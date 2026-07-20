@@ -10,6 +10,10 @@ SUMMARY.md
 plan/
 media/
 
+# Internal contributor/agent instructions — not for distribution
+AGENTS.md
+CLAUDE.md
+
 # Build artifacts
 *.log
 npm-debug.log*

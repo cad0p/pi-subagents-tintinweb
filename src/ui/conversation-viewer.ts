@@ -6,12 +6,12 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, buildInvocationTags, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
@@ -29,6 +29,8 @@ export class ConversationViewer implements Component {
   /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
   private stopArmed = false;
   private keys: ViewerKeys;
+  /** Steering composer — present while the user is typing a message to the agent. */
+  private composer: Input | undefined;
 
   constructor(
     private tui: TUI,
@@ -41,6 +43,8 @@ export class ConversationViewer implements Component {
     private onStop?: () => void,
     /** User keybindings from `ctx.ui.custom()`. Omitted → hardcoded defaults. */
     keybindings?: ViewerKeybindings,
+    /** Send a steering message to the agent. Omitted → no compose affordance. */
+    private onSteer?: (message: string) => void,
   ) {
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -50,9 +54,26 @@ export class ConversationViewer implements Component {
   }
 
   handleInput(data: string): void {
+    // While composing a steer message, the input owns all keys (Enter sends,
+    // Esc cancels — both wired in openComposer()). Editing keys flow through.
+    if (this.composer) {
+      this.composer.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+
     if (matchesKey(data, "escape") || matchesKey(data, "q")) {
       this.closed = true;
       this.done(undefined);
+      return;
+    }
+
+    // Enter opens the steering composer (only while the agent can still be
+    // steered) — then type + Enter sends, Esc or an empty submit returns. When
+    // not steerable, fall through so the key still disarms a pending stop.
+    if (matchesKey(data, "enter") && this.canSteer()) {
+      this.stopArmed = false;
+      this.openComposer();
       return;
     }
 
@@ -109,7 +130,7 @@ export class ConversationViewer implements Component {
       return s + " ".repeat(Math.max(0, len - vis));
     };
     const row = (content: string) =>
-      th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW) + " " + th.fg("border", "│");
+      th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW, "...", true) + " " + th.fg("border", "│");
     const hrTop = th.fg("border", `╭${"─".repeat(width - 2)}╮`);
     const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
@@ -138,7 +159,7 @@ export class ConversationViewer implements Component {
     }
 
     lines.push(row(
-      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${th.fg("dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));
@@ -162,19 +183,39 @@ export class ConversationViewer implements Component {
 
     // Footer
     lines.push(hrMid);
-    const scrollPct = contentLines.length <= viewportHeight
-      ? "100%"
-      : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
-    const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const scrollHint = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
-    // Stop hint goes first in the right group so it survives right-edge
-    // truncation on narrow terminals (the scroll hint is the expendable part).
-    const footerRight = this.isStoppable()
-      ? (this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop")) +
-        th.fg("dim", " · ") + scrollHint
-      : scrollHint;
-    const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
-    lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
+    if (this.composer) {
+      // Composer row: the Input renders its own `> ` prompt and cursor.
+      lines.push(row(this.composer.render(innerW)[0] ?? ""));
+      const composeHint = th.fg("dim", "Enter send · Esc cancel");
+      const composeLeft = th.fg("accent", "✎ steer");
+      const composeGap = Math.max(1, innerW - visibleWidth(composeLeft) - visibleWidth(composeHint));
+      lines.push(row(composeLeft + " ".repeat(composeGap) + composeHint));
+    } else {
+      // Actions on the left, navigation on the right. The scroll hint keeps its
+      // full key list so the less-obvious bindings stay discoverable; it leads
+      // the right group so "Esc close" is the only part that truncates first.
+      const sep = th.fg("dim", " · ");
+      const actions: string[] = [];
+      if (this.canSteer()) actions.push(th.fg("dim", "Enter steer"));
+      if (this.isStoppable()) {
+        actions.push(this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop"));
+      }
+      const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+
+      // Prepend the line-count/scroll-% readout only when there's spare width —
+      // it's the first thing dropped so it never crowds out the hints.
+      const scrollPct = contentLines.length <= viewportHeight
+        ? "100%"
+        : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
+      const count = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
+      const withCount = [count, ...actions].join(sep);
+      const footerLeft = visibleWidth(withCount) + visibleWidth(footerRight) + 1 <= innerW
+        ? withCount
+        : actions.join(sep);
+
+      const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
+      lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
+    }
     lines.push(hrBot);
 
     return lines;
@@ -183,6 +224,29 @@ export class ConversationViewer implements Component {
   /** Stoppable only when a stop handler exists and the agent is still active. */
   private isStoppable(): boolean {
     return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
+  }
+
+  /** Steerable only when a steer handler exists and the agent is still active. */
+  private canSteer(): boolean {
+    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+  }
+
+  /** Open the inline steering composer and route subsequent input to it. */
+  private openComposer(): void {
+    const input = new Input();
+    input.focused = true;
+    input.onSubmit = (value: string) => {
+      const message = value.trim();
+      this.composer = undefined;
+      if (message) this.onSteer?.(message);
+      this.tui.requestRender();
+    };
+    input.onEscape = () => {
+      this.composer = undefined;
+      this.tui.requestRender();
+    };
+    this.composer = input;
+    this.tui.requestRender();
   }
 
   invalidate(): void { /* no cached state to clear */ }
@@ -205,7 +269,8 @@ export class ConversationViewer implements Component {
   }
 
   private chromeLines(): number {
-    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0);
+    // The composer adds one row above the footer hint while it's open.
+    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0);
   }
 
   private invocationLine(): string | undefined {

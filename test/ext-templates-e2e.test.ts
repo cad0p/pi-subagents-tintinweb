@@ -27,13 +27,13 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
 import { getAgentConfig, registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
+import { registerFauxProvider } from "./helpers/pi-ai.js";
 
 // Real pi-mono (loader + dynamic extension import + session construction) — a
 // cold run under full-suite contention can exceed vitest's 5s default.

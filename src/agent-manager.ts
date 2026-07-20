@@ -167,6 +167,12 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      // Raw tri-state (not coerced to a boolean): true = background, false =
+      // foreground (has an inline tool-result surface), undefined = caller never
+      // declared it (e.g. a cross-extension RPC spawn). The widget's background-
+      // only filter excludes only explicit `false`, so undefined agents — which
+      // have no inline surface — stay visible instead of vanishing.
+      isBackground: options.isBackground,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
@@ -281,10 +287,20 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, session, aborted, steered }) => {
+      .then(({ responseText, session, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
-          record.status = aborted ? "aborted" : steered ? "steered" : "completed";
+          // Precedence: a hard abort keeps "aborted"; then a failed final turn
+          // (provider error that pi resolved instead of rejecting, #144) is an
+          // honest "error" — not a completion with an empty or stale result.
+          if (aborted) {
+            record.status = "aborted";
+          } else if (failure) {
+            record.status = "error";
+            record.error = failure;
+          } else {
+            record.status = steered ? "steered" : "completed";
+          }
         }
         record.result = responseText;
         record.session = session;
@@ -441,7 +457,7 @@ export class AgentManager {
     record.error = undefined;
 
     try {
-      const responseText = await resumeAgent(record.session, prompt, {
+      const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
         },
@@ -454,8 +470,11 @@ export class AgentManager {
         },
         signal,
       });
-      record.status = "completed";
-      record.result = responseText;
+      // Same contract as the spawn path (#144): a failed final turn is an
+      // error, not a completion — but the resumed text stays available.
+      record.status = failure ? "error" : "completed";
+      if (failure) record.error = failure;
+      record.result = text;
       record.completedAt = Date.now();
     } catch (err) {
       record.status = "error";
@@ -464,6 +483,27 @@ export class AgentManager {
     }
 
     return record;
+  }
+
+  /**
+   * Send a steering message to an agent from the UI (mirrors the steer_subagent
+   * tool). A live session delivers it now — it interrupts the agent after its
+   * current tool execution and appears as a user message. If the session isn't
+   * ready yet, the message is queued on `pendingSteers` and flushed when the
+   * session is created. Returns false if the agent can't accept steering
+   * (unknown id, or no longer running/queued).
+   */
+  steer(id: string, message: string): boolean {
+    const record = this.agents.get(id);
+    if (!record) return false;
+    if (record.status !== "running" && record.status !== "queued") return false;
+    if (record.session) {
+      record.session.steer(message).catch(() => {});
+    } else {
+      if (!record.pendingSteers) record.pendingSteers = [];
+      record.pendingSteers.push(message);
+    }
+    return true;
   }
 
   getRecord(id: string): AgentRecord | undefined {

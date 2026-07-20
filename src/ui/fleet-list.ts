@@ -11,7 +11,7 @@
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
@@ -217,6 +217,14 @@ export class FleetList {
     if (isKeyRelease(data)) return undefined;
     // While an overlay is open, let it own all input.
     if (this.viewerClose) return undefined;
+    // Input listeners fire BEFORE the focused component, and dialogs
+    // (ctx.ui.select/confirm/input, pi's own menus) swap the prompt editor out
+    // while getEditorText() still reads the detached — empty — editor. So when
+    // anything but the editor owns the keyboard, stay out of its keys (#123).
+    if (!this.editorHasFocus()) {
+      if (this.active) this.deactivate();
+      return undefined;
+    }
 
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
@@ -249,6 +257,19 @@ export class FleetList {
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
     return undefined;
+  }
+
+  /**
+   * True when pi's prompt editor owns the keyboard. pi's editor is an `Editor`
+   * subclass (CustomEditor) while every dialog/selector is not, and the loader
+   * aliases pi-tui to pi's own copy, so `instanceof` is a reliable identity
+   * check. `focusedComponent` is TUI-private (no public accessor), hence the
+   * best-effort peek: unknowable focus (no tui seen yet, nothing focused)
+   * counts as the editor so activation keeps working.
+   */
+  private editorHasFocus(): boolean {
+    const focused = (this.tui as { focusedComponent?: unknown } | undefined)?.focusedComponent;
+    return focused == null || focused instanceof Editor;
   }
 
   private deactivate(): void {
@@ -288,6 +309,7 @@ export class FleetList {
             if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
           },
           keybindings,
+          (message: string) => this.manager.steer(record.id, message),
         );
       },
       {

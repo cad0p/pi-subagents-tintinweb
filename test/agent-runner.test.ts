@@ -1,5 +1,7 @@
-import { homedir } from "node:os";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
@@ -107,6 +109,7 @@ vi.mock("../src/skill-loader.js", () => ({
 
 import {
   extensionCanonicalName,
+  extensionCanonicalNames,
   getAgentConversation,
   parseExtensionsSpec,
   parseExtSelectors,
@@ -205,6 +208,32 @@ describe("agent-runner final output capture", () => {
     }));
   });
 
+  it("passes the parent model runtime while retaining the legacy model registry", async () => {
+    const { session } = createSession("AUTHENTICATED");
+    createAgentSession.mockResolvedValue({ session });
+    const modelRuntime = { getAuth: vi.fn(), hasConfiguredAuth: vi.fn() };
+    const context = {
+      ...ctx,
+      modelRegistry: { ...ctx.modelRegistry, runtime: modelRuntime },
+    };
+
+    await runAgent(context, "Explore", "Say AUTHENTICATED", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      modelRegistry: context.modelRegistry,
+      modelRuntime,
+    }));
+  });
+
+  it("omits modelRuntime when the legacy registry does not expose one", async () => {
+    const { session } = createSession("LEGACY");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say LEGACY", { pi });
+
+    expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRuntime");
+  });
+
   it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
     const { session } = createSession("ISOLATED");
     createAgentSession.mockResolvedValue({ session });
@@ -229,7 +258,8 @@ describe("agent-runner final output capture", () => {
 
     const result = await resumeAgent(session as any, "Continue");
 
-    expect(result).toBe("RESUMED");
+    expect(result.text).toBe("RESUMED");
+    expect(result.failure).toBeUndefined();
   });
 
   it("sets the agent name as session name before binding extensions", async () => {
@@ -251,6 +281,170 @@ describe("agent-runner final output capture", () => {
     await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
 
     expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+  });
+});
+
+// #144 — a failed FINAL assistant turn (stopReason "error") must surface as
+// `failure`; how the turn STOPPED decides, never whether it produced text.
+describe("agent-runner failed-final-turn detection (#144)", () => {
+  /** Session whose prompt() appends the given messages to history. */
+  function sessionEnding(...messages: any[]) {
+    const { session } = createSession("");
+    session.prompt = vi.fn(async () => {
+      session.messages.push(...messages);
+    }) as any;
+    return session;
+  }
+
+  const errorFinal = {
+    role: "assistant",
+    content: [],
+    stopReason: "error",
+    errorMessage: "retries exhausted: 529 overloaded",
+  };
+
+  it("flags a run whose final turn is an empty provider error", async () => {
+    const session = sessionEnding(errorFinal);
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+  });
+
+  it("flags the failure even when an EARLIER turn produced text (no masking)", async () => {
+    const session = sessionEnding(
+      { role: "assistant", content: [{ type: "text", text: "partial progress" }] },
+      { role: "toolResult", content: [] },
+      errorFinal,
+    );
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+    // The earlier text stays available as context — status honesty, not data loss.
+    expect(result.responseText).toBe("partial progress");
+  });
+
+  it("flags a provider error that left partial text in the SAME final message", async () => {
+    const session = sessionEnding({
+      role: "assistant",
+      content: [{ type: "text", text: "truncated answ" }],
+      stopReason: "error",
+      errorMessage: "stream ended before message_stop",
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("stream ended before message_stop");
+    expect(result.responseText).toBe("truncated answ");
+  });
+
+  it("flags a run whose final turn hit the token limit with no text (#144 residual)", async () => {
+    // stopReason "length" with empty content is a silent max-token death — it
+    // reproduces the #144 "completed with No output." symptom, so it must fail.
+    const session = sessionEnding({ role: "assistant", content: [], stopReason: "length" });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("run hit the output token limit before producing any text");
+  });
+
+  it("does NOT flag a length stop that produced text (truncated answer completes)", async () => {
+    const session = sessionEnding({
+      role: "assistant",
+      content: [{ type: "text", text: "truncated but useful answer" }],
+      stopReason: "length",
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe("truncated but useful answer");
+  });
+
+  it("does NOT flag an empty final turn that stopped cleanly (no false failures)", async () => {
+    const session = sessionEnding(
+      { role: "assistant", content: [{ type: "text", text: "did the work" }] },
+      { role: "toolResult", content: [] },
+      { role: "assistant", content: [], stopReason: "stop" },
+    );
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe("did the work"); // walk-back fallback preserved
+  });
+
+  it("resumeAgent applies the same rule", async () => {
+    const { session } = createSession("");
+    session.prompt = vi.fn(async () => {
+      session.messages.push(errorFinal);
+    }) as any;
+
+    const result = await resumeAgent(session as any, "Continue");
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+  });
+
+  it("resume whose new turn fails empty does NOT return the previous turn's answer (#144)", async () => {
+    // The session already carries a completed prior turn; the resume prompt then
+    // fails empty. The walk-back must be bounded to this resume — result "".
+    const { session } = createSession("");
+    session.messages.push(
+      { role: "user", content: "first question" },
+      { role: "assistant", content: [{ type: "text", text: "PREVIOUS ANSWER" }], stopReason: "stop" },
+    );
+    session.prompt = vi.fn(async () => {
+      session.messages.push({ role: "user", content: "follow-up" }, errorFinal);
+    }) as any;
+
+    const result = await resumeAgent(session as any, "follow-up");
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+    expect(result.text).toBe(""); // NOT "PREVIOUS ANSWER"
+  });
+
+  it("resume that produces partial text before failing returns only THIS resume's text", async () => {
+    const { session } = createSession("");
+    session.messages.push(
+      { role: "assistant", content: [{ type: "text", text: "PREVIOUS ANSWER" }], stopReason: "stop" },
+    );
+    session.prompt = vi.fn(async () => {
+      session.messages.push(
+        { role: "assistant", content: [{ type: "text", text: "new partial" }] },
+        { role: "toolResult", content: [] },
+        errorFinal,
+      );
+    }) as any;
+
+    const result = await resumeAgent(session as any, "go");
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+    expect(result.text).toBe("new partial"); // this resume's progress, not the prior answer
+  });
+
+  it("collector: a toolResult/user message_start no longer wipes collected assistant text", async () => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) {
+        l({ type: "message_start", message: { role: "assistant" } });
+        l({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "STREAMED" } });
+        // pi emits message_start for tool results and queued user messages too.
+        l({ type: "message_start", message: { role: "toolResult" } });
+        l({ type: "message_start", message: { role: "user" } });
+      }
+    }) as any;
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.responseText).toBe("STREAMED");
   });
 });
 
@@ -680,6 +874,65 @@ describe("extensionCanonicalName", () => {
   });
 });
 
+describe("extensionCanonicalNames (#143 — package short name alias)", () => {
+  const tmpDirs: string[] = [];
+  function pkgDir(name: string, piExtensions: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), "subagents-pkg-"));
+    tmpDirs.push(dir);
+    const manifest: Record<string, unknown> = { name };
+    if (piExtensions !== undefined) manifest.pi = { extensions: piExtensions };
+    writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
+    return dir;
+  }
+  afterEach(() => {
+    while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  });
+
+  it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
+    // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
+    const dir = pkgDir("@tintinweb/Pi-Subagents", ["./src/index.ts"]);
+    expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
+  });
+
+  it("adds no alias for a loose file with no enclosing package.json", () => {
+    const dir = mkdtempSync(join(tmpdir(), "subagents-loose-"));
+    tmpDirs.push(dir);
+    writeFileSync(join(dir, "foo.ts"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "foo.ts"))).toEqual(["foo"]);
+  });
+
+  it("adds no alias when the nearest manifest does not declare this entry", () => {
+    // The package.json is a real pi package but lists a *different* entry — so a
+    // co-located file (e.g. our own test fixtures under this repo) is not falsely
+    // stamped with the package name.
+    const dir = pkgDir("@scope/other-ext", ["./src/other.ts"]);
+    expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src"]);
+  });
+
+  it("adds no alias when the nearest package.json has no pi manifest", () => {
+    const dir = pkgDir("just-a-project", undefined);
+    expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src"]);
+  });
+
+  it("does not climb past a node_modules boundary into a consumer's manifest", () => {
+    // A consumer that *declares* a dependency's entry must not lend its name to
+    // that dependency: the walk stops at node_modules before reading it.
+    const root = mkdtempSync(join(tmpdir(), "subagents-consumer-"));
+    tmpDirs.push(root);
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: "consumer", pi: { extensions: ["./node_modules/inner-ext/index.ts"] } }),
+    );
+    const inner = join(root, "node_modules", "inner-ext");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(join(inner, "index.ts"), "export default () => {};");
+    // Only the path-derived name — never "consumer".
+    expect(extensionCanonicalNames(join(inner, "index.ts"))).toEqual(["inner-ext"]);
+  });
+});
+
 describe("parseExtensionsSpec", () => {
   it("classifies bare entries as names", () => {
     const spec = parseExtensionsSpec(["mcp", "logger"], "/work");
@@ -761,6 +1014,34 @@ describe("agent-runner extension allowlist", () => {
     expect(tools).toContain("mcp");
     expect(tools).toContain("mcp_call");
     expect(tools).not.toContain("other_tool");
+  });
+
+  it("matches a package-installed extension by its package short name, not just its src dir (#143)", async () => {
+    // A package whose entry is `src/index.ts` canonicalizes to "src"; a child
+    // agent must still be able to allowlist it by the package name.
+    const dir = mkdtempSync(join(tmpdir(), "subagents-match-"));
+    try {
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ name: "@tintinweb/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
+      );
+      mkdirSync(join(dir, "src"));
+      writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
+      const entry = join(dir, "src", "index.ts");
+
+      setupArrayAgent(["pi-subagents"]);
+      withExtensions({ [entry]: ["pkg_tool"] });
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+
+      await runAgent(ctx, "Explore", "go", { pi });
+
+      // Before the fix keepNames={pi-subagents} but the extension only answered
+      // to "src", so it was filtered out and pkg_tool never reached the allowlist.
+      expect(lastToolsPassed()).toContain("pkg_tool");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("an absolute path is added to additionalExtensionPaths and its extension survives", async () => {

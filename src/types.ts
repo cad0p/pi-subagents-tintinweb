@@ -43,6 +43,8 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
   persistSession?: boolean;
+  /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
+  outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
   systemPrompt: string;
@@ -68,6 +70,15 @@ export interface AgentConfig {
 export type JoinMode = 'async' | 'group' | 'smart';
 
 export type ResultPreviewMode = "plain" | "markdown";
+
+/**
+ * Display mode for the persistent above-editor agent widget.
+ * - `all`: show every agent (foreground + background).
+ * - `background`: hide foreground agents (they already render inline as the
+ *   Agent tool result, #118); show background/queued/scheduled/RPC.
+ * - `off`: hide the widget entirely.
+ */
+export type WidgetMode = 'all' | 'background' | 'off';
 
 export interface AgentRecord {
   id: string;
@@ -106,6 +117,17 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /**
+   * Whether this agent was spawned to run in the background. Tri-state, set at
+   * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
+   * foreground (has an inline Agent tool-result surface), `undefined` = the
+   * caller never declared it (e.g. a cross-extension RPC spawn, which is detached
+   * and has no inline surface). The widget's background-only filter keys off this
+   * — and excludes only explicit `false`, so `undefined` agents stay visible.
+   * Reliable across ALL spawn paths, unlike the UI-only `invocation` snapshot,
+   * which only the Agent-tool path populates.
+   */
+  isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
 }

@@ -1,5 +1,5 @@
 /**
- * custom-agents.ts — Load user-defined agents from project (.pi/agents/) and global ($PI_CODING_AGENT_DIR/agents/, default ~/.pi/agent/agents/) locations.
+ * custom-agents.ts — Load user-defined agents from project (.pi/agents/, plus the shared .agents/agents/ workspace) and global ($PI_CODING_AGENT_DIR/agents/, default ~/.pi/agent/agents/) locations.
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -11,19 +11,24 @@ import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
 /**
  * Scan for custom agent .md files from multiple locations.
  * Discovery hierarchy (higher priority wins):
- *   1. Project: <cwd>/.pi/agents/*.md
- *   2. Global:  $PI_CODING_AGENT_DIR/agents/*.md (default: ~/.pi/agent/agents/*.md)
+ *   1. Project:   <cwd>/.pi/agents/*.md (authoritative — also where /agents writes)
+ *   2. Workspace: <cwd>/.agents/agents/*.md (shared cross-tool .agents workspace, read-only)
+ *   3. Global:    $PI_CODING_AGENT_DIR/agents/*.md (default: ~/.pi/agent/agents/*.md)
  *
- * Project-level agents override global ones with the same name.
+ * Project-level agents override global ones with the same name. On a name clash
+ * between the two project locations, .pi/agents wins — .pi stays the project
+ * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
 export function loadCustomAgents(cwd: string): Map<string, AgentConfig> {
   const globalDir = join(getAgentDir(), "agents");
+  const workspaceProjectDir = join(cwd, ".agents", "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
-  loadFromDir(globalDir, agents, "global");   // lower priority
-  loadFromDir(projectDir, agents, "project");  // higher priority (overwrites)
+  loadFromDir(globalDir, agents, "global");            // lowest priority
+  loadFromDir(workspaceProjectDir, agents, "project"); // shared workspace
+  loadFromDir(projectDir, agents, "project");          // highest priority (overwrites)
   return agents;
 }
 
@@ -66,6 +71,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
       maxTurns: nonNegativeInt(fm.max_turns),
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
+      outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : undefined,
       sessionDir: str(fm.session_dir),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",

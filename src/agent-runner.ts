@@ -2,8 +2,9 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
@@ -53,6 +54,68 @@ export function extensionCanonicalName(extPath: string): string {
     ? basename(dirname(extPath))
     : base.replace(/\.(ts|js)$/, "");
   return name.toLowerCase();
+}
+
+/**
+ * The unscoped, lowercased npm short name of the pi package that DECLARES
+ * `extPath` as an extension entry — or undefined if the entry doesn't belong to
+ * such a package.
+ *
+ * Climbs from the entry's directory looking for the package that owns it, and
+ * stays strictly within that package's tree by stopping at two structural
+ * boundaries — no hardcoded depth:
+ *   - the FIRST `package.json` found (the package root); the entry's own
+ *     manifest always sits at the root, above the entry, below any node_modules.
+ *   - a `node_modules` directory: a package never spans one (it's where OTHER
+ *     packages live), so reaching it means we've climbed out of the package —
+ *     stop before reading a consumer's or parent package's manifest.
+ * The name is then taken only when that root's `pi.extensions` manifest actually
+ * lists this entry. That "declares this entry" check is deliberate: our own test
+ * fixtures live under this repo, whose root manifest declares `./src/index.ts`
+ * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
+ * co-located file to `pi-subagents`.
+ */
+function extensionPackageName(extPath: string): string | undefined {
+  const entry = resolve(extPath);
+  let dir = dirname(extPath);
+  for (;;) {
+    // Climbing into node_modules means we've left the owning package's tree.
+    if (basename(dir) === "node_modules") return undefined;
+    let pkg: { name?: unknown; pi?: { extensions?: unknown } };
+    try {
+      pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return undefined; // walked to the filesystem root
+      dir = parent;
+      continue;
+    }
+    // First package.json wins — it's the package root; decide here.
+    const entries = pkg.pi?.extensions;
+    if (
+      typeof pkg.name === "string" &&
+      Array.isArray(entries) &&
+      entries.some((e) => typeof e === "string" && resolve(dir, e) === entry)
+    ) {
+      const short = pkg.name.startsWith("@") ? pkg.name.slice(pkg.name.indexOf("/") + 1) : pkg.name;
+      return short.toLowerCase();
+    }
+    return undefined;
+  }
+}
+
+/**
+ * All names an extension answers to for allowlist matching (lowercased): its
+ * path-derived {@link extensionCanonicalName} plus, when a pi package manifest
+ * declares this entry, that package's unscoped short name (`@scope/foo` → `foo`).
+ * #143: an extension installed via `pi.extensions: ["./src/index.ts"]` would
+ * otherwise only ever match as `src` (the source directory), never by its
+ * package name. The path-derived name is preserved, so it keeps matching too.
+ */
+export function extensionCanonicalNames(extPath: string): string[] {
+  const canonical = extensionCanonicalName(extPath);
+  const pkg = extensionPackageName(extPath);
+  return pkg && pkg !== canonical ? [canonical, pkg] : [canonical];
 }
 
 /**
@@ -247,6 +310,16 @@ export interface RunResult {
   aborted: boolean;
   /** True if the agent was steered to wrap up (hit soft turn limit) but finished in time. */
   steered: boolean;
+  /**
+   * A failure message for the run's FINAL assistant turn, when that turn failed:
+   * a provider error (stopReason "error"), or a "length" stop that produced no
+   * text (a silent max-token death). pi resolves an exhausted-retries failure
+   * normally instead of rejecting, so without this the manager would report such
+   * a run as completed — with an empty result, or worse, an earlier turn's text
+   * presented as the answer (#144). Undefined for a clean stop, or a "length"
+   * stop that produced text (a legitimate truncated answer).
+   */
+  failure?: string;
 }
 
 /**
@@ -256,7 +329,10 @@ export interface RunResult {
 function collectResponseText(session: AgentSession) {
   let text = "";
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "message_start") {
+    // message_start also fires for user and toolResult messages — resetting on
+    // those would wipe assistant text already collected. Reset only when a new
+    // ASSISTANT message begins, so getText() is the last assistant message's text.
+    if (event.type === "message_start" && event.message.role === "assistant") {
       text = "";
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -266,15 +342,50 @@ function collectResponseText(session: AgentSession) {
   return { getText: () => text, unsubscribe };
 }
 
-/** Get the last assistant text from the completed session history. */
-function getLastAssistantText(session: AgentSession): string {
-  for (let i = session.messages.length - 1; i >= 0; i--) {
+/**
+ * Get the last non-empty assistant text produced during THIS invocation.
+ * `startIndex` is the message count captured before the prompt, so the walk-back
+ * never crosses into a previous turn: on a resume whose new turn failed empty,
+ * this returns "" instead of the prior turn's answer (#144). Defaults to 0 (a
+ * fresh spawn, where the whole history belongs to this run).
+ */
+function getLastAssistantText(session: AgentSession, startIndex = 0): string {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
     const msg = session.messages[i];
     if (msg.role !== "assistant") continue;
     const text = extractText(msg.content).trim();
     if (text) return text;
   }
   return "";
+}
+
+/**
+ * Error message of THIS invocation's final assistant message, when that turn
+ * failed. Two failure shapes, both keyed off how the final turn STOPPED:
+ *   - stopReason "error": a provider failure pi resolved instead of rejecting
+ *     (any text; partial output is surfaced separately).
+ *   - stopReason "length" with NO text: a silent max-token death — the run hit
+ *     the output-token ceiling before writing anything, which would otherwise
+ *     land as a "completed" run with an empty result (the #144 symptom).
+ * Everything else completes: a clean "stop"/"toolUse" final, and — crucially — a
+ * "length" stop that DID produce text (a legitimate truncated-but-useful answer).
+ * "aborted" is handled by the manager's abort flag / "stopped" guard, not here.
+ * Bounded by `startIndex` (like the text fallback) so a resume that produced no
+ * assistant message of its own never inherits a PRIOR turn's stop reason.
+ */
+function finalTurnError(session: AgentSession, startIndex = 0): string | undefined {
+  for (let i = session.messages.length - 1; i >= startIndex; i--) {
+    const msg = session.messages[i];
+    if (msg.role !== "assistant") continue;
+    if (msg.stopReason === "error") {
+      return (msg as { errorMessage?: string }).errorMessage?.trim() || "provider error with no output";
+    }
+    if (msg.stopReason === "length" && !extractText(msg.content).trim()) {
+      return "run hit the output token limit before producing any text";
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -419,13 +530,13 @@ export async function runAgent(
     noExtensions || (loadAll && !hasExcludes)
       ? undefined
       : (base) => {
-          discoveredNames = new Set(base.extensions.map((e) => extensionCanonicalName(e.path)));
+          discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
-              const name = extensionCanonicalName(e.path);
-              if (excludeNames.has(name)) return false; // exclude wins
-              return loadAll || keepNames.has(name);
+              const canons = extensionCanonicalNames(e.path);
+              if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
+              return loadAll || canons.some((n) => keepNames.has(n));
             }),
           };
         };
@@ -492,7 +603,7 @@ export async function runAgent(
   }
   if (keepNames.size > 0 || extNames.size > 0) {
     const survivingNames = new Set(
-      loader.getExtensions().extensions.map((e) => extensionCanonicalName(e.path)),
+      loader.getExtensions().extensions.flatMap((e) => extensionCanonicalNames(e.path)),
     );
     for (const name of keepNames) {
       if (!survivingNames.has(name)) {
@@ -537,9 +648,11 @@ export async function runAgent(
   if (!noExtensions) {
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
-      const canon = extensionCanonicalName(extension.path);
-      if (optInActive && !extNames.has(canon)) continue;
-      const narrowed = narrowing.get(canon);
+      const canons = extensionCanonicalNames(extension.path);
+      if (optInActive && !canons.some((c) => extNames.has(c))) continue;
+      // First alias that carries a narrowing set — a user won't narrow one
+      // extension under two different names, so first-match is correct.
+      const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
       for (const toolName of extension.tools.keys()) {
         if (narrowed && !narrowed.has(toolName)) continue;
         extensionToolNames.push(toolName);
@@ -569,12 +682,20 @@ export async function runAgent(
     ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
     : SessionManager.inMemory(effectiveCwd);
 
-  const sessionOpts: Parameters<typeof createAgentSession>[0] = {
+  // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
+  // modelRuntime, but ExtensionContext still exposes only the registry facade.
+  // Pass both so the full supported Pi range retains the parent's providers.
+  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+  const sessionOpts: Parameters<typeof createAgentSession>[0] & {
+    modelRegistry: ExtensionContext["modelRegistry"];
+    modelRuntime?: unknown;
+  } = {
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
     settingsManager,
     modelRegistry: ctx.modelRegistry,
+    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
     tools: allowedTools,
     resourceLoader: loader,
@@ -664,6 +785,9 @@ export async function runAgent(
     }
   }
 
+  // Boundary for the history fallback: only assistant text produced from here
+  // on counts as this run's output (a fresh session, so usually 0).
+  const startLen = session.messages.length;
   try {
     await session.prompt(effectivePrompt);
   } finally {
@@ -672,8 +796,8 @@ export async function runAgent(
     cleanupAbort();
   }
 
-  const responseText = collector.getText().trim() || getLastAssistantText(session);
-  return { responseText, session, aborted, steered: softLimitReached };
+  const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
+  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
 }
 
 /**
@@ -688,7 +812,11 @@ export async function resumeAgent(
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<string> {
+): Promise<{ text: string; failure?: string }> {
+  // Boundary for the history fallback: the session already holds prior turns,
+  // so only assistant text produced by THIS resume prompt counts as its output
+  // — a failed resume must not surface the previous turn's answer (#144).
+  const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
@@ -718,7 +846,10 @@ export async function resumeAgent(
     cleanupAbort();
   }
 
-  return collector.getText().trim() || getLastAssistantText(session);
+  return {
+    text: collector.getText().trim() || getLastAssistantText(session, startLen),
+    failure: finalTurnError(session, startLen),
+  };
 }
 
 /**
