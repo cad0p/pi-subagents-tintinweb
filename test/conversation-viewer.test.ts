@@ -101,6 +101,27 @@ describe("ConversationViewer", () => {
       }
     });
 
+    it("keeps bordered rows exact-width at a double-width truncation boundary", () => {
+      const width = 40;
+      for (let prefixLength = 0; prefixLength < width; prefixLength++) {
+        const viewer = new ConversationViewer(
+          mockTui(30, width),
+          mockSession([]),
+          mockRecord({ description: `${"a".repeat(prefixLength)}界more` }),
+          undefined,
+          ansiTheme(),
+          vi.fn(),
+        );
+
+        for (const line of viewer.render(width)) {
+          expect(
+            visibleWidth(line),
+            `prefix ${prefixLength} produced an under-width bordered row: ${JSON.stringify(line)}`,
+          ).toBe(width);
+        }
+      }
+    });
+
     it("no line exceeds width when text is longer than viewport", () => {
       const longLine = "A".repeat(500);
       const messages = [
@@ -378,6 +399,96 @@ describe("ConversationViewer", () => {
       );
       expect(viewer.render(W).join("\n")).not.toContain("x stop");
       expect(() => { viewer.handleInput("x"); viewer.handleInput("x"); }).not.toThrow();
+    });
+  });
+
+  describe("steer composer", () => {
+    const W = 80;
+
+    function makeViewer(opts: { status?: AgentRecord["status"]; onSteer?: (m: string) => void } = {}) {
+      const onSteer = opts.onSteer ?? vi.fn();
+      const tui = mockTui(30, W);
+      const viewer = new ConversationViewer(
+        tui, mockSession(), mockRecord({ status: opts.status ?? "running" }),
+        undefined, ansiTheme(), vi.fn(), undefined, undefined, onSteer,
+      );
+      return { viewer, tui, onSteer };
+    }
+
+    it("offers the steer affordance for a running agent and opens on Enter", () => {
+      const { viewer } = makeViewer();
+      expect(viewer.render(W).join("\n")).toContain("Enter steer");
+
+      viewer.handleInput("\r"); // Enter
+      // Composer is shown (its prompt + send/cancel hint), idle footer is gone.
+      const out = viewer.render(W).join("\n");
+      expect(out).toContain("Enter send · Esc cancel");
+      expect(out).not.toContain("Enter steer");
+    });
+
+    it("typing then Enter sends the trimmed message and closes the composer", () => {
+      const { viewer, onSteer } = makeViewer();
+      viewer.handleInput("\r"); // open composer
+      for (const ch of "  hello  ") viewer.handleInput(ch);
+      viewer.handleInput("\r"); // send
+
+      expect(onSteer).toHaveBeenCalledWith("hello");
+      expect(viewer.render(W).join("\n")).not.toContain("Enter send"); // composer closed
+    });
+
+    it("Esc cancels the composer without sending", () => {
+      const { viewer, onSteer } = makeViewer();
+      viewer.handleInput("\r"); // open composer
+      for (const ch of "draft") viewer.handleInput(ch);
+      viewer.handleInput("\x1b"); // Esc
+
+      expect(onSteer).not.toHaveBeenCalled();
+      expect(viewer.render(W).join("\n")).not.toContain("Enter send");
+    });
+
+    it("an empty submit just returns (like Esc), without calling onSteer", () => {
+      const { viewer, onSteer } = makeViewer();
+      viewer.handleInput("\r"); // open composer
+      viewer.handleInput("\r"); // empty submit
+      expect(onSteer).not.toHaveBeenCalled();
+      expect(viewer.render(W).join("\n")).not.toContain("Enter send"); // composer closed
+    });
+
+    it("scroll keys are inert while composing (input owns them)", () => {
+      const { viewer } = makeViewer();
+      viewer.handleInput("\r"); // open composer
+      // 'j' would normally scroll, but here it types into the composer.
+      viewer.handleInput("j");
+      expect(viewer.render(W).join("\n")).toContain("Enter send · Esc cancel");
+    });
+
+    it("no steer affordance once the agent is no longer running", () => {
+      const { viewer, onSteer } = makeViewer({ status: "completed" });
+      expect(viewer.render(W).join("\n")).not.toContain("Enter steer");
+      viewer.handleInput("\r");
+      expect(viewer.render(W).join("\n")).not.toContain("Enter send");
+      expect(onSteer).not.toHaveBeenCalled();
+    });
+
+    it("no steer affordance when no onSteer handler is provided", () => {
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(), mockRecord({ status: "running" }), undefined, ansiTheme(), vi.fn(),
+      );
+      expect(viewer.render(W).join("\n")).not.toContain("Enter steer");
+      expect(() => viewer.handleInput("\r")).not.toThrow();
+    });
+
+    it("composer rows never exceed width", () => {
+      for (const w of [40, 80, 120]) {
+        const tui = mockTui(30, w);
+        const viewer = new ConversationViewer(
+          tui, mockSession(), mockRecord({ status: "running" }),
+          undefined, ansiTheme(), vi.fn(), undefined, undefined, vi.fn(),
+        );
+        viewer.handleInput("\r"); // open composer
+        for (const ch of "x".repeat(200)) viewer.handleInput(ch);
+        assertAllLinesFit(viewer.render(w), w);
+      }
     });
   });
 });

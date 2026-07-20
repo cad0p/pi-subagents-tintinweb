@@ -36,8 +36,8 @@
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
- * The same `runPrintMode()` covers built-in agent types, `.pi/agents/*.md`
- * frontmatter agents, and inline-instruction agents — the difference is purely
+ * The same `runPrintMode()` covers built-in agent types, `.pi/agents/*.md` /
+ * `.agents/agents/*.md` frontmatter agents, and inline-instruction agents — the difference is purely
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */
@@ -53,9 +53,7 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
-  getModel,
   type Model,
-  registerFauxProvider,
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
@@ -67,6 +65,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { getModel, registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
 const EXTENSION_PATH = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
@@ -98,7 +97,7 @@ export interface RunPrintModeOptions {
   prompt: string;
   /**
    * Working directory for the run. Defaults to a fresh temp dir that `dispose()`
-   * removes. Pass a fixtures dir to make `.pi/agents/*.md` discoverable.
+   * removes. Pass a fixtures dir to make project custom agents discoverable.
    */
   cwd?: string;
   /** Parent host system prompt. Default: a minimal orchestrator prompt. */
@@ -248,8 +247,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const ownsCwd = options.cwd == null;
   const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "subagents-print-"));
 
-  // chdir into cwd: the extension discovers .pi/agents/*.md from process.cwd()
-  // (not ctx.cwd), and re-reads it on every Agent invocation — so a custom agent
+  // chdir into cwd: the extension discovers project custom agents from process.cwd()
+  // (not ctx.cwd), and re-reads them on every Agent invocation — so a custom agent
   // is only spawnable if process.cwd() points at the dir holding it. Restored on
   // dispose. (Vitest isolates test files per process, so this doesn't race.)
   const prevCwd = process.cwd();
@@ -278,7 +277,15 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     const modelId = options.live?.model ?? process.env.PI_MODEL;
     if (provider && modelId) {
       // getModel's overloads need the concrete provider literal; cast through.
-      model = (getModel as (p: string, m: string) => Model<string>)(provider, modelId);
+      // Since pi-ai 0.80 it is a static builtin-catalog lookup that returns
+      // undefined for unknown models — fail fast instead of letting
+      // createAgentSession silently substitute another model.
+      model = (getModel as (p: string, m: string) => Model<string> | undefined)(provider, modelId);
+      if (!model) {
+        throw new Error(
+          `runPrintMode (live mode): model "${provider}/${modelId}" not found in the builtin catalog`,
+        );
+      }
     }
     modelRegistry = undefined; // let createAgentSession build the real, auth-backed registry
   } else {
@@ -404,41 +411,6 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const onAbort = () => session.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
-  // --- drive the turn under a wall-clock guard ---
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`print-mode runner timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    await Promise.race([
-      (async () => {
-        await session.prompt(options.prompt);
-        // Fallback for when the hold patch is unavailable: catch any subagents
-        // still running after prompt() returns and process their results.
-        if (hold) {
-          while (manager?.hasRunning()) {
-            await manager.waitForAll();
-            await session.prompt("Background agents have completed. Process their results.");
-          }
-        }
-      })(),
-      timeout,
-    ]);
-  } finally {
-    clearTimeout(timer);
-    unsubscribe();
-    options.signal?.removeEventListener("abort", onAbort);
-  }
-
-  if (!responseText.trim()) {
-    responseText = lastAssistantText(session);
-  }
-
-  // Snapshot subagent records (manager exposes them via the extension session,
-  // but the cross-package handle only exposes getRecord — read listAgents off
-  // the underlying manager if reachable, else fall back to an empty list).
-  const subagents = snapshotSubagents(manager);
-
   const dispose = async () => {
     // Emit session_shutdown FIRST so extensions tear down cleanly — in live mode
     // the real env loads global extensions (e.g. a status-bar) whose background
@@ -472,6 +444,66 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     }
     if (ownsCwd) rmSync(cwd, { recursive: true, force: true });
   };
+
+  // --- drive the turn under a wall-clock guard ---
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let failed = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const stillRunning = manager?.hasRunning() ? " (background subagents still running)" : "";
+      reject(new Error(`print-mode runner timed out after ${timeoutMs}ms${stillRunning}`));
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([
+      (async () => {
+        await session.prompt(options.prompt);
+        // Fallback for when the hold patch is unavailable: catch any subagents
+        // still running after prompt() returns and process their results.
+        if (hold) {
+          while (!failed && manager?.hasRunning()) {
+            await manager.waitForAll();
+            // prompt() resolves (not rejects) on abort, so after a timeout this
+            // orphaned race arm keeps running — never re-prompt a torn-down session.
+            if (failed) break;
+            await session.prompt("Background agents have completed. Process their results.");
+          }
+        }
+      })(),
+      timeout,
+    ]);
+  } catch (err) {
+    // On timeout (or any turn failure) we throw, so the caller never receives
+    // the dispose handle — without this, a live session and its background
+    // subagents would keep streaming after the test already failed. Subagents
+    // are aborted by dispose()'s session_shutdown emit (the extension's
+    // shutdown handler calls manager.abortAll()).
+    failed = true;
+    try {
+      session.abort();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await dispose();
+    } catch {
+      /* ignore — the turn error below is the diagnostic that matters */
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+
+  if (!responseText.trim()) {
+    responseText = lastAssistantText(session);
+  }
+
+  // Snapshot subagent records (manager exposes them via the extension session,
+  // but the cross-package handle only exposes getRecord — read listAgents off
+  // the underlying manager if reachable, else fall back to an empty list).
+  const subagents = snapshotSubagents(manager);
 
   return {
     responseText: responseText.trim(),

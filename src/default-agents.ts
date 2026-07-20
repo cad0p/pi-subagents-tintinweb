@@ -34,7 +34,10 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
-      model: "anthropic/claude-haiku-4-5-20251001",
+      // Fast/cheap model for read-only search. Provider-preferred but resilient:
+      // resolveModel matches this fuzzily (date-stamp optional) and falls back to
+      // the same model under another provider if anthropic doesn't expose it.
+      model: "anthropic/claude-haiku-4-5",
       systemPrompt: `# CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS
 You are a file search specialist. You excel at thoroughly navigating and exploring codebases.
 Your role is EXCLUSIVELY to search and analyze existing code. You do NOT have access to file editing tools.

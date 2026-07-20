@@ -163,8 +163,53 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
   });
 
+  it("spawns a FRONTMATTER-defined (.agents/agents/*.md) agent and its prompt reaches the child", async () => {
+    const MARKER = "SPYMARKER_AGENTS_FRONTMATTER_REACHED_CHILD";
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-agents-fm-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".agents", "agents"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".agents", "agents", "agents-spy.md"),
+      `---\ndescription: "Echoes a marker from the .agents/agents workspace dir."\n---\n${MARKER}\n`,
+    );
+
+    run = await runPrintMode({
+      prompt: "Delegate to the agents-spy agent.",
+      cwd,
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "agents-spy",
+          description: "echo workspace",
+          prompt: "Report what you were told.",
+          run_in_background: false,
+        }),
+        parentFinal: "Reported.",
+        subagent: (ctx: Context) =>
+          `child saw: ${ctx.systemPrompt?.includes(MARKER) ? MARKER : "MISSING"}`,
+      }),
+    });
+
+    const toolResults = agentToolResults(run.parentSession);
+    expect(toolResults.length).toBe(1);
+    expect(toolResults[0]).toContain(MARKER);
+    expect(toolResults[0]).not.toContain("MISSING");
+    expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
+  });
+
   it("errors clearly when faux mode is given no script", async () => {
     await expect(runPrintMode({ prompt: "x" })).rejects.toThrow(/provide `respond` or `steps`/);
+  });
+
+  it("times out with the runner's own descriptive error and restores the environment", async () => {
+    const prevCwd = process.cwd();
+    // A responder that never resolves — the turn stalls until the wall-clock guard fires.
+    await expect(
+      runPrintMode({ prompt: "stall", respond: () => new Promise(() => {}), timeoutMs: 300 }),
+    ).rejects.toThrow(/print-mode runner timed out after 300ms/);
+    // The failure path ran dispose(): cwd and global isolation were restored even
+    // though the caller never received a dispose handle.
+    expect(process.cwd()).toBe(prevCwd);
+    expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")]).toBeUndefined();
   });
 });
 
@@ -177,6 +222,17 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 // and assert robust invariants (a real spawn happened and produced output).
 // Per-feature determinism lives in the faux suite above, which scripts exact calls.
 const LIVE_TIMEOUT = 150_000;
+// SELF-SMOKE chains three live spawns in one session; passing runs land ~145s,
+// but live variance (slow turns, provider retries, extra polling) has blown past
+// 2× that — give it 4× so the smoke doesn't flake on latency alone.
+const SELF_SMOKE_TIMEOUT = 600_000;
+// The vitest per-test timer starts before runPrintMode and should not fire
+// first: the runner's own timeoutMs guard produces a descriptive error and
+// aborts the live session + subagents, while a vitest timeout is generic and
+// leaks them. The slack covers live setup/teardown outside the runner's guard.
+const VITEST_SLACK = 30_000;
+const LIVE_VITEST_TIMEOUT = LIVE_TIMEOUT + VITEST_SLACK;
+const SELF_SMOKE_VITEST_TIMEOUT = SELF_SMOKE_TIMEOUT + VITEST_SLACK;
 
 describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   let run: PrintModeRun | undefined;
@@ -200,7 +256,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       expect(agentToolResults(run.parentSession).join("\n")).toMatch(/PONG/i);
       expect(run.responseText).toMatch(/PONG/i);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -222,7 +278,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // via get_subagent_result and/or the held final answer).
       expect(run.responseText).toMatch(/BGPONG/i);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -241,7 +297,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       ).toBe(true);
       expect(run.responseText.length).toBeGreaterThan(0);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -263,7 +319,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
           "   working directory in one line.",
           "Finish with: 'SELF-SMOKE COMPLETE' followed by the PASS/FAIL lines.",
         ].join("\n"),
-        timeoutMs: LIVE_TIMEOUT,
+        timeoutMs: SELF_SMOKE_TIMEOUT,
       });
 
       const calls = agentToolCalls(run.parentSession);
@@ -288,6 +344,6 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // The agent ran the whole script to completion and self-reported.
       expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
     },
-    LIVE_TIMEOUT,
+    SELF_SMOKE_VITEST_TIMEOUT,
   );
 });

@@ -85,6 +85,63 @@ describe("resolveModel", () => {
     });
   });
 
+  describe("fuzzy match — separator equivalence (dash vs dot)", () => {
+    // id uses dashes and the name carries no version number — the case that
+    // failed before separators were normalized (the "4.5" token couldn't be
+    // found anywhere, so the dotted query matched nothing).
+    const HAIKU = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "anthropic" };
+    const dashReg = makeRegistry([HAIKU]);
+
+    it("matches a dotted query to a dashed id", () => {
+      expect(resolveModel("claude-haiku-4.5", dashReg)).toEqual(HAIKU);
+    });
+
+    it("matches a dotted provider/id query to a dashed id", () => {
+      expect(resolveModel("anthropic/claude-haiku-4.5", dashReg)).toEqual(HAIKU);
+    });
+
+    it("matches a dashed query to a dotted id", () => {
+      expect(resolveModel("gemini-2-5-pro", makeRegistry())).toEqual(MODELS[4]);
+    });
+  });
+
+  describe("fuzzy match — trailing date-stamp is optional", () => {
+    // A date-pinned config (e.g. an agent's frontmatter, or a shipped default)
+    // should still resolve when the registry lists the model without the stamp.
+    const HAIKU_DASH = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "anthropic" };
+    const HAIKU_DOT = { id: "claude-haiku-4.5", name: "Claude Haiku", provider: "anthropic" };
+
+    it("matches a dated provider/id config to an undated registry id", () => {
+      expect(resolveModel("anthropic/claude-haiku-4-5-20251001", makeRegistry([HAIKU_DASH]))).toEqual(HAIKU_DASH);
+    });
+
+    it("matches a dated config to an undated *dotted* registry id (date + separator)", () => {
+      expect(resolveModel("anthropic/claude-haiku-4-5-20251001", makeRegistry([HAIKU_DOT]))).toEqual(HAIKU_DOT);
+    });
+
+    it("still prefers an exact dated id when the registry has it", () => {
+      const dated = { id: "claude-haiku-4-5-20251001", name: "Claude Haiku 4.5", provider: "anthropic" };
+      expect(resolveModel("anthropic/claude-haiku-4-5-20251001", makeRegistry([dated]))).toEqual(dated);
+    });
+  });
+
+  describe("provider fallback (prefer named provider, else any)", () => {
+    const gatewayHaiku = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "openrouter" };
+    const anthropicHaiku = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "anthropic" };
+
+    it("falls back to another provider when the named one lacks the model", () => {
+      expect(resolveModel("anthropic/claude-haiku-4-5", makeRegistry([gatewayHaiku]))).toEqual(gatewayHaiku);
+    });
+
+    it("prefers the named provider when it has the model", () => {
+      expect(resolveModel("anthropic/claude-haiku-4-5", makeRegistry([gatewayHaiku, anthropicHaiku]))).toEqual(anthropicHaiku);
+    });
+
+    it("still errors when no provider has the model", () => {
+      expect(typeof resolveModel("anthropic/nonexistent-xyz", makeRegistry([gatewayHaiku]))).toBe("string");
+    });
+  });
+
   describe("fuzzy match — name contains", () => {
     it("matches 'Opus 4.6' via model name", () => {
       const result = resolveModel("Opus 4.6", makeRegistry());

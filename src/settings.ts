@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { JoinMode, ResultPreviewMode } from "./types.js";
+import type { JoinMode, ResultPreviewMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -56,8 +56,8 @@ export interface SubagentsSettings {
   failurePreviewMaxChars?: number;
   /**
    * When true, the three built-in default agents (general-purpose, Explore, Plan)
-   * are not registered at startup. User-defined agents from .pi/agents/*.md are
-   * completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
+   * are not registered at startup. User-defined agents from project/global custom
+   * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
    * Defaults to false.
    */
   disableDefaultAgents?: boolean;
@@ -78,6 +78,28 @@ export interface SubagentsSettings {
    * the list never registers and the global key handler never captures input.
    */
   fleetView?: boolean;
+  /**
+   * Display mode for the persistent above-editor agent widget:
+   *   - `all`: show every agent (foreground + background).
+   *   - `background`: hide foreground agents — they already render inline as the
+   *     Agent tool result, so the widget would otherwise double-render them
+   *     (#118); everything else (background, queued, scheduled, RPC) stays.
+   *   - `off`: hide the widget entirely.
+   * Defaults to `background`. Pure-UI and applied live (toggling refreshes the
+   * widget).
+   */
+  widgetMode?: WidgetMode;
+  /**
+   * Project/global default for writing each subagent's `.output` transcript
+   * (a JSON-lines copy of the run, stored under the OS temp dir).
+   * Defaults to `true`. Set `false` to make transcripts opt-in for the whole
+   * project (e.g. a repo that shouldn't leave run transcripts on disk for backup
+   * or DLP tooling to ingest). A custom agent's `output_transcript` frontmatter
+   * overrides this per agent. This governs only the transcript — it does NOT
+   * affect the persisted pi session (`persist_session`), worktree commits
+   * (`isolation: worktree`), or memory files.
+   */
+  outputTranscript?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -96,6 +118,8 @@ export interface SettingsAppliers {
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
+  setWidgetMode: (mode: WidgetMode) => void;
+  setOutputTranscript: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -104,6 +128,7 @@ export type SettingsEmit = (event: string, payload: unknown) => void;
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
 const VALID_RESULT_PREVIEW_MODES: ReadonlySet<string> = new Set<ResultPreviewMode>(["plain", "markdown"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
+const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
@@ -171,6 +196,12 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
   }
+  if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
+    out.widgetMode = r.widgetMode as WidgetMode;
+  }
+  if (typeof r.outputTranscript === "boolean") {
+    out.outputTranscript = r.outputTranscript;
+  }
   return out;
 }
 
@@ -233,6 +264,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
+  if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
+  if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
 }
 
 /**

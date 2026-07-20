@@ -1,4 +1,4 @@
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
@@ -40,12 +40,16 @@ function fakeManager(agents: AgentRecord[]): AgentManager {
   return {
     listAgents: () => agents,
     abort: () => true,
+    steer: vi.fn(() => true),
   } as unknown as AgentManager;
 }
 
 interface Harness {
   fleet: FleetList;
   ui: FleetUICtx;
+  manager: AgentManager;
+  /** The overlay component (a real ConversationViewer) once one is opened. */
+  overlayComponent: () => { handleInput(data: string): void } | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -57,6 +61,8 @@ interface Harness {
   overlayClosed: () => boolean;
   /** Simulate the viewer closing itself (Esc → done); flushes the close microtask. */
   closeOverlay: () => Promise<void>;
+  /** The fake `tui` handed to the widget factory; tests set `focusedComponent` on it. */
+  widgetTui: { requestRender(): void; focusedComponent?: unknown };
 }
 
 function harness(agents: AgentRecord[]): Harness {
@@ -66,6 +72,7 @@ function harness(agents: AgentRecord[]): Harness {
   let opened = false;
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
+  let overlayComponent: { handleInput(data: string): void } | undefined;
   const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
 
   const ui: FleetUICtx = {
@@ -78,25 +85,30 @@ function harness(agents: AgentRecord[]): Harness {
       return new Promise<undefined>((resolve) => {
         const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
         overlayDone = done;
-        // Construct the overlay component so the controller wires viewerClose.
-        factory(fakeTui, theme, undefined, done);
+        // Construct the overlay component so the controller wires viewerClose,
+        // and keep it so tests can drive the real ConversationViewer's input.
+        overlayComponent = factory(fakeTui, theme, undefined, done);
       });
     }) as FleetUICtx["custom"],
   };
 
-  const fleet = new FleetList(fakeManager(agents), new Map());
+  const manager = fakeManager(agents);
+  const fleet = new FleetList(manager, new Map());
   fleet.setUICtx(ui);
   fleet.update();
 
   return {
     fleet,
     ui,
+    manager,
+    overlayComponent: () => overlayComponent,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
     overlayOpened: () => opened,
     overlayClosed: () => closed,
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
+    widgetTui: fakeTui,
   };
 }
 
@@ -227,6 +239,58 @@ describe("FleetList navigation", () => {
   });
 });
 
+describe("FleetList vs other focused components (#123)", () => {
+  // pi dispatches terminal input to extension listeners BEFORE the focused
+  // component (pi-tui TUI.handleInput), and ctx.ui.select/confirm/input swap
+  // the prompt editor out of the editor container while getEditorText() still
+  // reads the detached (empty) editor. So while another component owns the
+  // keyboard — another extension's selector (rpiv-ask-user-question), pi's own
+  // menus, our /agents settings — the list must not consume its keys.
+
+  /** A minimal real Editor — what pi focuses at the prompt (CustomEditor extends it). */
+  function realEditor(): Editor {
+    const fakeTui = { requestRender: () => {} };
+    const theme = { borderColor: (s: string) => s, selectList: {} };
+    return new Editor(fakeTui as any, theme as any);
+  }
+
+  /** Hand the fleet list its `tui` (happens on first widget render in pi) with the given focus. */
+  function focusInHarness(h: Harness, focused: unknown): void {
+    h.widgetTui.focusedComponent = focused;
+    h.render();
+  }
+
+  it("does not steal ↓ from a focused selector (activation)", () => {
+    const h = harness([makeRecord()]);
+    focusInHarness(h, { kind: "selector" }); // e.g. ExtensionSelectorComponent
+    expect(h.press(DOWN)).toBeUndefined(); // must flow through to the selector
+  });
+
+  it("does not steal navigation keys from a selector opened while the list was active", () => {
+    const h = harness([makeRecord()]);
+    focusInHarness(h, realEditor());
+    expect(h.press(DOWN)).toEqual({ consume: true }); // activate at the prompt
+    focusInHarness(h, { kind: "selector" });          // a dialog takes focus
+    expect(h.press(DOWN)).toBeUndefined();
+    expect(h.press(ENTER)).toBeUndefined();
+    expect(h.press(ESC)).toBeUndefined();
+    // and the list dropped back to its inactive hint
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("still activates when the prompt editor has focus", () => {
+    const h = harness([makeRecord()]);
+    focusInHarness(h, realEditor());
+    expect(h.press(DOWN)).toEqual({ consume: true });
+  });
+
+  it("assumes the editor when focus is unknowable (no tui yet / nothing focused)", () => {
+    const h = harness([makeRecord()]);
+    // No render yet → the list has never seen a tui: activation must still work.
+    expect(h.press(DOWN)).toEqual({ consume: true });
+  });
+});
+
 describe("FleetList rendering", () => {
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
     const h = harness([makeRecord({ description: "Sleep then report 1" })]);
@@ -323,6 +387,22 @@ describe("FleetList overlay lifecycle", () => {
     // Selection follows a2 ("two") to its new position, not whatever is at idx 2 now.
     expect(h.render().find(l => l.includes("two"))).toContain("⏺");
     expect(h.render().find(l => l.includes("three"))).toContain("◯");
+  });
+
+  it("wires the viewer's steer composer to manager.steer with the agent id", () => {
+    const agents = [makeRecord({ id: "live", description: "the one" })];
+    const h = harness(agents);
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // → the agent
+    h.press(ENTER); // open the conversation viewer
+
+    const viewer = h.overlayComponent();
+    expect(viewer).toBeDefined();
+    viewer!.handleInput("\r");                       // Enter → open composer
+    for (const ch of "go left") viewer!.handleInput(ch);
+    viewer!.handleInput("\r");                       // Enter → send
+
+    expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
   });
 
   it("does NOT auto-close when the viewed agent finishes (final output stays readable)", () => {

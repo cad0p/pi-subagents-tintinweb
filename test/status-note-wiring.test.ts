@@ -17,11 +17,12 @@ import subagentsExtension from "../src/index.js";
 function makePi() {
   const tools = new Map<string, any>();
   const eventHandlers = new Map<string, any>();
+  const lifecycle = new Map<string, any>();
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: {
       emit: vi.fn(),
       on: vi.fn((event: string, handler: any) => {
@@ -32,7 +33,16 @@ function makePi() {
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, eventHandlers };
+  return { pi, tools, eventHandlers, lifecycle };
+}
+
+// The RPC channels are registered on the first bound session_start (#142), so a
+// test that drives them must fire it first — as a real session always does. A
+// sessionId-less ctx makes startScheduler short-circuit (no filesystem touch).
+async function bind(lifecycle: Map<string, any>) {
+  const bindCtx = ctx();
+  bindCtx.sessionManager.getSessionId = vi.fn(() => undefined);
+  await lifecycle.get("session_start")({}, bindCtx);
 }
 
 function ctx() {
@@ -77,8 +87,9 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {
     // A background agent that never settles on its own — only a stop ends it.
     vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
-    const { pi, tools, eventHandlers } = makePi();
+    const { pi, tools, eventHandlers, lifecycle } = makePi();
     subagentsExtension(pi);
+    await bind(lifecycle); // register RPC channels via session_start (#142)
 
     const spawn = await tools.get("Agent").execute(
       "tc2",

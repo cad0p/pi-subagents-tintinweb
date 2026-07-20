@@ -467,7 +467,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
       opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
-      return "second";
+      return { text: "second" };
     });
 
     await manager.resume(id, "more");
@@ -741,6 +741,53 @@ describe("AgentManager — abort() state machine", () => {
 // Regression for #44: ESC during a foreground Agent call must propagate to
 // the child. Pi delivers parent abort via AbortSignal; the manager wires the
 // signal's "abort" event to this.abort(id).
+describe("AgentManager — steer()", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("returns false for an unknown id", () => {
+    manager = new AgentManager();
+    expect(manager.steer("nope", "hi")).toBe(false);
+  });
+
+  it("delivers to a live session via session.steer()", () => {
+    manager = new AgentManager();
+    const steer = vi.fn(() => Promise.resolve());
+    let captured: ((s: any) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      captured = (opts as any)?.onSessionCreated;
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    // Simulate the session becoming ready.
+    captured?.({ steer, dispose: vi.fn() });
+
+    expect(manager.steer(id, "go left")).toBe(true);
+    expect(steer).toHaveBeenCalledWith("go left");
+  });
+
+  it("queues onto pendingSteers when the session isn't ready yet", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    record.session = undefined; // not ready
+
+    expect(manager.steer(id, "first")).toBe(true);
+    expect(manager.steer(id, "second")).toBe(true);
+    expect(record.pendingSteers).toEqual(["first", "second"]);
+  });
+
+  it("refuses to steer an agent that is no longer running", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: false });
+    await manager.getRecord(id)?.promise;
+    expect(manager.getRecord(id)?.status).toBe("completed");
+    expect(manager.steer(id, "too late")).toBe(false);
+  });
+});
+
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -863,5 +910,115 @@ describe("AgentManager — runAgent rejection leaves the record visible with err
     expect(record.status).toBe("error");
     expect(record.error).toBe("boom");
     expect(record.completedAt).toBeGreaterThan(0);
+  });
+});
+
+// #144 — a run that RESOLVES with a failed final turn (pi never rejects on
+// retry exhaustion) must map to status "error", not "completed".
+describe("AgentManager — resolved runs with a failed final turn map to error (#144)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  const failedRun = (failure: string, responseText = "") =>
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText,
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+      failure,
+    } as any);
+
+  it("sets status='error' and captures the provider message", async () => {
+    manager = new AgentManager();
+    failedRun("retries exhausted: 529 overloaded");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("retries exhausted: 529 overloaded");
+    expect(record.completedAt).toBeGreaterThan(0);
+  });
+
+  it("keeps earlier-turn text available as result context, but never as a clean completion", async () => {
+    manager = new AgentManager();
+    failedRun("provider died", "partial progress from an earlier turn");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    expect(record.status).toBe("error");
+    expect(record.result).toBe("partial progress from an earlier turn");
+  });
+
+  it("onComplete sees the error status (routes to subagents:failed in the host)", async () => {
+    let completed: AgentRecord | undefined;
+    manager = new AgentManager((r) => { completed = r; });
+    failedRun("boom");
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    expect(completed?.status).toBe("error");
+  });
+
+  it("an external stop still wins over a late failure resolution", async () => {
+    manager = new AgentManager();
+    let resolveRun: ((v: unknown) => void) | undefined;
+    const session = mockSession();
+    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    record.status = "stopped"; // external abort() path
+    resolveRun!({ responseText: "", session, aborted: false, steered: false, failure: "late error" });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.error).toBeUndefined();
+  });
+
+  it("resume(): a failed final turn on the resumed prompt maps to error too", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(record.status).toBe("completed");
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    // resumeAgent bounds its fallback to this invocation, so a failed empty
+    // resume yields text "" — never the prior turn's answer (#144 root-fix).
+    vi.mocked(resumeMock).mockResolvedValue({
+      text: "",
+      failure: "retries exhausted on resume",
+    });
+
+    await manager.resume(id, "more");
+
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("retries exhausted on resume");
+    expect(record.result).toBe(""); // no stale prior answer
+  });
+
+  it("resume(): partial text produced before the failure is kept as result", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({
+      text: "new partial progress",
+      failure: "provider died mid-turn",
+    });
+
+    await manager.resume(id, "more");
+
+    expect(record.status).toBe("error");
+    expect(record.result).toBe("new partial progress"); // salvageable, this-run text
   });
 });
