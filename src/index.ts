@@ -1404,11 +1404,6 @@ Terse command-style prompts produce shallow, generic work.
       agent_id: Type.String({
         description: "The agent ID to check.",
       }),
-      wait: Type.Optional(
-        Type.Boolean({
-          description: "If true, wait for the agent to complete before returning. Default: false.",
-        }),
-      ),
       verbose: Type.Optional(
         Type.Boolean({
           description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
@@ -1419,16 +1414,6 @@ Terse command-style prompts produce shallow, generic work.
       const record = manager.getRecord(params.agent_id);
       if (!record) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
-      }
-
-      // Wait for completion if requested.
-      // Pre-mark resultConsumed BEFORE awaiting: onComplete fires inside .then()
-      // (attached earlier at spawn time) and always runs before this await resumes.
-      // Setting the flag here prevents a redundant follow-up notification.
-      if (params.wait && record.status === "running" && record.promise) {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
-        await record.promise;
       }
 
       const displayName = getDisplayName(record.type);
@@ -1447,7 +1432,7 @@ Terse command-style prompts produce shallow, generic work.
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
+        output += "Agent is still running. You will be notified when it completes — check back later for the result.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}`;
       } else {
