@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 - **Cross-extension RPC** — other pi extensions can spawn and stop subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
-- **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
+- **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Frontmatter-pinned or parent-inherited out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
 ## Install
 
@@ -279,7 +279,6 @@ Launch a sub-agent.
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
-| `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Run without blocking |
@@ -379,11 +378,10 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 | Model source | Out-of-scope behavior |
 |---|---|
-| Caller-supplied via `Agent({ model: "..." })` | Hard error returned to the orchestrator, listing allowed models |
 | Pinned in agent frontmatter | Warning toast + the pinned model runs (frontmatter is authoritative) |
-| Parent-inherited (neither set) | Warning toast + parent's model runs |
+| Parent-inherited (frontmatter sets no model) | Warning toast + parent's model runs |
 
-**Design:** `scopeModels` is a guardrail against the orchestrator picking unexpected models at runtime, not a hard policy against user-level config. The "frontmatter is authoritative" guarantee from v0.5.1 still holds for `model:` — caller params can't override frontmatter, and frontmatter pins run even when out of scope (with a visible warning).
+**Design:** `scopeModels` is a guardrail against frontmatter-pinned or parent-inherited models drifting out of the user's allowlist. The "frontmatter is authoritative" guarantee from v0.5.1 still holds for `model:` — frontmatter pins run even when out of scope (with a visible warning).
 
 **Pattern format:** only exact `provider/modelId` entries are honored (e.g. `anthropic/claude-haiku-4-5-20251001`). Glob patterns (`*sonnet*`), bare model IDs, and `:thinking` suffixes — which pi itself supports — are silently dropped here. pi's `/scoped-models` picker writes exact entries, so the limitation is invisible if you configure scope through the UI. Hand-edited globs produce an empty allowed set (scope check becomes a no-op).
 

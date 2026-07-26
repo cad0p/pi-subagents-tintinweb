@@ -887,7 +887,6 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
@@ -973,12 +972,6 @@ Terse command-style prompts produce shallow, generic work.
       subagent_type: Type.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
-      model: Type.Optional(
-        Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
-        }),
-      ),
       thinking: Type.Optional(
         Type.String({
           description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
@@ -1127,38 +1120,27 @@ Terse command-style prompts produce shallow, generic work.
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // Resolve model from agent frontmatter only (no LLM-authored override).
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-        if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
-        } else {
+        if (typeof resolved !== "string") {
           model = resolved;
         }
+        // config-specified but unresolvable: silent fallback to parent (existing behavior)
       }
 
       // Scope validation: the effective resolved model is checked against the
       // user's enabledModels list (read in `enabled-models.ts`).
       //
-      // Design: scopeModels guards against *runtime* LLM choices, not user-level config.
-      //   - Caller-supplied out-of-scope → hard error (the orchestrator made an explicit
-      //     out-of-scope choice; surface it so it picks differently).
-      //   - Frontmatter-pinned or parent-inherited out-of-scope → warn but proceed (the
-      //     user authored/installed this agent or chose the parent's model; trust it).
+      // Design: scopeModels guards against frontmatter-pinned or parent-inherited
+      // models drifting out of the user's allowlist. Both warn and proceed —
+      // frontmatter is authoritative (the agent's author/installer chose it),
+      // and the parent's model was chosen by the user when starting the session.
       // See SubagentsSettings.scopeModels docstring for the full policy.
       if (isScopeModelsEnabled() && model) {
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
-          if (resolvedConfig.modelFromParams) {
-            const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
-            return textResult(
-              `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
-              `Allowed models (from enabledModels):\n${list}`,
-            );
-          }
-          // Frontmatter-pinned or parent-inherited: warn + proceed.
           const agentLabel = customConfig?.displayName ?? subagentType;
           const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
           ctx.ui.notify(
@@ -1238,7 +1220,6 @@ Terse command-style prompts produce shallow, generic work.
             schedule: params.schedule as string,
             subagent_type: subagentType,
             prompt: params.prompt as string,
-            model: params.model as string | undefined,
             thinking: thinking,
             max_turns: effectiveMaxTurns,
             isolated: isolated,

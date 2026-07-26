@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: The `Agent` tool no longer accepts a `model` parameter.** The orchestrator previously could pass `model: "claude-sonnet-4"` to override the subagent's model at spawn time, but `resolveModel` matched against auth-configured models without verifying billing — so a model with valid auth but no payment method produced a raw `401 CreditsError` ("No payment method") with no actionable guidance for the orchestrator to recover. The `model` param is removed; subagents now inherit the parent session's model (always authenticated and billed) unless a custom agent's frontmatter pins a specific model via `model:` in `.pi/agents/*.md`, `.agents/agents/*.md`, or `~/.pi/agent/agents/*.md`. Cross-extension RPC (`options.model`) and the scheduler (`job.model`) retain their `model` string fields — programmatic callers can still pass a model, and the `resolveModel` fuzzy matcher stays load-bearing for frontmatter pins. The `scopeModels` feature loses its "caller-supplied → hard error" branch (no longer reachable) and now only warns on frontmatter-pinned or parent-inherited out-of-scope models. Migration: orchestrator prompts that passed `model:` on the `Agent` tool should drop it; per-task model selection now goes through a custom agent's frontmatter `model:` pin.
+
 ## [0.14.2] - 2026-07-17
 
 ### Added
