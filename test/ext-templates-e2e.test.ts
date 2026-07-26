@@ -118,7 +118,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     // Mirror production: the caller resolves frontmatter-locked fields (isolated,
     // inherit_context, …) into runAgent options via resolveAgentInvocationConfig.
     // isolated is the one that affects tool gating (forces extensions:false + drops ext:).
-    const resolved = resolveAgentInvocationConfig(getAgentConfig(agentName), { modelFromParams: false } as any);
+    const resolved = resolveAgentInvocationConfig(getAgentConfig(agentName), {} as any);
 
     let active: string[] = [];
     let prompt = "";
