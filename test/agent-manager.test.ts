@@ -19,7 +19,7 @@ import { runAgent } from "../src/agent-runner.js";
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
 
-const mockSession = () => ({ dispose: vi.fn() } as any);
+const mockSession = () => ({ dispose: vi.fn(), sessionId: "child-session-id" } as any);
 
 const resolvedRun = () =>
   vi.mocked(runAgent).mockResolvedValue({
@@ -199,6 +199,32 @@ describe("AgentManager — completion callbacks", () => {
     await expect(manager.getRecord(id)!.promise).resolves.toBe("done");
 
     expect(manager.getRecord(id)!.status).toBe("completed");
+  });
+});
+
+describe("AgentManager — record.sessionId set at session creation", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("sets record.sessionId from the child session as soon as it's created", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // session.sessionId is surfaced onto the record at onSessionCreated, so the
+    // checkpoint tool can find this record via ctx.sessionManager.getSessionId().
+    expect(record.sessionId).toBe("child-session-id");
   });
 });
 

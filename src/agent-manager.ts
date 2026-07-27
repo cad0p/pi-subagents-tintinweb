@@ -277,6 +277,7 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        record.sessionId = session.sessionId;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
