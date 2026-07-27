@@ -289,13 +289,11 @@ Launch a sub-agent.
 
 ### `get_subagent_result`
 
-Check status and retrieve results from a background agent.
+Check status and retrieve results from a background agent. Surfaces the latest checkpoint (if the subagent called the `checkpoint` tool), the checkpoint-history and transcript file paths, and the result preview. The `verbose` parameter was removed — read the `.output` transcript file path that this tool surfaces for full detail.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to check |
-| `wait` | boolean | no | Wait for completion |
-| `verbose` | boolean | no | Include full conversation log |
 
 ### `steer_subagent`
 
