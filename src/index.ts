@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -1077,7 +1077,7 @@ Terse command-style prompts produce shallow, generic work.
               line += "\n" + theme.fg("dim", `  ${l}`);
             }
             if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (use get_subagent_result with verbose for full output)");
+              line += "\n" + theme.fg("muted", "  ... (read the .output transcript file for full detail)");
             }
           }
         } else {
@@ -1484,11 +1484,6 @@ Terse command-style prompts produce shallow, generic work.
       agent_id: Type.String({
         description: "The agent ID to check.",
       }),
-      verbose: Type.Optional(
-        Type.Boolean({
-          description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-        }),
-      ),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
@@ -1496,46 +1491,127 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      const displayName = getDisplayName(record.type);
-      const duration = formatDuration(record.startedAt, record.completedAt);
-      const tokens = formatLifetimeTokens(record);
-      const contextPercent = getSessionContextPercent(record.session);
-      const statsParts = [`Tool uses: ${record.toolUses}`];
-      if (tokens) statsParts.push(tokens);
-      if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
-      if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
-      statsParts.push(`Duration: ${duration}`);
-
-      let output =
-        `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-        `Description: ${record.description}\n\n`;
+      // The checkpoints path is only surfaced when the subagent actually wrote a
+      // checkpoint — deriving it from `outputFile` unconditionally would advertise
+      // a file that doesn't exist yet in the no-checkpoint shapes.
+      const checkpointsPath = record.lastCheckpoint
+        ? checkpointsFilePath(record.outputFile)
+        : undefined;
+      const transcriptPath = record.outputFile;
 
       if (record.status === "running") {
-        output += "Agent is still running. You will be notified when it completes — check back later for the result.";
-      } else if (record.status === "error") {
-        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
-      } else {
-        output += record.result?.trim() || "No output.";
+        return textResult(renderRunning(record, checkpointsPath, transcriptPath));
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
+      // Mark result as consumed — suppresses the completion notification.
+      // Skip for queued agents: they haven't run yet, so there's no result to
+      // consume and the completion nudge must still fire when they finish.
+      if (record.status !== "queued") {
         record.resultConsumed = true;
         cancelNudge(params.agent_id);
       }
 
-      // Verbose: include full conversation
-      if (params.verbose && record.session) {
-        const conversation = getAgentConversation(record.session);
-        if (conversation) {
-          output += `\n\n--- Agent Conversation ---\n${conversation}`;
-        }
+      if (record.status === "error") {
+        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
       }
-
-      return textResult(output);
+      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
     },
   }));
+
+  /** Running subagent: running header (turn/elapsed), then the latest checkpoint
+   *  (if any) and file paths, with a footer that discourages polling. */
+  function renderRunning(
+    record: AgentRecord,
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+  ): string {
+    const displayName = getDisplayName(record.type);
+    const turn = record.turnCount ?? 0;
+    const maxTurns = record.invocation?.maxTurns;
+    const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
+    const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
+
+    let output =
+      `Agent: ${record.id} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
+      `Type: ${displayName} | Description: ${record.description}\n\n`;
+
+    if (record.lastCheckpoint) {
+      output +=
+        `Latest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
+        `  ${record.lastCheckpoint.summary}\n\n`;
+      output += fileSection(checkpointsPath, transcriptPath,
+        "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.");
+    } else {
+      output += `No checkpoint yet — the subagent hasn't called the checkpoint tool.\n\n`;
+      output += fileSection(checkpointsPath, transcriptPath,
+        "  grep or read the transcript for detail on what it's doing. Do not poll repeatedly.");
+    }
+    return output;
+  }
+
+  /** Completed or errored subagent: completed header (Status + stats + status
+   *  note), the result preview or error block, then the latest checkpoint (if
+   *  any) and file paths. The agent is done, so the footer drops the
+   *  polling-discouragement. */
+  function renderTerminal(
+    record: AgentRecord,
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    errored: boolean,
+  ): string {
+    const header = completedHeader(record);
+    const body = errored
+      ? `Error: ${record.error}${partialOutputSuffix(record)}`
+      : record.result?.trim() || "No output.";
+
+    let output = `${header}\n\n${body}`;
+    if (record.lastCheckpoint) {
+      output +=
+        `\n\nLatest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
+        `  ${record.lastCheckpoint.summary}`;
+    }
+    const footer = record.lastCheckpoint
+      ? "  grep or read the checkpoints / transcript for more detail."
+      : "  grep or read the transcript for more detail.";
+    output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footer);
+    return output;
+  }
+
+  /** Shared header for the completed/errored shapes (Status + stats + status
+   *  note). The status note carries the "STOPPED BY THE USER" / "aborted"
+   *  signal on non-clean terminal outcomes; it's empty for `completed`. */
+  function completedHeader(record: AgentRecord): string {
+    const displayName = getDisplayName(record.type);
+    const duration = formatDuration(record.startedAt, record.completedAt);
+    const tokens = formatLifetimeTokens(record);
+    const contextPercent = getSessionContextPercent(record.session);
+    const statsParts = [`Tool uses: ${record.toolUses}`];
+    if (tokens) statsParts.push(tokens);
+    if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
+    if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
+    statsParts.push(`Duration: ${duration}`);
+    return (
+      `Agent: ${record.id}\n` +
+      `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+      `Description: ${record.description}`
+    );
+  }
+
+  /** The checkpoint-history / full-transcript path block, aligned so the paths
+   *  share a column, followed by the footer line. Both paths are optional: the
+   *  checkpoints path is passed only when a checkpoint exists; the transcript
+   *  path is undefined when `output_transcript: false`. */
+  function fileSection(
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    footer: string,
+  ): string {
+    let s = "";
+    if (checkpointsPath) s += `Checkpoint history: ${checkpointsPath}\n`;
+    if (transcriptPath) s += `Full transcript:   ${transcriptPath}\n`;
+    s += footer;
+    return s;
+  }
 
   // ---- steer_subagent tool ----
 
