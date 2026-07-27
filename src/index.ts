@@ -10,7 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
@@ -56,6 +56,14 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+/** Derive the `.checkpoints.md` path from a record's `.output` transcript path.
+ *  Mirrors the `record.outputFile` gate: when the transcript is suppressed
+ *  (`output_transcript: false`), `outputFile` is unset and this returns undefined. */
+function checkpointsFilePath(outputFile: string | undefined): string | undefined {
+  if (!outputFile) return undefined;
+  return outputFile.replace(/\.output$/, ".checkpoints.md");
 }
 
 export function renderRunningAgentStatus(
@@ -543,6 +551,7 @@ export default function (pi: ExtensionAPI) {
     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
       manager.spawn(piRef, ctx, type, prompt, options),
     getRecord: (id: string) => manager.getRecord(id),
+    listAgents: () => manager.listAgents(),
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
@@ -1578,6 +1587,56 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- checkpoint tool (subagent-facing) ----
+
+  pi.registerTool(defineTool({
+    name: "checkpoint",
+    label: "Checkpoint",
+    description:
+      "Save a progress checkpoint for the parent. Call at milestones — when you " +
+      "finish a phase, hit a dead end, or change approach. Include what you just " +
+      "did and what you're doing next.",
+    promptSnippet: "Save a progress checkpoint for the parent",
+    parameters: Type.Object({
+      summary: Type.String({
+        description: "1-2 sentences: what you just did, what you're doing next",
+      }),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const handle = (globalThis as Record<symbol, { listAgents?: () => AgentRecord[] } | undefined>)[MANAGER_KEY];
+      if (!handle?.listAgents) {
+        return textResult("Checkpoint failed: agent manager not available.");
+      }
+      const record = handle.listAgents().find((r) => r.sessionId === sessionId);
+      if (!record) {
+        return textResult("Checkpoint failed: agent record not found.");
+      }
+
+      const turn = record.turnCount ?? 0;
+      const maxTurns = record.invocation?.maxTurns;
+      const elapsedMs = Date.now() - record.startedAt;
+      const elapsedSeconds = Math.round(elapsedMs / 1000);
+      record.lastCheckpoint = { turn, maxTurns, elapsedMs, summary: params.summary };
+
+      // Append to the .checkpoints.md file iff the .output transcript is enabled
+      // (mirrors the output_transcript: false gate — the record holds the latest
+      // checkpoint for inline display regardless).
+      const checkpointsPath = checkpointsFilePath(record.outputFile);
+      if (checkpointsPath) {
+        const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
+        appendFileSync(
+          checkpointsPath,
+          `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
+          "utf-8",
+        );
+      }
+
+      const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
+      return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
     },
   }));
 
