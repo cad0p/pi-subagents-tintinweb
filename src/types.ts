@@ -117,6 +117,23 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /** Cumulative agentic turn count, incremented via the `onTurnEnd` callback.
+   *  Undefined until the first turn ends — the `checkpoint` tool reads it as 0
+   *  until then, and `get_subagent_result` surfaces it in its running header. */
+  turnCount?: number;
+  /** Latest checkpoint written by the subagent's `checkpoint` tool call.
+   *  Undefined until the subagent calls the tool. The full history lives in
+   *  the `.checkpoints.md` file; this field holds only the latest for inline
+   *  display in `get_subagent_result`. */
+  lastCheckpoint?: {
+    turn: number;
+    maxTurns?: number;
+    elapsedMs: number;
+    summary: string;
+  };
+  /** The child session's ID, set at spawn. The `checkpoint` tool reads
+   *  ctx.sessionManager.getSessionId() to find its own record. */
+  sessionId?: string;
   /**
    * Whether this agent was spawned to run in the background. Tri-state, set at
    * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
