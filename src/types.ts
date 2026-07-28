@@ -118,8 +118,13 @@ export interface AgentRecord {
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Cumulative agentic turn count, incremented via the `onTurnEnd` callback.
-   *  Undefined until the first turn ends — the `checkpoint` tool reads it as 0
-   *  until then, and `get_subagent_result` surfaces it in its running header. */
+   *  Initialized to 1 at spawn (in `onSessionCreated`) to match the activity
+   *  tracker's `turnCount: 1`, then stamped with the completed-turn count as
+   *  each turn ends. A second source exists in the `Agent` tool's execute
+   *  closure (the closure-local `AgentActivity.turnCount` used for the live
+   *  widget), which is unreachable from `get_subagent_result`'s separate execute
+   *  — hence the record needs its own field. `get_subagent_result` surfaces it
+   *  in its running header; the `checkpoint` tool reads it as the turn label. */
   turnCount?: number;
   /** Latest checkpoint written by the subagent's `checkpoint` tool call.
    *  Undefined until the subagent calls the tool. The full history lives in

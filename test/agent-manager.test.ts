@@ -226,6 +226,28 @@ describe("AgentManager — record.sessionId set at session creation", () => {
     // checkpoint tool can find this record via ctx.sessionManager.getSessionId().
     expect(record.sessionId).toBe("child-session-id");
   });
+
+  it("initializes record.turnCount = 1 at session creation to match the activity tracker", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // turnCount is initialized to 1 (not 0) at spawn so get_subagent_result's
+    // running header shows 'turn 1/N' during the first turn, matching the
+    // widget's activity-tracker counter.
+    expect(record.turnCount).toBe(1);
+  });
 });
 
 describe("AgentManager — cleanup timer", () => {

@@ -281,6 +281,13 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
+        // Initialize turnCount to 1 to match the activity tracker's turnCount: 1
+        // (the Agent tool's execute closure holds its own activity tracker, which
+        // is unreachable from get_subagent_result's separate execute). Without
+        // this, record.turnCount reads as undefined (0 via ??) during the first
+        // turn, so the widget shows 'turn 1/N' but get_subagent_result shows
+        // 'turn 0/N' and a checkpoint during turn 1 writes 'turn 0/N'.
+        record.turnCount = 1;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
