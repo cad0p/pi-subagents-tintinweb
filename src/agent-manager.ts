@@ -11,7 +11,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -178,8 +178,11 @@ export class AgentManager {
       // otherwise the settings default, then normalized. Captured at spawn so
       // `renderRunning` and the `checkpoint` tool read the same value the
       // widget displays (the activity tracker is closure-local, unreachable
-      // from `get_subagent_result`'s separate execute).
-      effectiveMaxTurns: options.maxTurns,
+      // from `get_subagent_result`'s separate execute). Normalized here so
+      // the contract holds for every spawn path (Agent tool, scheduler, RPC):
+      // a `max_turns: 0` (unlimited) caller value maps to `undefined` instead
+      // of leaking through as `turn N/0` in the running header and checkpoint.
+      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns),
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
       // declared it (e.g. a cross-extension RPC spawn). The widget's background-

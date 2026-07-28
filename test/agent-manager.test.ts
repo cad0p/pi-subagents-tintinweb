@@ -3,10 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
@@ -243,6 +243,28 @@ describe("AgentManager — record.sessionId set at session creation", () => {
     // is undefined (rendering 'turn 0/N') is closed. Asserted synchronously,
     // before onSessionCreated fires.
     expect(record.turnCount).toBe(1);
+
+    manager.abort(id);
+  });
+
+  it("normalizes effectiveMaxTurns at record construction so max_turns: 0 maps to unlimited", () => {
+    // Every spawn path (Agent tool, scheduler, cross-extension RPC) funnels
+    // through manager.spawn. Normalizing here — rather than trusting callers —
+    // makes the field's 'effective, normalized max turns' contract hold
+    // universally. A `max_turns: 0` (unlimited) caller value maps to
+    // `undefined` instead of leaking through as `turn N/0` in the running
+    // header and checkpoint confirmation.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      maxTurns: 0,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBeUndefined();
 
     manager.abort(id);
   });
