@@ -161,6 +161,28 @@ describe("checkpoint tool", () => {
     expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
   });
 
+  it("omits the /maxTurns suffix when invocation.maxTurns is undefined (unlimited)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-unlim-"));
+    const outputFile = join(dir, "agent.output");
+    const { tools } = await setupAgent({ sessionId: "child-sess-unlim", outputFile });
+    // Mirror the post-spawn default: turnCount = 1 (set by onSessionCreated in
+    // production) and invocation.maxTurns = undefined (unlimited spawn).
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.listAgents().find((r: any) => r.sessionId === "child-sess-unlim");
+    record.turnCount = 1;
+    record.invocation = { ...record.invocation, maxTurns: undefined };
+
+    const res = await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "unlimited run" }, undefined, undefined, childCtx("child-sess-unlim"),
+    );
+    expect(textOf(res)).toBe("Checkpoint saved (turn 1, 47s).");
+
+    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const contents = readFileSync(checkpointsPath, "utf-8");
+    expect(contents).toContain("## Turn 1 — 47s elapsed\nunlimited run\n\n");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("finds its own record via sessionId match (not by walking all records)", async () => {
     // Two records exist; checkpoint must pick the one matching its sessionId.
     const { pi, tools } = makePi();
