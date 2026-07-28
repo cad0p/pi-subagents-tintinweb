@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
-import type { AgentRecord } from "../src/types.js";
+import { registerAgents } from "../src/agent-types.js";
+import type { AgentConfig, AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -293,6 +294,45 @@ describe("AgentManager — record.sessionId set at session creation", () => {
     expect(record.effectiveMaxTurns).toBe(10);
 
     manager.abort(id);
+  });
+
+  it("resolves the agent-config leg of the effectiveMaxTurns fallback chain", () => {
+    // The fallback chain is: caller value -> agent-config maxTurns -> settings
+    // default. The caller leg (maxTurns: 0 -> undefined) and the settings-default
+    // leg are pinned above. This test pins the middle leg: a custom agent with
+    // a config-level maxTurns must win over the settings default when the caller
+    // omits maxTurns. Without this leg, a regression dropping
+    // getAgentConfig(type)?.maxTurns from the chain would pass the suite.
+    const customAgent: AgentConfig = {
+      name: "config-max-turns-7",
+      description: "custom agent with config maxTurns",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      maxTurns: 7,
+      systemPrompt: "",
+      promptMode: "replace",
+    };
+    registerAgents(new Map([[customAgent.name, customAgent]]));
+    setDefaultMaxTurns(10);
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "config-max-turns-7", "test", {
+      description: "test",
+      isBackground: true,
+      // maxTurns intentionally omitted — the agent-config value (7) should win
+      // over the settings default (10).
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBe(7);
+
+    manager.abort(id);
+    // Reset the registry to defaults so the custom agent doesn't leak into
+    // subsequent tests in this file (vitest isolates modules per file, but the
+    // registry is module-level state within the file).
+    registerAgents(new Map());
   });
 });
 
