@@ -152,6 +152,7 @@ describe("get_subagent_result output shapes", () => {
     error: string;
     completedAt: number;
     toolUses: number;
+    compactionCount: number;
   }>): void {
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
@@ -160,6 +161,7 @@ describe("get_subagent_result output shapes", () => {
     if (over.error !== undefined) record.error = over.error;
     if (over.completedAt !== undefined) record.completedAt = over.completedAt;
     if (over.toolUses !== undefined) record.toolUses = over.toolUses;
+    if (over.compactionCount !== undefined) record.compactionCount = over.compactionCount;
   }
 
   // ---- Shape 1: Running, with checkpoint ----
@@ -327,6 +329,26 @@ describe("get_subagent_result output shapes", () => {
     expect(lines[5]).toBe("");
     expect(lines[6]).toBe("Full transcript:   /tmp/pi-subagents-x/75616377.output");
     expect(lines[7]).toBe("  grep or read the transcript for more detail.");
+  });
+
+  // ---- compactionCount surfacing on the completed header (COV-R2-1) ----
+  it("completed header surfaces Compactions: N when compactionCount is set", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const startedAt = Date.now() - 1_098_000;
+    const { tools, id } = await setupAgent({ outputFile, startedAt });
+    settleRecord(id, {
+      status: "completed",
+      result: "Done.",
+      completedAt: Date.now(),
+      toolUses: 12,
+      compactionCount: 2,
+    });
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    const lines = out.split("\n");
+    expect(lines[1]).toMatch(/^Type: Agent \| Status: completed \| Tool uses: 12 \| Compactions: 2 \| Duration: .+$/);
   });
 
   // ---- Shape 5: Not found / evicted ----
