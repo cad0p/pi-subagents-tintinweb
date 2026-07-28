@@ -289,7 +289,7 @@ Launch a sub-agent.
 
 ### `get_subagent_result`
 
-Check status and retrieve results from a background agent. Surfaces the latest checkpoint (if the subagent called the `checkpoint` tool), the checkpoint-history and transcript file paths, and the result preview.
+Check status and retrieve results from a background agent.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
