@@ -24,32 +24,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-
-const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-
-function makePi() {
-  const tools = new Map<string, any>();
-  const lifecycle = new Map<string, any>();
-  const pi = {
-    registerMessageRenderer: vi.fn(),
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
-    appendEntry: vi.fn(),
-    sendMessage: vi.fn(),
-  } as any;
-  return { pi, tools, lifecycle };
-}
-
-const textOf = (r: any): string => r.content[0].text;
-
-/** Extract the Agent ID from a background-spawn tool result, asserting it's present. */
-function agentIdOf(spawn: any): string {
-  const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
-  if (!id) throw new Error("background spawn should surface an agent id");
-  return id;
-}
+import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 describe("get_subagent_result output shapes", () => {
   let cwd: string;
@@ -102,17 +77,10 @@ describe("get_subagent_result output shapes", () => {
   }): Promise<{ tools: Map<string, any>; id: string }> {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
-    const spawnCtx = {
-      cwd,
-      sessionManager: { getSessionId: vi.fn(() => "parent-session") },
-      getSystemPrompt: vi.fn(() => "parent"),
-      model: undefined,
-      modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
-    } as any;
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
       { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
-      undefined, undefined, spawnCtx,
+      undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
@@ -487,17 +455,10 @@ describe("get_subagent_result output shapes", () => {
     setDefaultMaxTurns(10);
     const { pi, tools } = makePi();
     subagentsExtension(pi);
-    const spawnCtx = {
-      cwd,
-      sessionManager: { getSessionId: vi.fn(() => "parent-session") },
-      getSystemPrompt: vi.fn(() => "parent"),
-      model: undefined,
-      modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
-    } as any;
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
       { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
-      undefined, undefined, spawnCtx,
+      undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
