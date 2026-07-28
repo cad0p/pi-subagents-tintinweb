@@ -22,7 +22,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
@@ -80,6 +80,7 @@ describe("get_subagent_result output shapes", () => {
     if (previousHome == null) delete process.env.HOME;
     else process.env.HOME = previousHome;
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    setDefaultMaxTurns(undefined);
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.restoreAllMocks();
@@ -116,8 +117,11 @@ describe("get_subagent_result output shapes", () => {
     record.turnCount = opts.turnCount ?? 3;
     if (opts.maxTurns === null) {
       record.invocation = { ...record.invocation, maxTurns: undefined };
+      record.effectiveMaxTurns = undefined;
     } else {
-      record.invocation = { ...record.invocation, maxTurns: opts.maxTurns ?? 10 };
+      const maxTurns = opts.maxTurns ?? 10;
+      record.invocation = { ...record.invocation, maxTurns };
+      record.effectiveMaxTurns = maxTurns;
     }
     record.startedAt = opts.startedAt ?? Date.now() - 47_000;
     if (opts.clearOutputFile) record.outputFile = undefined;
@@ -417,6 +421,43 @@ describe("get_subagent_result output shapes", () => {
       "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
     ));
     expect(out.split("\n")[0]).toBe(`Agent: ${id} (still running — turn 3, 47s elapsed)`);
+  });
+
+  // ---- default maxTurns via settings (no config override): running header
+  // surfaces the effective limit, matching the widget's display (ADV-1) ----
+  it("running header shows turn N/defaultMaxTurns when the limit comes from settings, not config", async () => {
+    // A default maxTurns set via settings applies when the agent config has no
+    // override. invocation.maxTurns is config-only (undefined here), but
+    // effectiveMaxTurns carries the settings default so the running header
+    // matches the widget instead of rendering a bare 'turn N'.
+    setDefaultMaxTurns(10);
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const spawnCtx = {
+      cwd,
+      sessionManager: { getSessionId: vi.fn(() => "parent-session") },
+      getSystemPrompt: vi.fn(() => "parent"),
+      model: undefined,
+      modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+    } as any;
+    const spawn = await tools.get("Agent").execute(
+      "spawn-tc",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, spawnCtx,
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    // invocation.maxTurns stays undefined (config-only), effectiveMaxTurns carries the default.
+    expect(record.invocation?.maxTurns).toBeUndefined();
+    expect(record.effectiveMaxTurns).toBe(10);
+    record.turnCount = 3;
+    record.startedAt = Date.now() - 47_000;
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    expect(out.split("\n")[0]).toBe(`Agent: ${id} (still running — turn 3/10, 47s elapsed)`);
   });
 
   // ---- verbose param is no longer in the schema and has no effect ----

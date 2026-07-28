@@ -14,7 +14,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
 const MANAGER_KEY = Symbol.for("pi-subagents:manager");
@@ -78,6 +78,7 @@ describe("checkpoint tool", () => {
     if (previousHome == null) delete process.env.HOME;
     else process.env.HOME = previousHome;
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    setDefaultMaxTurns(undefined);
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.restoreAllMocks();
@@ -113,6 +114,7 @@ describe("checkpoint tool", () => {
     record.sessionId = opts.sessionId;
     record.turnCount = 3;
     record.invocation = { ...record.invocation, maxTurns: 10 };
+    record.effectiveMaxTurns = 10;
     record.startedAt = Date.now() - 47_000;
     if (opts.outputFile !== undefined) record.outputFile = opts.outputFile;
     return { pi, tools, id };
@@ -166,11 +168,12 @@ describe("checkpoint tool", () => {
     const outputFile = join(dir, "agent.output");
     const { tools } = await setupAgent({ sessionId: "child-sess-unlim", outputFile });
     // Mirror the post-spawn default: turnCount = 1 (set by onSessionCreated in
-    // production) and invocation.maxTurns = undefined (unlimited spawn).
+    // production) and effectiveMaxTurns = undefined (unlimited spawn).
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.listAgents().find((r: any) => r.sessionId === "child-sess-unlim");
     record.turnCount = 1;
     record.invocation = { ...record.invocation, maxTurns: undefined };
+    record.effectiveMaxTurns = undefined;
 
     const res = await tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "unlimited run" }, undefined, undefined, childCtx("child-sess-unlim"),
@@ -180,6 +183,50 @@ describe("checkpoint tool", () => {
     const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
     const contents = readFileSync(checkpointsPath, "utf-8");
     expect(contents).toContain("## Turn 1 — 47s elapsed\nunlimited run\n\n");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("surfaces the settings-default maxTurns in the confirmation when config has no override (ADV-1)", async () => {
+    // A default maxTurns set via settings applies when the agent config has no
+    // override. invocation.maxTurns is config-only (undefined here), but
+    // effectiveMaxTurns carries the settings default so the checkpoint
+    // confirmation and .checkpoints.md header match the widget's display.
+    setDefaultMaxTurns(10);
+    const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-default-"));
+    const outputFile = join(dir, "agent.output");
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const spawnCtx = {
+      cwd,
+      sessionManager: { getSessionId: vi.fn(() => "parent-session") },
+      getSystemPrompt: vi.fn(() => "parent"),
+      model: undefined,
+      modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+    } as any;
+    const spawn = await tools.get("Agent").execute(
+      "spawn-tc",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, spawnCtx,
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    // invocation.maxTurns stays undefined (config-only), effectiveMaxTurns carries the default.
+    expect(record.invocation?.maxTurns).toBeUndefined();
+    expect(record.effectiveMaxTurns).toBe(10);
+    record.sessionId = "child-sess-default";
+    record.turnCount = 3;
+    record.startedAt = Date.now() - 47_000;
+    record.outputFile = outputFile;
+
+    const res = await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "default limit run" }, undefined, undefined, childCtx("child-sess-default"),
+    );
+    expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
+
+    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const contents = readFileSync(checkpointsPath, "utf-8");
+    expect(contents).toContain("## Turn 3/10 — 47s elapsed\ndefault limit run\n\n");
     rmSync(dir, { recursive: true, force: true });
   });
 

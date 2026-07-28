@@ -167,6 +167,12 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      // Effective max turns applied to the run — config value when set,
+      // otherwise the settings default, then normalized. Captured at spawn so
+      // `renderRunning` and the `checkpoint` tool read the same value the
+      // widget displays (the activity tracker is closure-local, unreachable
+      // from `get_subagent_result`'s separate execute).
+      effectiveMaxTurns: options.maxTurns,
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
       // declared it (e.g. a cross-extension RPC spawn). The widget's background-

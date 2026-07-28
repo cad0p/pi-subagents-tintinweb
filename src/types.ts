@@ -150,6 +150,12 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Effective max turns applied to the agent's run — config value when
+   *  set, otherwise the settings default (`getDefaultMaxTurns()`), then
+   *  normalized. Captured at spawn so `renderRunning` and the `checkpoint`
+   *  tool read the same value the widget displays (the activity tracker
+   *  is closure-local and unreachable from `get_subagent_result`). */
+  effectiveMaxTurns?: number;
 }
 
 export interface AgentInvocation {

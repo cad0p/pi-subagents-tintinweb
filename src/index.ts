@@ -1542,7 +1542,7 @@ Terse command-style prompts produce shallow, generic work.
   ): string {
     const displayName = getDisplayName(record.type);
     const turn = record.turnCount ?? 0;
-    const maxTurns = record.invocation?.maxTurns;
+    const maxTurns = record.effectiveMaxTurns;
     const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
     const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
 
@@ -1708,7 +1708,7 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       const turn = record.turnCount ?? 0;
-      const maxTurns = record.invocation?.maxTurns;
+      const maxTurns = record.effectiveMaxTurns;
       const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
       record.lastCheckpoint = { turn, summary: params.summary };
 
