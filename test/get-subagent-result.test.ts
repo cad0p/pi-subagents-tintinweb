@@ -641,6 +641,67 @@ describe("get_subagent_result output shapes", () => {
     expect(out).not.toContain("checkpoints / transcript");
   });
 
+  // ---- terminal footer when the checkpoints path is suppressed ----
+  // When record.lastCheckpoint is set but the .checkpoints.md file is deleted
+  // out-of-band (leaving the transcript on disk), the existsSync gate
+  // suppresses the checkpoints path. renderTerminal's footer must say
+  // "transcript" (not "checkpoints / transcript"). A regression reverting
+  // renderTerminal's footer to "checkpoints / transcript" whenever
+  // lastCheckpoint is truthy would not be caught without this test — the
+  // existing completed-with-checkpoint tests have the checkpoints path present.
+  it("completed footer says 'transcript' when the checkpoints path is suppressed", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "State machine written. Tests passing. Ready for review.");
+    settleRecord(id, {
+      status: "completed",
+      result: "Done implementing the subsystem.",
+      completedAt: Date.now(),
+      toolUses: 12,
+    });
+    // Delete the checkpoints file out-of-band, leaving the transcript on disk.
+    unlinkSync(`${outputFile}.checkpoints.md`);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The in-memory checkpoint section still renders.
+    expect(out).toContain("Latest checkpoint (turn 3):");
+    // The checkpoints path is suppressed (file deleted).
+    expect(out).not.toContain("Checkpoint history:");
+    // The transcript path is rendered (file still exists).
+    expect(out).toContain("Full transcript:");
+    // The footer references only the transcript, not "checkpoints / transcript".
+    expect(out).toContain("grep or read the transcript for more detail.");
+    expect(out).not.toContain("checkpoints / transcript");
+  });
+
+  it("error footer says 'transcript' when the checkpoints path is suppressed", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "Hit a snag on the parser.");
+    settleRecord(id, {
+      status: "error",
+      error: "provider rejected the prompt",
+      completedAt: Date.now(),
+    });
+    // Delete the checkpoints file out-of-band, leaving the transcript on disk.
+    unlinkSync(`${outputFile}.checkpoints.md`);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The in-memory checkpoint section still renders.
+    expect(out).toContain("Latest checkpoint (turn 3):");
+    // The checkpoints path is suppressed (file deleted).
+    expect(out).not.toContain("Checkpoint history:");
+    // The transcript path is rendered (file still exists).
+    expect(out).toContain("Full transcript:");
+    // The footer references only the transcript, not "checkpoints / transcript".
+    expect(out).toContain("grep or read the transcript for more detail.");
+    expect(out).not.toContain("checkpoints / transcript");
+  });
+
   // ---- resultConsumed is set on terminal reads, not on running reads ----
   it("reading a running agent does not mark the result consumed", async () => {
     const { tools, id } = await setupAgent({});
