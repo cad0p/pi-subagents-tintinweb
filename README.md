@@ -289,7 +289,7 @@ Launch a sub-agent.
 
 ### `get_subagent_result`
 
-Check status and retrieve results from a background agent. Surfaces the latest checkpoint (if the subagent called the `checkpoint` tool), the checkpoint-history and transcript file paths, and the result preview. The `verbose` parameter was removed — read the `.output` transcript file path that this tool surfaces for full detail.
+Check status and retrieve results from a background agent. Surfaces the latest checkpoint (if the subagent called the `checkpoint` tool), the checkpoint-history and transcript file paths, and the result preview.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -306,7 +306,7 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 ### `checkpoint`
 
-Subagent-facing: a subagent calls this at milestones to save a one-sentence progress summary for the parent. The summary lands on `record.lastCheckpoint` (the latest only — the full history lives in a `.checkpoints.md` file alongside the `.output` transcript) and is surfaced inline in `get_subagent_result`'s output. The tool finds its own record by matching `ctx.sessionManager.getSessionId()` against `record.sessionId`, so no `agent_id` param is needed and the subagent can't accidentally write to a sibling's record. The parent doesn't call this tool — calling it from the parent session returns `Checkpoint failed: agent record not found.`
+Subagent-facing: a subagent calls this at milestones to save a one-sentence progress summary for the parent. The latest summary is surfaced inline in `get_subagent_result`'s output; the full history lives in a `.checkpoints.md` file alongside the `.output` transcript.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
