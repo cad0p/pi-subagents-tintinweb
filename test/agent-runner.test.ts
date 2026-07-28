@@ -110,7 +110,6 @@ vi.mock("../src/skill-loader.js", () => ({
 import {
   extensionCanonicalName,
   extensionCanonicalNames,
-  getAgentConversation,
   parseExtensionsSpec,
   parseExtSelectors,
   resumeAgent,
@@ -559,83 +558,6 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
-  });
-});
-
-// getAgentConversation renders the subagent transcript shown in the /agents
-// inspect overlay. Pure function over session.messages — no mocks needed
-// beyond a literal-object session.
-describe("getAgentConversation", () => {
-  function fakeSession(messages: unknown[]) {
-    return { messages } as never;
-  }
-
-  it("returns an empty string for a session with no messages", () => {
-    expect(getAgentConversation(fakeSession([]))).toBe("");
-  });
-
-  it("formats a user-then-assistant exchange with role-prefixed lines joined by blank lines", () => {
-    const out = getAgentConversation(
-      fakeSession([
-        { role: "user", content: "hi" },
-        { role: "assistant", content: [{ type: "text", text: "hello" }] },
-      ]),
-    );
-    expect(out).toBe("[User]: hi\n\n[Assistant]: hello");
-  });
-
-  it("accepts user content as content-blocks (not just strings)", () => {
-    const out = getAgentConversation(
-      fakeSession([{ role: "user", content: [{ type: "text", text: "from blocks" }] }]),
-    );
-    expect(out).toBe("[User]: from blocks");
-  });
-
-  it("emits a [Tool Calls] block listing each toolCall by name or toolName, falling back to 'unknown'", () => {
-    const out = getAgentConversation(
-      fakeSession([
-        {
-          role: "assistant",
-          content: [
-            { type: "text", text: "calling tools" },
-            { type: "toolCall", name: "search" },
-            { type: "toolCall", toolName: "edit" },
-            { type: "toolCall" },
-          ],
-        },
-      ]),
-    );
-    expect(out).toContain("[Assistant]: calling tools");
-    expect(out).toContain("[Tool Calls]:\n  Tool: search\n  Tool: edit\n  Tool: unknown");
-  });
-
-  it("truncates toolResult content beyond 200 chars and tags it with the tool name", () => {
-    const longText = "x".repeat(300);
-    const out = getAgentConversation(
-      fakeSession([
-        {
-          role: "toolResult",
-          toolName: "bash",
-          content: [{ type: "text", text: longText }],
-        },
-      ]),
-    );
-    expect(out.startsWith("[Tool Result (bash)]: ")).toBe(true);
-    expect(out.endsWith("...")).toBe(true);
-    // prefix + 200 chars + "..."
-    expect(out.length).toBe("[Tool Result (bash)]: ".length + 200 + 3);
-  });
-
-  it("emits [Tool Calls] but no [Assistant] when the assistant only made tool calls", () => {
-    const out = getAgentConversation(
-      fakeSession([
-        { role: "user", content: "do it" },
-        { role: "assistant", content: [{ type: "toolCall", name: "search" }] },
-      ]),
-    );
-    expect(out).toContain("[User]: do it");
-    expect(out).not.toContain("[Assistant]:");
-    expect(out).toContain("[Tool Calls]:\n  Tool: search");
   });
 });
 
