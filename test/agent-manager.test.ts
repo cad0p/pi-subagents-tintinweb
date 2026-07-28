@@ -14,7 +14,7 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -204,7 +204,10 @@ describe("AgentManager — completion callbacks", () => {
 
 describe("AgentManager — record.sessionId set at session creation", () => {
   let manager: AgentManager;
-  afterEach(() => manager?.dispose());
+  afterEach(() => {
+    manager?.dispose();
+    setDefaultMaxTurns(undefined);
+  });
 
   it("sets record.sessionId from the child session as soon as it's created", async () => {
     manager = new AgentManager();
@@ -265,6 +268,29 @@ describe("AgentManager — record.sessionId set at session creation", () => {
     const record = manager.getRecord(id)!;
 
     expect(record.effectiveMaxTurns).toBeUndefined();
+
+    manager.abort(id);
+  });
+
+  it("resolves the full fallback chain for effectiveMaxTurns when maxTurns is omitted", () => {
+    // Scheduler and cross-extension RPC spawns can omit `max_turns` while an
+    // agent-config or settings default is set. The construction site must
+    // resolve the full chain (caller → agent-config → settings default) so
+    // `effectiveMaxTurns` matches the value `runAgent` actually enforces —
+    // otherwise the running header and checkpoint render `turn N` (unlimited
+    // style) for a run that is actually bounded.
+    setDefaultMaxTurns(10);
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      // maxTurns intentionally omitted — the settings default should apply.
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBe(10);
 
     manager.abort(id);
   });

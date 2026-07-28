@@ -11,7 +11,8 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -174,15 +175,18 @@ export class AgentManager {
       // exists where status === "running" but turnCount is undefined —
       // renderRunning and the checkpoint tool would show 'turn 0/N'.
       turnCount: 1,
-      // Effective max turns applied to the run — config value when set,
-      // otherwise the settings default, then normalized. Captured at spawn so
-      // `renderRunning` and the `checkpoint` tool read the same value the
-      // widget displays (the activity tracker is closure-local, unreachable
-      // from `get_subagent_result`'s separate execute). Normalized here so
-      // the contract holds for every spawn path (Agent tool, scheduler, RPC):
-      // a `max_turns: 0` (unlimited) caller value maps to `undefined` instead
-      // of leaking through as `turn N/0` in the running header and checkpoint.
-      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns),
+      // Effective max turns applied to the run — caller value, then the
+      // agent-config value, then the settings default, then normalized.
+      // Captured at spawn so `renderRunning` and the `checkpoint` tool read
+      // the same value the widget displays (the activity tracker is
+      // closure-local, unreachable from `get_subagent_result`'s separate
+      // execute). Resolving the full fallback chain here — rather than
+      // trusting callers to pre-resolve it — makes the contract hold for
+      // every spawn path (Agent tool, scheduler, RPC): a `max_turns: 0`
+      // (unlimited) caller value maps to `undefined` instead of leaking
+      // through as `turn N/0`, and a caller that omits `max_turns` still
+      // picks up the config/default the run actually uses.
+      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
       // declared it (e.g. a cross-extension RPC spawn). The widget's background-
