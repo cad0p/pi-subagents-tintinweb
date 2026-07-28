@@ -387,6 +387,23 @@ describe("get_subagent_result output shapes", () => {
     expect(out).toContain("Status: stopped (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)");
   });
 
+  // ---- Steered status carries the turn-limit note and the result body (ADV-4) ----
+  it("steered status appends the turn-limit note to the status line and renders the result", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    settleRecord(id, {
+      status: "steered",
+      result: "Partial writeup before the steer window closed.",
+      completedAt: Date.now(),
+    });
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    expect(out).toContain("Status: steered (wrapped up at the turn limit — output may be partial)");
+    expect(out).toContain("Partial writeup before the steer window closed.");
+  });
+
   // ---- Errored status: error + partial output + file paths ----
   it("error status renders the error, salvaged partial output, and the transcript path", async () => {
     const outputFile = "/tmp/pi-subagents-x/75616377.output";
