@@ -1566,8 +1566,10 @@ Terse command-style prompts produce shallow, generic work.
       output +=
         `Latest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
         `  ${record.lastCheckpoint.summary}\n\n`;
-      output += fileSection(checkpointsPath, transcriptPath,
-        "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.");
+      const footer = checkpointsPath
+        ? "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly."
+        : "  grep or read the transcript for more detail. Do not poll repeatedly.";
+      output += fileSection(checkpointsPath, transcriptPath, footer);
     } else {
       output += `No checkpoint yet — the subagent hasn't called the checkpoint tool.\n\n`;
       output += fileSection(checkpointsPath, transcriptPath,
@@ -1597,7 +1599,7 @@ Terse command-style prompts produce shallow, generic work.
         `\n\nLatest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
         `  ${record.lastCheckpoint.summary}`;
     }
-    const footer = record.lastCheckpoint
+    const footer = checkpointsPath
       ? "  grep or read the checkpoints / transcript for more detail."
       : "  grep or read the transcript for more detail.";
     output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footer);

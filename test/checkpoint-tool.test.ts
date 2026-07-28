@@ -373,6 +373,10 @@ describe("checkpoint tool", () => {
     expect(out).not.toContain("Checkpoint history:");
     // The transcript path is still present (the file exists on disk).
     expect(out).toContain("Full transcript:");
+    // The footer must drop 'checkpoints' since the checkpoints path is
+    // suppressed — it should say 'transcript' only, not 'checkpoints / transcript'.
+    expect(out).toContain("grep or read the transcript for more detail.");
+    expect(out).not.toContain("checkpoints / transcript");
   });
 
   it("keeps checkpointsFileOk latching-true across a later write failure so the parent still sees the path", async () => {

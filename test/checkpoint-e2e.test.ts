@@ -20,9 +20,9 @@
  * implementations, their composition, and the file format are all exercised
  * for real.
  */
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -127,6 +127,11 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     record.effectiveMaxTurns = opts.maxTurns ?? 10;
     record.startedAt = Date.now() - 23_000;
     record.outputFile = opts.outputFile;
+    // Create the transcript file on disk so the renderer's existsSync gate
+    // surfaces it — production records always point at real files. The
+    // .checkpoints.md sibling is created by the checkpoint tool's appendFileSync.
+    mkdirSync(dirname(opts.outputFile), { recursive: true });
+    writeFileSync(opts.outputFile, "", "utf-8");
     return { tools, id };
   }
 
