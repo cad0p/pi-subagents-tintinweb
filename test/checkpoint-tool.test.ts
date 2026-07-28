@@ -287,4 +287,21 @@ describe("checkpoint tool", () => {
     );
     expect(textOf(res)).toBe("Checkpoint failed: agent manager not available.");
   });
+
+  it("falls back to turn 0 when record.turnCount is undefined (pre-onSessionCreated window)", async () => {
+    // After onSessionCreated initializes record.turnCount = 1 at spawn, this
+    // fallback is unreachable in production (the subagent can't call checkpoint
+    // before its session is created). Pin the ?? 0 safety net anyway so a future
+    // change that drops the init doesn't silently regress to turn 0 mid-first-turn.
+    const { tools, id } = await setupAgent({ sessionId: "child-sess-9" });
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    delete record.turnCount;
+
+    const res = await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "pre-session" }, undefined, undefined, childCtx("child-sess-9"),
+    );
+    expect(textOf(res)).toBe("Checkpoint saved (turn 0/10, 47s).");
+    expect(record.lastCheckpoint.turn).toBe(0);
+  });
 });
