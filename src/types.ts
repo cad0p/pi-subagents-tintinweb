@@ -117,6 +117,35 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /** Cumulative agentic turn count, incremented via the `onTurnEnd` callback.
+   *  Initialized to 1 at spawn (record construction) to match the activity
+   *  tracker's `turnCount: 1`, then stamped with the completed-turn count as
+   *  each turn ends. A second source exists in the `Agent` tool's execute
+   *  closure (the closure-local `AgentActivity.turnCount` used for the live
+   *  widget), which is unreachable from `get_subagent_result`'s separate execute
+   *  — hence the record needs its own field. `get_subagent_result` surfaces it
+   *  in its running header; the `checkpoint` tool reads it as the turn label. */
+  turnCount?: number;
+  /** Latest checkpoint written by the subagent's `checkpoint` tool call.
+   *  Undefined until the subagent calls the tool. The full history lives in
+   *  the `.checkpoints.md` file; this field holds only the latest for inline
+   *  display in `get_subagent_result`. */
+  lastCheckpoint?: {
+    turn: number;
+    summary: string;
+  };
+  /** Whether at least one `.checkpoints.md` write succeeded for this agent.
+   *  Latching-true: set to true on the first successful write and never reset
+   *  to false. `get_subagent_result` only surfaces the `Checkpoint history:`
+   *  path when this is true — a failed first write leaves `lastCheckpoint` set
+   *  (the in-memory display is still useful) but must not advertise a file
+   *  that doesn't exist. A later failure after earlier successes returns the
+   *  soft warning but leaves the flag true so the parent can still read the
+   *  file's prior content. */
+  checkpointsFileOk?: boolean;
+  /** The child session's ID, set at spawn. The `checkpoint` tool reads
+   *  ctx.sessionManager.getSessionId() to find its own record. */
+  sessionId?: string;
   /**
    * Whether this agent was spawned to run in the background. Tri-state, set at
    * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
@@ -130,6 +159,14 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Effective max turns applied to the agent's run — caller-supplied value,
+   *  then the agent-config value, then the settings default
+   *  (`getDefaultMaxTurns()`), then normalized. Captured at spawn so
+   *  `renderRunning` and the `checkpoint` tool read the same value the
+   *  widget displays (the activity tracker is closure-local and
+   *  unreachable from `get_subagent_result`). Resolved in `manager.spawn`
+   *  so every spawn path (Agent tool, scheduler, RPC) agrees on the value. */
+  effectiveMaxTurns?: number;
 }
 
 export interface AgentInvocation {

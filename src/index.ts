@@ -10,13 +10,13 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -56,6 +56,15 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+/** Derive the `.checkpoints.md` path from `outputFile`. Mirrors the
+ *  `record.outputFile` gate (undefined when suppressed). Appends the suffix
+ *  unconditionally — a `replace(/\.output$/, ...)` would silently return the
+ *  transcript path unchanged if `outputFile` ever lacked the suffix. */
+function checkpointsFilePath(outputFile: string | undefined): string | undefined {
+  if (!outputFile) return undefined;
+  return `${outputFile}.checkpoints.md`;
 }
 
 export function renderRunningAgentStatus(
@@ -543,6 +552,7 @@ export default function (pi: ExtensionAPI) {
     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
       manager.spawn(piRef, ctx, type, prompt, options),
     getRecord: (id: string) => manager.getRecord(id),
+    listAgents: () => manager.listAgents(),
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
@@ -1068,7 +1078,7 @@ Terse command-style prompts produce shallow, generic work.
               line += "\n" + theme.fg("dim", `  ${l}`);
             }
             if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (use get_subagent_result with verbose for full output)");
+              line += "\n" + theme.fg("muted", "  ... (read the .output transcript file for full detail)");
             }
           }
         } else {
@@ -1475,11 +1485,6 @@ Terse command-style prompts produce shallow, generic work.
       agent_id: Type.String({
         description: "The agent ID to check.",
       }),
-      verbose: Type.Optional(
-        Type.Boolean({
-          description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
-        }),
-      ),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
@@ -1487,46 +1492,144 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      const displayName = getDisplayName(record.type);
-      const duration = formatDuration(record.startedAt, record.completedAt);
-      const tokens = formatLifetimeTokens(record);
-      const contextPercent = getSessionContextPercent(record.session);
-      const statsParts = [`Tool uses: ${record.toolUses}`];
-      if (tokens) statsParts.push(tokens);
-      if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
-      if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
-      statsParts.push(`Duration: ${duration}`);
-
-      let output =
-        `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-        `Description: ${record.description}\n\n`;
+      // existsSync gates cover out-of-band file deletion (checkpointsFileOk is latching-true).
+      const checkpointsCandidate = checkpointsFilePath(record.outputFile);
+      const checkpointsPath =
+        record.checkpointsFileOk && checkpointsCandidate && existsSync(checkpointsCandidate)
+          ? checkpointsCandidate
+          : undefined;
+      const transcriptPath =
+        record.outputFile && existsSync(record.outputFile) ? record.outputFile : undefined;
 
       if (record.status === "running") {
-        output += "Agent is still running. You will be notified when it completes — check back later for the result.";
-      } else if (record.status === "error") {
-        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
-      } else {
-        output += record.result?.trim() || "No output.";
+        return textResult(renderRunning(record, checkpointsPath, transcriptPath));
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
+      // Queued agent: has not started running yet. Return a short shape with no
+      // file paths and no result body, mirroring the `running` early return.
+      if (record.status === "queued") {
+        return textResult(renderQueued(record));
       }
 
-      // Verbose: include full conversation
-      if (params.verbose && record.session) {
-        const conversation = getAgentConversation(record.session);
-        if (conversation) {
-          output += `\n\n--- Agent Conversation ---\n${conversation}`;
-        }
-      }
+      // Mark result as consumed — suppresses the completion notification.
+      // Queued agents return above; this block only runs for terminal statuses.
+      record.resultConsumed = true;
+      cancelNudge(params.agent_id);
 
-      return textResult(output);
+      if (record.status === "error") {
+        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
+      }
+      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
     },
   }));
+
+  /** Queued subagent: no file paths, result body, or footer — nothing produced yet. */
+  function renderQueued(record: AgentRecord): string {
+    const displayName = getDisplayName(record.type);
+    return (
+      `Agent: ${record.id} (queued — not started yet)\n` +
+      `Type: ${displayName} | Description: ${record.description}\n\n` +
+      `This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.`
+    );
+  }
+
+  /** Running subagent: header (turn/elapsed), latest checkpoint, file paths, polling-discouragement footer. */
+  function renderRunning(
+    record: AgentRecord,
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+  ): string {
+    const displayName = getDisplayName(record.type);
+    const turn = record.turnCount ?? 0;
+    const maxTurns = record.effectiveMaxTurns;
+    const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
+    const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
+
+    let output =
+      `Agent: ${record.id} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
+      `Type: ${displayName} | Description: ${record.description}\n\n`;
+
+    if (record.lastCheckpoint) {
+      output +=
+        `Latest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
+        `  ${record.lastCheckpoint.summary}\n\n`;
+      output += fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, true));
+    } else {
+      output += `No checkpoint yet — the subagent hasn't called the checkpoint tool.\n\n`;
+      output += fileSection(checkpointsPath, transcriptPath,
+        "  grep or read the transcript for detail on what it's doing. Do not poll repeatedly.");
+    }
+    return output;
+  }
+
+  /** Completed/errored subagent: completed header, result or error block, latest checkpoint, file paths. */
+  function renderTerminal(
+    record: AgentRecord,
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    errored: boolean,
+  ): string {
+    const header = completedHeader(record);
+    const body = errored
+      ? `Error: ${record.error}${partialOutputSuffix(record)}`
+      : record.result?.trim() || "No output.";
+
+    let output = `${header}\n\n${body}`;
+    if (record.lastCheckpoint) {
+      output +=
+        `\n\nLatest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
+        `  ${record.lastCheckpoint.summary}`;
+    }
+    output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, false));
+    return output;
+  }
+
+  /** Shared header for completed/errored shapes (Status + stats + status note). */
+  function completedHeader(record: AgentRecord): string {
+    const displayName = getDisplayName(record.type);
+    const duration = formatDuration(record.startedAt, record.completedAt);
+    const tokens = formatLifetimeTokens(record);
+    const contextPercent = getSessionContextPercent(record.session);
+    const statsParts = [`Tool uses: ${record.toolUses}`];
+    if (tokens) statsParts.push(tokens);
+    if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
+    if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
+    statsParts.push(`Duration: ${duration}`);
+    return (
+      `Agent: ${record.id}\n` +
+      `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+      `Description: ${record.description}`
+    );
+  }
+
+  /** The checkpoint-history / full-transcript path block, aligned to a shared column, plus the footer. */
+  function fileSection(
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    footer: string,
+  ): string {
+    let s = "";
+    if (checkpointsPath) s += `Checkpoint history: ${checkpointsPath}\n`;
+    if (transcriptPath) s += `Full transcript:   ${transcriptPath}\n`;
+    s += footer;
+    return s;
+  }
+
+  /** Footer matching the paths actually rendered (existsSync can suppress either independently). */
+  function footerForPaths(
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    running: boolean,
+  ): string {
+    const suffix = running ? " Do not poll repeatedly." : "";
+    if (checkpointsPath && transcriptPath) {
+      return `  grep or read the checkpoints / transcript for more detail.${suffix}`;
+    }
+    if (checkpointsPath) {
+      return `  grep or read the checkpoints file for more detail.${suffix}`;
+    }
+    return `  grep or read the transcript for more detail.${suffix}`;
+  }
 
   // ---- steer_subagent tool ----
 
@@ -1578,6 +1681,55 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- checkpoint tool (subagent-facing) ----
+
+  pi.registerTool(defineTool({
+    name: "checkpoint",
+    label: "Checkpoint",
+    description:
+      "Save a progress checkpoint for the parent. Call at milestones — when you " +
+      "finish a phase, hit a dead end, or change approach. Include what you just " +
+      "did and what you're doing next.",
+    promptSnippet: "Save a progress checkpoint for the parent",
+    parameters: Type.Object({
+      summary: Type.String({
+        description: "1-2 sentences: what you just did, what you're doing next",
+      }),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const record = manager.listAgents().find((r) => r.sessionId === sessionId);
+      if (!record) {
+        return textResult("Checkpoint failed: agent record not found.");
+      }
+
+      const turn = record.turnCount ?? 0;
+      const maxTurns = record.effectiveMaxTurns;
+      const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
+      record.lastCheckpoint = { turn, summary: params.summary };
+
+      // Best-effort: a write failure (disk full, missing parent dir) returns a soft
+      // warning instead of crashing the call. checkpointsFileOk is latching-true —
+      // see AgentRecord.checkpointsFileOk for the suppression contract.
+      const checkpointsPath = checkpointsFilePath(record.outputFile);
+      const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
+      if (checkpointsPath) {
+        try {
+          appendFileSync(
+            checkpointsPath,
+            `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
+            "utf-8",
+          );
+          record.checkpointsFileOk = true;
+        } catch (err) {
+          return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
+        }
+      }
+
+      return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
     },
   }));
 

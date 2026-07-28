@@ -294,8 +294,6 @@ Check status and retrieve results from a background agent.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to check |
-| `wait` | boolean | no | Wait for completion |
-| `verbose` | boolean | no | Include full conversation log |
 
 ### `steer_subagent`
 
@@ -305,6 +303,14 @@ Send a steering message to a running agent. The message interrupts after the cur
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
+
+### `checkpoint`
+
+Subagent-facing: a subagent calls this at milestones to save a one-sentence progress summary for the parent. The latest summary is surfaced inline in `get_subagent_result`'s output; the full history lives in a `.checkpoints.md` file alongside the `.output` transcript.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `summary` | string | yes | 1-2 sentences: what you just did, what you're doing next |
 
 ## Commands
 

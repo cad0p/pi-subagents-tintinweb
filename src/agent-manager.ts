@@ -11,7 +11,8 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -167,6 +168,11 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      // Initialized to 1 at spawn to match AgentRecord.turnCount's contract; see the JSDoc there.
+      turnCount: 1,
+      // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
+      // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
+      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
       // declared it (e.g. a cross-extension RPC spawn). The widget's background-
@@ -264,7 +270,10 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
-      onTurnEnd: options.onTurnEnd,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        options.onTurnEnd?.(turnCount);
+      },
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
@@ -277,6 +286,7 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        record.sessionId = session.sessionId;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {

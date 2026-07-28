@@ -1,12 +1,13 @@
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
-import type { AgentRecord } from "../src/types.js";
+import { registerAgents } from "../src/agent-types.js";
+import type { AgentConfig, AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
@@ -14,12 +15,12 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
 
-const mockSession = () => ({ dispose: vi.fn() } as any);
+const mockSession = () => ({ dispose: vi.fn(), sessionId: "child-session-id" } as any);
 
 const resolvedRun = () =>
   vi.mocked(runAgent).mockResolvedValue({
@@ -199,6 +200,139 @@ describe("AgentManager — completion callbacks", () => {
     await expect(manager.getRecord(id)!.promise).resolves.toBe("done");
 
     expect(manager.getRecord(id)!.status).toBe("completed");
+  });
+});
+
+describe("AgentManager — record.sessionId set at session creation", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    setDefaultMaxTurns(undefined);
+  });
+
+  it("sets record.sessionId from the child session as soon as it's created", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // session.sessionId is surfaced onto the record at onSessionCreated, so the
+    // checkpoint tool can find this record via ctx.sessionManager.getSessionId().
+    expect(record.sessionId).toBe("child-session-id");
+  });
+
+  it("initializes record.turnCount = 1 at construction to match the activity tracker", async () => {
+    manager = new AgentManager();
+    // Keep the agent running so the record stays alive for synchronous inspection.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+
+    // turnCount is initialized to 1 at record construction (not deferred to
+    // onSessionCreated) so the window where status === "running" but turnCount
+    // is undefined (rendering 'turn 0/N') is closed. Asserted synchronously,
+    // before onSessionCreated fires.
+    expect(record.turnCount).toBe(1);
+
+    manager.abort(id);
+  });
+
+  it("normalizes effectiveMaxTurns at record construction so max_turns: 0 maps to unlimited", () => {
+    // Every spawn path (Agent tool, scheduler, cross-extension RPC) funnels
+    // through manager.spawn. Normalizing here — rather than trusting callers —
+    // makes the field's 'effective, normalized max turns' contract hold
+    // universally. A `max_turns: 0` (unlimited) caller value maps to
+    // `undefined` instead of leaking through as `turn N/0` in the running
+    // header and checkpoint confirmation.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      maxTurns: 0,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBeUndefined();
+
+    manager.abort(id);
+  });
+
+  it("resolves the full fallback chain for effectiveMaxTurns when maxTurns is omitted", () => {
+    // Scheduler and cross-extension RPC spawns can omit `max_turns` while an
+    // agent-config or settings default is set. The construction site must
+    // resolve the full chain (caller → agent-config → settings default) so
+    // `effectiveMaxTurns` matches the value `runAgent` actually enforces —
+    // otherwise the running header and checkpoint render `turn N` (unlimited
+    // style) for a run that is actually bounded.
+    setDefaultMaxTurns(10);
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      // maxTurns intentionally omitted — the settings default should apply.
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBe(10);
+
+    manager.abort(id);
+  });
+
+  it("resolves the agent-config leg of the effectiveMaxTurns fallback chain", () => {
+    // The fallback chain is: caller value -> agent-config maxTurns -> settings
+    // default. The caller leg (maxTurns: 0 -> undefined) and the settings-default
+    // leg are pinned above. This test pins the middle leg: a custom agent with
+    // a config-level maxTurns must win over the settings default when the caller
+    // omits maxTurns. Without this leg, a regression dropping
+    // getAgentConfig(type)?.maxTurns from the chain would pass the suite.
+    const customAgent: AgentConfig = {
+      name: "config-max-turns-7",
+      description: "custom agent with config maxTurns",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      maxTurns: 7,
+      systemPrompt: "",
+      promptMode: "replace",
+    };
+    registerAgents(new Map([[customAgent.name, customAgent]]));
+    setDefaultMaxTurns(10);
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "config-max-turns-7", "test", {
+      description: "test",
+      isBackground: true,
+      // maxTurns intentionally omitted — the agent-config value (7) should win
+      // over the settings default (10).
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.effectiveMaxTurns).toBe(7);
+
+    manager.abort(id);
+    // Reset the registry to defaults so the custom agent doesn't leak into
+    // subsequent tests in this file (vitest isolates modules per file, but the
+    // registry is module-level state within the file).
+    registerAgents(new Map());
   });
 });
 
