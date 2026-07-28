@@ -304,6 +304,14 @@ Send a steering message to a running agent. The message interrupts after the cur
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
 
+### `checkpoint`
+
+Subagent-facing: a subagent calls this at milestones to save a one-sentence progress summary for the parent. The summary lands on `record.lastCheckpoint` (the latest only — the full history lives in a `.checkpoints.md` file alongside the `.output` transcript) and is surfaced inline in `get_subagent_result`'s output. The tool finds its own record by matching `ctx.sessionManager.getSessionId()` against `record.sessionId`, so no `agent_id` param is needed and the subagent can't accidentally write to a sibling's record. The parent doesn't call this tool — calling it from the parent session returns `Checkpoint failed: agent record not found.`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `summary` | string | yes | 1-2 sentences: what you just did, what you're doing next |
+
 ## Commands
 
 | Command | Description |
