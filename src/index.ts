@@ -1497,14 +1497,19 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // The checkpoints path is only surfaced when at least one file write
-      // succeeded — `lastCheckpoint` alone is insufficient because the first
-      // write may have failed (disk full, missing parent dir), leaving the
-      // in-memory field set but no file to read. `checkpointsFileOk` is set
-      // by the checkpoint tool on each write attempt.
-      const checkpointsPath = record.checkpointsFileOk
-        ? checkpointsFilePath(record.outputFile)
-        : undefined;
-      const transcriptPath = record.outputFile;
+      // succeeded AND the file still exists on disk — `checkpointsFileOk`
+      // is latching-true, so an out-of-band deletion (tmpwatch, manual rm,
+      // container dir cleanup) leaves the flag true with no file behind it.
+      // The existsSync gate is a cheap per-call syscall that covers the
+      // deletion case without maintaining a live flag. The transcript path
+      // has the same staleness class, so it gets the same gate for symmetry.
+      const checkpointsCandidate = checkpointsFilePath(record.outputFile);
+      const checkpointsPath =
+        record.checkpointsFileOk && checkpointsCandidate && existsSync(checkpointsCandidate)
+          ? checkpointsCandidate
+          : undefined;
+      const transcriptPath =
+        record.outputFile && existsSync(record.outputFile) ? record.outputFile : undefined;
 
       if (record.status === "running") {
         return textResult(renderRunning(record, checkpointsPath, transcriptPath));

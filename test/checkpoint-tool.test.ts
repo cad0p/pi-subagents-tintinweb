@@ -340,10 +340,15 @@ describe("checkpoint tool", () => {
     // doesn't exist. The `Latest checkpoint (turn N):` line still renders.
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-gate-"));
     const outputFile = join(dir, "agent.output");
+    // Create the transcript file on disk so the existsSync gate on the
+    // transcript path passes — this test isolates the checkpointsFileOk gate,
+    // not the existsSync gate (covered by get-subagent-result.test.ts).
+    writeFileSync(outputFile, "", "utf-8");
     const { tools, id } = await setupAgent({ sessionId: "child-sess-gate", outputFile });
 
-    // Remove the parent directory out-of-band so appendFileSync throws ENOENT.
-    rmSync(dir, { recursive: true, force: true });
+    // Force the first checkpoints write to fail (disk full, missing parent dir).
+    // The transcript file stays on disk so the transcript path is still surfaced.
+    vi.mocked(appendFileSync).mockImplementationOnce(() => { throw new Error("disk full"); });
 
     await tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "first write fails" }, undefined, undefined, childCtx("child-sess-gate"),
@@ -363,9 +368,10 @@ describe("checkpoint tool", () => {
     // The in-memory latest-checkpoint line still renders.
     expect(out).toContain("Latest checkpoint (turn 3):");
     expect(out).toContain("  first write fails");
-    // The `Checkpoint history:` path must NOT be advertised — the file doesn't exist.
+    // The `Checkpoint history:` path must NOT be advertised — checkpointsFileOk
+    // is undefined and the file doesn't exist.
     expect(out).not.toContain("Checkpoint history:");
-    // The transcript path is still present (it's a separate file).
+    // The transcript path is still present (the file exists on disk).
     expect(out).toContain("Full transcript:");
   });
 

@@ -12,9 +12,9 @@
  *   5. Not found / evicted
  * Plus the error terminal shape (error + salvaged partial output + file paths).
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -89,7 +89,10 @@ describe("get_subagent_result output shapes", () => {
   /** Spawn a background agent and stamp the fields the renderer reads. Returns
    *  the tools map and the agent id, with the record pre-populated for the
    *  running shape (turn 3/10, 47s elapsed, an outputFile path).
-   *  Pass `maxTurns: null` to clear invocation.maxTurns (omit the /maxTurns suffix). */
+   *  Pass `maxTurns: null` to clear invocation.maxTurns (omit the /maxTurns suffix).
+   *  The outputFile and its .checkpoints.md sibling are created on disk so the
+   *  renderer's existsSync gate surfaces them — production records always point
+   *  at real files. */
   async function setupAgent(opts: {
     outputFile?: string;
     turnCount?: number;
@@ -125,7 +128,15 @@ describe("get_subagent_result output shapes", () => {
     }
     record.startedAt = opts.startedAt ?? Date.now() - 47_000;
     if (opts.clearOutputFile) record.outputFile = undefined;
-    else if (opts.outputFile !== undefined) record.outputFile = opts.outputFile;
+    else if (opts.outputFile !== undefined) {
+      record.outputFile = opts.outputFile;
+      // Create the transcript and checkpoints files on disk so the renderer's
+      // existsSync gate surfaces them. Production records always point at real
+      // files; tests that assert the paths must not rely on nonexistent paths.
+      mkdirSync(dirname(opts.outputFile), { recursive: true });
+      writeFileSync(opts.outputFile, "", "utf-8");
+      writeFileSync(`${opts.outputFile}.checkpoints.md`, "", "utf-8");
+    }
     return { tools, id };
   }
 
@@ -546,6 +557,38 @@ describe("get_subagent_result output shapes", () => {
         "  grep or read the transcript for detail on what it's doing. Do not poll repeatedly.",
       ].join("\n"),
     );
+  });
+
+  // ---- out-of-band file deletion: existsSync gate suppresses stale paths ----
+  it("does not surface the Checkpoint history path when the file is deleted out-of-band", async () => {
+    // checkpointsFileOk is latching-true: once a write succeeds it stays true.
+    // If the .checkpoints.md file is deleted out-of-band (tmpwatch, manual rm,
+    // container dir cleanup) with no subsequent write, the flag stays true but
+    // the file is gone. The existsSync gate in get_subagent_result must suppress
+    // the stale path so the parent isn't pointed at a nonexistent file. The
+    // in-memory Latest checkpoint (turn N): section still renders from
+    // record.lastCheckpoint.
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "Wrote the parser skeleton. Moving to tests next.");
+    // Delete the checkpoints file out-of-band, simulating tmpwatch cleanup.
+    unlinkSync(`${outputFile}.checkpoints.md`);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The in-memory checkpoint section still renders.
+    expect(out).toContain("Latest checkpoint (turn 3):");
+    expect(out).toContain("  Wrote the parser skeleton. Moving to tests next.");
+    // The stale Checkpoint history path must NOT be surfaced.
+    expect(out).not.toContain("Checkpoint history:");
+    // The transcript path is also gated on existsSync; delete it too and assert
+    // it is suppressed (same staleness class).
+    unlinkSync(outputFile);
+    const out2 = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    expect(out2).not.toContain("Full transcript:");
   });
 
   // ---- resultConsumed is set on terminal reads, not on running reads ----
