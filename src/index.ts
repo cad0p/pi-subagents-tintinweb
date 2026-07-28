@@ -1725,8 +1725,8 @@ Terse command-style prompts produce shallow, generic work.
       // least one write succeeded so get_subagent_result doesn't advertise a
       // `Checkpoint history:` path that doesn't exist.
       const checkpointsPath = checkpointsFilePath(record.outputFile);
+      const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
       if (checkpointsPath) {
-        const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
         try {
           appendFileSync(
             checkpointsPath,
@@ -1740,7 +1740,6 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
       return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
     },
   }));
