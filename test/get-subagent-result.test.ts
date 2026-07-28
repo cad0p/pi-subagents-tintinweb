@@ -207,6 +207,25 @@ describe("get_subagent_result output shapes", () => {
     );
   });
 
+  // ---- Queued shape: not started yet ----
+  it("queued agent renders a not-started shape with no file paths, no result body, no footer", async () => {
+    const { tools, id } = await setupAgent({ outputFile: "/tmp/pi-subagents-x/75616377.output" });
+    settleRecord(id, { status: "queued" });
+
+    const res = await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    );
+
+    expect(textOf(res)).toBe(
+      [
+        `Agent: ${id} (queued — not started yet)`,
+        "Type: Agent | Description: d",
+        "",
+        "This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.",
+      ].join("\n"),
+    );
+  });
+
   // ---- Shape 3: Completed, with checkpoint ----
   it("completed + checkpoint renders the header, preview, checkpoint, both paths, footer", async () => {
     const outputFile = "/tmp/pi-subagents-x/75616377.output";

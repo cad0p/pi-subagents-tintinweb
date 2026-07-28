@@ -1503,13 +1503,16 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(renderRunning(record, checkpointsPath, transcriptPath));
       }
 
-      // Mark result as consumed — suppresses the completion notification.
-      // Skip for queued agents: they haven't run yet, so there's no result to
-      // consume and the completion nudge must still fire when they finish.
-      if (record.status !== "queued") {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
+      // Queued agent: has not started running yet. Return a short shape with no
+      // file paths and no result body, mirroring the `running` early return.
+      if (record.status === "queued") {
+        return textResult(renderQueued(record));
       }
+
+      // Mark result as consumed — suppresses the completion notification.
+      // Queued agents return above; this block only runs for terminal statuses.
+      record.resultConsumed = true;
+      cancelNudge(params.agent_id);
 
       if (record.status === "error") {
         return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
@@ -1517,6 +1520,18 @@ Terse command-style prompts produce shallow, generic work.
       return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
     },
   }));
+
+  /** Queued subagent: has not started running yet. No file paths, no result
+   *  body, no footer — the subagent hasn't produced any output and its
+   *  `.output` transcript may not exist yet. Mirrors the `running` early return. */
+  function renderQueued(record: AgentRecord): string {
+    const displayName = getDisplayName(record.type);
+    return (
+      `Agent: ${record.id} (queued — not started yet)\n` +
+      `Type: ${displayName} | Description: ${record.description}\n\n` +
+      `This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.`
+    );
+  }
 
   /** Running subagent: running header (turn/elapsed), then the latest checkpoint
    *  (if any) and file paths, with a footer that discourages polling. */
