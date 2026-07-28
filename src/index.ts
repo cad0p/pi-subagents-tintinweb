@@ -58,14 +58,10 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
-/** Derive the `.checkpoints.md` path from a record's `.output` transcript path.
- *  Mirrors the `record.outputFile` gate: when the transcript is suppressed
- *  (`output_transcript: false`), `outputFile` is unset and this returns undefined.
- *  Appends the suffix unconditionally rather than replacing a trailing `.output` —
- *  a `replace(/\.output$/, ...)` would silently return the transcript path
- *  unchanged if `outputFile` ever lacked the suffix, corrupting the transcript
- *  file with checkpoint markdown. The resulting `<agentId>.output.checkpoints.md`
- *  filename is slightly uglier but safe. */
+/** Derive the `.checkpoints.md` path from `outputFile`. Mirrors the
+ *  `record.outputFile` gate (undefined when suppressed). Appends the suffix
+ *  unconditionally — a `replace(/\.output$/, ...)` would silently return the
+ *  transcript path unchanged if `outputFile` ever lacked the suffix. */
 function checkpointsFilePath(outputFile: string | undefined): string | undefined {
   if (!outputFile) return undefined;
   return `${outputFile}.checkpoints.md`;
@@ -1496,13 +1492,7 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      // The checkpoints path is only surfaced when at least one file write
-      // succeeded AND the file still exists on disk — `checkpointsFileOk`
-      // is latching-true, so an out-of-band deletion (tmpwatch, manual rm,
-      // container dir cleanup) leaves the flag true with no file behind it.
-      // The existsSync gate is a cheap per-call syscall that covers the
-      // deletion case without maintaining a live flag. The transcript path
-      // has the same staleness class, so it gets the same gate for symmetry.
+      // existsSync gates cover out-of-band file deletion (checkpointsFileOk is latching-true).
       const checkpointsCandidate = checkpointsFilePath(record.outputFile);
       const checkpointsPath =
         record.checkpointsFileOk && checkpointsCandidate && existsSync(checkpointsCandidate)
@@ -1533,9 +1523,7 @@ Terse command-style prompts produce shallow, generic work.
     },
   }));
 
-  /** Queued subagent: has not started running yet. No file paths, no result
-   *  body, no footer — the subagent hasn't produced any output and its
-   *  `.output` transcript may not exist yet. Mirrors the `running` early return. */
+  /** Queued subagent: no file paths, result body, or footer — nothing produced yet. */
   function renderQueued(record: AgentRecord): string {
     const displayName = getDisplayName(record.type);
     return (
@@ -1545,8 +1533,7 @@ Terse command-style prompts produce shallow, generic work.
     );
   }
 
-  /** Running subagent: running header (turn/elapsed), then the latest checkpoint
-   *  (if any) and file paths, with a footer that discourages polling. */
+  /** Running subagent: header (turn/elapsed), latest checkpoint, file paths, polling-discouragement footer. */
   function renderRunning(
     record: AgentRecord,
     checkpointsPath: string | undefined,
@@ -1575,10 +1562,7 @@ Terse command-style prompts produce shallow, generic work.
     return output;
   }
 
-  /** Completed or errored subagent: completed header (Status + stats + status
-   *  note), the result preview or error block, then the latest checkpoint (if
-   *  any) and file paths. The agent is done, so the footer drops the
-   *  polling-discouragement. */
+  /** Completed/errored subagent: completed header, result or error block, latest checkpoint, file paths. */
   function renderTerminal(
     record: AgentRecord,
     checkpointsPath: string | undefined,
@@ -1600,9 +1584,7 @@ Terse command-style prompts produce shallow, generic work.
     return output;
   }
 
-  /** Shared header for the completed/errored shapes (Status + stats + status
-   *  note). The status note carries the "STOPPED BY THE USER" / "aborted"
-   *  signal on non-clean terminal outcomes; it's empty for `completed`. */
+  /** Shared header for completed/errored shapes (Status + stats + status note). */
   function completedHeader(record: AgentRecord): string {
     const displayName = getDisplayName(record.type);
     const duration = formatDuration(record.startedAt, record.completedAt);
@@ -1620,10 +1602,7 @@ Terse command-style prompts produce shallow, generic work.
     );
   }
 
-  /** The checkpoint-history / full-transcript path block, aligned so the paths
-   *  share a column, followed by the footer line. Both paths are optional: the
-   *  checkpoints path is passed only when a checkpoint exists; the transcript
-   *  path is undefined when `output_transcript: false`. */
+  /** The checkpoint-history / full-transcript path block, aligned to a shared column, plus the footer. */
   function fileSection(
     checkpointsPath: string | undefined,
     transcriptPath: string | undefined,
@@ -1636,9 +1615,7 @@ Terse command-style prompts produce shallow, generic work.
     return s;
   }
 
-  /** Footer text matching the paths actually rendered — the `existsSync` gate
-   *  can suppress either path independently, so the footer must reflect what
-   *  the parent LLM actually sees, not just whether `checkpointsPath` is set. */
+  /** Footer matching the paths actually rendered (existsSync can suppress either independently). */
   function footerForPaths(
     checkpointsPath: string | undefined,
     transcriptPath: string | undefined,
@@ -1734,17 +1711,9 @@ Terse command-style prompts produce shallow, generic work.
       const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
       record.lastCheckpoint = { turn, summary: params.summary };
 
-      // Append to the .checkpoints.md file iff the .output transcript is enabled
-      // (mirrors the output_transcript: false gate — the record holds the latest
-      // checkpoint for inline display regardless). The file write is best-effort:
-      // a failure (disk full, missing parent dir after out-of-band cleanup) returns
-      // a soft warning instead of crashing the subagent's tool call. Matches the
-      // .output writer's silent-swallow stance (src/output-file.ts) and the tool's
-      // own handled lookup-failure style. record.lastCheckpoint stays set — the
-      // in-memory display is still useful. checkpointsFileOk is latching-true:
-      // set to true on the first successful write and never reset to false, so a
-      // transient later failure doesn't hide a readable file from the parent in
-      // get_subagent_result's `Checkpoint history:` path.
+      // Best-effort: a write failure (disk full, missing parent dir) returns a soft
+      // warning instead of crashing the call. checkpointsFileOk is latching-true —
+      // see AgentRecord.checkpointsFileOk for the suppression contract.
       const checkpointsPath = checkpointsFilePath(record.outputFile);
       const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
       if (checkpointsPath) {

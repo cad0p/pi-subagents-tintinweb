@@ -164,7 +164,8 @@ export interface AgentRecord {
    *  (`getDefaultMaxTurns()`), then normalized. Captured at spawn so
    *  `renderRunning` and the `checkpoint` tool read the same value the
    *  widget displays (the activity tracker is closure-local and
-   *  unreachable from `get_subagent_result`). */
+   *  unreachable from `get_subagent_result`). Resolved in `manager.spawn`
+   *  so every spawn path (Agent tool, scheduler, RPC) agrees on the value. */
   effectiveMaxTurns?: number;
 }
 

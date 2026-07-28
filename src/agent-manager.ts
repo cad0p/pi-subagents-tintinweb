@@ -168,24 +168,10 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
-      // Initialized to 1 at construction to match the activity tracker's
-      // turnCount: 1 (the Agent tool's execute closure creates its tracker
-      // synchronously, not deferred to onSessionCreated). onTurnEnd overwrites
-      // this with the real count as turns complete. Without this, a window
-      // exists where status === "running" but turnCount is undefined —
-      // renderRunning and the checkpoint tool would show 'turn 0/N'.
+      // Initialized to 1 at spawn to match AgentRecord.turnCount's contract; see the JSDoc there.
       turnCount: 1,
-      // Effective max turns applied to the run — caller value, then the
-      // agent-config value, then the settings default, then normalized.
-      // Captured at spawn so `renderRunning` and the `checkpoint` tool read
-      // the same value the widget displays (the activity tracker is
-      // closure-local, unreachable from `get_subagent_result`'s separate
-      // execute). Resolving the full fallback chain here — rather than
-      // trusting callers to pre-resolve it — makes the contract hold for
-      // every spawn path (Agent tool, scheduler, RPC): a `max_turns: 0`
-      // (unlimited) caller value maps to `undefined` instead of leaking
-      // through as `turn N/0`, and a caller that omits `max_turns` still
-      // picks up the config/default the run actually uses.
+      // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
+      // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
       effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
