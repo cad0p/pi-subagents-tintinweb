@@ -118,7 +118,7 @@ export interface AgentRecord {
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Cumulative agentic turn count, incremented via the `onTurnEnd` callback.
-   *  Initialized to 1 at spawn (in `onSessionCreated`) to match the activity
+   *  Initialized to 1 at spawn (record construction) to match the activity
    *  tracker's `turnCount: 1`, then stamped with the completed-turn count as
    *  each turn ends. A second source exists in the `Agent` tool's execute
    *  closure (the closure-local `AgentActivity.turnCount` used for the live

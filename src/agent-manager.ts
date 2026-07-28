@@ -167,6 +167,13 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      // Initialized to 1 at construction to match the activity tracker's
+      // turnCount: 1 (the Agent tool's execute closure creates its tracker
+      // synchronously, not deferred to onSessionCreated). onTurnEnd overwrites
+      // this with the real count as turns complete. Without this, a window
+      // exists where status === "running" but turnCount is undefined —
+      // renderRunning and the checkpoint tool would show 'turn 0/N'.
+      turnCount: 1,
       // Effective max turns applied to the run — config value when set,
       // otherwise the settings default, then normalized. Captured at spawn so
       // `renderRunning` and the `checkpoint` tool read the same value the
@@ -287,13 +294,6 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
-        // Initialize turnCount to 1 to match the activity tracker's turnCount: 1
-        // (the Agent tool's execute closure holds its own activity tracker, which
-        // is unreachable from get_subagent_result's separate execute). Without
-        // this, record.turnCount reads as undefined (0 via ??) during the first
-        // turn, so the widget shows 'turn 1/N' but get_subagent_result shows
-        // 'turn 0/N' and a checkpoint during turn 1 writes 'turn 0/N'.
-        record.turnCount = 1;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
