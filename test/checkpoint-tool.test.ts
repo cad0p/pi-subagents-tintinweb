@@ -4,10 +4,21 @@
  * format, returns the brief confirmation, finds its own record by sessionId,
  * no-ops cleanly when the record is gone, and never pushes to the parent.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Wrap `appendFileSync` in a delegating mock so a test can force a single call
+// to throw (via mockImplementationOnce) without affecting other tests. The
+// default implementation delegates to the real fs.appendFileSync; existing
+// tests that rely on real writes (e.g. the append-format test, the soft-warning
+// test that removes the parent dir) are unaffected. afterEach calls
+// vi.restoreAllMocks, which restores the delegating default.
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  return { ...actual, appendFileSync: vi.fn(actual.appendFileSync) };
+});
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -340,9 +351,11 @@ describe("checkpoint tool", () => {
 
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
-    // lastCheckpoint is set; checkpointsFileOk is false (write failed).
+    // lastCheckpoint is set; checkpointsFileOk stays undefined (latching-true:
+    // set on first success, never set to false on failure) so the gate in
+    // get_subagent_result suppresses the `Checkpoint history:` path.
     expect(record.lastCheckpoint.summary).toBe("first write fails");
-    expect(record.checkpointsFileOk).toBe(false);
+    expect(record.checkpointsFileOk).toBeUndefined();
 
     const out = textOf(await tools.get("get_subagent_result").execute(
       "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
@@ -354,6 +367,44 @@ describe("checkpoint tool", () => {
     expect(out).not.toContain("Checkpoint history:");
     // The transcript path is still present (it's a separate file).
     expect(out).toContain("Full transcript:");
+  });
+
+  it("keeps checkpointsFileOk latching-true across a later write failure so the parent still sees the path", async () => {
+    // A successful first write sets checkpointsFileOk = true. A later checkpoint
+    // call whose appendFileSync throws (disk fills mid-run) must NOT flip the
+    // flag back to false — the file from the first write still exists and is
+    // readable, so get_subagent_result should keep surfacing the `Checkpoint
+    // history:` path. The flag is latching-true: set on first success, never reset.
+    const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-latch-"));
+    const outputFile = join(dir, "agent.output");
+    const { tools, id } = await setupAgent({ sessionId: "child-sess-latch", outputFile });
+
+    // First write succeeds — flag latches true, file exists with one entry.
+    await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "first write ok" }, undefined, undefined, childCtx("child-sess-latch"),
+    );
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    expect(record.checkpointsFileOk).toBe(true);
+    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    expect(readFileSync(checkpointsPath, "utf-8")).toContain("first write ok");
+
+    // Second write fails — flag stays true (latching), soft warning returned.
+    vi.mocked(appendFileSync).mockImplementationOnce(() => { throw new Error("disk full"); });
+    const res = await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "second write fails" }, undefined, undefined, childCtx("child-sess-latch"),
+    );
+    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: disk full.");
+    expect(handle.getRecord(id).checkpointsFileOk).toBe(true);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The latch stayed true, so the parent can still reach the file's prior content.
+    expect(out).toContain("Checkpoint history:");
+    expect(out).toContain(checkpointsPath);
+
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("returns a clear error when the agent manager registry is unavailable", async () => {

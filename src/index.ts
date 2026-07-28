@@ -1721,9 +1721,10 @@ Terse command-style prompts produce shallow, generic work.
       // a soft warning instead of crashing the subagent's tool call. Matches the
       // .output writer's silent-swallow stance (src/output-file.ts) and the tool's
       // own handled lookup-failure style. record.lastCheckpoint stays set — the
-      // in-memory display is still useful. checkpointsFileOk tracks whether at
-      // least one write succeeded so get_subagent_result doesn't advertise a
-      // `Checkpoint history:` path that doesn't exist.
+      // in-memory display is still useful. checkpointsFileOk is latching-true:
+      // set to true on the first successful write and never reset to false, so a
+      // transient later failure doesn't hide a readable file from the parent in
+      // get_subagent_result's `Checkpoint history:` path.
       const checkpointsPath = checkpointsFilePath(record.outputFile);
       const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
       if (checkpointsPath) {
@@ -1735,7 +1736,6 @@ Terse command-style prompts produce shallow, generic work.
           );
           record.checkpointsFileOk = true;
         } catch (err) {
-          record.checkpointsFileOk = false;
           return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
         }
       }
