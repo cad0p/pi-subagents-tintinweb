@@ -120,7 +120,7 @@ describe("checkpoint tool", () => {
     return { pi, tools, id };
   }
 
-  it("writes record.lastCheckpoint with turn, maxTurns, elapsedMs, summary", async () => {
+  it("writes record.lastCheckpoint with turn and summary", async () => {
     const { tools } = await setupAgent({ sessionId: "child-sess-1" });
 
     const res = await tools.get("checkpoint").execute(
