@@ -1736,7 +1736,7 @@ Terse command-style prompts produce shallow, generic work.
           record.checkpointsFileOk = true;
         } catch (err) {
           record.checkpointsFileOk = false;
-          return textResult(`Checkpoint saved in memory, but file write failed: ${err}.`);
+          return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
         }
       }
 

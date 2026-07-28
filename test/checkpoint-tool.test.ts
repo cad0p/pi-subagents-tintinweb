@@ -314,7 +314,7 @@ describe("checkpoint tool", () => {
       "ckpt-tc", { summary: "would-be-written" }, undefined, undefined, childCtx("child-sess-7"),
     );
 
-    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: Error: ENOENT: no such file or directory, open '" + outputFile.replace(/\.output$/, ".checkpoints.md") + "'.");
+    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: ENOENT: no such file or directory, open '" + outputFile.replace(/\.output$/, ".checkpoints.md") + "'.");
 
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
