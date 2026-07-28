@@ -232,4 +232,24 @@ describe("checkpoint tool", () => {
     // No outputFile → no .checkpoints.md path to write to (the tool never throws).
     expect(record.outputFile).toBeUndefined();
   });
+
+  it("returns a soft warning when the file write fails (best-effort, no crash)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-fail-"));
+    const outputFile = join(dir, "agent.output");
+    const { tools, id } = await setupAgent({ sessionId: "child-sess-7", outputFile });
+
+    // Remove the parent directory out-of-band so appendFileSync throws ENOENT.
+    rmSync(dir, { recursive: true, force: true });
+
+    const res = await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "would-be-written" }, undefined, undefined, childCtx("child-sess-7"),
+    );
+
+    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: Error: ENOENT: no such file or directory, open '" + outputFile.replace(/\.output$/, ".checkpoints.md") + "'.");
+
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    // record.lastCheckpoint is still set — the in-memory display is still useful.
+    expect(record.lastCheckpoint.summary).toBe("would-be-written");
+  });
 });

@@ -1714,15 +1714,24 @@ Terse command-style prompts produce shallow, generic work.
 
       // Append to the .checkpoints.md file iff the .output transcript is enabled
       // (mirrors the output_transcript: false gate — the record holds the latest
-      // checkpoint for inline display regardless).
+      // checkpoint for inline display regardless). The file write is best-effort:
+      // a failure (disk full, missing parent dir after out-of-band cleanup) returns
+      // a soft warning instead of crashing the subagent's tool call. Matches the
+      // .output writer's silent-swallow stance (src/output-file.ts) and the tool's
+      // own handled lookup-failure style. record.lastCheckpoint stays set — the
+      // in-memory display is still useful.
       const checkpointsPath = checkpointsFilePath(record.outputFile);
       if (checkpointsPath) {
         const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
-        appendFileSync(
-          checkpointsPath,
-          `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
-          "utf-8",
-        );
+        try {
+          appendFileSync(
+            checkpointsPath,
+            `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
+            "utf-8",
+          );
+        } catch (err) {
+          return textResult(`Checkpoint saved in memory, but file write failed: ${err}.`);
+        }
       }
 
       const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
