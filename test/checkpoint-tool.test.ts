@@ -131,11 +131,8 @@ describe("checkpoint tool", () => {
     const record = records.find((r: any) => r.sessionId === "child-sess-1");
     expect(record.lastCheckpoint).toEqual({
       turn: 3,
-      maxTurns: 10,
-      elapsedMs: expect.any(Number),
       summary: "Read the spec. Writing tests next.",
     });
-    expect(record.lastCheckpoint.elapsedMs).toBeGreaterThanOrEqual(47_000);
   });
 
   it("appends to .checkpoints.md in the ## Turn N/M — Xs elapsed format", async () => {

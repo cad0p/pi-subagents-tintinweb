@@ -133,8 +133,6 @@ describe("get_subagent_result output shapes", () => {
     const record = handle.getRecord(id);
     record.lastCheckpoint = {
       turn,
-      maxTurns: record.invocation?.maxTurns,
-      elapsedMs: Date.now() - record.startedAt,
       summary,
     };
   }

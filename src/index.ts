@@ -1709,9 +1709,8 @@ Terse command-style prompts produce shallow, generic work.
 
       const turn = record.turnCount ?? 0;
       const maxTurns = record.invocation?.maxTurns;
-      const elapsedMs = Date.now() - record.startedAt;
-      const elapsedSeconds = Math.round(elapsedMs / 1000);
-      record.lastCheckpoint = { turn, maxTurns, elapsedMs, summary: params.summary };
+      const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
+      record.lastCheckpoint = { turn, summary: params.summary };
 
       // Append to the .checkpoints.md file iff the .output transcript is enabled
       // (mirrors the output_transcript: false gate — the record holds the latest

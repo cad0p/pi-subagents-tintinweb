@@ -132,8 +132,6 @@ export interface AgentRecord {
    *  display in `get_subagent_result`. */
   lastCheckpoint?: {
     turn: number;
-    maxTurns?: number;
-    elapsedMs: number;
     summary: string;
   };
   /** The child session's ID, set at spawn. The `checkpoint` tool reads
