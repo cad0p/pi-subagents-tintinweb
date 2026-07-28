@@ -39,7 +39,7 @@ export const SUBAGENT_TOOL_NAMES = {
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
-const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
+export const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.

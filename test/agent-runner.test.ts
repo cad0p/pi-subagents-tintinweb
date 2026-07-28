@@ -108,12 +108,14 @@ vi.mock("../src/skill-loader.js", () => ({
 }));
 
 import {
+  EXCLUDED_TOOL_NAMES,
   extensionCanonicalName,
   extensionCanonicalNames,
   parseExtensionsSpec,
   parseExtSelectors,
   resumeAgent,
   runAgent,
+  SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
 
 function createSession(finalText: string) {
@@ -739,6 +741,13 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).not.toContain("get_subagent_result");
     expect(tools).not.toContain("steer_subagent");
     expect(tools).toContain("ok_ext");
+  });
+
+  it("checkpoint is not in EXCLUDED_TOOL_NAMES or SUBAGENT_TOOL_NAMES (regression guard)", () => {
+    // A regression adding `checkpoint` to either set would silently drop it
+    // from the subagent allowlist — these pin that it never happens.
+    expect(EXCLUDED_TOOL_NAMES).not.toContain("checkpoint");
+    expect(Object.values(SUBAGENT_TOOL_NAMES)).not.toContain("checkpoint");
   });
 
   it("extensions: false with disallowedTools — denylist applies to built-ins", async () => {
