@@ -1566,10 +1566,7 @@ Terse command-style prompts produce shallow, generic work.
       output +=
         `Latest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
         `  ${record.lastCheckpoint.summary}\n\n`;
-      const footer = checkpointsPath
-        ? "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly."
-        : "  grep or read the transcript for more detail. Do not poll repeatedly.";
-      output += fileSection(checkpointsPath, transcriptPath, footer);
+      output += fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, true));
     } else {
       output += `No checkpoint yet — the subagent hasn't called the checkpoint tool.\n\n`;
       output += fileSection(checkpointsPath, transcriptPath,
@@ -1599,10 +1596,7 @@ Terse command-style prompts produce shallow, generic work.
         `\n\nLatest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
         `  ${record.lastCheckpoint.summary}`;
     }
-    const footer = checkpointsPath
-      ? "  grep or read the checkpoints / transcript for more detail."
-      : "  grep or read the transcript for more detail.";
-    output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footer);
+    output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, false));
     return output;
   }
 
@@ -1640,6 +1634,24 @@ Terse command-style prompts produce shallow, generic work.
     if (transcriptPath) s += `Full transcript:   ${transcriptPath}\n`;
     s += footer;
     return s;
+  }
+
+  /** Footer text matching the paths actually rendered — the `existsSync` gate
+   *  can suppress either path independently, so the footer must reflect what
+   *  the parent LLM actually sees, not just whether `checkpointsPath` is set. */
+  function footerForPaths(
+    checkpointsPath: string | undefined,
+    transcriptPath: string | undefined,
+    running: boolean,
+  ): string {
+    const suffix = running ? " Do not poll repeatedly." : "";
+    if (checkpointsPath && transcriptPath) {
+      return `  grep or read the checkpoints / transcript for more detail.${suffix}`;
+    }
+    if (checkpointsPath) {
+      return `  grep or read the checkpoints file for more detail.${suffix}`;
+    }
+    return `  grep or read the transcript for more detail.${suffix}`;
   }
 
   // ---- steer_subagent tool ----

@@ -591,6 +591,56 @@ describe("get_subagent_result output shapes", () => {
     expect(out2).not.toContain("Full transcript:");
   });
 
+  // ---- asymmetric file deletion: footer matches the paths actually rendered ----
+  // When the checkpoints file exists but the transcript is deleted out-of-band,
+  // the existsSync gate suppresses the transcript path but the checkpoints path
+  // still renders. The footer must say "checkpoints file" (not
+  // "checkpoints / transcript") so the parent LLM isn't pointed at a transcript
+  // path that isn't surfaced.
+  it("running footer says 'checkpoints file' when only the checkpoints path is rendered", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "Wrote the parser skeleton. Moving to tests next.");
+    // Delete only the transcript file, leaving the checkpoints file on disk.
+    unlinkSync(outputFile);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The checkpoints path is rendered (file still exists).
+    expect(out).toContain("Checkpoint history:");
+    // The transcript path is suppressed (file deleted).
+    expect(out).not.toContain("Full transcript:");
+    // The footer references only the checkpoints file, not "checkpoints / transcript".
+    expect(out).toContain("grep or read the checkpoints file for more detail. Do not poll repeatedly.");
+    expect(out).not.toContain("checkpoints / transcript");
+  });
+
+  it("completed footer says 'checkpoints file' when only the checkpoints path is rendered", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "State machine written. Tests passing. Ready for review.");
+    settleRecord(id, {
+      status: "completed",
+      result: "Done implementing the subsystem.",
+      completedAt: Date.now(),
+      toolUses: 12,
+    });
+    // Delete only the transcript file, leaving the checkpoints file on disk.
+    unlinkSync(outputFile);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The checkpoints path is rendered (file still exists).
+    expect(out).toContain("Checkpoint history:");
+    // The transcript path is suppressed (file deleted).
+    expect(out).not.toContain("Full transcript:");
+    // The footer references only the checkpoints file, not "checkpoints / transcript".
+    expect(out).toContain("grep or read the checkpoints file for more detail.");
+    expect(out).not.toContain("checkpoints / transcript");
+  });
+
   // ---- resultConsumed is set on terminal reads, not on running reads ----
   it("reading a running agent does not mark the result consumed", async () => {
     const { tools, id } = await setupAgent({});
