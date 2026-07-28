@@ -197,7 +197,7 @@ describe("checkpoint tool", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("surfaces the settings-default maxTurns in the confirmation when config has no override (ADV-1)", async () => {
+  it("surfaces the settings-default maxTurns in the confirmation when config has no override", async () => {
     // A default maxTurns set via settings applies when the agent config has no
     // override. invocation.maxTurns is config-only (undefined here), but
     // effectiveMaxTurns carries the settings default so the checkpoint
@@ -333,7 +333,7 @@ describe("checkpoint tool", () => {
     expect(record.lastCheckpoint.summary).toBe("would-be-written");
   });
 
-  it("does not surface the Checkpoint history path in get_subagent_result when the file write failed (ADV-2)", async () => {
+  it("does not surface the Checkpoint history path in get_subagent_result when the file write failed", async () => {
     // A failed file write leaves record.lastCheckpoint set (the in-memory
     // display is still useful) but record.checkpointsFileOk is false, so
     // get_subagent_result must not advertise a `Checkpoint history:` path that

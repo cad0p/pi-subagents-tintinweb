@@ -331,7 +331,7 @@ describe("get_subagent_result output shapes", () => {
     expect(lines[7]).toBe("  grep or read the transcript for more detail.");
   });
 
-  // ---- compactionCount surfacing on the completed header (COV-R2-1) ----
+  // ---- compactionCount surfacing on the completed header ----
   it("completed header surfaces Compactions: N when compactionCount is set", async () => {
     const outputFile = "/tmp/pi-subagents-x/75616377.output";
     const startedAt = Date.now() - 1_098_000;
@@ -387,7 +387,7 @@ describe("get_subagent_result output shapes", () => {
     expect(out).toContain("Status: stopped (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)");
   });
 
-  // ---- Steered status carries the turn-limit note and the result body (ADV-4) ----
+  // ---- Steered status carries the turn-limit note and the result body ----
   it("steered status appends the turn-limit note to the status line and renders the result", async () => {
     const outputFile = "/tmp/pi-subagents-x/75616377.output";
     const { tools, id } = await setupAgent({ outputFile });
@@ -467,7 +467,7 @@ describe("get_subagent_result output shapes", () => {
   });
 
   // ---- default maxTurns via settings (no config override): running header
-  // surfaces the effective limit, matching the widget's display (ADV-1) ----
+  // surfaces the effective limit, matching the widget's display ----
   it("running header shows turn N/defaultMaxTurns when the limit comes from settings, not config", async () => {
     // A default maxTurns set via settings applies when the agent config has no
     // override. invocation.maxTurns is config-only (undefined here), but
