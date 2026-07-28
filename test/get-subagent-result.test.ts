@@ -183,6 +183,37 @@ describe("get_subagent_result output shapes", () => {
     );
   });
 
+  // ---- Running after a compaction: checkpoint survives, running header intact ----
+  it("running + checkpoint + compaction renders the running-with-checkpoint shape unchanged", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    stampCheckpoint(id, "Compacted mid-run. Resuming the parser rewrite.");
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    handle.getRecord(id).compactionCount = 1;
+
+    const res = await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    );
+
+    const out = textOf(res);
+    // The running header is intact (compactionCount is only surfaced on the
+    // completed header, not the running one), the checkpoint summary survives,
+    // and both file paths are present.
+    expect(out).toBe(
+      [
+        `Agent: ${id} (still running — turn 3/10, 47s elapsed)`,
+        "Type: Agent | Description: d",
+        "",
+        "Latest checkpoint (turn 3):",
+        "  Compacted mid-run. Resuming the parser rewrite.",
+        "",
+        "Checkpoint history: /tmp/pi-subagents-x/75616377.checkpoints.md",
+        "Full transcript:   /tmp/pi-subagents-x/75616377.output",
+        "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.",
+      ].join("\n"),
+    );
+  });
+
   // ---- Shape 2: Running, NO checkpoint ----
   it("running + no checkpoint renders only the transcript path and the do-not-poll footer", async () => {
     const outputFile = "/tmp/pi-subagents-x/75616377.output";
