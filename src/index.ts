@@ -1491,10 +1491,12 @@ Terse command-style prompts produce shallow, generic work.
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      // The checkpoints path is only surfaced when the subagent actually wrote a
-      // checkpoint — deriving it from `outputFile` unconditionally would advertise
-      // a file that doesn't exist yet in the no-checkpoint shapes.
-      const checkpointsPath = record.lastCheckpoint
+      // The checkpoints path is only surfaced when at least one file write
+      // succeeded — `lastCheckpoint` alone is insufficient because the first
+      // write may have failed (disk full, missing parent dir), leaving the
+      // in-memory field set but no file to read. `checkpointsFileOk` is set
+      // by the checkpoint tool on each write attempt.
+      const checkpointsPath = record.checkpointsFileOk
         ? checkpointsFilePath(record.outputFile)
         : undefined;
       const transcriptPath = record.outputFile;
@@ -1719,7 +1721,9 @@ Terse command-style prompts produce shallow, generic work.
       // a soft warning instead of crashing the subagent's tool call. Matches the
       // .output writer's silent-swallow stance (src/output-file.ts) and the tool's
       // own handled lookup-failure style. record.lastCheckpoint stays set — the
-      // in-memory display is still useful.
+      // in-memory display is still useful. checkpointsFileOk tracks whether at
+      // least one write succeeded so get_subagent_result doesn't advertise a
+      // `Checkpoint history:` path that doesn't exist.
       const checkpointsPath = checkpointsFilePath(record.outputFile);
       if (checkpointsPath) {
         const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
@@ -1729,7 +1733,9 @@ Terse command-style prompts produce shallow, generic work.
             `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
             "utf-8",
           );
+          record.checkpointsFileOk = true;
         } catch (err) {
+          record.checkpointsFileOk = false;
           return textResult(`Checkpoint saved in memory, but file write failed: ${err}.`);
         }
       }

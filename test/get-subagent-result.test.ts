@@ -139,6 +139,10 @@ describe("get_subagent_result output shapes", () => {
       turn,
       summary,
     };
+    // The checkpoint tool sets this on a successful file write; the renderer
+    // gates the `Checkpoint history:` path on it. Stamp true here so the
+    // with-checkpoint shapes surface the path as production would.
+    record.checkpointsFileOk = true;
   }
 
   /** Force a record into a terminal status with a result. */

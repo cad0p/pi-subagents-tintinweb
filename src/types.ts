@@ -134,6 +134,12 @@ export interface AgentRecord {
     turn: number;
     summary: string;
   };
+  /** Whether at least one `.checkpoints.md` write succeeded for this agent.
+   *  Undefined until the first `checkpoint` call resolves. `get_subagent_result`
+   *  only surfaces the `Checkpoint history:` path when this is true — a failed
+   *  first write leaves `lastCheckpoint` set (the in-memory display is still
+   *  useful) but must not advertise a file that doesn't exist. */
+  checkpointsFileOk?: boolean;
   /** The child session's ID, set at spawn. The `checkpoint` tool reads
    *  ctx.sessionManager.getSessionId() to find its own record. */
   sessionId?: string;

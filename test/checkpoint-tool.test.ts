@@ -322,6 +322,40 @@ describe("checkpoint tool", () => {
     expect(record.lastCheckpoint.summary).toBe("would-be-written");
   });
 
+  it("does not surface the Checkpoint history path in get_subagent_result when the file write failed (ADV-2)", async () => {
+    // A failed file write leaves record.lastCheckpoint set (the in-memory
+    // display is still useful) but record.checkpointsFileOk is false, so
+    // get_subagent_result must not advertise a `Checkpoint history:` path that
+    // doesn't exist. The `Latest checkpoint (turn N):` line still renders.
+    const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-gate-"));
+    const outputFile = join(dir, "agent.output");
+    const { tools, id } = await setupAgent({ sessionId: "child-sess-gate", outputFile });
+
+    // Remove the parent directory out-of-band so appendFileSync throws ENOENT.
+    rmSync(dir, { recursive: true, force: true });
+
+    await tools.get("checkpoint").execute(
+      "ckpt-tc", { summary: "first write fails" }, undefined, undefined, childCtx("child-sess-gate"),
+    );
+
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    // lastCheckpoint is set; checkpointsFileOk is false (write failed).
+    expect(record.lastCheckpoint.summary).toBe("first write fails");
+    expect(record.checkpointsFileOk).toBe(false);
+
+    const out = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    // The in-memory latest-checkpoint line still renders.
+    expect(out).toContain("Latest checkpoint (turn 3):");
+    expect(out).toContain("  first write fails");
+    // The `Checkpoint history:` path must NOT be advertised — the file doesn't exist.
+    expect(out).not.toContain("Checkpoint history:");
+    // The transcript path is still present (it's a separate file).
+    expect(out).toContain("Full transcript:");
+  });
+
   it("returns a clear error when the agent manager registry is unavailable", async () => {
     const { tools } = await setupAgent({ sessionId: "child-sess-8" });
 
