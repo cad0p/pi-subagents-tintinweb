@@ -1724,11 +1724,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const sessionId = ctx.sessionManager.getSessionId();
-      const handle = (globalThis as Record<symbol, { listAgents?: () => AgentRecord[] } | undefined>)[MANAGER_KEY];
-      if (!handle?.listAgents) {
-        return textResult("Checkpoint failed: agent manager not available.");
-      }
-      const record = handle.listAgents().find((r) => r.sessionId === sessionId);
+      const record = manager.listAgents().find((r) => r.sessionId === sessionId);
       if (!record) {
         return textResult("Checkpoint failed: agent record not found.");
       }

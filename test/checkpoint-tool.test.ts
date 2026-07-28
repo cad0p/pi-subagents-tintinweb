@@ -417,19 +417,6 @@ describe("checkpoint tool", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("returns a clear error when the agent manager registry is unavailable", async () => {
-    const { tools } = await setupAgent({ sessionId: "child-sess-8" });
-
-    // Simulate the registry slot being absent (e.g. a child activation filtered out
-    // before claiming the slot). Replace the handle with an object missing listAgents.
-    (globalThis as Record<symbol, any>)[MANAGER_KEY] = {};
-
-    const res = await tools.get("checkpoint").execute(
-      "ckpt-tc", { summary: "orphan" }, undefined, undefined, childCtx("child-sess-8"),
-    );
-    expect(textOf(res)).toBe("Checkpoint failed: agent manager not available.");
-  });
-
   it("falls back to turn 0 when record.turnCount is undefined (defensive net)", async () => {
     // record.turnCount is initialized to 1 at record construction in spawn(),
     // so this fallback is unreachable in production (the subagent can't call
