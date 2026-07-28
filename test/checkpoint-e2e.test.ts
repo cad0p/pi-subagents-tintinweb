@@ -124,6 +124,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     record.sessionId = "child-session";
     record.turnCount = opts.turnCount ?? 2;
     record.invocation = { ...record.invocation, maxTurns: opts.maxTurns ?? 10 };
+    record.effectiveMaxTurns = opts.maxTurns ?? 10;
     record.startedAt = Date.now() - 23_000;
     record.outputFile = opts.outputFile;
     return { tools, id };
