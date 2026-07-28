@@ -177,7 +177,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
       expect(midRun).toContain("Latest checkpoint (turn 3):");
       expect(midRun).toContain("  Read agent-runner.ts L737. Found turn-limit hook. Writing checkpoint storage next.");
       expect(midRun).toContain("Checkpoint history:");
-      expect(midRun).toContain(outputFile.replace(/\.output$/, ".checkpoints.md"));
+      expect(midRun).toContain(`${outputFile}.checkpoints.md`);
       expect(midRun).toContain(`Full transcript:   ${outputFile}`);
       expect(midRun).toContain("  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.");
       expect(midRun).not.toContain("No checkpoint yet");
@@ -205,7 +205,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
       expect(handle.getRecord(id).resultConsumed).toBe(true);
 
       // ---- The .checkpoints.md file holds both checkpoints in chronological order ----
-      const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+      const checkpointsPath = `${outputFile}.checkpoints.md`;
       const fileContents = readFileSync(checkpointsPath, "utf-8");
       // Two chronological entries, blank line between them, header format exact.
       // The elapsed seconds are live (Date.now() - startedAt); assert structure,

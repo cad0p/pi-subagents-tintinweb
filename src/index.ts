@@ -60,10 +60,15 @@ function textResult(msg: string, details?: AgentDetails) {
 
 /** Derive the `.checkpoints.md` path from a record's `.output` transcript path.
  *  Mirrors the `record.outputFile` gate: when the transcript is suppressed
- *  (`output_transcript: false`), `outputFile` is unset and this returns undefined. */
+ *  (`output_transcript: false`), `outputFile` is unset and this returns undefined.
+ *  Appends the suffix unconditionally rather than replacing a trailing `.output` —
+ *  a `replace(/\.output$/, ...)` would silently return the transcript path
+ *  unchanged if `outputFile` ever lacked the suffix, corrupting the transcript
+ *  file with checkpoint markdown. The resulting `<agentId>.output.checkpoints.md`
+ *  filename is slightly uglier but safe. */
 function checkpointsFilePath(outputFile: string | undefined): string | undefined {
   if (!outputFile) return undefined;
-  return outputFile.replace(/\.output$/, ".checkpoints.md");
+  return `${outputFile}.checkpoints.md`;
 }
 
 export function renderRunningAgentStatus(

@@ -157,7 +157,7 @@ describe("checkpoint tool", () => {
     await tools.get("checkpoint").execute("ckpt-tc", { summary: "First checkpoint." }, undefined, undefined, ctx2);
     await tools.get("checkpoint").execute("ckpt-tc", { summary: "Second checkpoint." }, undefined, undefined, ctx2);
 
-    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const checkpointsPath = `${outputFile}.checkpoints.md`;
     const contents = readFileSync(checkpointsPath, "utf-8");
     // Two chronological entries, blank line between them, header format exact.
     expect(contents).toContain("## Turn 3/10 — 47s elapsed\nFirst checkpoint.\n\n");
@@ -191,7 +191,7 @@ describe("checkpoint tool", () => {
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 1, 47s).");
 
-    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const checkpointsPath = `${outputFile}.checkpoints.md`;
     const contents = readFileSync(checkpointsPath, "utf-8");
     expect(contents).toContain("## Turn 1 — 47s elapsed\nunlimited run\n\n");
     rmSync(dir, { recursive: true, force: true });
@@ -235,7 +235,7 @@ describe("checkpoint tool", () => {
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
 
-    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const checkpointsPath = `${outputFile}.checkpoints.md`;
     const contents = readFileSync(checkpointsPath, "utf-8");
     expect(contents).toContain("## Turn 3/10 — 47s elapsed\ndefault limit run\n\n");
     rmSync(dir, { recursive: true, force: true });
@@ -325,7 +325,7 @@ describe("checkpoint tool", () => {
       "ckpt-tc", { summary: "would-be-written" }, undefined, undefined, childCtx("child-sess-7"),
     );
 
-    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: ENOENT: no such file or directory, open '" + outputFile.replace(/\.output$/, ".checkpoints.md") + "'.");
+    expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: ENOENT: no such file or directory, open '" + `${outputFile}.checkpoints.md` + "'.");
 
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
@@ -386,7 +386,7 @@ describe("checkpoint tool", () => {
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
     expect(record.checkpointsFileOk).toBe(true);
-    const checkpointsPath = outputFile.replace(/\.output$/, ".checkpoints.md");
+    const checkpointsPath = `${outputFile}.checkpoints.md`;
     expect(readFileSync(checkpointsPath, "utf-8")).toContain("first write ok");
 
     // Second write fails — flag stays true (latching), soft warning returned.

@@ -186,7 +186,7 @@ describe("get_subagent_result output shapes", () => {
         "Latest checkpoint (turn 3):",
         "  Read agent-runner.ts L737. Found turn-limit hook. Writing checkpoint storage next.",
         "",
-        "Checkpoint history: /tmp/pi-subagents-x/75616377.checkpoints.md",
+        "Checkpoint history: /tmp/pi-subagents-x/75616377.output.checkpoints.md",
         "Full transcript:   /tmp/pi-subagents-x/75616377.output",
         "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.",
       ].join("\n"),
@@ -217,7 +217,7 @@ describe("get_subagent_result output shapes", () => {
         "Latest checkpoint (turn 3):",
         "  Compacted mid-run. Resuming the parser rewrite.",
         "",
-        "Checkpoint history: /tmp/pi-subagents-x/75616377.checkpoints.md",
+        "Checkpoint history: /tmp/pi-subagents-x/75616377.output.checkpoints.md",
         "Full transcript:   /tmp/pi-subagents-x/75616377.output",
         "  grep or read the checkpoints / transcript for more detail. Do not poll repeatedly.",
       ].join("\n"),
@@ -295,7 +295,7 @@ describe("get_subagent_result output shapes", () => {
     expect(lines[6]).toBe("Latest checkpoint (turn 3):");
     expect(lines[7]).toBe("  State machine written. Tests passing. Ready for review.");
     expect(lines[8]).toBe("");
-    expect(lines[9]).toBe("Checkpoint history: /tmp/pi-subagents-x/75616377.checkpoints.md");
+    expect(lines[9]).toBe("Checkpoint history: /tmp/pi-subagents-x/75616377.output.checkpoints.md");
     expect(lines[10]).toBe("Full transcript:   /tmp/pi-subagents-x/75616377.output");
     expect(lines[11]).toBe("  grep or read the checkpoints / transcript for more detail.");
     // The status note is empty for a clean completion.
@@ -452,7 +452,7 @@ describe("get_subagent_result output shapes", () => {
     expect(lines[6]).toBe("Latest checkpoint (turn 3):");
     expect(lines[7]).toBe("  Hit a snag on the parser.");
     expect(lines[8]).toBe("");
-    expect(lines[9]).toBe("Checkpoint history: /tmp/pi-subagents-x/75616377.checkpoints.md");
+    expect(lines[9]).toBe("Checkpoint history: /tmp/pi-subagents-x/75616377.output.checkpoints.md");
     expect(lines[10]).toBe("Full transcript:   /tmp/pi-subagents-x/75616377.output");
     expect(lines[11]).toBe("  grep or read the checkpoints / transcript for more detail.");
   });
