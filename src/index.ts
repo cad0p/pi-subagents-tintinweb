@@ -1686,52 +1686,60 @@ Terse command-style prompts produce shallow, generic work.
 
   // ---- checkpoint tool (subagent-facing) ----
 
-  pi.registerTool(defineTool({
-    name: "checkpoint",
-    label: "Checkpoint",
-    description:
-      "Save a progress checkpoint for the parent. Call at milestones — when you " +
-      "finish a phase, hit a dead end, or change approach. Include what you just " +
-      "did and what you're doing next.",
-    promptSnippet: "Save a progress checkpoint for the parent",
-    parameters: Type.Object({
-      summary: Type.String({
-        description: "1-2 sentences: what you just did, what you're doing next",
+  // Register only in child (subagent-session) activations: the first
+  // in-process activation is the root (main) session, where the main agent
+  // must not see this tool.
+  if (!ownsManagerRegistry) {
+    pi.registerTool(defineTool({
+      name: "checkpoint",
+      label: "Checkpoint",
+      description:
+        "Save a progress checkpoint for the parent. Call at milestones — when you " +
+        "finish a phase, hit a dead end, or change approach. Include what you just " +
+        "did and what you're doing next.",
+      promptSnippet: "Save a progress checkpoint for the parent",
+      parameters: Type.Object({
+        summary: Type.String({
+          description: "1-2 sentences: what you just did, what you're doing next",
+        }),
       }),
-    }),
-    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-      const sessionId = ctx.sessionManager.getSessionId();
-      const record = manager.listAgents().find((r) => r.sessionId === sessionId);
-      if (!record) {
-        return textResult("Checkpoint failed: agent record not found.");
-      }
-
-      const turn = record.turnCount ?? 0;
-      const maxTurns = record.effectiveMaxTurns;
-      const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
-      record.lastCheckpoint = { turn, summary: params.summary };
-
-      // Best-effort: a write failure (disk full, missing parent dir) returns a soft
-      // warning instead of crashing the call. checkpointsFileOk is latching-true —
-      // see AgentRecord.checkpointsFileOk for the suppression contract.
-      const checkpointsPath = checkpointsFilePath(record.outputFile);
-      const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
-      if (checkpointsPath) {
-        try {
-          appendFileSync(
-            checkpointsPath,
-            `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
-            "utf-8",
-          );
-          record.checkpointsFileOk = true;
-        } catch (err) {
-          return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
+      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+        const sessionId = ctx.sessionManager.getSessionId();
+        // Records live in the root manager (spawns happen there) — reach it via
+        // the registry; a child activation's local `manager` is empty.
+        const handle = (globalThis as Record<symbol, { listAgents?: () => AgentRecord[] } | undefined>)[MANAGER_KEY];
+        const record = handle?.listAgents?.().find((r) => r.sessionId === sessionId);
+        if (!record) {
+          return textResult("Checkpoint failed: agent record not found.");
         }
-      }
 
-      return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
-    },
-  }));
+        const turn = record.turnCount ?? 0;
+        const maxTurns = record.effectiveMaxTurns;
+        const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
+        record.lastCheckpoint = { turn, summary: params.summary };
+
+        // Best-effort: a write failure (disk full, missing parent dir) returns a soft
+        // warning instead of crashing the call. checkpointsFileOk is latching-true —
+        // see AgentRecord.checkpointsFileOk for the suppression contract.
+        const checkpointsPath = checkpointsFilePath(record.outputFile);
+        const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
+        if (checkpointsPath) {
+          try {
+            appendFileSync(
+              checkpointsPath,
+              `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
+              "utf-8",
+            );
+            record.checkpointsFileOk = true;
+          } catch (err) {
+            return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
+          }
+        }
+
+        return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
+      },
+    }));
+  }
 
   // ---- /agents interactive menu ----
 

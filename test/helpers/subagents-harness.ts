@@ -12,6 +12,7 @@
  * extracted.
  */
 import { vi } from "vitest";
+import subagentsExtension from "../../src/index.js";
 
 /** Symbol under which `src/index.ts` publishes the manager handle on
  *  `globalThis` for cross-package RPC. The test suites read/write it directly
@@ -34,6 +35,21 @@ export function makePi() {
     sendMessage: vi.fn(),
   } as any;
   return { pi, tools, lifecycle };
+}
+
+/** Simulate the production two-activation topology: the root session's
+ *  activation runs first and claims the manager registry (its manager owns
+ *  the agent records and the parent-facing tools), then a subagent session's
+ *  activation runs with the registry already claimed — the child branch that
+ *  registers the subagent-facing `checkpoint` tool. `checkpoint` resolves its
+ *  record against the root manager via the global registry, exactly as in
+ *  production — a single-activation harness would mask a regression there. */
+export function makeRootAndChild() {
+  const root = makePi();
+  subagentsExtension(root.pi);
+  const child = makePi();
+  subagentsExtension(child.pi);
+  return { root, child };
 }
 
 /** Pull the text payload out of a tool's `execute` return value. */
