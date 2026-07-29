@@ -18,7 +18,9 @@
  * doesn't load the extension from `additionalExtensionPaths` under global
  * isolation), so the real-pi-session path isn't reachable here. The tool
  * implementations, their composition, and the file format are all exercised
- * for real.
+ * for real, and the two-activation `makeRootAndChild` harness mirrors the
+ * production topology: the root activation owns the record, the child
+ * activation's `checkpoint` tool resolves it via the global registry.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,8 +33,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
-import subagentsExtension from "../src/index.js";
-import { agentIdOf, childCtx, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, childCtx, MANAGER_KEY, makePi, makeRootAndChild, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 describe("checkpoint end-to-end (real tools, full flow)", () => {
   let cwd: string;
@@ -73,10 +74,9 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     outputFile: string;
     turnCount?: number;
     maxTurns?: number;
-  }): Promise<{ tools: Map<string, any>; id: string }> {
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const spawn = await tools.get("Agent").execute(
+  }): Promise<{ root: ReturnType<typeof makePi>; child: ReturnType<typeof makePi>; id: string }> {
+    const { root, child } = makeRootAndChild();
+    const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
       { prompt: "go", description: "checkpoint work", subagent_type: "general-purpose", run_in_background: true },
       undefined, undefined, spawnCtx(cwd),
@@ -95,7 +95,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     // .checkpoints.md sibling is created by the checkpoint tool's appendFileSync.
     mkdirSync(dirname(opts.outputFile), { recursive: true });
     writeFileSync(opts.outputFile, "", "utf-8");
-    return { tools, id };
+    return { root, child, id };
   }
 
   /** Drive the real `checkpoint` tool (the child's tool) to write a checkpoint. */
@@ -130,14 +130,14 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     const outputDir = mkdtempSync(join(tmpdir(), "pi-ckpt-e2e-out-"));
     const outputFile = join(outputDir, "75616377.output");
     try {
-      const { tools, id } = await setupAgent({ outputFile });
+      const { root, child, id } = await setupAgent({ outputFile });
 
       // The child calls checkpoint twice (turns 2 and 3 of a 10-turn budget).
-      await checkpoint(tools, "Started reading agent-runner.ts. Looking for the turn-end hook.", 2);
-      await checkpoint(tools, "Read agent-runner.ts L737. Found turn-limit hook. Writing checkpoint storage next.", 3);
+      await checkpoint(child.tools, "Started reading agent-runner.ts. Looking for the turn-end hook.", 2);
+      await checkpoint(child.tools, "Read agent-runner.ts L737. Found turn-limit hook. Writing checkpoint storage next.", 3);
 
       // ---- Mid-run: the parent reads the result while the child is still running ----
-      const midRun = await getResult(tools, id);
+      const midRun = await getResult(root.tools, id);
       const midRunLines = midRun.split("\n");
       // The child has written 2 checkpoints; the latest (turn 3) is inline.
       expect(midRunLines[0]).toMatch(/^Agent: .+ \(still running — turn 3\/10, \d+s elapsed\)$/);
@@ -157,7 +157,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
       settleRecord(id, { status: "completed", result: "Done implementing the subsystem." });
 
       // ---- Post-completion: the parent reads the completed shape ----
-      const postRun = await getResult(tools, id);
+      const postRun = await getResult(root.tools, id);
       const postLines = postRun.split("\n");
       expect(postLines[0]).toBe(`Agent: ${id}`);
       expect(postLines[1]).toMatch(/^Type: Agent \| Status: completed \| Tool uses: 0 \| Duration: .+$/);
@@ -191,10 +191,10 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     const outputDir = mkdtempSync(join(tmpdir(), "pi-ckpt-e2e-none-"));
     const outputFile = join(outputDir, "agent.output");
     try {
-      const { tools, id } = await setupAgent({ outputFile, turnCount: 1 });
+      const { root, id } = await setupAgent({ outputFile, turnCount: 1 });
 
       // Mid-run, no checkpoint yet.
-      const midRun = await getResult(tools, id);
+      const midRun = await getResult(root.tools, id);
       expect(midRun).toContain("No checkpoint yet — the subagent hasn't called the checkpoint tool.");
       expect(midRun).toContain(`Full transcript:   ${outputFile}`);
       expect(midRun).toContain("  grep or read the transcript for detail on what it's doing. Do not poll repeatedly.");
@@ -203,7 +203,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
 
       // Post-completion, still no checkpoint.
       settleRecord(id, { status: "completed", result: "Done." });
-      const postRun = await getResult(tools, id);
+      const postRun = await getResult(root.tools, id);
       expect(postRun).toContain(`Full transcript:   ${outputFile}`);
       expect(postRun).toContain("  grep or read the transcript for more detail.");
       expect(postRun).not.toContain("Checkpoint history:");

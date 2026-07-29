@@ -3,6 +3,13 @@
  * writes record.lastCheckpoint, appends to .checkpoints.md in the right
  * format, returns the brief confirmation, finds its own record by sessionId,
  * no-ops cleanly when the record is gone, and never pushes to the parent.
+ *
+ * The suite drives the production two-activation topology via
+ * makeRootAndChild: the root activation (main session) owns the agent
+ * records and never registers `checkpoint`; the child activation (subagent
+ * session) registers it, and the tool resolves its record against the root
+ * manager via the global registry. A single-activation harness would mask a
+ * closure-vs-registry regression in that lookup.
  */
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +34,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { agentIdOf, childCtx, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, childCtx, MANAGER_KEY, makePi, makeRootAndChild, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 describe("checkpoint tool", () => {
   let cwd: string;
@@ -64,19 +71,19 @@ describe("checkpoint tool", () => {
     vi.restoreAllMocks();
   });
 
-  /** Build the extension once, spawn one background agent, stamp the child fields. */
+  /** Build the two-activation topology (root spawns/owns the record, child
+   *  registers `checkpoint`), spawn one background agent, stamp the child fields. */
   async function setupAgent(opts: {
     sessionId: string;
     outputFile?: string;
     outputTranscript?: boolean;
-  }): Promise<{ pi: any; tools: Map<string, any>; id: string }> {
+  }): Promise<{ root: ReturnType<typeof makePi>; child: ReturnType<typeof makePi>; id: string }> {
     if (opts.outputTranscript === false) {
       mkdirSync(join(cwd, ".pi"), { recursive: true });
       writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ outputTranscript: false }));
     }
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const spawn = await tools.get("Agent").execute(
+    const { root, child } = makeRootAndChild();
+    const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
       { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
       undefined, undefined, spawnCtx(cwd),
@@ -90,13 +97,24 @@ describe("checkpoint tool", () => {
     record.effectiveMaxTurns = 10;
     record.startedAt = Date.now() - 47_000;
     if (opts.outputFile !== undefined) record.outputFile = opts.outputFile;
-    return { pi, tools, id };
+    return { root, child, id };
   }
 
-  it("writes record.lastCheckpoint with turn and summary", async () => {
-    const { tools } = await setupAgent({ sessionId: "child-sess-1" });
+  it("is not registered in the root (main-session) activation — the main agent must not see it", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    expect(tools.has("checkpoint")).toBe(false);
+  });
 
-    const res = await tools.get("checkpoint").execute(
+  it("is registered in a child (subagent-session) activation", () => {
+    const { child } = makeRootAndChild();
+    expect(child.tools.has("checkpoint")).toBe(true);
+  });
+
+  it("writes record.lastCheckpoint with turn and summary", async () => {
+    const { child } = await setupAgent({ sessionId: "child-sess-1" });
+
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "Read the spec. Writing tests next." }, undefined, undefined, childCtx("child-sess-1"),
     );
     expect(res.content[0].text).toMatch(/Checkpoint saved/);
@@ -113,11 +131,11 @@ describe("checkpoint tool", () => {
   it("appends to .checkpoints.md in the ## Turn N/M — Xs elapsed format", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-file-"));
     const outputFile = join(dir, "agent.output");
-    const { tools } = await setupAgent({ sessionId: "child-sess-2", outputFile });
+    const { child } = await setupAgent({ sessionId: "child-sess-2", outputFile });
 
     const ctx2 = childCtx("child-sess-2");
-    await tools.get("checkpoint").execute("ckpt-tc", { summary: "First checkpoint." }, undefined, undefined, ctx2);
-    await tools.get("checkpoint").execute("ckpt-tc", { summary: "Second checkpoint." }, undefined, undefined, ctx2);
+    await child.tools.get("checkpoint").execute("ckpt-tc", { summary: "First checkpoint." }, undefined, undefined, ctx2);
+    await child.tools.get("checkpoint").execute("ckpt-tc", { summary: "Second checkpoint." }, undefined, undefined, ctx2);
 
     const checkpointsPath = `${outputFile}.checkpoints.md`;
     const contents = readFileSync(checkpointsPath, "utf-8");
@@ -128,9 +146,9 @@ describe("checkpoint tool", () => {
   });
 
   it("returns the 'Checkpoint saved (turn N/M, Xs).' confirmation", async () => {
-    const { tools } = await setupAgent({ sessionId: "child-sess-3" });
+    const { child } = await setupAgent({ sessionId: "child-sess-3" });
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "doing things" }, undefined, undefined, childCtx("child-sess-3"),
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
@@ -139,7 +157,7 @@ describe("checkpoint tool", () => {
   it("omits the /maxTurns suffix when invocation.maxTurns is undefined (unlimited)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-unlim-"));
     const outputFile = join(dir, "agent.output");
-    const { tools } = await setupAgent({ sessionId: "child-sess-unlim", outputFile });
+    const { child } = await setupAgent({ sessionId: "child-sess-unlim", outputFile });
     // Mirror the post-spawn default: turnCount = 1 (set by onSessionCreated in
     // production) and effectiveMaxTurns = undefined (unlimited spawn).
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
@@ -148,7 +166,7 @@ describe("checkpoint tool", () => {
     record.invocation = { ...record.invocation, maxTurns: undefined };
     record.effectiveMaxTurns = undefined;
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "unlimited run" }, undefined, undefined, childCtx("child-sess-unlim"),
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 1, 47s).");
@@ -167,9 +185,8 @@ describe("checkpoint tool", () => {
     setDefaultMaxTurns(10);
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-default-"));
     const outputFile = join(dir, "agent.output");
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const spawn = await tools.get("Agent").execute(
+    const { root, child } = makeRootAndChild();
+    const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
       { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
       undefined, undefined, spawnCtx(cwd),
@@ -185,7 +202,7 @@ describe("checkpoint tool", () => {
     record.startedAt = Date.now() - 47_000;
     record.outputFile = outputFile;
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "default limit run" }, undefined, undefined, childCtx("child-sess-default"),
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
@@ -198,17 +215,16 @@ describe("checkpoint tool", () => {
 
   it("finds its own record via sessionId match (not by walking all records)", async () => {
     // Two records exist; checkpoint must pick the one matching its sessionId.
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
+    const { root, child } = makeRootAndChild();
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
 
     const ctx = spawnCtx(cwd);
-    const spawnA = await tools.get("Agent").execute(
+    const spawnA = await root.tools.get("Agent").execute(
       "spawn-a", { prompt: "go", description: "a", subagent_type: "general-purpose", run_in_background: true },
       undefined, undefined, ctx,
     );
     const idA = agentIdOf(spawnA);
-    const spawnB = await tools.get("Agent").execute(
+    const spawnB = await root.tools.get("Agent").execute(
       "spawn-b", { prompt: "go", description: "b", subagent_type: "general-purpose", run_in_background: true },
       undefined, undefined, ctx,
     );
@@ -218,7 +234,7 @@ describe("checkpoint tool", () => {
     handle.getRecord(idA).turnCount = 1;
     handle.getRecord(idB).turnCount = 2;
 
-    await tools.get("checkpoint").execute("ckpt-tc", { summary: "B's work" }, undefined, undefined, childCtx("child-B"));
+    await child.tools.get("checkpoint").execute("ckpt-tc", { summary: "B's work" }, undefined, undefined, childCtx("child-B"));
 
     const a = handle.getRecord(idA);
     const b = handle.getRecord(idB);
@@ -227,30 +243,30 @@ describe("checkpoint tool", () => {
   });
 
   it("no-ops with a clear error when the record is not found (session disposed)", async () => {
-    const { tools } = await setupAgent({ sessionId: "child-sess-4" });
+    const { child } = await setupAgent({ sessionId: "child-sess-4" });
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "orphan" }, undefined, undefined, childCtx("nonexistent-session"),
     );
     expect(textOf(res)).toBe("Checkpoint failed: agent record not found.");
   });
 
   it("does not push anything to the parent (no pi.sendMessage, no custom_message)", async () => {
-    const { tools, pi } = await setupAgent({ sessionId: "child-sess-5" });
+    const { child } = await setupAgent({ sessionId: "child-sess-5" });
 
-    await tools.get("checkpoint").execute(
+    await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "quiet update" }, undefined, undefined, childCtx("child-sess-5"),
     );
 
     // checkpoint is pull-only — the parent is never notified mid-run.
-    expect(pi.sendMessage).not.toHaveBeenCalled();
-    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:steered", expect.anything());
+    expect(child.pi.sendMessage).not.toHaveBeenCalled();
+    expect(child.pi.events.emit).not.toHaveBeenCalledWith("subagents:steered", expect.anything());
   });
 
   it("skips the file write when outputFile is undefined but still updates lastCheckpoint", async () => {
-    const { tools, id } = await setupAgent({ sessionId: "child-sess-6", outputTranscript: false });
+    const { child, id } = await setupAgent({ sessionId: "child-sess-6", outputTranscript: false });
 
-    await tools.get("checkpoint").execute(
+    await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "in-memory only" }, undefined, undefined, childCtx("child-sess-6"),
     );
 
@@ -265,12 +281,12 @@ describe("checkpoint tool", () => {
   it("returns a soft warning when the file write fails (best-effort, no crash)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-fail-"));
     const outputFile = join(dir, "agent.output");
-    const { tools, id } = await setupAgent({ sessionId: "child-sess-7", outputFile });
+    const { child, id } = await setupAgent({ sessionId: "child-sess-7", outputFile });
 
     // Remove the parent directory out-of-band so appendFileSync throws ENOENT.
     rmSync(dir, { recursive: true, force: true });
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "would-be-written" }, undefined, undefined, childCtx("child-sess-7"),
     );
 
@@ -293,13 +309,13 @@ describe("checkpoint tool", () => {
     // transcript path passes — this test isolates the checkpointsFileOk gate,
     // not the existsSync gate (covered by get-subagent-result.test.ts).
     writeFileSync(outputFile, "", "utf-8");
-    const { tools, id } = await setupAgent({ sessionId: "child-sess-gate", outputFile });
+    const { root, child, id } = await setupAgent({ sessionId: "child-sess-gate", outputFile });
 
     // Force the first checkpoints write to fail (disk full, missing parent dir).
     // The transcript file stays on disk so the transcript path is still surfaced.
     vi.mocked(appendFileSync).mockImplementationOnce(() => { throw new Error("disk full"); });
 
-    await tools.get("checkpoint").execute(
+    await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "first write fails" }, undefined, undefined, childCtx("child-sess-gate"),
     );
 
@@ -311,7 +327,7 @@ describe("checkpoint tool", () => {
     expect(record.lastCheckpoint.summary).toBe("first write fails");
     expect(record.checkpointsFileOk).toBeUndefined();
 
-    const out = textOf(await tools.get("get_subagent_result").execute(
+    const out = textOf(await root.tools.get("get_subagent_result").execute(
       "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
     ));
     // The in-memory latest-checkpoint line still renders.
@@ -336,10 +352,10 @@ describe("checkpoint tool", () => {
     // history:` path. The flag is latching-true: set on first success, never reset.
     const dir = mkdtempSync(join(tmpdir(), "pi-checkpoint-latch-"));
     const outputFile = join(dir, "agent.output");
-    const { tools, id } = await setupAgent({ sessionId: "child-sess-latch", outputFile });
+    const { root, child, id } = await setupAgent({ sessionId: "child-sess-latch", outputFile });
 
     // First write succeeds — flag latches true, file exists with one entry.
-    await tools.get("checkpoint").execute(
+    await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "first write ok" }, undefined, undefined, childCtx("child-sess-latch"),
     );
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
@@ -350,13 +366,13 @@ describe("checkpoint tool", () => {
 
     // Second write fails — flag stays true (latching), soft warning returned.
     vi.mocked(appendFileSync).mockImplementationOnce(() => { throw new Error("disk full"); });
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "second write fails" }, undefined, undefined, childCtx("child-sess-latch"),
     );
     expect(textOf(res)).toBe("Checkpoint saved in memory, but file write failed: disk full.");
     expect(handle.getRecord(id).checkpointsFileOk).toBe(true);
 
-    const out = textOf(await tools.get("get_subagent_result").execute(
+    const out = textOf(await root.tools.get("get_subagent_result").execute(
       "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
     ));
     // The latch stayed true, so the parent can still reach the file's prior content.
@@ -372,12 +388,12 @@ describe("checkpoint tool", () => {
     // checkpoint before its record exists). Pin the ?? 0 safety net anyway so
     // a future change that drops the construction-time init doesn't silently
     // regress to turn 0 mid-first-turn.
-    const { tools, id } = await setupAgent({ sessionId: "child-sess-9" });
+    const { child, id } = await setupAgent({ sessionId: "child-sess-9" });
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     const record = handle.getRecord(id);
     delete record.turnCount;
 
-    const res = await tools.get("checkpoint").execute(
+    const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "pre-session" }, undefined, undefined, childCtx("child-sess-9"),
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 0/10, 47s).");
