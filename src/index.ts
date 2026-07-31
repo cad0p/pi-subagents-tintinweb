@@ -54,8 +54,8 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 // ---- Shared helpers ----
 
 /** Tool execute return value for a text response. */
-function textResult(msg: string, details?: AgentDetails) {
-  return { content: [{ type: "text" as const, text: msg }], details: details as any };
+function textResult<D>(msg: string, details?: D) {
+  return { content: [{ type: "text" as const, text: msg }], details };
 }
 
 /** Derive the `.checkpoints.md` path from `outputFile`. Mirrors the
@@ -373,26 +373,52 @@ export default function (pi: ExtensionAPI) {
   const agentActivity = new Map<string, AgentActivity>();
 
   // ---- Cancellable pending notifications ----
-  // Holds notifications briefly so get_subagent_result can cancel them
-  // before they reach pi.sendMessage (fire-and-forget).
+  // Holds notifications briefly so get_subagent_result can cancel them before
+  // they reach pi.sendMessage (fire-and-forget — once sent, a followUp message
+  // cannot be retracted). The 200ms hold alone only covers synchronous races:
+  // a parent mid-turn (e.g. blocked in a long tool call) cannot call
+  // get_subagent_result within that window, so sends are additionally parked
+  // while the main session is mid-turn and released on turn_end. Consumption
+  // (resultConsumed + cancelNudge) then stays effective for the whole turn.
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
+  const parkedNudges = new Map<string, () => void>();
   const NUDGE_HOLD_MS = 200;
+  let mainTurnActive = false;
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
+    if (mainTurnActive) {
+      parkedNudges.set(key, send);
+      return;
+    }
     pendingNudges.set(key, setTimeout(() => {
       pendingNudges.delete(key);
+      // A new turn may have started inside the grace window — re-park.
+      if (mainTurnActive) {
+        parkedNudges.set(key, send);
+        return;
+      }
       try { send(); } catch { /* ignore stale completion side-effect errors */ }
     }, delay));
   }
 
   function cancelNudge(key: string) {
+    parkedNudges.delete(key);
     const timer = pendingNudges.get(key);
     if (timer != null) {
       clearTimeout(timer);
       pendingNudges.delete(key);
     }
   }
+
+  // Turn-aware gating for the nudge scheduler (see comment above).
+  pi.on("turn_start", () => { mainTurnActive = true; });
+  pi.on("turn_end", () => {
+    mainTurnActive = false;
+    const parked = [...parkedNudges];
+    parkedNudges.clear();
+    for (const [key, send] of parked) scheduleNudge(key, send);
+  });
 
   // ---- Individual nudge helper (async join mode) ----
   function emitIndividualNudge(record: AgentRecord) {
@@ -636,6 +662,8 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    parkedNudges.clear();
+    mainTurnActive = false;
     fleet.dispose();
     manager.dispose();
   });
@@ -1513,13 +1541,34 @@ Terse command-style prompts produce shallow, generic work.
 
       // Mark result as consumed — suppresses the completion notification.
       // Queued agents return above; this block only runs for terminal statuses.
+      // Note: for group-batched agents the nudge is keyed `group:<ids>`, so
+      // cancelNudge(agent_id) is a no-op there — the group send closure's
+      // resultConsumed re-check is what filters this agent out instead.
       record.resultConsumed = true;
       cancelNudge(params.agent_id);
 
+      // Attach notification details so renderResult can render the report as
+      // markdown, mirroring the completion notification the parent just
+      // suppressed by consuming synchronously.
+      const details = buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id));
+
       if (record.status === "error") {
-        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
+        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true), details);
       }
-      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
+      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false), details);
+    },
+
+    renderResult(result, { expanded }, theme) {
+      const details = result.details as NotificationDetails | undefined;
+      if (!details) {
+        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+        return new Text(text, 0, 0);
+      }
+      const effectiveExpanded = resultPreviewExpanded ? true : expanded;
+      const container = new Container();
+      container.addChild(subagentNotificationRenderHeader(details, theme));
+      container.addChild(subagentNotificationRenderBody(details, effectiveExpanded, resultPreviewMode, theme));
+      return container;
     },
   }));
 
