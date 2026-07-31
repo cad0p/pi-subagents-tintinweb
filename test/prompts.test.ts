@@ -291,6 +291,43 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("Preloaded Skill: skill1");
   });
 
+  describe("worktree isolation directive", () => {
+    const worktree = { path: "/tmp/pi-agent-abc123", parentCwd: "/repo/main-checkout" };
+
+    it("renders after the env block in append mode, naming both paths", () => {
+      const config = getDefaultConfig("general-purpose");
+      const prompt = buildAgentPrompt(config, worktree.path, env, "Parent prompt.", { worktree });
+      expect(prompt).toContain("<worktree_isolation>");
+      expect(prompt).toContain("/tmp/pi-agent-abc123");
+      expect(prompt).toContain("/repo/main-checkout");
+      expect(prompt.indexOf("# Environment")).toBeLessThan(prompt.indexOf("<worktree_isolation>"));
+    });
+
+    it("renders in replace mode", () => {
+      const config: AgentConfig = {
+        name: "wt-agent",
+        description: "Worktree Agent",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "You are a worktree agent.",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, worktree.path, env, undefined, { worktree });
+      expect(prompt).toContain("<worktree_isolation>");
+      expect(prompt).toContain("You are a worktree agent.");
+    });
+
+    it("is absent without the worktree extra", () => {
+      const config = getDefaultConfig("general-purpose");
+      const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
+      expect(prompt).not.toContain("<worktree_isolation>");
+    });
+  });
+
   it("no extras means no extra sections", () => {
     const config: AgentConfig = {
       name: "plain",
