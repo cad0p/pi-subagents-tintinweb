@@ -15,10 +15,11 @@
  * immediately-resolving runAgent mock, completion beats batch registration, so
  * the nudge arms at t=0 and fires at t=200 (the hold window) unless parked.
  */
-import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
