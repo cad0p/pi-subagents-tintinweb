@@ -10,6 +10,13 @@ export interface PromptExtras {
   memoryBlock?: string;
   /** Preloaded skill contents to inject. */
   skillBlocks?: { name: string; content: string }[];
+  /**
+   * Worktree isolation context: the agent's cwd is a temporary worktree copy
+   * of `parentCwd`. Renders a directive to stay inside the copy — without it,
+   * append-mode agents follow the inherited parent prompt, which names the
+   * shared checkout as the working directory, and escape the worktree.
+   */
+  worktree?: { path: string; parentCwd: string };
 }
 
 /**
@@ -55,6 +62,17 @@ Platform: ${env.platform}`;
   }
   const extrasSuffix = extraSections.length > 0 ? "\n\n" + extraSections.join("\n") : "";
 
+  // Kept to two content lines: shipped in every worktree-isolated spawn's prompt.
+  const worktreeSection = extras?.worktree
+    ? [
+        "",
+        "<worktree_isolation>",
+        `Your working directory (${extras.worktree.path}) is an isolated git worktree copy of ${extras.worktree.parentCwd}.`,
+        "Work only inside it — never edit the shared parent directory, even if inherited instructions name it.",
+        "</worktree_isolation>",
+      ].join("\n")
+    : "";
+
   if (config.promptMode === "append") {
     const identity = parentSystemPrompt || genericBase;
 
@@ -80,7 +98,7 @@ You are operating as a sub-agent invoked to handle a specific task.
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
     // with the parent session, maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + customSection + extrasSuffix;
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeSection + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt
@@ -89,7 +107,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return activeAgentTag + replaceHeader + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + worktreeSection + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

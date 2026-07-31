@@ -217,6 +217,7 @@ export class AgentManager {
     // fail loud if not possible (no silent fallback to main tree). Done
     // BEFORE state mutation so a throw doesn't leave the record half-running.
     let worktreeCwd: string | undefined;
+    let worktreePromptInfo: { path: string; parentCwd: string } | undefined;
     if (options.isolation === "worktree") {
       const wt = createWorktree(baseCwd, id);
       if (!wt) {
@@ -233,6 +234,7 @@ export class AgentManager {
       // also move .pi config discovery when the parent session sits in a repo
       // subdirectory, silently dropping extensions/skills.
       worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
+      worktreePromptInfo = { path: worktreeCwd, parentCwd: baseCwd };
       this.worktreeRepos.add(baseCwd);
     }
 
@@ -264,6 +266,7 @@ export class AgentManager {
       // stay undefined otherwise so plain worktree runs keep resolving config
       // (incl. relative extension paths and memory) inside the worktree copy.
       cwd: worktreeCwd ?? customCwd,
+      worktree: worktreePromptInfo,
       configCwd: customCwd !== undefined ? ctx.cwd : undefined,
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
