@@ -1,15 +1,21 @@
 /**
- * turn-gated-notification.test.ts — pins the turn-aware gating of completion
- * notifications. pi.sendMessage is fire-and-forget (a queued followUp cannot be
- * retracted), so the 200ms NUDGE_HOLD_MS alone could not cover a parent that is
- * mid-turn when a background agent completes (e.g. blocked in a long tool call)
- * and calls get_subagent_result seconds later — the notification had already
- * been sent and the report arrived twice.
+ * turn-gated-notification.test.ts — pins the boundary-aware gating of
+ * completion notifications. pi.sendMessage is fire-and-forget (a queued
+ * message cannot be retracted), so the 200ms NUDGE_HOLD_MS alone could not
+ * cover a parent that is mid-turn when a background agent completes (e.g.
+ * blocked in a long tool call) and calls get_subagent_result seconds later —
+ * the notification had already been sent and the report arrived twice.
  *
  * The gate parks nudges while the main session is mid-turn (turn_start …
- * turn_end), so resultConsumed/cancelNudge from get_subagent_result stays
- * effective for the whole turn; parked nudges are released on turn_end with the
- * usual 200ms grace.
+ * turn_end of each iteration) and releases them at the next main-session
+ * message boundary (message_end / tool_execution_end), delivered through the
+ * steering queue (deliverAs: "steer") — the agent loop drains that queue right
+ * after such a boundary, before the parent's next LLM call, so the
+ * notification lands at the next possible moment instead of only when the
+ * whole turn ends. turn_end remains the fallback release point, with the
+ * usual 200ms grace (then delivered as a new turn). Consumption
+ * (resultConsumed + cancelNudge) cancels the nudge at any point before
+ * firing; the send closures re-check it at fire time.
  *
  * Timer notes (fake timers, mirrors print-mode.test.ts): with the
  * immediately-resolving runAgent mock, completion beats batch registration, so
@@ -115,7 +121,7 @@ describe("turn-gated completion notifications", () => {
     vi.useRealTimers();
   });
 
-  it("completion mid-turn parks the nudge until turn_end", async () => {
+  it("completion mid-turn is released at the next message boundary (not turn_end)", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     vi.useFakeTimers();
@@ -127,11 +133,14 @@ describe("turn-gated completion notifications", () => {
     await vi.advanceTimersByTimeAsync(1000); // well past the hold window
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
-    lifecycle.get("turn_end")({}, ctx());
-    await vi.advanceTimersByTimeAsync(200); // grace window after turn end
+    // The parent's current tool returns — the first boundary after completion.
+    lifecycle.get("tool_execution_end")({}, ctx());
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
+    // Delivered via the steering queue so the loop injects it before the
+    // parent's next LLM call (mid-turn, not as a post-turn followUp).
+    expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
   it("get_subagent_result during the turn cancels the parked notification", async () => {
@@ -147,8 +156,12 @@ describe("turn-gated completion notifications", () => {
     const result = await tools.get("get_subagent_result").execute("tc-gsr", { agent_id: id }, undefined, undefined, ctx());
     expect(textOf(result)).toContain("THE-RESULT-PAYLOAD");
 
+    // Boundary fires after consumption — the parked nudge was cancelled, so
+    // nothing is released.
+    lifecycle.get("tool_execution_end")({}, ctx());
+    lifecycle.get("message_end")({}, ctx());
     lifecycle.get("turn_end")({}, ctx());
-    await vi.advanceTimersByTimeAsync(1000); // parked nudge was cancelled — nothing released
+    await vi.advanceTimersByTimeAsync(1000);
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
@@ -199,7 +212,7 @@ describe("turn-gated completion notifications", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("a batched pair's group notification is parked mid-turn and released at turn_end", async () => {
+  it("a batched pair's group notification is parked mid-turn and released at the next boundary", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     vi.useFakeTimers();
@@ -222,12 +235,12 @@ describe("turn-gated completion notifications", () => {
     await vi.advanceTimersByTimeAsync(1000); // both complete mid-turn → group nudge parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
-    lifecycle.get("turn_end")({}, ctx());
-    await vi.advanceTimersByTimeAsync(200);
+    lifecycle.get("tool_execution_end")({}, ctx());
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
     expect(pi.sendMessage.mock.calls[0][0].content).toContain("Background agent group completed");
+    expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 });
 
