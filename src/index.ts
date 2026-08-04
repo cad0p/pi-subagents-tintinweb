@@ -374,12 +374,19 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them before
-  // they reach pi.sendMessage (fire-and-forget — once sent, a followUp message
+  // they reach pi.sendMessage (fire-and-forget — once sent, a custom message
   // cannot be retracted). The 200ms hold alone only covers synchronous races:
   // a parent mid-turn (e.g. blocked in a long tool call) cannot call
   // get_subagent_result within that window, so sends are additionally parked
-  // while the main session is mid-turn and released on turn_end. Consumption
-  // (resultConsumed + cancelNudge) then stays effective for the whole turn.
+  // while the main session is mid-turn and released at the next main-session
+  // message boundary (message_end / tool_execution_end). Boundary delivery
+  // uses the steering queue (deliverAs: "steer" in the send options), which
+  // the agent loop drains right after such a boundary — before the parent's
+  // next LLM call — so the notification lands at the next possible moment
+  // instead of only when the whole turn ends. turn_end remains the fallback
+  // release point (then delivered as a new turn, as before). Consumption
+  // (resultConsumed + cancelNudge) cancels the nudge at any point before
+  // firing; the send closures re-check it at fire time.
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const parkedNudges = new Map<string, () => void>();
   const NUDGE_HOLD_MS = 200;
@@ -411,8 +418,28 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Turn-aware gating for the nudge scheduler (see comment above).
+  /** Fire all parked nudges now (mid-turn release at a message boundary). */
+  function releaseParkedNudges() {
+    if (parkedNudges.size === 0) return;
+    const parked = [...parkedNudges];
+    parkedNudges.clear();
+    for (const [, send] of parked) {
+      try { send(); } catch { /* ignore stale completion side-effect errors */ }
+    }
+  }
+
+  // Turn-aware gating for the nudge scheduler (see comment above): park while
+  // mid-turn, release at the next message boundary so the notification is
+  // injected right after the parent's current tool call or response (the
+  // steering queue is drained after every such boundary, before the parent's
+  // next LLM call). turn_end is the fallback release point — re-scheduled
+  // through the grace window so the send lands once the run has ended
+  // (delivered as a new turn), or re-parks if the next iteration already
+  // started; this also covers the error/abort path where the loop returns
+  // without draining the steering queue again.
   pi.on("turn_start", () => { mainTurnActive = true; });
+  pi.on("message_end", () => { releaseParkedNudges(); });
+  pi.on("tool_execution_end", () => { releaseParkedNudges(); });
   pi.on("turn_end", () => {
     mainTurnActive = false;
     const parked = [...parkedNudges];
@@ -432,7 +459,7 @@ export default function (pi: ExtensionAPI) {
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    }, { deliverAs: "steer", triggerTurn: true });
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -470,7 +497,7 @@ export default function (pi: ExtensionAPI) {
           content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
           display: true,
           details,
-        }, { deliverAs: "followUp", triggerTurn: true });
+        }, { deliverAs: "steer", triggerTurn: true });
       });
       widget.update();
     },
