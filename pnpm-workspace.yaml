@@ -7,4 +7,6 @@
 # Approving them here makes `pnpm install` exit 0.
 allowBuilds:
   "@google/genai": true
+  esbuild: true
+  koffi: false
   protobufjs: true
