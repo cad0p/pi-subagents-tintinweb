@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@earendil-works/pi-ai':
-        specifier: '>=0.80.0'
-        version: 0.80.3(ws@8.21.0)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
         specifier: '>=0.80.0'
         version: 0.80.3(ws@8.21.0)(zod@4.4.3)
@@ -30,6 +27,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.4.14
         version: 2.5.3
+      '@earendil-works/pi-ai':
+        specifier: '>=0.80.0'
+        version: 0.80.3(ws@8.21.0)(zod@4.4.3)
       '@types/node':
         specifier: ^25.5.0
         version: 25.9.5
