@@ -17,6 +17,8 @@ export default defineConfig({
   // nested under pi-coding-agent), which yielded two registries. That era's fix
   // was inlining the @earendil-works packages through Vite so dedupe could
   // collapse them — intentionally dropped with the pnpm migration.
-  test: {},
+  test: {
+    setupFiles: ["test/setup-hermetic.ts"],
+  },
   resolve: { dedupe: ["@earendil-works/pi-ai"] },
 });
