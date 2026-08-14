@@ -1,6 +1,6 @@
 # Security Policy
 
-This document explains the security model behind `@tintinweb/pi-subagents` and
+This document explains the security model behind `@cad0p/pi-subagents-tintinweb` and
 where the boundaries are.
 
 `pi-subagents` is a [pi](https://pi.dev) extension. It spawns and orchestrates
