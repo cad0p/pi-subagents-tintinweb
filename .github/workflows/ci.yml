@@ -44,6 +44,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Install current Pi
-        run: pnpm install --no-save @earendil-works/pi-coding-agent@latest @earendil-works/pi-ai@latest @earendil-works/pi-tui@latest
+        run: pnpm add @earendil-works/pi-coding-agent@latest @earendil-works/pi-ai@latest @earendil-works/pi-tui@latest # ephemeral job: package.json mutation is fine here
       - name: Isolated-provider regression guard against current Pi
         run: npx vitest run test/e2e/isolated-provider.e2e.test.ts --reporter=verbose
