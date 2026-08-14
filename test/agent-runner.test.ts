@@ -823,8 +823,8 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
 
   it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
-    const dir = pkgDir("@tintinweb/Pi-Subagents", ["./src/index.ts"]);
-    expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
+    const dir = pkgDir("@cad0p/Pi-Subagents-Tintinweb", ["./src/index.ts"]);
+    expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents-tintinweb"]);
   });
 
   it("adds no alias for a loose file with no enclosing package.json", () => {
@@ -954,20 +954,20 @@ describe("agent-runner extension allowlist", () => {
     try {
       writeFileSync(
         join(dir, "package.json"),
-        JSON.stringify({ name: "@tintinweb/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
+        JSON.stringify({ name: "@cad0p/pi-subagents-tintinweb", pi: { extensions: ["./src/index.ts"] } }),
       );
       mkdirSync(join(dir, "src"));
       writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
       const entry = join(dir, "src", "index.ts");
 
-      setupArrayAgent(["pi-subagents"]);
+      setupArrayAgent(["pi-subagents-tintinweb"]);
       withExtensions({ [entry]: ["pkg_tool"] });
       const { session } = createSession("OK");
       createAgentSession.mockResolvedValue({ session });
 
       await runAgent(ctx, "Explore", "go", { pi });
 
-      // Before the fix keepNames={pi-subagents} but the extension only answered
+      // Before the fix keepNames={pi-subagents-tintinweb} but the extension only answered
       // to "src", so it was filtered out and pkg_tool never reached the allowlist.
       expect(lastToolsPassed()).toContain("pkg_tool");
     } finally {

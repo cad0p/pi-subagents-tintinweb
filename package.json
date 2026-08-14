@@ -1,16 +1,20 @@
 {
-  "name": "@tintinweb/pi-subagents",
+  "name": "@cad0p/pi-subagents-tintinweb",
   "version": "0.14.2",
   "description": "A pi extension extension that brings smart Claude Code-style autonomous sub-agents to pi.",
   "author": "tintinweb",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tintinweb/pi-subagents.git"
+    "url": "https://github.com/cad0p/pi-subagents-tintinweb.git"
   },
-  "homepage": "https://github.com/tintinweb/pi-subagents#readme",
+  "homepage": "https://github.com/cad0p/pi-subagents-tintinweb#readme",
   "bugs": {
-    "url": "https://github.com/tintinweb/pi-subagents/issues"
+    "url": "https://github.com/cad0p/pi-subagents-tintinweb/issues"
   },
   "keywords": [
     "pi-package",

@@ -1,4 +1,4 @@
-# Contributing to @tintinweb/pi-subagents
+# Contributing to @cad0p/pi-subagents-tintinweb
 
 This guide exists to save both sides time.
 

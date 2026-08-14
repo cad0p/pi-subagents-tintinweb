@@ -1,4 +1,4 @@
-# @tintinweb/pi-subagents
+# @cad0p/pi-subagents-tintinweb
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in foreground or background, steer them mid-run, resume completed sessions, and define your own custom agent types.
 
@@ -35,7 +35,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Install
 
 ```bash
-pi install npm:@tintinweb/pi-subagents
+pi install npm:@cad0p/pi-subagents-tintinweb
 ```
 
 Or load directly for development:
