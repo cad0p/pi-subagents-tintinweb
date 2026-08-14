@@ -2,8 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- Declare engines node >=22.19.0 (pi's minimum) ([#22](https://github.com/cad0p/pi-subagents-tintinweb/pull/22))
+
+### 🐛 Bug Fixes
+
+- Drop prepublishOnly gate from npm publish path ([#20](https://github.com/cad0p/pi-subagents-tintinweb/pull/20))
+- Publish-blocking tsc error against current pi types ([#21](https://github.com/cad0p/pi-subagents-tintinweb/pull/21))
+- Drop upstream tintinweb media URLs from pi manifest (fork) ([#23](https://github.com/cad0p/pi-subagents-tintinweb/pull/23))
+
+### ⚙️ Miscellaneous Tasks
+
+- Add workflow_dispatch trigger to Auto Release ([#19](https://github.com/cad0p/pi-subagents-tintinweb/pull/19))
+
 
 ## [Unreleased]
 
