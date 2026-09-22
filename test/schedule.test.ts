@@ -183,6 +183,26 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(next).toBe(new Date(new Date(lastRun).getTime() + 3_600_000).toISOString());
   });
 
+  // The store is not validated per field, so a corrupted or hand-edited
+  // interval can reach getNextRun. It must answer undefined rather than throw
+  // while the scheduled-jobs menu still has rows to render.
+  const CORRUPT_INTERVALS: Array<[string, unknown]> = [
+    ["a string interval", "5m"],
+    ["NaN", Number.NaN],
+    ["a negative interval", -60_000],
+  ];
+  it.each(CORRUPT_INTERVALS)("getNextRun returns undefined for %s", (_name, intervalMs) => {
+    const job = scheduler.addJob({
+      name: "corrupt-interval", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    // Unschedule first, then corrupt the record in place without re-arming.
+    scheduler.updateJob(job.id, { enabled: false });
+    store.update(job.id, { enabled: true, intervalMs: intervalMs as number });
+    expect(() => scheduler.getNextRun(job.id)).not.toThrow();
+    expect(scheduler.getNextRun(job.id)).toBeUndefined();
+  });
+
   it("rejects past one-shot timestamps upfront — no record created", () => {
     const past = new Date(Date.now() - 60_000).toISOString();
     expect(() => scheduler.addJob({

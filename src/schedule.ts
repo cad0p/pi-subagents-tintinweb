@@ -153,12 +153,19 @@ export class SubagentScheduler {
     const job = this.store?.get(jobId);
     if (!job?.enabled) return undefined;
     if (job.scheduleType === "once") return job.schedule;
-    if (job.scheduleType === "interval" && job.intervalMs) {
+    if (job.scheduleType === "interval") {
+      // The store is not validated per field, so coerce before the arithmetic:
+      // a string or NaN interval would otherwise reach toISOString() and throw
+      // RangeError, taking the whole scheduled-jobs menu down.
+      const intervalMs = Number(job.intervalMs);
+      if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
       // Before the first fire there's no `lastRun`, so fall back to "now" —
       // accurate at create time (setInterval was just armed) and within
       // intervalMs of correct in any pre-first-fire view.
       const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
-      return new Date(base + job.intervalMs).toISOString();
+      const next = base + intervalMs;
+      if (!Number.isFinite(next)) return undefined;
+      return new Date(next).toISOString();
     }
     return undefined;
   }
