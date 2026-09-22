@@ -111,11 +111,13 @@ export async function showSchedulesMenu(
     const base = formatJob(j, scheduler);
     let label = base;
     if (jobByLabel.has(label)) {
-      // Resume from this base's last used suffix, so a fully-conflicting set
-      // costs one step per row instead of rescanning from 2 every time.
-      // Unreachable today (every base ends with its `runs N` tail), but keep
-      // the scan: a duplicate label would let the user cancel the wrong job.
+      // A repeated base (rows can truncate to the same text) is load-bearing:
+      // the suffix keeps the labels distinct. Resume from the last used suffix
+      // so a fully-conflicting set costs one step per row.
       let n = nextSuffix.get(base) ?? 2;
+      // The rescan is unreachable today (every base ends with its `runs N`
+      // tail), but keep it: a duplicate label would let the user cancel the
+      // wrong job if the row shape changes.
       while (jobByLabel.has(`${base} (${n})`)) n++;
       label = `${base} (${n})`;
       nextSuffix.set(base, n + 1);

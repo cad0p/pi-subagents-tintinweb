@@ -164,7 +164,11 @@ export class SubagentScheduler {
     return stored;
   }
 
-  /** Next-run time as ISO, or undefined if not currently armed. */
+  /**
+   * Next-run time as ISO, or undefined when there is none (disabled, unknown
+   * type, or corrupt interval). A valid one-shot too distant for the JS timer
+   * still reports its date — the store keeps it enabled for a later start.
+   */
   getNextRun(jobId: string): string | undefined {
     const cron = this.jobs.get(jobId);
     if (cron) return cron.nextRun()?.toISOString();
