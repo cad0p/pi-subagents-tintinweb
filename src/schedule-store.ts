@@ -347,16 +347,23 @@ export class ScheduleStore {
   }
 
   remove(id: string): boolean {
-    // No-op fast path — see update().
-    if (!this.jobs.has(id)) return false;
+    // No-op fast path — see update(). A record can be live, or already
+    // reclassified into a preserved list by an earlier load, so check all
+    // three before deciding there is nothing to remove.
+    const sameId = (raw: unknown) => isRecord(raw) && raw.id === id;
+    const known = this.jobs.has(id) || this.skipped.some(sameId) || this.shadowed.some(sameId);
+    if (!known) return false;
     return this.withLock(() => {
-      if (!this.jobs.delete(id)) return false;
-      // The user deleted this id, so its preserved records go too — including
-      // a shadowed duplicate the menu never exposed.
-      const sameId = (raw: unknown) => isRecord(raw) && raw.id === id;
+      // The user deleted this id, so purge it from every list — a record that
+      // load() reclassified mid-mutation (e.g. its agent type was invalidated)
+      // must not survive in `skipped` and get re-promoted once the type is
+      // back, and a shadowed duplicate must go with its live twin.
+      const removedLive = this.jobs.delete(id);
+      const skippedBefore = this.skipped.length;
+      const shadowedBefore = this.shadowed.length;
       this.skipped = this.skipped.filter(raw => !sameId(raw));
       this.shadowed = this.shadowed.filter(raw => !sameId(raw));
-      return true;
+      return removedLive || this.skipped.length !== skippedBefore || this.shadowed.length !== shadowedBefore;
     });
   }
 

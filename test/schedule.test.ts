@@ -10,7 +10,7 @@
  *   - Concurrency-bypass option flows through to manager.spawn
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -557,6 +557,47 @@ describe("SubagentScheduler — fire path", () => {
     vi.advanceTimersByTime(10_000);
     expect(manager.spawn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  // Regression: remove() runs its load() under the lock, and that load can
+  // reclassify the very record being deleted (its agent type was invalidated
+  // mid-session). The old remove() bailed on the failed jobs.delete() and left
+  // the record in the preserved list, so restoring the type resurrected a job
+  // the user had cancelled.
+  it("cancelling a job whose type was invalidated mid-session purges it from every list", () => {
+    const file = join(tmp, "s.json");
+    const raw = {
+      id: "dead-type", name: "dead-type", description: "x", schedule: "1s", scheduleType: "interval",
+      intervalMs: 1_000, subagent_type: "Explore", prompt: "x", enabled: true,
+      createdAt: new Date().toISOString(), runCount: 0,
+    };
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [raw] }, null, 2));
+    store = new ScheduleStore(file);
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The user disables default agents mid-session — Explore is no longer valid.
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+
+    expect(scheduler.removeJob("dead-type")).toBe(true);
+    expect(scheduler.list()).toEqual([]);
+    expect(store.get("dead-type")).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    const afterCancel = JSON.parse(readFileSync(file, "utf-8"));
+    expect(afterCancel.jobs).toEqual([]);
+    expect(afterCancel.shadowed).toEqual([]);
+
+    // The type comes back — a fresh store and scheduler must not resurrect or
+    // arm the cancelled record.
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, new ScheduleStore(file));
+    expect(scheduler.list()).toEqual([]);
+    vi.advanceTimersByTime(10_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
   });
 
   it("emits fired event with agentId on successful spawn", () => {

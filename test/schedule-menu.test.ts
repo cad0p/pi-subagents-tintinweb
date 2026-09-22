@@ -84,6 +84,26 @@ describe("showSchedulesMenu", () => {
     expect(removeJob).toHaveBeenCalledWith("job-2");
   });
 
+  it("reports the real cancellation outcome in the toast", async () => {
+    const { scheduler, removeJob } = fakeScheduler([job({ id: "job-1", name: "gone-soon" })]);
+    const { ctx } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+    expect(removeJob).toHaveBeenCalledWith("job-1");
+    expect(ctx.ui.notify).toHaveBeenCalledWith('Cancelled "gone-soon".', "info");
+  });
+
+  it("does not claim a cancellation when removeJob reports nothing removed", async () => {
+    const { scheduler, removeJob } = fakeScheduler([job({ id: "job-1", name: "already-gone" })]);
+    removeJob.mockReturnValue(false);
+    const { ctx } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+    expect(removeJob).toHaveBeenCalledWith("job-1");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/could not cancel/i), "warning");
+    expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Cancelled"), "info");
+  });
+
   it("keeps forged metadata lines out of the details block", async () => {
     const osc = "\u001b]0;evil\u0007";
     const jobs = [

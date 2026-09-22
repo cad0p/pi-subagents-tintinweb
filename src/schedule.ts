@@ -155,8 +155,10 @@ export class SubagentScheduler {
 
   removeJob(id: string): boolean {
     const store = this.requireStore();
-    if (!store.get(id)) return false;
     this.unscheduleJob(id);
+    // No pre-check on store.get(id): an id reclassified out of the live set
+    // still has a preserved record to purge, and store.remove() reports
+    // whether anything was actually removed.
     const ok = store.remove(id);
     if (ok) this.emit({ type: "removed", jobId: id });
     return ok;

@@ -137,6 +137,12 @@ export async function showSchedulesMenu(
   const ok = await ctx.ui.confirm(`Cancel "${toSingleLine(job.name)}"?`, formatDetails(job, scheduler));
   if (!ok) return;
 
-  scheduler.removeJob(job.id);
-  ctx.ui.notify(`Cancelled "${toSingleLine(job.name)}".`, "info");
+  const removed = scheduler.removeJob(job.id);
+  if (removed) {
+    ctx.ui.notify(`Cancelled "${toSingleLine(job.name)}".`, "info");
+  } else {
+    // The record vanished between the list read and the removal — do not
+    // claim a cancellation that did not happen.
+    ctx.ui.notify(`Could not cancel "${toSingleLine(job.name)}" — it is no longer a scheduled job.`, "warning");
+  }
 }
