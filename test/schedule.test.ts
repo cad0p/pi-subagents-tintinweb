@@ -538,6 +538,25 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("catches a throw from the once callback's auto-disable and reports it", () => {
+    const job = scheduler.addJob({
+      name: "once-disk-fail", description: "x", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    const originalUpdate = store.update.bind(store);
+    vi.spyOn(store, "update").mockImplementation((id: string, patch: any) => {
+      // Only the post-fire auto-disable write fails; executeJob's own writes pass.
+      if (patch?.enabled === false && Object.keys(patch).length === 1) throw new Error("disk full");
+      return originalUpdate(id, patch);
+    });
+
+    expect(() => vi.advanceTimersByTime(2_000)).not.toThrow();
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id, error: "disk full",
+    }));
+    vi.mocked(store.update).mockRestore();
+  });
+
   // ── Status reflection from record.status (regression for bug #1) ────
   // The real AgentManager's promise *always* resolves (its .catch returns ""),
   // so the schedule's success/error must be inferred from `record.status`,

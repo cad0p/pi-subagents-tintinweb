@@ -361,4 +361,19 @@ describe("ScheduleStore", () => {
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
     expect(onDisk.jobs.map((j: any) => j.name)).toEqual(["first", "other", "second"]);
   });
+
+  it("does not unlink the file while a skipped entry exists", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "live" }), null]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(store.remove("live")).toBe(true);
+    store.deleteFileIfEmpty();
+
+    expect(existsSync(file)).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([null]);
+  });
 });
