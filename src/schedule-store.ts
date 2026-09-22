@@ -171,7 +171,7 @@ export class ScheduleStore {
    * their own list so a freed id can never re-promote them to live jobs.
    */
   private shadowed: unknown[] = [];
-  /** Preserved entries dropped at load — too deeply nested. */
+  /** Records dropped at load instead of preserved verbatim — too deeply nested. */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
   private fileShapeInvalid = false;
@@ -180,17 +180,19 @@ export class ScheduleStore {
   /** Ids the last locked load promoted into the live set; drained once the lock is gone. */
   private pendingPromoted: string[] = [];
   /**
-   * Called by load() with the ids that were live in the previous cache but are
-   * no longer live after an existing-file reload: the record no longer
-   * sanitizes into a live job (for example an unregistered agent type, an
-   * unparseable cron, a wrong-typed load-bearing field, or an invalid
-   * `scheduleType`) or it is absent from the file (deleted by another writer,
-   * or dropped for exceeding the depth bound). The scheduler binds this to
-   * clear timers that would otherwise keep ticking a record the live set no
-   * longer contains. Never called when load() keeps the previous state: a
-   * missing file (the kept in-memory state is re-written by the next save, so
-   * a mid-session deletion only sticks if the session ends before that write)
-   * or corrupt JSON.
+   * Called by load() while the store lock is held, with the ids that were live
+   * in the previous cache but are no longer live after an existing-file reload:
+   * the record no longer sanitizes into a live job (for example an
+   * unregistered agent type, an unparseable cron, a wrong-typed load-bearing
+   * field, or an invalid `scheduleType`), the `jobs` container is not an array
+   * (every live id is reclassified at once), or the record is no longer the
+   * file's live entry (deleted by another writer, or dropped for exceeding the
+   * depth bound). The scheduler binds this to clear timers that would
+   * otherwise keep ticking a record the live set no longer contains, so the
+   * callback must not write to the store (the lock is not re-entrant). Never
+   * called when load() keeps the previous state: a missing file (the kept
+   * in-memory state is re-written by the next save, so a mid-session deletion
+   * only sticks if the session ends before that write) or corrupt JSON.
    */
   onReclassified: ((ids: string[]) => void) | undefined;
   /**
@@ -355,7 +357,7 @@ export class ScheduleStore {
    * from withLock's `finally` after the lock is released, so a callback throw
    * must not replace the mutation's own outcome. A callback failure aborts
    * that report — the warning names the affected ids, and they are not
-   * re-reported; a later start() re-arms every live record.
+   * re-reported; a later start() re-arms the live enabled records.
    */
   private drainPromoted(): void {
     const ids = this.pendingPromoted;
