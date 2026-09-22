@@ -554,6 +554,74 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).not.toHaveBeenCalled();
   });
 
+  it("arms a record promoted back into the live set when its type returns", () => {
+    const file = join(tmp, "s.json");
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    const seeded = scheduler.buildJob({
+      name: "promoted", description: "x", schedule: "1s",
+      subagent_type: "Explore", prompt: "promoted-prompt",
+    });
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [seeded] }, null, 2));
+    store = new ScheduleStore(file);
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    // Skipped at load: not live, not armed.
+    expect(scheduler.list()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The type returns; one supported mutation reloads and promotes the record.
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+    const trigger = scheduler.addJob({
+      name: "trigger", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "trigger",
+    });
+
+    expect(scheduler.list().map(j => j.id)).toEqual([seeded.id, trigger.id]);
+    expect(scheduler.getNextRun(seeded.id)).toBeDefined();
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).toHaveBeenCalledWith(pi, ctx, "Explore", "promoted-prompt", expect.objectContaining({
+      isBackground: true, bypassQueue: true,
+    }));
+  });
+
+  it("disarms a promoted record whose interval is outside the armable range", () => {
+    const file = join(tmp, "s.json");
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    const seeded = {
+      ...scheduler.buildJob({
+        name: "promoted-bad", description: "x", schedule: "1s",
+        subagent_type: "Explore", prompt: "x",
+      }),
+      intervalMs: 1e16,
+    };
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [seeded] }, null, 2));
+    store = new ScheduleStore(file);
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+    expect(vi.getTimerCount()).toBe(0);
+
+    // The promote path arms the record and the arm guard disarms it again —
+    // from outside the non-re-entrant store lock, so this must not throw.
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+    expect(() => scheduler.addJob({
+      name: "trigger", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "trigger",
+    })).not.toThrow();
+
+    const stored = scheduler.list().find(j => j.id === seeded.id);
+    expect(stored?.enabled).toBe(false);
+    expect(stored?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: seeded.id,
+    }));
+    expect(vi.getTimerCount()).toBe(1); // only the trigger's 1h timer
+  });
+
   it("keeps a valid job's timer armed and firing across a reload", () => {
     const a = scheduler.addJob({
       name: "still-valid", description: "x", schedule: "1s",

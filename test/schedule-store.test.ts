@@ -97,6 +97,36 @@ describe("ScheduleStore", () => {
     expect(store.remove(job.id)).toBe(false);
   });
 
+  it("reports ids promoted into the live set after a locked reload", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, []);
+    const store = new ScheduleStore(file);
+    const promoted = vi.fn();
+    store.onPromoted = promoted;
+
+    // Another writer adds a record between loads; the next locked mutation
+    // reloads it into the live set.
+    writeStoreFile(file, [makeJob({ id: "late" })]);
+    store.add(makeJob({ id: "trigger" }));
+
+    expect(promoted).toHaveBeenCalledTimes(1);
+    expect(promoted).toHaveBeenCalledWith(["late"]);
+  });
+
+  it("does not report promotions for records that were already live", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "seeded" })]);
+    const store = new ScheduleStore(file);
+    const promoted = vi.fn();
+    store.onPromoted = promoted;
+
+    // Constructing the store must not invoke the callback, and a reload that
+    // keeps the same live record is not a promotion.
+    expect(promoted).not.toHaveBeenCalled();
+    store.update("seeded", { lastStatus: "error" });
+    expect(promoted).not.toHaveBeenCalled();
+  });
+
   it("hasName excludes a given id (for rename safety)", () => {
     const store = new ScheduleStore(join(tmp, "s.json"));
     const job = makeJob({ name: "alpha" });

@@ -193,6 +193,8 @@ export class ScheduleStore {
   private fileShapeInvalid = false;
   /** Signature of the last skip set we warned about, so repeated locked loads stay quiet. */
   private warnedSkips: string | undefined;
+  /** Ids the last locked load promoted into the live set; drained once the lock is gone. */
+  private pendingPromoted: string[] = [];
   /**
    * Called by load() with the ids that were live in the previous cache but are
    * not live after the reload — records reclassified into `skipped` (invalid
@@ -202,6 +204,16 @@ export class ScheduleStore {
    * (missing or corrupt file).
    */
   onReclassified: ((ids: string[]) => void) | undefined;
+  /**
+   * Called from withLock() after the mutation lock is released, with the ids
+   * that were not live in the previous cache but are live after the reload —
+   * records promoted out of `skipped` once their agent type is registered
+   * again, or records another writer added to the file. The scheduler binds
+   * this to arm enabled records that hold no timer. Never called when load()
+   * keeps the previous state (missing or corrupt file), and never while the
+   * lock is held, so the callback may safely mutate the store.
+   */
+  onPromoted: ((ids: string[]) => void) | undefined;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -270,6 +282,10 @@ export class ScheduleStore {
     // later load (e.g. after the agent type returns) would re-promote it.
     const reclassified = previousLiveIds.filter(id => !jobs.has(id));
     if (reclassified.length > 0) this.onReclassified?.(reclassified);
+    // Promotion is reported after the lock (see withLock): arming a promoted
+    // record can write to the store on the arm-guard branches, which cannot
+    // run while withLock holds the non-re-entrant lock.
+    this.pendingPromoted = [...jobs.keys()].filter(id => !previousLiveIds.includes(id));
   }
 
   /** Warn once per distinct invalid-entry summary — load() runs before every mutation. */
@@ -334,7 +350,16 @@ export class ScheduleStore {
       return result;
     } finally {
       releaseLock(this.lockPath);
+      this.drainPromoted();
     }
+  }
+
+  /** Report ids the last load promoted, now that the lock is gone. */
+  private drainPromoted(): void {
+    const ids = this.pendingPromoted;
+    if (ids.length === 0) return;
+    this.pendingPromoted = [];
+    this.onPromoted?.(ids);
   }
 
   /** Read-only — returns a snapshot of the in-memory cache. */

@@ -88,6 +88,7 @@ export class SubagentScheduler {
     store.onReclassified = ids => {
       for (const id of ids) this.unscheduleJob(id);
     };
+    store.onPromoted = ids => this.armPromoted(ids);
 
     for (const job of store.list()) {
       if (job.enabled) this.scheduleJob(job);
@@ -100,7 +101,10 @@ export class SubagentScheduler {
     this.jobs.clear();
     for (const t of this.intervals.values()) clearTimeout(t);
     this.intervals.clear();
-    if (this.store) this.store.onReclassified = undefined;
+    if (this.store) {
+      this.store.onReclassified = undefined;
+      this.store.onPromoted = undefined;
+    }
     this.store = undefined;
     this.pi = undefined;
     this.ctx = undefined;
@@ -214,6 +218,22 @@ export class SubagentScheduler {
   }
 
   // ── Scheduling primitives ────────────────────────────────────────────
+
+  /**
+   * Arm records the store promoted back into the live set. Called from the
+   * store after it released the mutation lock, so the arm guard's writes are
+   * safe. A record this scheduler already holds a timer for is skipped, so a
+   * promotion report cannot double-arm.
+   */
+  private armPromoted(ids: string[]): void {
+    const store = this.store;
+    if (!store) return; // stopped between the load and the drain
+    for (const id of ids) {
+      if (this.jobs.has(id) || this.intervals.has(id)) continue;
+      const job = store.get(id);
+      if (job?.enabled) this.scheduleJob(job);
+    }
+  }
 
   private scheduleJob(job: ScheduledSubagent): void {
     const store = this.store;
