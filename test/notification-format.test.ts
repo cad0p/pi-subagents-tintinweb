@@ -632,7 +632,7 @@ describe("markdown completion report", () => {
     expect(stoppedReport).toContain(`Result:\n\n${"y".repeat(10)}\n…(truncated, see transcript)`);
   });
 
-  it("does not crash on a bare low surrogate in the truncated span", () => {
+  it("coerces a bare low surrogate in the truncated span to U+FFFD", () => {
     const malformed = `hello${String.fromCharCode(0xdc00)}world`;
     const report = formatTaskNotification(
       createRecord({ status: "error", error: malformed, result: undefined }),
