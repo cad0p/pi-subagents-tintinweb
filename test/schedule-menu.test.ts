@@ -10,6 +10,9 @@ import type { SubagentScheduler } from "../src/schedule.js";
 import type { ScheduledSubagent } from "../src/types.js";
 import { showSchedulesMenu } from "../src/ui/schedule-menu.js";
 
+/** Matches an unpaired UTF-16 surrogate (a split astral code point). */
+const LONE_SURROGATE = /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
+
 function job(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent {
   return {
     id: "job-1",
@@ -112,5 +115,18 @@ describe("showSchedulesMenu", () => {
     expect(lines[7]).toBe("");
     expect(lines[8]).toBe("prompt:");
     expect(lines.slice(9)).toEqual(["line one", "line two"]);
+  });
+
+  it("truncates a padded name on a code-point boundary", async () => {
+    const name = `${"a".repeat(17)}😀tail`;
+    const { scheduler } = fakeScheduler([job({ id: "job-1", name })]);
+    const { ctx, labels } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+
+    const label = labels[0][0];
+    expect(label).not.toMatch(LONE_SURROGATE);
+    // The astral pair is dropped whole, so the padded name column keeps its space.
+    expect(label).toContain(`${"a".repeat(17)} `);
   });
 });

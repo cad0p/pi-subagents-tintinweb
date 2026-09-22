@@ -74,6 +74,9 @@ function assertAllLinesFit(lines: string[], width: number) {
   }
 }
 
+/** Matches an unpaired UTF-16 surrogate (a split astral code point). */
+const LONE_SURROGATE = /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -344,6 +347,28 @@ describe("ConversationViewer", () => {
         mockTui(30, w), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
       );
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
+    });
+  });
+
+  describe("500-unit truncation", () => {
+    const W = 600;
+
+    it("does not split an astral code point in toolResult or bashExecution output", () => {
+      const payload = `${"a".repeat(499)}😀tail`;
+      const messages = [
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text: payload }] },
+        {
+          role: "bashExecution", command: "cat", output: payload,
+          exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now(),
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+
+      const rendered = (viewer as any).buildContentLines(W).join("\n");
+      expect(rendered).not.toMatch(LONE_SURROGATE);
+      expect(rendered).toContain(`${"a".repeat(499)}... (truncated)`);
     });
   });
 

@@ -8,7 +8,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
-import { stripControlChars, toSingleLine } from "../text-safety.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
@@ -327,7 +327,7 @@ export class ConversationViewer implements Component {
         }
       } else if (msg.role === "toolResult") {
         const text = stripControlChars(extractText(msg.content));
-        const truncated = text.length > 500 ? text.slice(0, 500) + "... (truncated)" : text;
+        const truncated = text.length > 500 ? safeTruncate(text, 500) + "... (truncated)" : text;
         if (!truncated.trim()) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("dim", "[Result]"));
@@ -341,7 +341,7 @@ export class ConversationViewer implements Component {
         if (bash.output?.trim()) {
           const rawOut = stripControlChars(bash.output);
           const out = rawOut.length > 500
-            ? rawOut.slice(0, 500) + "... (truncated)"
+            ? safeTruncate(rawOut, 500) + "... (truncated)"
             : rawOut;
           for (const line of wrapTextWithAnsi(out.trim(), width)) {
             lines.push(th.fg("dim", line));

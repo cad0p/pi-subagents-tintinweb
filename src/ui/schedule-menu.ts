@@ -43,8 +43,8 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id);
   return [
     statusIcon(j),
-    toSingleLine(j.name).padEnd(18).slice(0, 18),
-    toSingleLine(j.schedule).padEnd(14).slice(0, 14),
+    safeTruncate(toSingleLine(j.name), 18).padEnd(18),
+    safeTruncate(toSingleLine(j.schedule), 14).padEnd(14),
     `[${toSingleLine(j.subagent_type)}]`,
     `next ${relTime(next)}`,
     `last ${relTime(j.lastRun)}`,
