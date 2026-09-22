@@ -91,6 +91,9 @@ describe("showSchedulesMenu", () => {
         name: `safe${osc}\r\nname: forged`,
         createdAt: "2026-01-01T00:00:00.000Z\rcreated: forged",
         lastStatus: "success\nruns: 999" as ScheduledSubagent["lastStatus"],
+        // Store JSON is not validated on load, so a corrupted/hand-edited file
+        // can hand runCount a string carrying newlines and an OSC payload.
+        runCount: `7\r\nruns: 999${osc}` as unknown as number,
         prompt: `line one\nline two${osc}`,
       }),
     ];

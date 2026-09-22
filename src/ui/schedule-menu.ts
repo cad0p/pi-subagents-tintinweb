@@ -59,6 +59,9 @@ function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): stri
   // label, so nothing it contains can forge a metadata line above it.
   const prompt = stripControlChars(j.prompt);
   const promptPreview = prompt.length > 200 ? `${safeTruncate(prompt, 200)}…` : prompt;
+  // runCount is typed number but comes from unvalidated JSON; coerce before the
+  // single-line sanitizer, which returns "" for non-string input.
+  const runCount = Number(j.runCount);
   return [
     `name:      ${toSingleLine(j.name)}`,
     `schedule:  ${toSingleLine(j.schedule)} (${toSingleLine(j.scheduleType)})`,
@@ -66,7 +69,7 @@ function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): stri
     `created:   ${toSingleLine(j.createdAt)}`,
     `last run:  ${toSingleLine(j.lastRun ?? "—")} (${toSingleLine(j.lastStatus ?? "—")})`,
     `next run:  ${toSingleLine(next)}`,
-    `runs:      ${j.runCount}`,
+    `runs:      ${toSingleLine(String(Number.isFinite(runCount) ? runCount : 0))}`,
     "",
     "prompt:",
     promptPreview,
