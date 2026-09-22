@@ -26,9 +26,9 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type NotificationDetails, type ResultPreviewMode, type SubagentType, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -48,7 +48,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
@@ -150,26 +150,22 @@ function partialOutputSuffix(record: AgentRecord): string {
   return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
 }
 
-/** Human-readable status label for agent completion. */
-function getStatusLabel(status: string, error?: string): string {
+/** Human-readable status word for the completion report header. */
+function getStatusWord(status: string): string {
   switch (status) {
-    case "error": return `Error: ${error ?? "unknown"}`;
-    case "aborted": return "Aborted (max turns exceeded)";
-    case "steered": return "Wrapped up (turn limit)";
-    case "stopped": return "Stopped";
-    default: return "Done";
+    case "error": return "error";
+    case "stopped": return "stopped";
+    case "aborted": return "aborted";
+    case "steered": return "wrapped up (turn limit)";
+    default: return "completed";
   }
 }
 
-/** Escape XML special characters to prevent injection in structured notifications. */
-function escapeXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Collapse newlines/CRs so header text cannot forge report metadata. */
+function sanitizeHeaderText(s: string): string {
+  return s.replace(/\r\n?|\n/g, " ").trim();
 }
 
-// Collapsed preview line limit - matches pi's read/write tool precedent
-const COLLAPSED_PREVIEW_LINES = 10;
-const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
-const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
 
 /** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
@@ -179,7 +175,7 @@ function safeTruncate(s: string, maxChars: number): string {
   return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
 }
 
-/** Build the preview body shared by XML payload + UI details. Caps failure-mode bodies; success/aborted/steered uncapped. */
+/** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
   const body = record.result ?? record.error ?? "";
   if (!body) return "No output.";
@@ -193,27 +189,39 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
     : body;
 }
 
-/** @internal Format a structured task notification matching Claude Code's <task-notification> XML. */
+/**
+ * @internal Format a background completion as a markdown report. The report is
+ * both the parent model's context and the text pi renders in its default
+ * custom-message box, so it carries no ANSI and puts the body last (an
+ * unbalanced fence in it cannot swallow the metadata above).
+ */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
-  const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-  const contextPercent = getSessionContextPercent(record.session);
-  const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
-  const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
+  const context = formatSessionContext(record.session);
 
-  const resultPreview = buildResultPreview(record, settings);
+  const stats: string[] = [];
+  const turnCount = record.turnCount ?? 0;
+  if (turnCount > 0) stats.push(formatTurns(turnCount, record.effectiveMaxTurns));
+  if (record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
+  if (totalTokens > 0) stats.push(formatTokens(totalTokens));
+  if (context !== null) stats.push(`ctx ${context}`);
+  if (record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
+  if (durationMs > 0) stats.push(formatMs(durationMs));
 
-  return [
-    `<task-notification>`,
-    `<task-id>${record.id}</task-id>`,
-    record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
-    `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
-    `<result>${escapeXml(resultPreview)}</result>`,
-    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
-    `</task-notification>`,
-  ].filter(Boolean).join('\n');
+  const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+  const description = sanitizeHeaderText(record.description ?? "");
+  let header = `**${isError ? "✗" : "✓"} Subagent ${getStatusWord(record.status)}: ${description}**`;
+  if (record.error && (record.status === "error" || record.status === "stopped")) {
+    header += ` — ${sanitizeHeaderText(record.error)}`;
+  }
+  header += getStatusNote(record.status);
+  if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
+
+  const metadata = [`Agent: ${record.id}`];
+  if (record.outputFile) metadata.push(`Transcript: ${record.outputFile}`);
+
+  return [header, "", metadata.join("\n"), "", "Result:", "", buildResultPreview(record, settings)].join("\n");
 }
 
 /** Build AgentDetails from a base + record-specific fields. */
@@ -237,111 +245,7 @@ function buildDetails(
   };
 }
 
-/** @internal Build notification details for the custom message renderer. */
-export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
-  const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-
-  const resultPreview = buildResultPreview(record, settings);
-
-  return {
-    id: record.id,
-    description: record.description,
-    status: record.status,
-    toolUses: record.toolUses,
-    turnCount: activity?.turnCount ?? 0,
-    maxTurns: activity?.maxTurns,
-    totalTokens,
-    durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
-    outputFile: record.outputFile,
-    error: record.error,
-    resultPreview,
-  };
-}
-
-/** @internal Render notification header with icon, description, status, and stats. */
-export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
-  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-  const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-  const statusText = isError ? d.status
-    : d.status === "steered" ? "completed (steered)"
-    : "completed";
-
-  // Line 1: icon + agent description + status
-  let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
-
-  // Line 2: stats
-  const parts: string[] = [];
-  if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
-  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-  if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
-  if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
-  if (parts.length) {
-    line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
-  }
-
-  return new Text(line, 0, 0);
-}
-
-/** @internal Render notification body with markdown or plain mode dispatch. */
-export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
-  if (mode === "markdown") {
-    let body = d.resultPreview;
-    if (!expanded) {
-      const lines = body.split("\n");
-      if (lines.length > COLLAPSED_PREVIEW_LINES) {
-        const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
-        body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
-      }
-    }
-    
-    const container = new Container();
-    if (body.trim()) {
-      container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
-    }
-    if (d.outputFile) {
-      container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
-    }
-    return container;
-  } else {
-    let bodyText = "";
-    if (expanded) {
-      const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
-      for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
-    } else {
-      const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
-      bodyText = theme.fg("dim", `  ⎿  ${preview}`);
-    }
-
-    if (d.outputFile) {
-      bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
-    }
-
-    return new Text(bodyText, 0, 0);
-  }
-}
-
-/** @internal Main subagent notification renderer. */
-export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
-  const d = message.details;
-  if (!d) return undefined;
-
-  const effectiveExpanded = resultPreviewExpanded ? true : options.expanded;
-
-  const container = new Container();
-  container.addChild(subagentNotificationRenderHeader(d, theme));
-  container.addChild(subagentNotificationRenderBody(d, effectiveExpanded, resultPreviewMode, theme));
-  return container;
-}
-
 export default function (pi: ExtensionAPI) {
-  // ---- Register custom notification renderer ----
-  pi.registerMessageRenderer<NotificationDetails>(
-    "subagent-notification",
-    (message, { expanded }, theme) => {
-      return subagentNotificationRenderer(message, { expanded }, theme, resultPreviewMode, resultPreviewExpanded);
-    }
-  );
-
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = () => {
     const userAgents = loadCustomAgents(process.cwd());
@@ -433,14 +337,10 @@ export default function (pi: ExtensionAPI) {
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    const notification = formatTaskNotification(record, { failurePreviewMaxChars });
-    const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
-
-    pi.sendMessage<NotificationDetails>({
+    pi.sendMessage({
       customType: "subagent-notification",
-      content: notification + footer,
+      content: formatTaskNotification(record, { failurePreviewMaxChars }),
       display: true,
-      details: buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id)),
     }, { deliverAs: "steer", triggerTurn: true });
   }
 
@@ -675,12 +575,8 @@ export default function (pi: ExtensionAPI) {
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
-  // ---- Result preview configuration ----
-  let resultPreviewMode: ResultPreviewMode = "markdown";
-  let resultPreviewExpanded = true;
+  // ---- Failure preview configuration ----
   let failurePreviewMaxChars = DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
-  function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
-  function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
   function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
 
   // ---- Disable default agents configuration ----
@@ -763,8 +659,6 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
-      setResultPreviewMode,
-      setResultPreviewExpanded,
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -2244,8 +2138,6 @@ ${systemPrompt}
       graceTurns: getGraceTurns(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
-      resultPreviewMode,
-      resultPreviewExpanded,
       failurePreviewMaxChars,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -2297,20 +2189,6 @@ ${systemPrompt}
           label: "Scope models",
           description: "Validate subagent models against scoped models (/scoped-models)",
           currentValue: isScopeModelsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "resultPreviewMode",
-          label: "Result preview mode",
-          description: "Render result body as markdown or plain text",
-          currentValue: resultPreviewMode,
-          values: ["markdown", "plain"],
-        },
-        {
-          id: "resultPreviewExpanded",
-          label: "Result preview expanded by default",
-          description: "Always show expanded result preview, ignoring pi's expanded flag",
-          currentValue: resultPreviewExpanded ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -2396,16 +2274,9 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "resultPreviewMode") {
-        setResultPreviewMode(value as ResultPreviewMode);
-        notifyApplied(ctx, `Result preview mode set to ${value}`);
-      } else if (id === "resultPreviewExpanded") {
-        const expanded = value === "on";
-        setResultPreviewExpanded(expanded);
-        notifyApplied(ctx, `Result preview expanded by default ${expanded ? "enabled" : "disabled"}`);
       } else if (id === "failurePreviewMaxChars") {
         const n = parseInt(value, 10);
-        if (n >= 1 && n <= RESULT_PREVIEW_MAX_CHARS_CEILING) {
+        if (n >= 1 && n <= FAILURE_PREVIEW_MAX_CHARS_CEILING) {
           setFailurePreviewMaxChars(n);
           notifyApplied(ctx, `Failure preview max chars set to ${n}`);
         }
@@ -2476,17 +2347,13 @@ ${systemPrompt}
 
     // If a numeric field ID was returned, prompt for typed input
     if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent"
-        ? String(manager.getMaxConcurrent())
-        : result === "defaultMaxTurns"
-          ? String(getDefaultMaxTurns() ?? 0)
-          : String(getGraceTurns());
-
-      const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
-        : result === "defaultMaxTurns"
-          ? "Default max turns (0 = unlimited)"
-          : "Grace turns (1+)";
+      const numericPrompt: Record<string, { current: string; label: string }> = {
+        maxConcurrent: { current: String(manager.getMaxConcurrent()), label: "Max concurrency (1+)" },
+        defaultMaxTurns: { current: String(getDefaultMaxTurns() ?? 0), label: "Default max turns (0 = unlimited)" },
+        graceTurns: { current: String(getGraceTurns()), label: "Grace turns (1+)" },
+        failurePreviewMaxChars: { current: String(failurePreviewMaxChars), label: "Failure preview max chars (1+)" },
+      };
+      const { current, label } = numericPrompt[result];
 
       // Loop until user enters a valid integer or cancels (Esc / null).
       // Silently trims whitespace; rejects non-numeric input by re-prompting.

@@ -23,7 +23,6 @@ function makePi() {
   const lifecycle = new Map<string, any>();
   const events = new Map<string, any>();
   const pi = {
-    registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),

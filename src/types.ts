@@ -67,8 +67,6 @@ export interface AgentConfig {
   source?: "default" | "project" | "global";
 }
 
-export type ResultPreviewMode = "plain" | "markdown";
-
 /**
  * Display mode for the persistent above-editor agent widget.
  * - `all`: show every agent (foreground + background).
@@ -172,21 +170,6 @@ export interface AgentInvocation {
   inheritContext?: boolean;
   runInBackground?: boolean;
   isolation?: IsolationMode;
-}
-
-/** Details attached to custom notification messages for visual rendering. */
-export interface NotificationDetails {
-  id: string;
-  description: string;
-  status: string;
-  toolUses: number;
-  turnCount: number;
-  maxTurns?: number;
-  totalTokens: number;
-  durationMs: number;
-  outputFile?: string;
-  error?: string;
-  resultPreview: string;
 }
 
 export interface EnvInfo {

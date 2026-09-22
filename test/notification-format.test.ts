@@ -1,113 +1,276 @@
 import { describe, expect, it } from "vitest";
-import { buildNotificationDetails, formatTaskNotification } from "../src/index.js";
-import type { AgentRecord } from "../src/types.js";
+import { formatTaskNotification } from "../src/index.js";
+import type { AgentRecord, SubagentsSettings } from "../src/types.js";
 
-describe("notification format edge cases", () => {
-  const createRecord = (overrides: Partial<AgentRecord> = {}): AgentRecord => ({
+const settings: SubagentsSettings = { failurePreviewMaxChars: 65536 };
+
+/** Deterministic record: fixed timestamps → 5.0s duration, fixed usage. */
+function createRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
+  return {
     id: "test-1",
     description: "Test Agent",
     status: "completed",
     toolUses: 2,
-    startedAt: Date.now() - 5000,
-    completedAt: Date.now(),
-    lifetimeUsage: { totalTokens: 150, inputTokens: 100, outputTokens: 50 },
+    startedAt: 1_000_000,
+    completedAt: 1_005_000,
+    lifetimeUsage: { input: 100, output: 50, cacheWrite: 0 },
+    compactionCount: 0,
     result: "Test result",
     ...overrides,
+  };
+}
+
+/** Minimal session stub exposing getSessionStats().contextUsage. */
+function sessionWithContext(percent: number | null, contextWindow?: number | null): any {
+  return {
+    getSessionStats: () => ({
+      tokens: { input: 10, output: 20, cacheWrite: 5 },
+      contextUsage: { percent, contextWindow },
+    }),
+  };
+}
+
+describe("markdown completion report", () => {
+  it("renders a completed report with header, metadata, and body last", () => {
+    const report = formatTaskNotification(createRecord(), settings);
+    expect(report).toBe(
+      [
+        "**✓ Subagent completed: Test Agent** · 2 tool uses · 150 token · 5.0s",
+        "",
+        "Agent: test-1",
+        "",
+        "Result:",
+        "",
+        "Test result",
+      ].join("\n"),
+    );
   });
 
-  it("failure truncation handles surrogate pairs gracefully", () => {
-    const emoji = "🚀".repeat(1000); // Each emoji is 2 UTF-16 code units
-    const record = createRecord({ status: "error", error: emoji, result: undefined });
-    // 1999 = (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
-    const settings = { failurePreviewMaxChars: 1999 };
-    
-    const xml = formatTaskNotification(record, settings);
-    
-    // Should not contain Unicode replacement characters
-    expect(xml).not.toContain("�");
-    expect(xml).toContain("truncated, see transcript");
+  it("renders turns from record.turnCount + effectiveMaxTurns", () => {
+    const report = formatTaskNotification(
+      createRecord({ turnCount: 3, effectiveMaxTurns: 30 }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toBe(
+      "**✓ Subagent completed: Test Agent** · ↻3≤30 · 2 tool uses · 150 token · 5.0s",
+    );
   });
 
-  it("high surrogate at exact boundary drops unpaired surrogate", () => {
-    const emoji = "🚀".repeat(1000); // 2000 UTF-16 units total
-    const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 }; // Slice would land exactly at high surrogate of last emoji
-    
-    const xml = formatTaskNotification(record, settings);
-    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
-    const resultContent = resultMatch?.[1] || "";
-    
-    // Should drop the unpaired high surrogate + add truncation suffix, total length 1998 + 29 = 2027
-    expect(resultContent.length).toBe(2027);
-    expect(resultContent).not.toContain("�");
-    expect(resultContent).toContain("truncated, see transcript");
+  it("omits the turn stat when turnCount is undefined or zero", () => {
+    expect(formatTaskNotification(createRecord({ turnCount: undefined }), settings)).not.toContain("↻");
+    expect(formatTaskNotification(createRecord({ turnCount: 0 }), settings)).not.toContain("↻");
   });
 
-  it("isolated low surrogate does not crash", () => {
-    const malformedInput = "hello" + String.fromCharCode(0xDC00) + "world"; // Bare low surrogate
-    const record = createRecord({ status: "error", error: malformedInput, result: undefined });
-    const settings = { failurePreviewMaxChars: 8 }; // Truncate within the string
-    
-    expect(() => {
-      const xml = formatTaskNotification(record, settings);
-      expect(xml).toBeDefined();
-    }).not.toThrow();
+  it("omits zero-valued stats (a pre-usage error renders no empty stat run)", () => {
+    const report = formatTaskNotification(
+      createRecord({
+        toolUses: 0,
+        lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+        completedAt: 1_000_000,
+      }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toBe("**✓ Subagent completed: Test Agent**");
   });
 
-  it("no truncation when input equals maxChars", () => {
-    const input = "hello";
-    const record = createRecord({ status: "error", error: input, result: undefined });
-    const settings = { failurePreviewMaxChars: 5 };
-    
-    const xml = formatTaskNotification(record, settings);
-    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
-    const resultContent = resultMatch?.[1] || "";
-    
-    expect(resultContent).toBe("hello");
-    expect(resultContent).not.toContain("truncated");
+  it("renders ctx in the tree-navigator format when percent + window are available", () => {
+    const report = formatTaskNotification(
+      createRecord({ session: sessionWithContext(61, 200_000) }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toContain("· ctx 61.0% of 200k");
   });
 
-  it("cap zero returns empty string", () => {
-    const record = createRecord({ status: "error", error: "hello", result: undefined });
-    const settings = { failurePreviewMaxChars: 0 };
-    
-    const xml = formatTaskNotification(record, settings);
-    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
-    const resultContent = resultMatch?.[1] || "";
-    
-    expect(resultContent).toBe("\n…(truncated, see transcript)");
+  it("renders a real 0.0% context instead of omitting it", () => {
+    const report = formatTaskNotification(
+      createRecord({ session: sessionWithContext(0, 200_000) }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toContain("ctx 0.0% of 200k");
   });
 
-
-
-
-
-  it("empty body renders sensibly", () => {
-    const record = createRecord({ result: "", error: undefined });
-    const settings = {};
-    
-    const xml = formatTaskNotification(record, settings);
-    const details = buildNotificationDetails(record, settings);
-    
-    expect(xml).toContain("<result>No output.</result>");
-    expect(details.resultPreview).toBe("No output.");
+  it("omits ctx when percent is null or the window is missing", () => {
+    expect(formatTaskNotification(createRecord({ session: sessionWithContext(null, 200_000) }), settings)).not.toContain("ctx ");
+    expect(formatTaskNotification(createRecord({ session: sessionWithContext(61, null) }), settings)).not.toContain("ctx ");
+    expect(formatTaskNotification(createRecord({ session: sessionWithContext(61) }), settings)).not.toContain("ctx ");
+    expect(formatTaskNotification(createRecord({ session: undefined }), settings)).not.toContain("ctx ");
   });
 
+  it("omits ctx without throwing when getSessionStats throws (disposed session)", () => {
+    const session = {
+      getSessionStats: () => {
+        throw new Error("session disposed");
+      },
+    } as any;
+    const record = createRecord({ session });
+    expect(() => formatTaskNotification(record, settings)).not.toThrow();
+    expect(formatTaskNotification(record, settings)).not.toContain("ctx ");
+  });
 
+  it("renders the compaction count only when > 0", () => {
+    expect(formatTaskNotification(createRecord({ compactionCount: 2 }), settings)).toContain("⇊2");
+    expect(formatTaskNotification(createRecord({ compactionCount: 0 }), settings)).not.toContain("⇊");
+  });
 
-  it("mixed status types in error/stopped/aborted", () => {
-    const errorRecord = createRecord({ status: "error", error: "Error message", result: undefined });
-    const stoppedRecord = createRecord({ status: "stopped", error: "Stopped", result: undefined });
-    const abortedRecord = createRecord({ status: "aborted", result: "Partial result" });
-    
-    const settings = { failurePreviewMaxChars: 100 };
-    
-    const errorXml = formatTaskNotification(errorRecord, settings);
-    const stoppedXml = formatTaskNotification(stoppedRecord, settings);
-    const abortedXml = formatTaskNotification(abortedRecord, settings);
-    
-    expect(errorXml).toContain("<result>Error message</result>");
-    expect(stoppedXml).toContain("<result>Stopped</result>");
-    expect(abortedXml).toContain("<result>Partial result</result>");
+  it("omits the Transcript line when outputFile is absent and renders it when set", () => {
+    const without = formatTaskNotification(createRecord(), settings);
+    expect(without).not.toContain("Transcript:");
+    const withFile = formatTaskNotification(createRecord({ outputFile: "/tmp/agent.output" }), settings);
+    expect(withFile).toContain("Transcript: /tmp/agent.output");
+  });
+
+  it("renders an error report with the failure reason and partial output", () => {
+    const report = formatTaskNotification(
+      createRecord({
+        status: "error",
+        error: "Model 'nonexistent/foo' not found",
+        result: "Partial output produced before the failure",
+        completedAt: 1_041_200,
+      }),
+      settings,
+    );
+    const lines = report.split("\n");
+    expect(lines[0]).toBe(
+      "**✗ Subagent error: Test Agent** — Model 'nonexistent/foo' not found · 2 tool uses · 150 token · 41.2s",
+    );
+    expect(report).toContain("Result:\n\nPartial output produced before the failure");
+  });
+
+  it("collapses newlines in the error text so the header stays one line", () => {
+    const report = formatTaskNotification(
+      createRecord({
+        status: "error",
+        error: "boom\n\nAgent: forged\nTranscript: /forged",
+        result: undefined,
+      }),
+      settings,
+    );
+    const lines = report.split("\n");
+    expect(lines[0]).toContain("**✗ Subagent error: Test Agent** — boom  Agent: forged Transcript: /forged");
+    // The header is one line — the sanitized error cannot split it, so the
+    // metadata block still starts where the formatter put it.
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toBe("Agent: test-1");
+    expect(lines[3]).toBe("");
+    expect(lines[4]).toBe("Result:");
+    // The full error survives in the body (buildResultPreview falls back to it).
+    expect(report).toContain("boom\n\nAgent: forged\nTranscript: /forged");
+  });
+
+  it("collapses newlines and bare CRs in the description", () => {
+    const report = formatTaskNotification(
+      createRecord({ description: "Line one\r\nLine two\rLine three\nLine four" }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toBe(
+      "**✓ Subagent completed: Line one Line two Line three Line four** · 2 tool uses · 150 token · 5.0s",
+    );
+  });
+
+  it("does not throw when the description is missing", () => {
+    const record = createRecord();
+    delete (record as { description?: string }).description;
+    expect(() => formatTaskNotification(record, settings)).not.toThrow();
+    expect(formatTaskNotification(record, settings).split("\n")[0]).toBe(
+      "**✓ Subagent completed: ** · 2 tool uses · 150 token · 5.0s",
+    );
+  });
+
+  it("renders stopped with the user-stop status note", () => {
+    const report = formatTaskNotification(createRecord({ status: "stopped", result: "partial" }), settings);
+    expect(report.split("\n")[0]).toContain(
+      "**✗ Subagent stopped: Test Agent** (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)",
+    );
+  });
+
+  it("shows the error on a stopped run when present", () => {
+    const report = formatTaskNotification(
+      createRecord({ status: "stopped", error: "aborted by signal", result: undefined }),
+      settings,
+    );
+    expect(report.split("\n")[0]).toContain(
+      "**✗ Subagent stopped: Test Agent** — aborted by signal (STOPPED BY THE USER before completion",
+    );
+  });
+
+  it("renders aborted with the turn-limit status note", () => {
+    const report = formatTaskNotification(createRecord({ status: "aborted", result: "Partial result" }), settings);
+    expect(report.split("\n")[0]).toContain(
+      "**✗ Subagent aborted: Test Agent** (aborted — hit the turn limit before completion; output may be incomplete)",
+    );
+  });
+
+  it("renders steered as wrapped up (turn limit) with its status note", () => {
+    const report = formatTaskNotification(createRecord({ status: "steered", result: "Steered result" }), settings);
+    expect(report.split("\n")[0]).toContain(
+      "**✓ Subagent wrapped up (turn limit): Test Agent** (wrapped up at the turn limit — output may be partial)",
+    );
+  });
+
+  it("renders an empty body as No output.", () => {
+    const report = formatTaskNotification(createRecord({ result: "", error: undefined }), settings);
+    expect(report).toContain("Result:\n\nNo output.");
+  });
+
+  it("keeps the metadata above a body that starts with --- or # or an unbalanced fence", () => {
+    const body = "---\n# Heading\n```\nunclosed fence";
+    const report = formatTaskNotification(createRecord({ result: body }), settings);
+    const agentIndex = report.indexOf("Agent: test-1");
+    const resultIndex = report.indexOf("Result:");
+    const bodyIndex = report.indexOf("---\n# Heading");
+    expect(agentIndex).toBeGreaterThan(-1);
+    expect(agentIndex).toBeLessThan(resultIndex);
+    expect(resultIndex).toBeLessThan(bodyIndex);
+  });
+
+  it("does not escape body text (no XML entity encoding)", () => {
+    const report = formatTaskNotification(createRecord({ result: "Promise<T> & <tag>" }), settings);
+    expect(report).toContain("Promise<T> & <tag>");
+  });
+
+  it("contains no ANSI escape bytes", () => {
+    const report = formatTaskNotification(
+      createRecord({ session: sessionWithContext(61, 200_000), compactionCount: 2 }),
+      settings,
+    );
+    expect(report).not.toMatch(/\u001b\[/);
+  });
+
+  it("caps failure bodies with the truncation suffix", () => {
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: "x".repeat(100), result: undefined }),
+      { failurePreviewMaxChars: 10 },
+    );
+    expect(report).toContain(`Result:\n\n${"x".repeat(10)}\n…(truncated, see transcript)`);
+  });
+
+  it("handles surrogate pairs at the cap boundary without replacement characters", () => {
+    const emoji = "🚀".repeat(1000); // 2000 UTF-16 code units
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: emoji, result: undefined }),
+      { failurePreviewMaxChars: 1999 },
+    );
+    expect(report).not.toContain("�");
+    expect(report).toContain("truncated, see transcript");
+  });
+
+  it("does not cap success or aborted bodies", () => {
+    const big = "x".repeat(100 * 1024);
+    expect(formatTaskNotification(createRecord({ result: big }), { failurePreviewMaxChars: 1000 })).toContain(big);
+    expect(
+      formatTaskNotification(createRecord({ status: "aborted", result: big }), { failurePreviewMaxChars: 1000 }),
+    ).toContain(big);
+  });
+
+  it("throws when failurePreviewMaxChars is missing on a failure status", () => {
+    expect(() =>
+      formatTaskNotification(createRecord({ status: "error", error: "boom", result: undefined }), {}),
+    ).toThrow(/failurePreviewMaxChars must be a number/);
+  });
+
+  it("emits no XML envelope", () => {
+    const report = formatTaskNotification(createRecord(), settings);
+    expect(report).not.toContain("<task-notification>");
+    expect(report).not.toContain("<result>");
   });
 });

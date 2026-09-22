@@ -40,7 +40,6 @@ function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
   const pi = {
-    registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
@@ -134,10 +133,18 @@ describe("turn-gated completion notifications", () => {
     lifecycle.get("tool_execution_end")({}, ctx());
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
+    const [payload, options] = pi.sendMessage.mock.calls[0];
+    expect(payload.customType).toBe("subagent-notification");
+    expect(payload.display).toBe(true);
+    expect(payload.details).toBeUndefined();
+    expect(payload.content).not.toContain("<task-notification>");
+    expect(payload.content).toContain("**✓ Subagent completed: research thing**");
+    expect(payload.content).toContain("Result:\n\n");
+    // Body last: the report text follows the Result: label.
+    expect(payload.content.indexOf("Result:")).toBeLessThan(payload.content.indexOf("THE-RESULT-PAYLOAD"));
     // Delivered via the steering queue so the loop injects it before the
     // parent's next LLM call (mid-turn, not as a post-turn followUp).
-    expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
   it("get_subagent_result during the turn cancels the parked notification", async () => {

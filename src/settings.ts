@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ResultPreviewMode, WidgetMode } from "./types.js";
+import type { WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -43,10 +43,6 @@ export interface SubagentsSettings {
    * against. Defaults to false: subagents may use any model.
    */
   scopeModels?: boolean;
-  /** Result preview rendering mode. Defaults to "markdown". */
-  resultPreviewMode?: ResultPreviewMode;
-  /** Always show expanded result preview, ignoring pi's expanded flag. Defaults to true. */
-  resultPreviewExpanded?: boolean;
   /** Max chars for failure preview before truncation. Defaults to 65536 (64 KiB). */
   failurePreviewMaxChars?: number;
   /**
@@ -106,8 +102,6 @@ export interface SettingsAppliers {
   setGraceTurns: (n: number) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
-  setResultPreviewMode: (mode: ResultPreviewMode) => void;
-  setResultPreviewExpanded: (expanded: boolean) => void;
   setFailurePreviewMaxChars: (chars: number) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
@@ -119,7 +113,6 @@ export interface SettingsAppliers {
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
-const VALID_RESULT_PREVIEW_MODES: ReadonlySet<string> = new Set<ResultPreviewMode>(["plain", "markdown"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 
@@ -130,7 +123,7 @@ const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "bac
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
-export const RESULT_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
+export const FAILURE_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -164,16 +157,10 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
   }
-  if (typeof r.resultPreviewMode === "string" && VALID_RESULT_PREVIEW_MODES.has(r.resultPreviewMode)) {
-    out.resultPreviewMode = r.resultPreviewMode as ResultPreviewMode;
-  }
-  if (typeof r.resultPreviewExpanded === "boolean") {
-    out.resultPreviewExpanded = r.resultPreviewExpanded;
-  }
   if (
     Number.isInteger(r.failurePreviewMaxChars) &&
     (r.failurePreviewMaxChars as number) >= 1 &&
-    (r.failurePreviewMaxChars as number) <= RESULT_PREVIEW_MAX_CHARS_CEILING
+    (r.failurePreviewMaxChars as number) <= FAILURE_PREVIEW_MAX_CHARS_CEILING
   ) {
     out.failurePreviewMaxChars = r.failurePreviewMaxChars as number;
   }
@@ -247,8 +234,6 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
-  if (s.resultPreviewMode) appliers.setResultPreviewMode(s.resultPreviewMode);
-  if (typeof s.resultPreviewExpanded === "boolean") appliers.setResultPreviewExpanded(s.resultPreviewExpanded);
   if (typeof s.failurePreviewMaxChars === "number") appliers.setFailurePreviewMaxChars(s.failurePreviewMaxChars);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);

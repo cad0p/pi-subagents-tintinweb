@@ -18,7 +18,6 @@ function makePi() {
 
   return {
     pi: {
-      registerMessageRenderer: vi.fn(),
       registerTool: vi.fn((tool: any) => {
         tools.set(tool.name, tool);
       }),

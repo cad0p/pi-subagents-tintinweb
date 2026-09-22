@@ -30,7 +30,6 @@ function makePi() {
   const lifecycle = new Map<string, any>(); // pi.on(...) — session_start, session_before_switch, session_shutdown
   const events = new Map<string, any>(); // pi.events.on(...) — subagents:rpc:*, etc.
   const pi = {
-    registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),

@@ -300,6 +300,62 @@ describe("settings persistence", () => {
     });
   });
 
+  describe("failurePreviewMaxChars sanitizer", () => {
+    it("accepts valid integers in range", () => {
+      writeProject({ failurePreviewMaxChars: 1 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBe(1);
+
+      writeProject({ failurePreviewMaxChars: 65536 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBe(65536);
+
+      writeProject({ failurePreviewMaxChars: 1048576 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBe(1048576);
+    });
+
+    it("drops out-of-range values", () => {
+      writeProject({ failurePreviewMaxChars: 0 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+
+      writeProject({ failurePreviewMaxChars: -1 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+
+      writeProject({ failurePreviewMaxChars: 2000000 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+    });
+
+    it("drops non-integer values", () => {
+      writeProject({ failurePreviewMaxChars: 1.5 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+
+      writeProject({ failurePreviewMaxChars: NaN });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+
+      writeProject({ failurePreviewMaxChars: "1000" });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBeUndefined();
+    });
+
+    it("round-trips failurePreviewMaxChars through save/load", () => {
+      expect(saveSettings({ failurePreviewMaxChars: 32768 }, projectDir)).toBe(true);
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBe(32768);
+    });
+
+    it("project overrides global for failurePreviewMaxChars", () => {
+      writeGlobal({ failurePreviewMaxChars: 1000 });
+      writeProject({ failurePreviewMaxChars: 2000 });
+      expect(loadSettings(projectDir).failurePreviewMaxChars).toBe(2000);
+    });
+
+    it("silently drops removed legacy keys (resultPreviewMode, resultPreviewExpanded, defaultJoinMode)", () => {
+      writeProject({
+        resultPreviewMode: "plain",
+        resultPreviewExpanded: false,
+        defaultJoinMode: "smart",
+        failurePreviewMaxChars: 4096,
+      });
+      expect(loadSettings(projectDir)).toEqual({ failurePreviewMaxChars: 4096 });
+    });
+  });
+
   describe("save result + corrupt-file warning", () => {
     it("saveSettings returns true on success", () => {
       expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
@@ -352,6 +408,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
@@ -440,6 +497,13 @@ describe("settings persistence", () => {
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(false);
       applySettings({ outputTranscript: true }, appliers);
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
+    });
+
+    it("applies failurePreviewMaxChars; skips it when absent", () => {
+      applySettings({ failurePreviewMaxChars: 1000 }, appliers);
+      expect(appliers.setFailurePreviewMaxChars).toHaveBeenCalledWith(1000);
+      applySettings({}, appliers);
+      expect(appliers.setFailurePreviewMaxChars).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {

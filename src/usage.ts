@@ -24,7 +24,7 @@ export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
 /** Minimal shape we read from upstream `getSessionStats()`. */
 export type SessionStatsLike = {
   tokens: { input: number; output: number; cacheWrite: number };
-  contextUsage?: { percent: number | null };
+  contextUsage?: { percent: number | null; contextWindow?: number | null };
 };
 export type SessionLike = { getSessionStats(): SessionStatsLike };
 
@@ -57,4 +57,23 @@ export function getSessionContextPercent(session: SessionLike | undefined): numb
   if (!session) return null;
   try { return session.getSessionStats().contextUsage?.percent ?? null; }
   catch { return null; }
+}
+
+/** Format a context-window size for the report: "1.0M" at ≥1M, else "NNNk". */
+function formatContextWindow(contextWindow: number): string {
+  return contextWindow >= 1_000_000 ? "1.0M" : `${(contextWindow / 1000).toFixed(0)}k`;
+}
+
+/**
+ * Context-window utilization as `<percent>% of <window>` (e.g. "61.0% of 200k"),
+ * or null when unavailable (no model contextWindow, post-compaction, or a
+ * disposed/throwing session). A real 0.0% renders — the gate is null, not 0.
+ */
+export function formatSessionContext(session: SessionLike | undefined): string | null {
+  if (!session) return null;
+  try {
+    const usage = session.getSessionStats().contextUsage;
+    if (usage?.percent == null || usage.contextWindow == null) return null;
+    return `${usage.percent.toFixed(1)}% of ${formatContextWindow(usage.contextWindow)}`;
+  } catch { return null; }
 }

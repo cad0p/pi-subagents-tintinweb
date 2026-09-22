@@ -124,6 +124,50 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
 
+  it("delivers one markdown notification per background agent, in completion order", async () => {
+    // The first child finishes first (the second one sleeps), so the two
+    // notifications fire in a deterministic order: first bg, then second bg.
+    const respond = async (ctx: Context) => {
+      const isParent = (ctx.tools ?? []).some((t) => t.name === "Agent");
+      if (!isParent) {
+        const prompt = ctx.messages
+          .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+          .join("\n");
+        if (prompt.includes("Reply with BETA")) await new Promise((r) => setTimeout(r, 80));
+        return prompt.includes("Reply with ALPHA") ? "ALPHA-OUTPUT" : "BETA-OUTPUT";
+      }
+      const spawned = ctx.messages.some(
+        (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
+      );
+      if (spawned) return "summarized";
+      return [
+        agentCall({ description: "first bg", prompt: "Reply with ALPHA", run_in_background: true }, { id: "bg-1" }),
+        agentCall({ description: "second bg", prompt: "Reply with BETA", run_in_background: true }, { id: "bg-2" }),
+      ];
+    };
+
+    run = await runPrintMode({ prompt: "Spawn two background agents.", respond });
+
+    // Completion notifications are parked through the 200ms hold window, so
+    // wait for both to land in the parent's conversation.
+    await vi.waitFor(() => {
+      const text = conversationText(run!.parentSession);
+      expect(text).toContain("ALPHA-OUTPUT");
+      expect(text).toContain("BETA-OUTPUT");
+    });
+
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).not.toContain("Background agent group completed");
+    expect(transcript).toContain("**✓ Subagent completed: first bg**");
+    expect(transcript).toContain("**✓ Subagent completed: second bg**");
+    expect(transcript.match(/\*\*[✓✗] Subagent completed: /g)?.length).toBe(2);
+    expect(transcript).toContain("Result:");
+    // Completion order: first bg's report precedes second bg's.
+    expect(transcript.indexOf("Subagent completed: first bg")).toBeLessThan(
+      transcript.indexOf("Subagent completed: second bg"),
+    );
+  });
+
   it("spawns a FRONTMATTER-defined (.pi/agents/*.md) agent and its prompt reaches the child", async () => {
     // A project agent whose body is a distinctive system prompt. Proving the
     // child SAW it proves the full chain: the extension discovers the .md from
