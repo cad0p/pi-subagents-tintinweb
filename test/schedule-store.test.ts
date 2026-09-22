@@ -282,6 +282,51 @@ describe("ScheduleStore", () => {
     expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", "bad-type"]);
   });
 
+  it("keeps a record with a valid cron schedule", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "good-cron" }), schedule: "0 0 9 * * 1", scheduleType: "cron" }]);
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["good-cron"]);
+  });
+
+  it("skips a record with an unparseable cron schedule and preserves it", () => {
+    const file = join(tmp, "s.json");
+    const raw = { ...makeJob({ id: "bad-cron" }), schedule: "not a cron", scheduleType: "cron" };
+    writeStoreFile(file, [raw]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.add(makeJob({ id: "valid" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", "bad-cron"]);
+  });
+
+  it("skips a record with an unregistered subagent_type and preserves it", () => {
+    const file = join(tmp, "s.json");
+    const raw = { ...makeJob({ id: "bad-agent" }), subagent_type: "definitely-not-registered" };
+    writeStoreFile(file, [raw]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.add(makeJob({ id: "valid" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", "bad-agent"]);
+  });
+
+  it("drops the legacy 'inline' isolation value now that only worktree is accepted", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "inline-iso" }), isolation: "inline" }]);
+    const store = new ScheduleStore(file);
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0].isolation).toBeUndefined();
+  });
+
   it("drops a preserved entry that cannot be re-serialized instead of wedging save()", () => {
     const file = join(tmp, "s.json");
     // JSON.parse tolerates ~10k nesting; JSON.stringify overflows the stack.

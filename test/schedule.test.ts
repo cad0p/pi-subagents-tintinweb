@@ -755,6 +755,12 @@ describe("SubagentScheduler — arm-path range guard", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 
+  it("validates a cron expression without arming a timer", () => {
+    expect(vi.getTimerCount()).toBe(0);
+    expect(SubagentScheduler.validateCronExpression("0 0 9 * * 1").valid).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("does not arm a one-shot more than the max timer delay away but keeps it enabled", () => {
     const job = scheduler.addJob({
       name: "far-once", description: "x", schedule: "+30d",

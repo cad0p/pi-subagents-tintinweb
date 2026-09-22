@@ -187,3 +187,8 @@ export function getConfig(type: string): {
   };
 }
 
+// Seed the defaults at module load so consumers that run before the extension's
+// init (direct store use, tools) see the same registry production uses;
+// registerAgents() re-seeds on every explicit call.
+registerAgents(new Map());
+

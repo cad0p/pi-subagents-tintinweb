@@ -12,6 +12,8 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isValidType } from "./agent-types.js";
+import { SubagentScheduler } from "./schedule.js";
 import type { IsolationMode, ScheduledSubagent, ScheduleStoreData, SubagentType, ThinkingLevel } from "./types.js";
 
 const LOCK_RETRY_MS = 50;
@@ -19,7 +21,7 @@ const LOCK_MAX_RETRIES = 100;
 
 const SCHEDULE_TYPES: readonly string[] = ["cron", "once", "interval"];
 const LAST_STATUSES: readonly string[] = ["success", "error", "running"];
-const ISOLATION_MODES: readonly string[] = ["inline", "worktree"];
+const ISOLATION_MODES: readonly string[] = ["worktree"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -46,6 +48,11 @@ function sanitizeJob(raw: unknown): ScheduledSubagent | undefined {
   ) {
     return undefined;
   }
+  // Records that cannot run as declared must not appear active: a bad cron
+  // would arm nothing while the menu shows it as healthy, and an unregistered
+  // type silently falls back to a write-capable config at spawn time.
+  if (scheduleType === "cron" && !SubagentScheduler.validateCronExpression(schedule).valid) return undefined;
+  if (!isValidType(subagent_type)) return undefined;
   return {
     id,
     name,

@@ -431,8 +431,9 @@ export class SubagentScheduler {
       };
     }
     try {
-      // Croner validates by construction.
-      new Cron(expr, () => {});
+      // Validate without arming: a Cron constructed with a callback schedules
+      // itself and would keep the process alive until stopped.
+      new Cron(expr, { paused: true }, () => {}).stop();
       return { valid: true };
     } catch (e) {
       return { valid: false, error: e instanceof Error ? e.message : "Invalid cron expression" };
