@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTaskNotification } from "../src/index.js";
+import { effectiveFailurePreviewCap, formatTaskNotification } from "../src/index.js";
 import type { SubagentsSettings } from "../src/settings.js";
 import type { AgentRecord } from "../src/types.js";
 
@@ -221,8 +221,22 @@ describe("markdown completion report", () => {
 
   it("renders the raw status for non-terminal values instead of completed", () => {
     const report = formatTaskNotification(createRecord({ status: "running" as any, result: "wip" }), settings);
-    expect(report.split("\n")[0]).toContain("**✓ Subagent running: Test Agent**");
+    expect(report.split("\n")[0]).toContain("**○ Subagent running: Test Agent**");
     expect(report).not.toContain("completed");
+  });
+
+  it("uses the success glyph only for completed/steered and a neutral glyph otherwise", () => {
+    const header = (status: any) =>
+      formatTaskNotification(createRecord({ status, result: "x" }), settings).split("\n")[0];
+    expect(header("completed")).toContain("**✓ ");
+    expect(header("steered")).toContain("**✓ ");
+    expect(header("error")).toContain("**✗ ");
+    expect(header("stopped")).toContain("**✗ ");
+    expect(header("aborted")).toContain("**✗ ");
+    expect(header("running")).toContain("**○ ");
+    expect(header("queued")).toContain("**○ ");
+    expect(header("completed forged")).toContain("**○ ");
+    expect(header("")).toContain("**○ ");
   });
 
   it("strips control and bidi bytes from the header and metadata lines", () => {
@@ -390,14 +404,14 @@ describe("markdown completion report", () => {
       settings,
     );
     expect(report.split("\n")[0]).toBe(
-      "**✓ Subagent completed forged: Test Agent** · 2 tool uses · 150 token · 5.0s",
+      "**○ Subagent completed forged: Test Agent** · 2 tool uses · 150 token · 5.0s",
     );
     expect(report).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
   });
 
   it("renders unknown for a status that sanitizes to empty", () => {
     const report = formatTaskNotification(createRecord({ status: "\u0000" as any, result: "wip" }), settings);
-    expect(report.split("\n")[0]).toContain("**✓ Subagent unknown: Test Agent**");
+    expect(report.split("\n")[0]).toContain("**○ Subagent unknown: Test Agent**");
   });
 
   it("does not leave a dangling separator when the error sanitizes to empty", () => {
@@ -630,13 +644,32 @@ describe("markdown completion report", () => {
     expect(report).not.toContain("truncated");
   });
 
-  it("returns only the truncation marker when failurePreviewMaxChars is 0", () => {
-    const report = formatTaskNotification(
-      createRecord({ status: "error", error: "hello", result: undefined }),
-      { failurePreviewMaxChars: 0 },
-    );
-    const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
-    expect(body).toBe("\n…(truncated, see transcript)");
+  it("throws when failurePreviewMaxChars is 0", () => {
+    expect(() =>
+      formatTaskNotification(
+        createRecord({ status: "error", error: "hello", result: undefined }),
+        { failurePreviewMaxChars: 0 },
+      ),
+    ).toThrow(/failurePreviewMaxChars must be a number/);
+  });
+
+  it("throws when failurePreviewMaxChars is not a positive integer", () => {
+    for (const cap of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 1.5]) {
+      expect(() =>
+        formatTaskNotification(
+          createRecord({ status: "error", error: "boom", result: undefined }),
+          { failurePreviewMaxChars: cap },
+        ),
+      ).toThrow(/failurePreviewMaxChars must be a number/);
+    }
+  });
+
+  it("falls back to the default cap when the in-memory value is not a positive integer", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5]) {
+      expect(effectiveFailurePreviewCap(bad)).toBe(65536);
+    }
+    expect(effectiveFailurePreviewCap(1)).toBe(1);
+    expect(effectiveFailurePreviewCap(1000)).toBe(1000);
   });
 
   it("handles surrogate pairs at the cap boundary without a lone surrogate", () => {

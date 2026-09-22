@@ -163,6 +163,18 @@ function getStatusWord(status: string): string {
   }
 }
 
+/** Completion-report glyph: success only for terminal success statuses. */
+function getStatusGlyph(status: string): string {
+  switch (status) {
+    case "completed":
+    case "steered": return "✓";
+    case "error":
+    case "stopped":
+    case "aborted": return "✗";
+    default: return "○";
+  }
+}
+
 /**
  * Collapse newlines/CRs/tabs and strip control/invisible characters from text
  * that is composed into the report header or metadata lines.
@@ -186,12 +198,27 @@ function headerPreview(s: string): string {
   return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
 }
 
+/** The settings contract for the failure preview cap: a positive integer. */
+function isValidFailurePreviewCap(value: number): boolean {
+  return Number.isInteger(value) && value >= 1;
+}
+
+/**
+ * @internal Coerce the in-memory failure preview cap for the send path:
+ * an out-of-contract value (a settings regression) falls back to the default
+ * instead of throwing away the completion.
+ */
+export function effectiveFailurePreviewCap(value: number): number {
+  return isValidFailurePreviewCap(value) ? value : DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
+}
+
 /** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
 function failurePreviewCap(settings: SubagentsSettings): number {
-  if (typeof settings.failurePreviewMaxChars !== "number") {
+  const cap = settings.failurePreviewMaxChars;
+  if (typeof cap !== "number" || !isValidFailurePreviewCap(cap)) {
     throw new Error("failurePreviewMaxChars must be a number on failure status");
   }
-  return settings.failurePreviewMaxChars;
+  return cap;
 }
 
 /** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
@@ -234,10 +261,9 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   if (Number.isFinite(record.compactionCount) && record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
   if (Number.isFinite(durationMs) && durationMs > 0) stats.push(formatMs(durationMs));
 
-  const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
-  let header = `**${isError ? "✗" : "✓"} Subagent ${getStatusWord(record.status)}: ${description}**`;
+  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status)}: ${description}**`;
   const errorText = record.error && (record.status === "error" || record.status === "stopped")
     ? sanitizeHeaderText(String(record.error))
     : "";
@@ -376,7 +402,7 @@ export default function (pi: ExtensionAPI) {
     try {
       pi.sendMessage({
         customType: "subagent-notification",
-        content: formatTaskNotification(record, { failurePreviewMaxChars }),
+        content: formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }),
         display: true,
       }, { deliverAs: "steer", triggerTurn: true });
     } catch (err) {

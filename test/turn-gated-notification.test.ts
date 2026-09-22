@@ -33,6 +33,19 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+vi.mock("../src/settings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/settings.js")>();
+  return {
+    ...actual,
+    // The real loader only ever supplies sanitized positive integers. Force an
+    // out-of-contract in-memory cap so the send path's fallback gets exercised.
+    applyAndEmitLoaded: (appliers: { setFailurePreviewMaxChars: (n: number) => void }) => {
+      appliers.setFailurePreviewMaxChars(Number.NaN);
+      return {};
+    },
+  };
+});
+
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
@@ -229,6 +242,30 @@ describe("turn-gated completion notifications", () => {
     await lifecycle.get("session_shutdown")({}, ctx());
     await vi.advanceTimersByTimeAsync(1000);
     expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("still sends a capped failure notification when the in-memory cap is out of contract", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "failing task", subagent_type: "general-purpose", run_in_background: true },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    expect(textOf(spawn)).toContain("Agent ID:");
+    await vi.advanceTimersByTimeAsync(300); // hold window
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.content).toContain("**✗ Subagent error: failing task** — boom");
+    expect(payload.content).toContain("Result:\n\nboom");
   });
 
   it("two mid-turn completions park two nudges and release both at the next boundary", async () => {
