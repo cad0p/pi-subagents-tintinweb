@@ -152,6 +152,45 @@ describe("ScheduleStore", () => {
     expect(promoted).not.toHaveBeenCalled();
   });
 
+  it("does not let a throwing onPromoted listener fail a committed mutation", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, []);
+    const store = new ScheduleStore(file);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const promoted = vi.fn(() => { throw new Error("listener blew up"); });
+    store.onPromoted = promoted;
+
+    // Another writer adds a record between loads, so the next mutation really
+    // drains a promotion into the throwing listener.
+    writeStoreFile(file, [makeJob({ id: "late" })]);
+    const trigger = makeJob({ id: "trigger" });
+    expect(() => store.add(trigger)).not.toThrow();
+
+    // The mutation committed before the listener ran, and the drain is one-shot.
+    const fresh = new ScheduleStore(file);
+    expect(fresh.get("late")).toBeDefined();
+    expect(fresh.get("trigger")).toBeDefined();
+    store.update(trigger.id, { lastStatus: "error" });
+    expect(promoted).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed: listener blew up"));
+  });
+
+  it("surfaces a save failure even when the onPromoted listener throws", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, []);
+    const store = new ScheduleStore(file);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    store.onPromoted = () => { throw new Error("listener blew up"); };
+
+    // Another writer adds a record, then this mutation fails to serialize: the
+    // original storage error must reach the caller, not the listener's.
+    writeStoreFile(file, [makeJob({ id: "late" })]);
+    const poison: ScheduledSubagent & { self?: unknown } = { ...makeJob({ id: "poison" }) };
+    poison.self = poison; // circular — JSON.stringify throws
+    expect(() => store.add(poison)).toThrow(/Failed to serialize schedule store/);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed: listener blew up"));
+  });
+
   it("hasName excludes a given id (for rename safety)", () => {
     const store = new ScheduleStore(join(tmp, "s.json"));
     const job = makeJob({ name: "alpha" });

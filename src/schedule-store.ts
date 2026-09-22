@@ -345,12 +345,22 @@ export class ScheduleStore {
     }
   }
 
-  /** Report ids the last load promoted, now that the lock is gone. */
+  /**
+   * Report ids the last load promoted, now that the lock is gone. A consumer
+   * callback failure is contained and logged: the mutation has already
+   * committed, and letting the listener's throw escape would either mask an
+   * in-flight save error or make a persisted mutation report failure.
+   */
   private drainPromoted(): void {
     const ids = this.pendingPromoted;
     if (ids.length === 0) return;
     this.pendingPromoted = [];
-    this.onPromoted?.(ids);
+    try {
+      this.onPromoted?.(ids);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[pi-subagents] ${this.filePath}: onPromoted callback failed: ${message}`);
+    }
   }
 
   /** Read-only — returns a snapshot of the in-memory cache. */
