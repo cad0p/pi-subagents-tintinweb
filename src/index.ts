@@ -158,23 +158,25 @@ function getStatusWord(status: string): string {
     case "stopped": return "stopped";
     case "aborted": return "aborted";
     case "steered": return "wrapped up (turn limit)";
-    default: return sanitizeHeaderText(status) || "unknown";
+    default: return sanitizeHeaderText(String(status)) || "unknown";
   }
 }
 
 /**
  * Strip terminal control sequences and invisible/forging characters, keeping
- * tab, newlines, and printable non-ASCII. Complete OSC/CSI sequences are
- * consumed whole; a dangling introducer goes with its ESC/C1 byte so no
- * `[2J`/`]8;;`-style residue is left. A guard against terminal control and
- * invisible text, not a content filter.
+ * tab, LF, and printable non-ASCII. Complete OSC/CSI sequences are consumed
+ * whole; a dangling introducer goes with its ESC/C1 byte so no `[2J`/`]8;;`-
+ * style residue is left. CR is dropped, so CRLF collapses to LF and a lone CR
+ * cannot overwrite the rendered line. A guard against terminal control and
+ * invisible text, not a content filter: markdown and XML-ish characters pass
+ * through untouched.
  */
 function stripControlChars(s: string): string {
   return s
     .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // complete OSC: ESC ] … BEL | ST
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // complete CSI: ESC [ … final byte
     .replace(/[\u001b\u009b][[\]()#;?]*/g, "") // dangling ESC/C1 plus its introducer
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200d\u2028\u2029\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "");
+    .replace(/[\x00-\x08\x0b-\x0d\x0e-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200d\u200e\u200f\u2028\u2029\u202a-\u202e\u2060-\u2069\ufeff]/g, "");
 }
 
 /**
@@ -200,17 +202,26 @@ function headerPreview(s: string): string {
   return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
 }
 
+/** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
+function failurePreviewCap(settings: SubagentsSettings): number {
+  if (typeof settings.failurePreviewMaxChars !== "number") {
+    throw new Error("failurePreviewMaxChars must be a number on failure status");
+  }
+  return settings.failurePreviewMaxChars;
+}
+
 /** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
   const isFailure = record.status === "error" || record.status === "stopped";
-  // `record.result` bodies are accepted raw (Call 12); the error fallback is the
-  // same string the header sanitizes, so strip terminal controls from it too.
-  const body = record.result ?? (isFailure ? stripControlChars(String(record.error ?? "")) : record.error ?? "");
+  // Terminal-safety strip only: markdown structure and XML-ish text pass
+  // through untouched, while escape/control bytes (OSC clipboard writes and
+  // links, CSI screen clears, C0/C1, invisible format characters) never reach
+  // the terminal.
+  const body = stripControlChars(String(record.result ?? record.error ?? ""));
+  // Validate before the empty-body return: the metadata `Error:` line uses the
+  // same cap and must see the same validated value.
+  const cap = isFailure ? failurePreviewCap(settings) : Number.POSITIVE_INFINITY;
   if (!body) return "No output.";
-  if (isFailure && typeof settings.failurePreviewMaxChars !== "number") {
-    throw new Error("buildResultPreview: failurePreviewMaxChars must be a number on failure status");
-  }
-  const cap = isFailure ? (settings.failurePreviewMaxChars as number) : Number.POSITIVE_INFINITY;
   return body.length > cap
     ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
     : body;
@@ -219,8 +230,9 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
 /**
  * @internal Format a background completion as a markdown report. The report is
  * both the parent model's context and the text pi renders in its default
- * custom-message box, so it carries no ANSI and puts the body last (an
- * unbalanced fence in it cannot swallow the metadata above).
+ * custom-message box: terminal control sequences are stripped from every field
+ * while markdown stays intact, and the body goes last (an unbalanced fence in
+ * it cannot swallow the metadata above).
  */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
@@ -256,7 +268,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   // The header only previews the error. When a partial result replaces the error
   // in the body, carry the full sanitized error here so its tail is not lost.
   if (errorText.length > HEADER_PREVIEW_MAX_CHARS && record.result != null) {
-    const cap = settings.failurePreviewMaxChars as number; // validated by buildResultPreview above
+    const cap = failurePreviewCap(settings); // same validated cap as the body
     const fullError = errorText.length > cap ? `${safeTruncate(errorText, cap)}\n…(truncated, see transcript)` : errorText;
     metadata.push(`Error: ${fullError}`);
   }
@@ -912,9 +924,10 @@ Terse command-style prompts produce shallow, generic work.
 
     renderResult(result, { expanded, isPartial }, theme) {
       const details = result.details as AgentDetails | undefined;
+      // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
         const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(text, 0, 0);
+        return new Text(stripControlChars(text), 0, 0);
       }
 
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
@@ -934,7 +947,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        return renderRunningAgentStatus(frame, s, details.activity ?? "thinking…", theme);
+        return renderRunningAgentStatus(frame, s, stripControlChars(details.activity ?? "thinking…"), theme);
       }
 
       // ---- Background agent launched ----
@@ -952,7 +965,7 @@ Terse command-style prompts produce shallow, generic work.
         line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
 
         if (expanded) {
-          const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
+          const resultText = stripControlChars(result.content[0]?.type === "text" ? result.content[0].text : "");
           if (resultText) {
             const lines = resultText.split("\n").slice(0, 50);
             for (const l of lines) {
@@ -982,7 +995,7 @@ Terse command-style prompts produce shallow, generic work.
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
       if (details.status === "error") {
-        line += "\n" + theme.fg("error", `  ⎿  Error: ${details.error ?? "unknown"}`);
+        line += "\n" + theme.fg("error", `  ⎿  Error: ${stripControlChars(String(details.error ?? "")) || "unknown"}`);
       } else {
         line += "\n" + theme.fg("warning", "  ⎿  Aborted (max turns exceeded)");
       }
@@ -1390,7 +1403,7 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, _options, theme) {
       const report = result.content[0]?.type === "text" ? result.content[0].text : "";
       // Display copy only: the tool text returned to the parent model keeps its
-      // raw bytes (Call 12 posture for result/error bodies).
+      // raw bytes.
       const display = stripControlChars(report);
       return display
         ? new Markdown(display, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
