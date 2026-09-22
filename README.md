@@ -81,7 +81,7 @@ Schedule formats:
 
 When a schedule fires, the spawn runs in background and its completion notification arrives in the conversation through the same steering-queue path as a manually-spawned background agent — your parent agent reasons about the result the same way.
 
-Interval delays are capped by the JS timer ceiling (2,147,483,647 ms, ~24.8 days): longer intervals are rejected at creation, while a one-shot further out stays scheduled and arms once it falls within range.
+Interval delays are capped by the JS timer ceiling (2,147,483,647 ms, ~24.8 days): longer intervals are rejected at creation, while a one-shot further out stays scheduled and arms at a later scheduler start once it falls within range.
 
 Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`. List and cancel via `/agents → Scheduled jobs` (creation is the `Agent` tool's job — there is no parallel manual-create wizard). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json` with PID-based file locking for cross-instance safety.
 

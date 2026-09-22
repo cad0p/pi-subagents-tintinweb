@@ -25,9 +25,9 @@ import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
- * Smallest armable interval. The parsers' smallest unit is one second, so
- * anything sub-second can only come from a corrupt store — and Node clamps
- * such a delay to 1 ms like any other out-of-range value.
+ * Smallest armable interval. The parsers' smallest unit is one second, so a
+ * sub-second value can only come from a corrupt store; the values closest to
+ * zero are the ones Node clamps to ~1 ms.
  */
 const MIN_ARMABLE_INTERVAL_MS = 1000;
 

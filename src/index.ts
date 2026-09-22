@@ -755,7 +755,7 @@ export default function (pi: ExtensionAPI) {
         description:
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-          'Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm once closer. ' +
+          'Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. ' +
           'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
