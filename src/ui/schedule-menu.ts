@@ -41,6 +41,9 @@ function statusIcon(j: ScheduledSubagent): string {
 /** Compact selectable row — name, schedule, agent type, next/last run, count. */
 function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id);
+  // runCount is typed number but comes from unvalidated JSON; coerce before the
+  // single-line sanitizer, which returns "" for non-string input.
+  const runCount = Number(j.runCount);
   return [
     statusIcon(j),
     safeTruncate(toSingleLine(j.name), 18).padEnd(18),
@@ -48,7 +51,7 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
     `[${toSingleLine(j.subagent_type)}]`,
     `next ${relTime(next)}`,
     `last ${relTime(j.lastRun)}`,
-    `runs ${j.runCount}`,
+    `runs ${toSingleLine(String(Number.isFinite(runCount) ? runCount : 0))}`,
   ].join("  ");
 }
 

@@ -120,6 +120,23 @@ describe("showSchedulesMenu", () => {
     expect(lines.slice(9)).toEqual(["line one", "line two"]);
   });
 
+  it("collapses a forged run count in the select row label", async () => {
+    const osc = "\u001b]0;evil\u0007";
+    const jobs = [
+      job({ id: "job-1", runCount: `7\r\nruns: 999${osc}` as unknown as number }),
+    ];
+    const { scheduler } = fakeScheduler(jobs);
+    const { ctx, labels } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+
+    expect(labels[0]).toHaveLength(1);
+    expect(labels[0][0]).toContain("runs 0");
+    expect(labels[0][0]).not.toContain("\u001b");
+    expect(labels[0][0]).not.toContain("\n");
+    expect(labels[0][0]).not.toContain("\r");
+  });
+
   it("truncates a padded name on a code-point boundary", async () => {
     const name = `${"a".repeat(17)}😀tail`;
     const { scheduler } = fakeScheduler([job({ id: "job-1", name })]);
