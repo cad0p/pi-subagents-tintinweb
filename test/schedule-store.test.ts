@@ -221,12 +221,27 @@ describe("ScheduleStore", () => {
     expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["repaired"]);
   });
 
+  it("warns when the file is not a store object and repairs it on the next save", () => {
+    const file = join(tmp, "s.json");
+    writeFileSync(file, JSON.stringify([1, 2, 3]));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/not a versioned store object/i);
+
+    store.add(makeJob({ id: "repaired" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["repaired"]);
+  });
+
   const NO_ID: Array<[string, Record<string, unknown>]> = [
     ["missing", {}],
     ["empty", { id: "" }],
-    ["non-string", { id: 42 }],
+    ["not a string", { id: 42 }],
   ];
-  it.each(NO_ID)("skips a record with a %s id and preserves it on disk", (_name, idPatch) => {
+  it.each(NO_ID)("skips a record whose id is %s and preserves it on disk", (_name, idPatch) => {
     const file = join(tmp, "s.json");
     const raw = makeRawJob(idPatch);
     writeStoreFile(file, [raw]);

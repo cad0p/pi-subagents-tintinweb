@@ -145,6 +145,7 @@ export class ScheduleStore {
   /** Skipped entries that could not be re-serialized; dropped instead of wedging save(). */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
+  private fileShapeInvalid = false;
   /** Signature of the last skip set we warned about, so repeated locked loads stay quiet. */
   private warnedSkips: string | undefined;
 
@@ -197,6 +198,7 @@ export class ScheduleStore {
     this.skipped = skipped;
     this.droppedCount = dropped;
     this.jobsContainerInvalid = rawJobs !== undefined && !Array.isArray(rawJobs);
+    this.fileShapeInvalid = !isRecord(parsed);
     this.warnAboutSkips();
   }
 
@@ -206,6 +208,7 @@ export class ScheduleStore {
       this.skipped.map(skipSignature).join(","),
       `dropped:${this.droppedCount}`,
       `container:${this.jobsContainerInvalid}`,
+      `file:${this.fileShapeInvalid}`,
     ].join("|");
     if (signature === this.warnedSkips) return;
     this.warnedSkips = signature;
@@ -213,6 +216,7 @@ export class ScheduleStore {
     if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
     if (this.droppedCount > 0) details.push(`${this.droppedCount} unserializable scheduled-job record(s) dropped`);
     if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
+    if (this.fileShapeInvalid) details.push("the file is not a versioned store object and will be rewritten");
     if (details.length === 0) return;
     console.warn(`[pi-subagents] ${this.filePath}: ${details.join("; ")}. Repair or remove invalid entries there.`);
   }
