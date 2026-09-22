@@ -396,7 +396,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files.
 
-**Failure preview** (`failurePreviewMaxChars`, default `65536`): caps the `Result:` body of `error`/`stopped` completion notifications; the full text stays in the transcript.
+**Failure preview** (`failurePreviewMaxChars`, default `65536`): caps the `Result:` body of `error`/`stopped` completion notifications. The untruncated text remains available via `get_subagent_result` and the session record (and in the transcript when one exists).
 
 **Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` is the rich Claude Code-style prompt (~1,400 tokens with the default agents); `"compact"` is ~75% smaller — one-line agent type list, terse usage notes — for small/local models where tool-spec tokens are expensive. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
 
