@@ -171,7 +171,7 @@ export class ScheduleStore {
    * their own list so a freed id can never re-promote them to live jobs.
    */
   private shadowed: unknown[] = [];
-  /** Skipped entries dropped at load — too deeply nested or not re-serializable. */
+  /** Skipped entries dropped at load — too deeply nested. */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
   private fileShapeInvalid = false;
@@ -182,12 +182,12 @@ export class ScheduleStore {
   /**
    * Called by load() with the ids that were live in the previous cache but are
    * not live after an existing-file reload — records reclassified into
-   * `skipped` (invalid type/cron/interval) or deleted from the file by another
-   * writer. The scheduler binds this to clear timers that would otherwise keep
-   * ticking a record the live set no longer contains. Never called when load()
-   * keeps the previous state: a missing file (including one deleted
-   * mid-session, which therefore takes effect at the next session start) or
-   * corrupt JSON.
+   * `skipped` (unknown agent type or unparseable cron) or deleted from the file
+   * by another writer. The scheduler binds this to clear timers that would
+   * otherwise keep ticking a record the live set no longer contains. Never
+   * called when load() keeps the previous state: a missing file (the kept
+   * in-memory state is re-written by the next save, so a mid-session deletion
+   * only sticks if the session ends before that write) or corrupt JSON.
    */
   onReclassified: ((ids: string[]) => void) | undefined;
   /**
@@ -294,7 +294,7 @@ export class ScheduleStore {
     const details: string[] = [];
     if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
     if (this.shadowed.length > 0) details.push(`${this.shadowed.length} shadowed duplicate record(s) retained verbatim on disk and discarded when their id is deleted`);
-    if (this.droppedCount > 0) details.push(`${this.droppedCount} scheduled-job record(s) dropped (too deeply nested or not re-serializable)`);
+    if (this.droppedCount > 0) details.push(`${this.droppedCount} scheduled-job record(s) dropped (too deeply nested)`);
     if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
     if (this.fileShapeInvalid) details.push("the file is not a versioned store object and will be rewritten");
     if (details.length === 0) return;
