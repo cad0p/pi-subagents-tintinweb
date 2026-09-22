@@ -249,6 +249,80 @@ describe("markdown completion report", () => {
     expect(report).toContain("Transcript: /tmp/p.tmp");
   });
 
+  it("strips terminal controls from the result body while keeping markdown and text", () => {
+    const control = "\u001b[2J\u001b]8;;https://evil.example\u0007\u001b]52;c;cGF3bmVk\u0007";
+    const report = formatTaskNotification(
+      createRecord({ result: `paid${control}CLICK\n# Heading\n**bold** & <tag>` }),
+      settings,
+    );
+    expect(report).not.toContain("\u001b");
+    expect(report).not.toContain("[2J");
+    expect(report).not.toContain("]8;;");
+    expect(report).toContain("Result:\n\npaidCLICK\n# Heading\n**bold** & <tag>");
+  });
+
+  it("strips terminal controls from the error fallback body and metadata Error line", () => {
+    const control = "\u001b[2J\u001b]8;;https://evil.example\u0007\u001b]52;c;cGF3bmVk\u0007";
+    const fallback = formatTaskNotification(
+      createRecord({ status: "error", error: `boom${control}click`, result: undefined }),
+      settings,
+    );
+    expect(fallback).not.toContain("\u001b");
+    expect(fallback).not.toContain("[2J");
+    expect(fallback).not.toContain("]8;;");
+    expect(fallback).toContain("Result:\n\nboomclick");
+
+    const metadata = formatTaskNotification(
+      createRecord({ status: "error", error: `${"e".repeat(400)}${control}`, result: "partial output" }),
+      settings,
+    );
+    expect(metadata).not.toContain("\u001b");
+    expect(metadata).toContain(`\nError: ${"e".repeat(400)}\n`);
+  });
+
+  it("strips the extended invisible/format set from the description and body", () => {
+    const invisibles = ["\u00ad", "\u061c", "\u180e", "\u2061", "\u2062", "\u2063", "\u2064", "\u2065"];
+    for (const ch of invisibles) {
+      const report = formatTaskNotification(
+        createRecord({ description: `a${ch}b`, result: `x${ch}y` }),
+        settings,
+      );
+      expect(report.split("\n")[0]).toContain("Subagent completed: ab");
+      expect(report).toContain("Result:\n\nxy");
+      expect(report).not.toContain(ch);
+    }
+  });
+
+  it("consumes a dangling ESC/C1 introducer with its escape byte", () => {
+    for (const dangling of ["boom\u001b[", "boom\u001b]", "boom\u009b"]) {
+      const report = formatTaskNotification(
+        createRecord({ status: "error", error: dangling, result: undefined }),
+        settings,
+      );
+      expect(report).not.toContain("\u001b");
+      expect(report).not.toContain("\u009b");
+      const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
+      expect(body).toBe("boom");
+    }
+  });
+
+  it("drops CR from bodies while keeping LF line breaks", () => {
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: "a\r\nb\rc", result: undefined }),
+      settings,
+    );
+    expect(report).toContain("Result:\n\na\nbc");
+    expect(report).not.toContain("\r");
+  });
+
+  it("does not throw on a non-string status and always renders a one-line header", () => {
+    for (const status of [42, null, undefined, {}]) {
+      const report = formatTaskNotification(createRecord({ status: status as any, result: "wip" }), settings);
+      expect(report.split("\n")[0]).toContain("Subagent ");
+      expect(report.split("\n")[0]).not.toMatch(/[\u0000-\u001f]/);
+    }
+  });
+
   it("keeps a control-byte status from breaking the one-line header", () => {
     const report = formatTaskNotification(
       createRecord({ status: "completed\u0000\nforged" as any, result: "wip" }),
@@ -258,6 +332,11 @@ describe("markdown completion report", () => {
       "**✓ Subagent completed forged: Test Agent** · 2 tool uses · 150 token · 5.0s",
     );
     expect(report).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
+  });
+
+  it("renders unknown for a status that sanitizes to empty", () => {
+    const report = formatTaskNotification(createRecord({ status: "\u0000" as any, result: "wip" }), settings);
+    expect(report.split("\n")[0]).toContain("**✓ Subagent unknown: Test Agent**");
   });
 
   it("does not leave a dangling separator when the error sanitizes to empty", () => {
@@ -344,6 +423,32 @@ describe("markdown completion report", () => {
     );
     expect(report).not.toContain("Error:");
     expect(report.split("\n")[0]).toContain("— short error");
+  });
+
+  it("emits the metadata Error line for an empty-string result and keeps No output.", () => {
+    const longError = "e".repeat(1000);
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: longError, result: "" }),
+      settings,
+    );
+    expect(report).toContain(`\nError: ${longError}\n`);
+    expect(report).toContain("Result:\n\nNo output.");
+  });
+
+  it("omits the metadata Error line when the result is undefined (the body carries it)", () => {
+    const longError = `head-${"e".repeat(1000)}-tail`;
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: longError, result: undefined }),
+      settings,
+    );
+    expect(report).not.toContain("Error:");
+    expect(report).toContain(`Result:\n\n${longError}`);
+  });
+
+  it("throws on the empty-body metadata path when failurePreviewMaxChars is missing", () => {
+    expect(() =>
+      formatTaskNotification(createRecord({ status: "error", error: "e".repeat(400), result: "" }), {}),
+    ).toThrow(/failurePreviewMaxChars must be a number/);
   });
 
   it("renders a placeholder when the description is missing or empty", () => {

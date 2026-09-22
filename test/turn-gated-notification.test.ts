@@ -35,6 +35,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import type { AgentDetails } from "../src/ui/agent-widget.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -252,6 +253,65 @@ describe("turn-gated completion notifications", () => {
     const contents = pi.sendMessage.mock.calls.map((call: any[]) => call[0].content as string).join("\n");
     expect(contents).toContain("**✓ Subagent completed: first task**");
     expect(contents).toContain("**✓ Subagent completed: second task**");
+  });
+});
+
+describe("foreground Agent result rendering", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const control = "\u001b[2J\u001b]8;;https://evil.example\u0007\u001b]52;c;cGF3bmVk\u0007";
+
+  function details(overrides: Partial<AgentDetails>): AgentDetails {
+    return {
+      displayName: "Agent",
+      description: "d",
+      subagentType: "general-purpose",
+      toolUses: 1,
+      tokens: "1.0k token",
+      durationMs: 1000,
+      status: "completed",
+      ...overrides,
+    };
+  }
+
+  it("expanded results strip terminal controls from the display copy but not the tool text", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const text = `# Report\n${control}BOOM`;
+    const res = {
+      content: [{ type: "text" as const, text }],
+      details: details({ status: "completed" }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: true, isPartial: false }, mockTheme);
+    expect(rendered.text).not.toContain("\u001b");
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).not.toContain("]8;;");
+    expect(rendered.text).not.toContain("\u009f");
+    expect(rendered.text).toContain("# Report");
+    expect(rendered.text).toContain("BOOM");
+    // The tool text handed to the model keeps its raw bytes.
+    expect(res.content[0].text).toBe(text);
+  });
+
+  it("error lines strip terminal controls from the display copy", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const text = `Agent failed: ${control}connection reset`;
+    const res = {
+      content: [{ type: "text" as const, text }],
+      details: details({ status: "error", error: `${control}connection reset` }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme);
+    expect(rendered.text).not.toContain("\u001b");
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).not.toContain("]8;;");
+    expect(rendered.text).toContain("Error: connection reset");
+    // The tool text handed to the model keeps its raw bytes.
+    expect(res.content[0].text).toBe(text);
   });
 });
 
