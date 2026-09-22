@@ -182,15 +182,27 @@ describe("AgentWidget", () => {
     expect(finishedLines).toContain("error: errtail");
   });
 
-  it("collapses newlines and tabs in the record description", () => {
-    const manager = {
+  it("collapses newlines and tabs in the record description on running and finished rows", () => {
+    const running = {
       listAgents: () => [{
         ...makeRecord("multiline", { isBackground: true }),
         description: "line one\nline two\tend",
       }],
     };
-    const lines = renderLines(manager, "multiline", () => "background");
-    expect(lines).toContain("line one line two end");
+    expect(renderLines(running, "multiline", () => "background")).toContain("line one line two end");
+
+    const finished = {
+      listAgents: () => [{
+        ...makeRecord("multiline-finished", { isBackground: true }),
+        status: "error",
+        completedAt: Date.now(),
+        description: "line one\nline two\tend",
+        error: "err\nsecond line",
+      }],
+    };
+    const finishedLines = renderLines(finished, "multiline-finished", () => "background");
+    expect(finishedLines).toContain("line one line two end");
+    expect(finishedLines).toContain("error: err second line");
   });
 
   it("sanitizes a frontmatter display_name at both widget name sites", () => {

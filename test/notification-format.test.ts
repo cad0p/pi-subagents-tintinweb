@@ -675,17 +675,20 @@ describe("markdown completion report", () => {
 
   it("falls back to the default cap and warns once while an out-of-contract value persists", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5, FAILURE_PREVIEW_MAX_CHARS_CEILING + 1];
-    for (const bad of bads) {
-      expect(effectiveFailurePreviewCap(bad)).toBe(65536);
+    try {
+      const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5, FAILURE_PREVIEW_MAX_CHARS_CEILING + 1];
+      for (const bad of bads) {
+        expect(effectiveFailurePreviewCap(bad)).toBe(65536);
+      }
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(bads[0])));
+      expect(effectiveFailurePreviewCap(1)).toBe(1);
+      expect(effectiveFailurePreviewCap(1000)).toBe(1000);
+      expect(effectiveFailurePreviewCap(FAILURE_PREVIEW_MAX_CHARS_CEILING)).toBe(FAILURE_PREVIEW_MAX_CHARS_CEILING);
+      expect(warn).toHaveBeenCalledTimes(1); // in-contract values stay silent
+    } finally {
+      warn.mockRestore();
     }
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(bads[0])));
-    expect(effectiveFailurePreviewCap(1)).toBe(1);
-    expect(effectiveFailurePreviewCap(1000)).toBe(1000);
-    expect(effectiveFailurePreviewCap(FAILURE_PREVIEW_MAX_CHARS_CEILING)).toBe(FAILURE_PREVIEW_MAX_CHARS_CEILING);
-    expect(warn).toHaveBeenCalledTimes(1); // in-contract values stay silent
-    warn.mockRestore();
   });
 
   it("handles surrogate pairs at the cap boundary without a lone surrogate", () => {
