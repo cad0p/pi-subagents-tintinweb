@@ -399,6 +399,20 @@ describe("foreground Agent result rendering", () => {
     expect(text).toContain("readfiles");
   });
 
+  it("collapses a newline in running activity so it cannot add a display line", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const res = {
+      content: [{ type: "text" as const, text: "partial" }],
+      details: details({ status: "running", activity: "read files\nforged: yes" }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
+    const text = rendered.render(120).join("\n");
+    expect(text).toContain("read files forged: yes");
+    expect(text).not.toContain("read files\nforged: yes");
+  });
+
   it("renderCall strips terminal controls from the description", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
@@ -629,6 +643,27 @@ describe("get_subagent_result terminal rendering", () => {
     expect(rendered.text).toContain("THE-RESULT-PAYLOAD");
   });
 
+  it("collapses a newline in a terminal record status", async () => {
+    const { pi, tools } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    const id = await spawnCompleting(tools);
+    await vi.advanceTimersByTimeAsync(0); // let the completion microtasks land
+
+    // Unexpected terminal status value, as a corrupted or resumed record can
+    // carry. It still renders through the completed-header path.
+    const record = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+    expect(record.status).toBe("completed");
+    record.status = "completed\nforged: yes";
+
+    const result = await tools.get("get_subagent_result").execute("tc-gsr", { agent_id: id }, undefined, undefined, ctx());
+    const text = textOf(result);
+    expect(text).toContain("Status: completed forged: yes");
+    expect(text).not.toContain("completed\n");
+  });
+
   it("running results render as markdown too", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
     const { pi, tools } = makePi();
@@ -741,6 +776,43 @@ describe("agents command terminal surfaces", () => {
     expect(runningMenu?.options[0]).toContain("(desctail forged)");
     expect(runningMenu?.options.join("\n")).not.toContain("\u001b");
     expect(notifications.map(n => n.message)).toContain('Stopped "desctail forged".');
+  });
+
+  it("collapses a newline in a record status in the running-agents menu", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
+    const { pi, tools, commands } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+
+    const { c, selects } = commandCtx((title, options) => {
+      if (title === "Agents") {
+        return selects.filter(s => s.title === "Agents").length <= 1
+          ? options.find(o => o.startsWith("Running agents ("))
+          : undefined;
+      }
+      return undefined;
+    });
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, c,
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    expect(id).toBeTruthy();
+
+    // Unexpected status value: the option renders the raw status word, so the
+    // payload must be collapsed rather than split across lines.
+    (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status = "running\u001b]52;c;cGF3bmVk\u0007\nforged";
+
+    await commands.get("agents").handler("", c);
+
+    const runningMenu = selects.find(s => s.title === "Running agents");
+    expect(runningMenu).toBeDefined();
+    const joined = runningMenu?.options.join("\n") ?? "";
+    expect(joined).toContain("running forged");
+    expect(joined).not.toContain("\u001b");
+    expect(joined).not.toContain("\nforged");
   });
 
   it("collapses a frontmatter display_name in the running-agents menu", async () => {
