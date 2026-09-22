@@ -281,4 +281,39 @@ describe("ScheduleStore", () => {
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
     expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", "bad-type"]);
   });
+
+  it("drops a preserved entry that cannot be re-serialized instead of wedging save()", () => {
+    const file = join(tmp, "s.json");
+    // JSON.parse tolerates ~10k nesting; JSON.stringify overflows the stack.
+    const deep = "[".repeat(12_000) + "]".repeat(12_000);
+    writeFileSync(file, `{"version":1,"jobs":[${deep},${JSON.stringify(makeJob({ id: "valid" }))}]}`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["valid"]);
+    expect(warn.mock.calls[0][0]).toMatch(/dropped/i);
+
+    // add and cancel keep working: the unserializable entry never reaches save().
+    expect(() => store.add(makeJob({ id: "second" }))).not.toThrow();
+    expect(store.remove("valid")).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["second"]);
+    expect(existsSync(file + ".tmp")).toBe(false);
+  });
+
+  it("keeps the first duplicate id live and preserves the shadowed record", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0].name).toBe("first");
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The shadowed duplicate survives the next save.
+    store.add(makeJob({ id: "other", name: "other" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.name)).toEqual(["first", "other", "second"]);
+  });
 });

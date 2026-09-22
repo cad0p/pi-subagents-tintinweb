@@ -77,6 +77,21 @@ function skipSignature(raw: unknown): string {
   return typeof raw === "object" && raw !== null ? "object" : typeof raw;
 }
 
+/**
+ * Queue a record for verbatim re-write on save, but only when it round-trips
+ * through JSON.stringify: a preserved record that cannot be serialized would
+ * make every later save() throw. Returns false when the record was dropped.
+ */
+function preserveSkipped(raw: unknown, into: unknown[]): boolean {
+  try {
+    JSON.stringify(raw);
+  } catch {
+    return false;
+  }
+  into.push(raw);
+  return true;
+}
+
 function isProcessRunning(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -120,6 +135,8 @@ export class ScheduleStore {
   private jobs = new Map<string, ScheduledSubagent>();
   /** Raw entries load() could not sanitize; written back on save so no user data is erased. */
   private skipped: unknown[] = [];
+  /** Skipped entries that could not be re-serialized; dropped instead of wedging save(). */
+  private droppedCount = 0;
   private jobsContainerInvalid = false;
   /** Signature of the last skip set we warned about, so repeated locked loads stay quiet. */
   private warnedSkips: string | undefined;
@@ -155,31 +172,42 @@ export class ScheduleStore {
     const entries = Array.isArray(rawJobs) ? rawJobs : [];
     const jobs = new Map<string, ScheduledSubagent>();
     const skipped: unknown[] = [];
+    let dropped = 0;
     for (const raw of entries) {
       const job = sanitizeJob(raw);
-      if (job) jobs.set(job.id, job);
-      else skipped.push(raw);
+      if (!job) {
+        if (!preserveSkipped(raw, skipped)) dropped++;
+        continue;
+      }
+      if (jobs.has(job.id)) {
+        // First record wins; keep the shadowed duplicate so save() cannot erase it.
+        if (!preserveSkipped(raw, skipped)) dropped++;
+        continue;
+      }
+      jobs.set(job.id, job);
     }
     this.jobs = jobs;
     this.skipped = skipped;
+    this.droppedCount = dropped;
     this.jobsContainerInvalid = rawJobs !== undefined && !Array.isArray(rawJobs);
     this.warnAboutSkips();
   }
 
-  /** Warn once per distinct skip set — load() runs before every mutation. */
+  /** Warn once per distinct invalid-entry summary — load() runs before every mutation. */
   private warnAboutSkips(): void {
-    const signatures = [
-      ...(this.jobsContainerInvalid ? ["jobs-not-array"] : []),
-      ...this.skipped.map(skipSignature),
-    ];
-    const signature = signatures.join("|");
+    const signature = [
+      this.skipped.map(skipSignature).join(","),
+      `dropped:${this.droppedCount}`,
+      `container:${this.jobsContainerInvalid}`,
+    ].join("|");
     if (signature === this.warnedSkips) return;
     this.warnedSkips = signature;
-    if (signatures.length === 0) return;
-    console.warn(
-      `[pi-subagents] Skipped ${signatures.length} invalid scheduled-job record(s) in ${this.filePath}; ` +
-        "they are kept on disk but hidden from the scheduler. Repair or remove them there.",
-    );
+    const details: string[] = [];
+    if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
+    if (this.droppedCount > 0) details.push(`${this.droppedCount} unserializable scheduled-job record(s) dropped`);
+    if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
+    if (details.length === 0) return;
+    console.warn(`[pi-subagents] ${this.filePath}: ${details.join("; ")}. Repair or remove invalid entries there.`);
   }
 
   /** Atomic write via temp file + rename (POSIX-atomic). */
@@ -190,9 +218,24 @@ export class ScheduleStore {
       version: 1,
       jobs: [...this.jobs.values(), ...(this.skipped as ScheduledSubagent[])],
     };
+    let json: string;
+    try {
+      json = JSON.stringify(data, null, 2);
+    } catch (err) {
+      // Fail before touching the file: the previous contents stay intact and a
+      // clear error reaches the caller instead of a bare RangeError.
+      throw new Error(
+        `Failed to serialize schedule store ${this.filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     const tmp = this.filePath + ".tmp";
-    writeFileSync(tmp, JSON.stringify(data, null, 2));
-    renameSync(tmp, this.filePath);
+    try {
+      writeFileSync(tmp, json);
+      renameSync(tmp, this.filePath);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   /** Acquire lock → reload → mutate → save → release. */
