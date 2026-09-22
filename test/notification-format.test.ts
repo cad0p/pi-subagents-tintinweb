@@ -8,6 +8,7 @@ const settings: SubagentsSettings = { failurePreviewMaxChars: 65536 };
 function createRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "test-1",
+    type: "general-purpose",
     description: "Test Agent",
     status: "completed",
     toolUses: 2,
@@ -332,12 +333,48 @@ describe("markdown completion report", () => {
     expect(report).not.toMatch(/\u001b\[/);
   });
 
-  it("caps failure bodies with the truncation suffix", () => {
-    const report = formatTaskNotification(
+  it("caps error and stopped failure bodies with the truncation suffix", () => {
+    const errorReport = formatTaskNotification(
       createRecord({ status: "error", error: "x".repeat(100), result: undefined }),
       { failurePreviewMaxChars: 10 },
     );
-    expect(report).toContain(`Result:\n\n${"x".repeat(10)}\n…(truncated, see transcript)`);
+    expect(errorReport).toContain(`Result:\n\n${"x".repeat(10)}\n…(truncated, see transcript)`);
+
+    const stoppedReport = formatTaskNotification(
+      createRecord({ status: "stopped", error: "y".repeat(100), result: undefined }),
+      { failurePreviewMaxChars: 10 },
+    );
+    expect(stoppedReport).toContain(`Result:\n\n${"y".repeat(10)}\n…(truncated, see transcript)`);
+  });
+
+  it("does not crash on a bare low surrogate in the truncated span", () => {
+    const malformed = `hello${String.fromCharCode(0xdc00)}world`;
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: malformed, result: undefined }),
+      { failurePreviewMaxChars: 8 },
+    );
+    const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
+    expect(body).toBe(`hello${String.fromCharCode(0xdc00)}wo\n…(truncated, see transcript)`);
+    expect(report).not.toContain("\uFFFD");
+  });
+
+  it("does not truncate when the input length equals failurePreviewMaxChars", () => {
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: "hello", result: undefined }),
+      { failurePreviewMaxChars: 5 },
+    );
+    const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
+    expect(body).toBe("hello");
+    expect(report).not.toContain("truncated");
+  });
+
+  it("returns only the truncation marker when failurePreviewMaxChars is 0", () => {
+    const report = formatTaskNotification(
+      createRecord({ status: "error", error: "hello", result: undefined }),
+      { failurePreviewMaxChars: 0 },
+    );
+    const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
+    expect(body).toBe("\n…(truncated, see transcript)");
   });
 
   it("handles surrogate pairs at the cap boundary without replacement characters", () => {

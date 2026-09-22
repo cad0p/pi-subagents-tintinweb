@@ -17,6 +17,7 @@ const settings: SubagentsSettings = { failurePreviewMaxChars: 65536 };
 function createRecord(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "56493b20-4d5d-4de",
+    type: "general-purpose",
     description: "Find auth files",
     status: "completed",
     toolUses: 3,
@@ -40,6 +41,11 @@ function renderCustomMessage(content: string, width = 100): string {
   return component.render(width).join("\n");
 }
 
+/** Strip ANSI SGR sequences so assertions match the visible text. */
+function stripAnsi(s: string): string {
+  return s.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 describe("default custom-message rendering", () => {
   it("renders the report in pi's standard box with the customType label", () => {
     const rendered = renderCustomMessage(formatTaskNotification(createRecord(), settings));
@@ -48,6 +54,14 @@ describe("default custom-message rendering", () => {
     expect(rendered).toContain("Agent: 56493b20-4d5d-4de");
     expect(rendered).toContain("Result:");
     expect(rendered).toContain("Found 5 files related to authentication:");
+
+    // Markdown transform: the bold markers are consumed by the renderer, and
+    // the report carries no collapse affordance.
+    const stripped = stripAnsi(rendered);
+    expect(stripped).toContain("✓ Subagent completed: Find auth files");
+    expect(stripped).not.toContain("**✓");
+    expect(stripped).not.toContain("ctrl+O");
+    expect(stripped).not.toContain("more lines");
   });
 
   it("keeps Agent/Transcript/Result lines intact with a ---/#/unbalanced-fence body", () => {
@@ -63,6 +77,7 @@ describe("default custom-message rendering", () => {
     expect(rendered).toContain("Transcript: /tmp/tasks/56493b20-4d5d-4de.output");
     expect(rendered).toContain("Result:");
     expect(rendered).toContain("Heading");
+    expect(stripAnsi(rendered)).toContain("✓ Subagent completed: Find auth files");
   });
 
   it("renders a markdown table and list body", () => {
@@ -71,8 +86,11 @@ describe("default custom-message rendering", () => {
       settings,
     );
     const rendered = renderCustomMessage(report);
-    expect(rendered).toContain("one");
-    expect(rendered).toContain("two");
+    const stripped = stripAnsi(rendered);
+    expect(stripped).toContain("one");
+    expect(stripped).toContain("two");
+    // Markdown table transform: at least one border glyph survives rendering.
+    expect(stripped).toMatch(/[│┌]/);
   });
 
   it("replays a legacy XML notification entry without crashing", () => {
@@ -90,9 +108,12 @@ describe("default custom-message rendering", () => {
   });
 
   it("renders a ~100 KB body", () => {
-    const big = "x".repeat(100 * 1024);
-    const report = formatTaskNotification(createRecord({ result: big }), settings);
-    const rendered = renderCustomMessage(report, 200);
-    expect(rendered.length).toBeGreaterThan(100 * 1024);
+    const body = `HEAD-${"x".repeat(100 * 1024)}-TAIL`;
+    const report = formatTaskNotification(createRecord({ result: body }), settings);
+    const stripped = stripAnsi(renderCustomMessage(report, 200));
+    expect(stripped.length).toBeGreaterThan(100 * 1024);
+    // The head and tail of the body survive wrapping, not just its length.
+    expect(stripped).toContain("HEAD-");
+    expect(stripped).toContain("-TAIL");
   });
 });

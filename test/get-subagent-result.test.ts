@@ -243,6 +243,13 @@ describe("get_subagent_result output shapes", () => {
         "This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.",
       ].join("\n"),
     );
+
+    const tool = tools.get("get_subagent_result");
+    const rendered = tool.renderResult(res, { expanded: false, isPartial: false }, {
+      fg: (_color: string, text: string) => text,
+    });
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).toContain("queued — not started yet");
   });
 
   // ---- Shape 3: Completed, with checkpoint ----
@@ -340,6 +347,14 @@ describe("get_subagent_result output shapes", () => {
     );
 
     expect(textOf(res)).toBe(`Agent not found: "nope-1234". It may have been cleaned up.`);
+
+    const rendered = tools.get("get_subagent_result").renderResult(
+      res,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+    );
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).toContain(`Agent not found: "nope-1234"`);
   });
 
   // ---- Completed with NO output ----

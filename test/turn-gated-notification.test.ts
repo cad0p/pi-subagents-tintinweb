@@ -93,7 +93,7 @@ afterEach(() => {
 
 /** Spawn a background agent whose runAgent resolves immediately; the record
  *  reaches "completed" via microtasks (no timer advance needed). */
-async function spawnCompleting(tools: Map<string, any>): Promise<string> {
+async function spawnCompleting(tools: Map<string, any>, description = "research thing"): Promise<string> {
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "# Report\n\nTHE-RESULT-PAYLOAD",
     session: { dispose: vi.fn() } as any,
@@ -102,7 +102,7 @@ async function spawnCompleting(tools: Map<string, any>): Promise<string> {
   });
   const spawn = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "research thing", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
     undefined,
     undefined,
     ctx(),
@@ -236,8 +236,8 @@ describe("turn-gated completion notifications", () => {
     vi.useFakeTimers();
 
     lifecycle.get("turn_start")({}, ctx());
-    await spawnCompleting(tools);
-    await spawnCompleting(tools);
+    await spawnCompleting(tools, "first task");
+    await spawnCompleting(tools, "second task");
     await vi.advanceTimersByTimeAsync(1000); // hold expires mid-turn → both nudges parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
@@ -249,6 +249,9 @@ describe("turn-gated completion notifications", () => {
       expect(call[0].content).not.toContain("Background agent group completed");
       expect(call[1]).toEqual({ deliverAs: "steer", triggerTurn: true });
     }
+    const contents = pi.sendMessage.mock.calls.map((call) => call[0].content as string).join("\n");
+    expect(contents).toContain("**✓ Subagent completed: first task**");
+    expect(contents).toContain("**✓ Subagent completed: second task**");
   });
 });
 
