@@ -598,7 +598,9 @@ describe("SubagentScheduler — fire path", () => {
     });
 
     expect(scheduler.list().map(j => j.id)).toEqual([seeded.id, trigger.id]);
-    expect(scheduler.getNextRun(seeded.id)).toBeDefined();
+    // The promoted record holds its own timer again; the trigger's timer is
+    // separate, so arming both leaves exactly two.
+    expect(vi.getTimerCount()).toBe(2);
     vi.advanceTimersByTime(1_000);
     expect(manager.spawn).toHaveBeenCalledWith(pi, ctx, "Explore", "promoted-prompt", expect.objectContaining({
       isBackground: true, bypassQueue: true,
@@ -635,6 +637,19 @@ describe("SubagentScheduler — fire path", () => {
       subagent_type: "general-purpose", prompt: "trigger",
     });
     expect(errorsForFarOnce()).toHaveLength(1);
+  });
+
+  it("ignores a promotion report for a record that already holds a timer", () => {
+    const job = scheduler.addJob({
+      name: "already-armed", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    expect(vi.getTimerCount()).toBe(1);
+
+    // A stale or replayed promotion report must not double-arm: the guard
+    // skips ids that already hold a timer.
+    store.onPromoted!([job.id]);
+    expect(vi.getTimerCount()).toBe(1);
   });
 
   it("disarms a promoted record whose interval is outside the armable range", () => {
