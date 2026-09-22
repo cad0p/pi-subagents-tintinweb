@@ -187,7 +187,7 @@ export class ScheduleStore {
    * their own list so a freed id can never re-promote them to live jobs.
    */
   private shadowed: unknown[] = [];
-  /** Skipped entries that could not be re-serialized; dropped instead of wedging save(). */
+  /** Skipped entries dropped at load — too deeply nested or not re-serializable. */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
   private fileShapeInvalid = false;
@@ -197,11 +197,13 @@ export class ScheduleStore {
   private pendingPromoted: string[] = [];
   /**
    * Called by load() with the ids that were live in the previous cache but are
-   * not live after the reload — records reclassified into `skipped` (invalid
-   * type/cron/interval) or removed outside this store. The scheduler binds
-   * this to clear timers that would otherwise keep ticking a record the live
-   * set no longer contains. Never called when load() keeps the previous state
-   * (missing or corrupt file).
+   * not live after an existing-file reload — records reclassified into
+   * `skipped` (invalid type/cron/interval) or deleted from the file by another
+   * writer. The scheduler binds this to clear timers that would otherwise keep
+   * ticking a record the live set no longer contains. Never called when load()
+   * keeps the previous state: a missing file (including one deleted
+   * mid-session, which therefore takes effect at the next session start) or
+   * corrupt JSON.
    */
   onReclassified: ((ids: string[]) => void) | undefined;
   /**
@@ -406,10 +408,13 @@ export class ScheduleStore {
     const known = this.jobs.has(id) || this.skipped.some(sameId) || this.shadowed.some(sameId);
     if (!known) return false;
     return this.withLock(() => {
-      // The user deleted this id, so purge it from every list — a record that
-      // load() reclassified mid-mutation (e.g. its agent type was invalidated)
-      // must not survive in `skipped` and get re-promoted once the type is
-      // back, and a shadowed duplicate must go with its live twin.
+      // The user deleted this id, so purge every top-level record whose id
+      // matches from every list: a record that load() reclassified
+      // mid-mutation (e.g. its agent type was invalidated) must not survive in
+      // `skipped` and get re-promoted once the type is back, and a shadowed
+      // duplicate must go with its live twin. A same-id record nested inside a
+      // preserved container is left verbatim — it is inert, because every load
+      // rejects the wrapper and sends it back to `skipped`.
       const removedLive = this.jobs.delete(id);
       const skippedBefore = this.skipped.length;
       const shadowedBefore = this.shadowed.length;
