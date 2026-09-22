@@ -412,7 +412,18 @@ describe("ScheduleStore", () => {
 
   it("keeps the first duplicate id live and preserves the shadowed record", () => {
     const file = join(tmp, "s.json");
-    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    const first = makeJob({ id: "dup", name: "first" });
+    // Fields the sanitizer would normalize (enabled), drop (model, futureField),
+    // or add (createdAt, runCount) — storing the sanitized copy must fail this.
+    const rawSecond: Record<string, unknown> = {
+      ...makeJob({ id: "dup", name: "second" }),
+      enabled: "yes",
+      model: 42,
+      futureField: { nested: true },
+    };
+    delete rawSecond.createdAt;
+    delete rawSecond.runCount;
+    writeStoreFile(file, [first, rawSecond]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const store = new ScheduleStore(file);
@@ -420,11 +431,13 @@ describe("ScheduleStore", () => {
     expect(store.list()[0].name).toBe("first");
     expect(warn).toHaveBeenCalledTimes(1);
 
-    // The shadowed duplicate survives the next save — in its own non-promotable list.
+    // The shadowed duplicate survives the next save — verbatim, in its own
+    // non-promotable list.
     store.add(makeJob({ id: "other", name: "other" }));
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
     expect(onDisk.jobs.map((j: any) => j.name)).toEqual(["first", "other"]);
-    expect(onDisk.shadowed.map((j: any) => j.name)).toEqual(["second"]);
+    expect(onDisk.shadowed).toHaveLength(1);
+    expect(onDisk.shadowed[0]).toEqual(rawSecond);
   });
 
   it("purges a shadowed duplicate when its live id is removed", () => {
