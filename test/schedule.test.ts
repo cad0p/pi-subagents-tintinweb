@@ -250,6 +250,48 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(scheduler.list()).toEqual([]);
   });
 
+  // A record the arm path disables must not advertise a next run either, or
+  // the menu promises a fire that can never happen.
+  function seedInterval(intervalMs: unknown): void {
+    store.add({
+      id: "seeded-interval",
+      name: "seeded-interval",
+      description: "x",
+      schedule: "1s",
+      scheduleType: "interval",
+      intervalMs: intervalMs as number,
+      subagent_type: "general-purpose",
+      prompt: "p",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      runCount: 0,
+    });
+  }
+
+  const UNARMABLE_INTERVAL_NEXT_RUNS: Array<[string, unknown]> = [
+    ["a sub-second fraction", 0.5],
+    ["a boolean", true],
+    ["one millisecond under the minimum", 999],
+    ["a numeric string", "1"],
+  ];
+  it.each(UNARMABLE_INTERVAL_NEXT_RUNS)("getNextRun reports no next run for an interval with %s", (_name, intervalMs) => {
+    seedInterval(intervalMs);
+    expect(scheduler.getNextRun("seeded-interval")).toBeUndefined();
+  });
+
+  const ARMABLE_INTERVAL_NEXT_RUNS: Array<[string, number]> = [
+    ["the minimum", 1000],
+    ["the timer ceiling", 2 ** 31 - 1],
+  ];
+  it.each(ARMABLE_INTERVAL_NEXT_RUNS)("getNextRun reports a date for an interval at %s", (_name, intervalMs) => {
+    seedInterval(intervalMs);
+    const next = scheduler.getNextRun("seeded-interval");
+    expect(next).toBeDefined();
+    const delta = new Date(next!).getTime() - Date.now();
+    expect(delta).toBeGreaterThanOrEqual(intervalMs - 1_000);
+    expect(delta).toBeLessThanOrEqual(intervalMs + 1_000);
+  });
+
   // A finite interval past the Date ceiling would pass the old finite check,
   // get persisted and armed, then throw in getNextRun whenever the menu read it.
   it("rejects an out-of-range interval upfront — no record created or armed", () => {

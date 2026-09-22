@@ -38,6 +38,16 @@ const MIN_ARMABLE_INTERVAL_MS = 1000;
  */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+/** True when a stored interval is a real integer the JS timer can hold. */
+function isArmableInterval(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_ARMABLE_INTERVAL_MS &&
+    value <= MAX_TIMER_DELAY_MS
+  );
+}
+
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
   | { type: "added"; job: ScheduledSubagent }
@@ -180,12 +190,10 @@ export class SubagentScheduler {
       return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
     }
     if (job.scheduleType === "interval") {
-      // The store is not validated per field, so coerce before the arithmetic:
-      // a string, NaN, or finite-but-out-of-range interval would otherwise
-      // reach toISOString() and throw RangeError, taking the whole
-      // scheduled-jobs menu down.
-      const intervalMs = Number(job.intervalMs);
-      if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
+      // The same armable predicate as scheduleJob: a record that cannot arm
+      // has no next run to advertise.
+      const intervalMs = job.intervalMs;
+      if (!isArmableInterval(intervalMs)) return undefined;
       // Before the first fire there's no `lastRun`, so fall back to "now" —
       // accurate at create time (setInterval was just armed) and within
       // intervalMs of correct in any pre-first-fire view.
@@ -206,12 +214,7 @@ export class SubagentScheduler {
     try {
       if (job.scheduleType === "interval") {
         const intervalMs = job.intervalMs;
-        if (
-          typeof intervalMs !== "number" ||
-          !Number.isInteger(intervalMs) ||
-          intervalMs < MIN_ARMABLE_INTERVAL_MS ||
-          intervalMs > MAX_TIMER_DELAY_MS
-        ) {
+        if (!isArmableInterval(intervalMs)) {
           // Outside the timer range and cannot be honored — Node clamps the
           // delay to ~1 ms, turning the job into a hot loop. Disable it and
           // mark it broken, mirroring the past-one-shot branch below.
@@ -374,7 +377,7 @@ export class SubagentScheduler {
     // "5m" — interval
     const ivl = SubagentScheduler.parseInterval(trimmed);
     if (ivl !== null) {
-      if (ivl < MIN_ARMABLE_INTERVAL_MS || ivl > MAX_TIMER_DELAY_MS) {
+      if (!isArmableInterval(ivl)) {
         throw new Error(
           `Interval "${trimmed}" is not armable — use between ${MIN_ARMABLE_INTERVAL_MS} ms (1s) and ${MAX_TIMER_DELAY_MS} ms (about 24.8 days).`,
         );
