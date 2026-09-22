@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import { safeTruncate, toSingleLine } from "../text-safety.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
@@ -178,9 +178,10 @@ export function buildInvocationTags(
 
 /** Truncate text to a single line, max `len` chars. */
 function truncateLine(text: string, len = 60): string {
-  const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  const raw = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  const line = stripControlChars(raw);
   if (line.length <= len) return line;
-  return line.slice(0, len) + "…";
+  return safeTruncate(line, len) + "…";
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */

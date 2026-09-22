@@ -6,7 +6,7 @@ import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -149,6 +149,22 @@ describe("AgentWidget", () => {
     expect(lines).not.toContain("[2J");
     expect(lines).not.toContain("]8;;");
     expect(lines).toContain("xylink");
+  });
+
+  // The widget/foreground call sites run the activity string through
+  // toSingleLine, which would coerce a lone surrogate to U+FFFD and hide a
+  // mid-pair cut; drive describeActivity directly to pin the boundary.
+  it("truncates the activity line on a code-point boundary", () => {
+    const text = "a".repeat(59) + "😀tail";
+    expect(describeActivity(new Map(), text)).toBe("a".repeat(59) + "…");
+
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const activity = makeActivity();
+    activity.responseText = text;
+    const lines = renderLines(manager, "background", () => "background", activity);
+    // End to end the row drops the astral pair rather than showing U+FFFD.
+    expect(lines).toContain("a".repeat(59) + "…");
+    expect(lines).not.toContain("\uFFFD");
   });
 
   it("strips terminal controls from record descriptions and errors", () => {
