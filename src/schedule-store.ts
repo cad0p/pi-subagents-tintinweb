@@ -99,11 +99,41 @@ function canSerializeInPayload(raw: unknown): boolean {
 }
 
 /**
- * Queue a record for verbatim re-write on save, but only when it round-trips
- * inside the save payload: a preserved record that cannot be serialized would
- * make every later save() throw. Returns false when the record was dropped.
+ * Deepest JSON nesting a preserved record may have. A real scheduled job is a
+ * flat object; anything past a handful of levels is hand-written or corrupt.
+ * The bound is deliberately far below the smallest JSON.stringify stack
+ * ceiling observed on the supported engines (~6k nesting frames on the Node
+ * 22/24 main thread; worker threads are much higher), so the payload proof
+ * below can never overflow for an accepted record and the drop decision no
+ * longer depends on the ambient stack depth.
+ */
+export const MAX_PRESERVED_DEPTH = 64;
+
+/**
+ * True when `value` nests no deeper than `budget` JSON levels. Recursion is
+ * bounded by `budget`, so an arbitrarily deep value cannot overflow this
+ * check itself (JSON.parse accepts far more nesting than stringify).
+ */
+function isWithinDepth(value: unknown, budget: number): boolean {
+  if (!Array.isArray(value) && !isRecord(value)) return true;
+  if (budget <= 0) return false;
+  const children = Array.isArray(value) ? value : Object.values(value);
+  for (const child of children) {
+    if (!isWithinDepth(child, budget - 1)) return false;
+  }
+  return true;
+}
+
+/**
+ * Queue a record for verbatim re-write on save, but only when it nests no
+ * deeper than MAX_PRESERVED_DEPTH and round-trips inside the save payload: a
+ * preserved record that cannot be serialized would make every later save()
+ * throw. The depth bound is the deterministic guard; the payload proof stays
+ * as the general mechanism for anything else the shape rejects. Returns false
+ * when the record was dropped.
  */
 function preserveRecord(raw: unknown, into: unknown[]): boolean {
+  if (!isWithinDepth(raw, MAX_PRESERVED_DEPTH)) return false;
   if (!canSerializeInPayload(raw)) return false;
   into.push(raw);
   return true;
@@ -256,7 +286,7 @@ export class ScheduleStore {
     const details: string[] = [];
     if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
     if (this.shadowed.length > 0) details.push(`${this.shadowed.length} shadowed duplicate record(s) retained verbatim on disk and discarded when their id is deleted`);
-    if (this.droppedCount > 0) details.push(`${this.droppedCount} unserializable scheduled-job record(s) dropped`);
+    if (this.droppedCount > 0) details.push(`${this.droppedCount} scheduled-job record(s) dropped (too deeply nested or not re-serializable)`);
     if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
     if (this.fileShapeInvalid) details.push("the file is not a versioned store object and will be rewritten");
     if (details.length === 0) return;
@@ -265,10 +295,6 @@ export class ScheduleStore {
 
   /** Atomic write via temp file + rename (POSIX-atomic). */
   private save(): void {
-    // Final gate: the load-time proof runs a few frames deeper, but a value at
-    // the stack limit can still tip over here. Drop anything that cannot
-    // survive the payload shape so no preserved entry can wedge a mutation.
-    if (this.dropUnserializablePreserved() > 0) this.warnAboutSkips();
     // Preserved entries are written back verbatim so an unrelated mutation
     // cannot silently erase a record the user can still repair by hand.
     // Shadowed duplicates live under their own key: never promoted, never armed.
@@ -295,20 +321,6 @@ export class ScheduleStore {
       try { unlinkSync(tmp); } catch { /* ignore */ }
       throw err;
     }
-  }
-
-  /** Drop preserved records that cannot be serialized inside the save payload. */
-  private dropUnserializablePreserved(): number {
-    let dropped = 0;
-    const keep = (raw: unknown): boolean => {
-      if (canSerializeInPayload(raw)) return true;
-      dropped++;
-      return false;
-    };
-    this.skipped = this.skipped.filter(keep);
-    this.shadowed = this.shadowed.filter(keep);
-    this.droppedCount += dropped;
-    return dropped;
   }
 
   /** Acquire lock → reload → mutate → save → release. */

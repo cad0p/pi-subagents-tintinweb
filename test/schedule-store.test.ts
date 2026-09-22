@@ -9,7 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveStorePath, ScheduleStore } from "../src/schedule-store.js";
+import { MAX_PRESERVED_DEPTH, resolveStorePath, ScheduleStore } from "../src/schedule-store.js";
 import type { ScheduledSubagent } from "../src/types.js";
 
 function makeJob(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent {
@@ -342,9 +342,10 @@ describe("ScheduleStore", () => {
     expect(store.list()[0].isolation).toBeUndefined();
   });
 
-  it("drops a preserved entry that cannot be re-serialized instead of wedging save()", () => {
+  it("drops a preserved entry far past the depth bound instead of wedging save()", () => {
     const file = join(tmp, "s.json");
-    // JSON.parse tolerates ~10k nesting; JSON.stringify overflows the stack.
+    // Deep past MAX_PRESERVED_DEPTH (and past stringify's stack limit on some
+    // engines): load() must drop it before it can reach save().
     const deep = "[".repeat(12_000) + "]".repeat(12_000);
     writeFileSync(file, `{"version":1,"jobs":[${deep},${JSON.stringify(makeJob({ id: "valid" }))}]}`);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -353,7 +354,7 @@ describe("ScheduleStore", () => {
     expect(store.list().map(j => j.id)).toEqual(["valid"]);
     expect(warn.mock.calls[0][0]).toMatch(/dropped/i);
 
-    // add and cancel keep working: the unserializable entry never reaches save().
+    // add and cancel keep working: the over-deep entry never reaches save().
     expect(() => store.add(makeJob({ id: "second" }))).not.toThrow();
     expect(store.remove("valid")).toBe(true);
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
@@ -361,53 +362,45 @@ describe("ScheduleStore", () => {
     expect(existsSync(file + ".tmp")).toBe(false);
   });
 
-  it("never wedges a mutation on a near-limit preserved record", () => {
-    // JSON.parse tolerates deeper nesting than JSON.stringify. Just below the
-    // standalone stringify limit there is a band where a record still
-    // serializes standalone but overflows inside the {version, jobs} payload
-    // save() writes. No depth in that band may make a mutation throw.
-    const firstFailing = (serialize: (raw: unknown) => void): number => {
-      let lo = 4000;
-      let hi = 8000;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        const raw = JSON.parse("[".repeat(mid) + "]".repeat(mid));
-        let ok = true;
-        try { serialize(raw); } catch { ok = false; }
-        if (ok) lo = mid + 1;
-        else hi = mid;
-      }
-      return lo;
-    };
-    const standaloneFailsAt = firstFailing(raw => JSON.stringify(raw));
-    let sawDrop = false;
+  // The depth bound is the deterministic half of the guarantee: it is checked
+  // before the payload proof, so the drop decision never depends on the stack
+  // depth of the process (or the vitest pool) running the test.
+  it("preserves a record at the depth bound verbatim", () => {
+    const file = join(tmp, "s.json");
+    const atBound = JSON.parse("[".repeat(MAX_PRESERVED_DEPTH) + "]".repeat(MAX_PRESERVED_DEPTH));
+    writeStoreFile(file, [atBound, makeJob({ id: "valid" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    for (let depth = standaloneFailsAt - 12; depth <= standaloneFailsAt + 2; depth++) {
-      const deep = "[".repeat(depth) + "]".repeat(depth);
-      const file = join(tmp, `deep-${depth}.json`);
-      writeFileSync(file, `{"version":1,"jobs":[${deep},${JSON.stringify(makeJob({ id: "valid" }))}]}`);
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["valid"]);
+    expect(warn).toHaveBeenCalledTimes(1);
 
-      const store = new ScheduleStore(file);
-      expect(store.list().map(j => j.id)).toEqual(["valid"]);
-      // The contract: no preserved record may make a mutation throw. Call
-      // directly — wrapping in expect() adds stack frames and shifts the
-      // very limit this test is probing.
-      store.add(makeJob({ id: "second" }));
-      store.remove("valid");
+    // Survives an unrelated mutation verbatim, in the skipped tail of `jobs`.
+    store.add(makeJob({ id: "second" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs[0].id).toBe("valid");
+    expect(onDisk.jobs[1].id).toBe("second");
+    expect(onDisk.jobs[2]).toEqual(atBound);
+    expect(existsSync(file + ".tmp")).toBe(false);
+  });
 
-      if (warn.mock.calls.some(call => /dropped/i.test(String(call[0])))) {
-        sawDrop = true;
-        // Dropped, not repaired: the next load must not meet it again.
-        const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-        expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["second"]);
-      }
-      expect(existsSync(file + ".tmp")).toBe(false);
-      warn.mockRestore();
-    }
+  it("drops a record one level past the depth bound with a warning", () => {
+    const file = join(tmp, "s.json");
+    const past = JSON.parse("[".repeat(MAX_PRESERVED_DEPTH + 1) + "]".repeat(MAX_PRESERVED_DEPTH + 1));
+    writeStoreFile(file, [past, makeJob({ id: "valid" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    // The window must include records that actually overflow the payload.
-    expect(sawDrop).toBe(true);
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["valid"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/dropped \(too deeply nested/i);
+
+    // The over-deep record never reaches save(); mutations keep working.
+    expect(() => store.add(makeJob({ id: "second" }))).not.toThrow();
+    expect(store.remove("valid")).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["second"]);
+    expect(existsSync(file + ".tmp")).toBe(false);
   });
 
   it("keeps the first duplicate id live and preserves the shadowed record", () => {
