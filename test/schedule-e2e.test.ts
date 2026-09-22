@@ -8,8 +8,8 @@
  * outcome. Catches integration bugs that fake-timer microtask scheduling
  * can hide.
  *
- * Uses very short timings (100–300 ms for one-shots; the 1 s minimum for
- * intervals) so the test stays fast.
+ * Timings: one-shots fire ~100 ms out; the interval case uses the 1 s
+ * minimum, so this file raises the vitest test timeout like its neighbors.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -18,6 +18,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
+
+vi.setConfig({ testTimeout: 30_000 });
 
 type FakeRecord = { status: string; promise: Promise<string>; resolve: () => void };
 
