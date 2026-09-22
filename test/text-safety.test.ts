@@ -87,6 +87,14 @@ describe("stripControlChars", () => {
     expect(stripControlChars(once)).toBe(once);
   });
 
+  it("joins a split surrogate pair when a removal brings the halves together", () => {
+    // CSI removal deletes the introducer between the halves, so the pair forms
+    // before the coercion pass and survives as U+10000.
+    expect(stripControlChars("\uD800\u001b[0m\uDC00")).toBe("\u{10000}");
+    // ZWSP is removed after coercion, so the halves are each replaced first.
+    expect(stripControlChars("\uD800\u200b\uDC00")).toBe("\uFFFD\uFFFD");
+  });
+
   it("drops CR so CRLF collapses to LF", () => {
     expect(stripControlChars("a\r\nb")).toBe("a\nb");
     expect(stripControlChars("a\rb")).toBe("ab");
