@@ -152,7 +152,7 @@ Found 5 files related to authentication:
 - src/auth.ts
 ```
 
-The notification report is markdown-wrapped child output with terminal control sequences (OSC/CSI escapes, CR, and invisible format characters) stripped from the header, metadata, and body before the notification is rendered or persisted; markdown structure and body text are otherwise unchanged. The LLM-facing tool text (`get_subagent_result`, foreground `Agent` results) is unchanged: it keeps the raw bytes by design.
+The notification report is markdown-wrapped child output with terminal control sequences (OSC/CSI escapes, CR, and invisible format characters) stripped from the header, metadata, and body before the notification is rendered or persisted; markdown structure and body text are otherwise unchanged. The LLM-facing tool text (`get_subagent_result`, foreground `Agent` results) keeps the raw result and error bodies by design; the single-line metadata fields in that text (agent id, type, status, description, model name, invocation tags, and file paths) go through the same single-line sanitizer, so a field carrying line breaks or control bytes is collapsed before the parent model sees it.
 
 Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 

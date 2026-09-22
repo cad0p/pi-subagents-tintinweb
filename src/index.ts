@@ -1420,7 +1420,7 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, _options, theme) {
       const report = result.content[0]?.type === "text" ? result.content[0].text : "";
       // Display copy only: the tool text returned to the parent model keeps its
-      // raw bytes.
+      // raw result/error bodies; the builders collapse its single-line metadata.
       const display = typeof report === "string" ? stripControlChars(report) : "";
       return display
         ? new Markdown(display, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
