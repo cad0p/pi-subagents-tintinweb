@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { effectiveFailurePreviewCap, formatTaskNotification } from "../src/index.js";
-import type { SubagentsSettings } from "../src/settings.js";
+import { FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings } from "../src/settings.js";
 import type { AgentRecord } from "../src/types.js";
 
 const settings: SubagentsSettings = { failurePreviewMaxChars: 65536 };
@@ -523,7 +523,7 @@ describe("markdown completion report", () => {
   it("throws on the empty-body metadata path when failurePreviewMaxChars is missing", () => {
     expect(() =>
       formatTaskNotification(createRecord({ status: "error", error: "e".repeat(400), result: "" }), {}),
-    ).toThrow(/failurePreviewMaxChars must be a number/);
+    ).toThrow(/failurePreviewMaxChars must be a positive integer within the settings ceiling/);
   });
 
   it("renders a placeholder when the description is missing or empty", () => {
@@ -658,23 +658,23 @@ describe("markdown completion report", () => {
         createRecord({ status: "error", error: "hello", result: undefined }),
         { failurePreviewMaxChars: 0 },
       ),
-    ).toThrow(/failurePreviewMaxChars must be a number/);
+    ).toThrow(/failurePreviewMaxChars must be a positive integer within the settings ceiling/);
   });
 
-  it("throws when failurePreviewMaxChars is not a positive integer", () => {
-    for (const cap of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 1.5]) {
+  it("throws when failurePreviewMaxChars is not a positive integer within the ceiling", () => {
+    for (const cap of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 1.5, FAILURE_PREVIEW_MAX_CHARS_CEILING + 1]) {
       expect(() =>
         formatTaskNotification(
           createRecord({ status: "error", error: "boom", result: undefined }),
           { failurePreviewMaxChars: cap },
         ),
-      ).toThrow(/failurePreviewMaxChars must be a number/);
+      ).toThrow(/failurePreviewMaxChars must be a positive integer within the settings ceiling/);
     }
   });
 
   it("falls back to the default cap when the in-memory value is not a positive integer", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5];
+    const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5, FAILURE_PREVIEW_MAX_CHARS_CEILING + 1];
     for (const bad of bads) {
       expect(effectiveFailurePreviewCap(bad)).toBe(65536);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(bad)));
@@ -682,6 +682,7 @@ describe("markdown completion report", () => {
     expect(warn).toHaveBeenCalledTimes(bads.length);
     expect(effectiveFailurePreviewCap(1)).toBe(1);
     expect(effectiveFailurePreviewCap(1000)).toBe(1000);
+    expect(effectiveFailurePreviewCap(FAILURE_PREVIEW_MAX_CHARS_CEILING)).toBe(FAILURE_PREVIEW_MAX_CHARS_CEILING);
     expect(warn).toHaveBeenCalledTimes(bads.length); // in-contract values stay silent
     warn.mockRestore();
   });
@@ -713,7 +714,7 @@ describe("markdown completion report", () => {
   it("throws when failurePreviewMaxChars is missing on a failure status", () => {
     expect(() =>
       formatTaskNotification(createRecord({ status: "error", error: "boom", result: undefined }), {}),
-    ).toThrow(/failurePreviewMaxChars must be a number/);
+    ).toThrow(/failurePreviewMaxChars must be a positive integer within the settings ceiling/);
   });
 
   it("emits no XML envelope", () => {

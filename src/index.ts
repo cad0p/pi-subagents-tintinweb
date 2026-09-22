@@ -198,9 +198,9 @@ function headerPreview(s: string): string {
   return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
 }
 
-/** The settings contract for the failure preview cap: a positive integer. */
+/** The settings contract for the failure preview cap: a positive integer within the settings ceiling. */
 function isValidFailurePreviewCap(value: number): boolean {
-  return Number.isInteger(value) && value >= 1;
+  return Number.isInteger(value) && value >= 1 && value <= FAILURE_PREVIEW_MAX_CHARS_CEILING;
 }
 
 /**
@@ -220,7 +220,7 @@ export function effectiveFailurePreviewCap(value: number): number {
 function failurePreviewCap(settings: SubagentsSettings): number {
   const cap = settings.failurePreviewMaxChars;
   if (typeof cap !== "number" || !isValidFailurePreviewCap(cap)) {
-    throw new Error("failurePreviewMaxChars must be a number on failure status");
+    throw new Error("failurePreviewMaxChars must be a positive integer within the settings ceiling on failure status");
   }
   return cap;
 }
