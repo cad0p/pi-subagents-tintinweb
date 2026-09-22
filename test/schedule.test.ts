@@ -1105,6 +1105,7 @@ describe("SubagentScheduler — arm-path range guard", () => {
     seedJob("near-once", {
       scheduleType: "once",
       schedule: new Date(Date.now() + 60_000).toISOString(),
+      intervalMs: undefined,
     });
     scheduler.stop();
     scheduler.start(pi, ctx, manager, store);
