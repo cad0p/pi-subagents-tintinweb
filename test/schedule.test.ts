@@ -493,6 +493,24 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  // resolveModel runs before manager.spawn and used to sit outside any
+  // try/catch; a truthy non-string model threw a TypeError straight out of the
+  // bare interval callback, which Node treats as an uncaught exception.
+  it("reports a model-resolution throw instead of escaping the timer callback", () => {
+    const job = scheduler.addJob({
+      name: "bad-model", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+      model: true as unknown as string,
+    });
+
+    expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id,
+    }));
+  });
+
   // ── Status reflection from record.status (regression for bug #1) ────
   // The real AgentManager's promise *always* resolves (its .catch returns ""),
   // so the schedule's success/error must be inferred from `record.status`,

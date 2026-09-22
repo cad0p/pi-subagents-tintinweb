@@ -242,11 +242,15 @@ export class SubagentScheduler {
             });
           } else {
             const t = setTimeout(() => {
-              this.executeJob(job.id);
-              // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-              store.update(job.id, { enabled: false });
-              const updated = store.get(job.id);
-              if (updated) this.emit({ type: "updated", job: updated });
+              try {
+                this.executeJob(job.id);
+                // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
+                store.update(job.id, { enabled: false });
+                const updated = store.get(job.id);
+                if (updated) this.emit({ type: "updated", job: updated });
+              } catch (err) {
+                this.reportJobError(job.id, err);
+              }
             }, delay);
             this.intervals.set(job.id, t);
           }
@@ -281,7 +285,9 @@ export class SubagentScheduler {
   /**
    * Fire a job: persist running state, spawn (bypassing the concurrency
    * queue), persist completion. Fire-and-forget: the timer tick returns
-   * immediately so other jobs keep firing.
+   * immediately so other jobs keep firing. Never throws: this runs from a
+   * bare timer callback, where an escaping error would be an uncaught
+   * exception and take the host process down.
    */
   private executeJob(id: string): void {
     const store = this.store;
@@ -289,23 +295,22 @@ export class SubagentScheduler {
     const ctx = this.ctx;
     const manager = this.manager;
     if (!store || !pi || !ctx || !manager) return;
-    const job = store.get(id);
-    if (!job?.enabled) return;
-
-    store.update(id, { lastStatus: "running" });
-
-    // Resolve model at fire time — registry contents may have changed since the
-    // job was created (auth added/removed). Fall back silently to spawn-default
-    // if resolution fails; the spawn path handles undefined model gracefully.
-    let resolvedModel: any | undefined;
-    if (job.model) {
-      const r = resolveModel(job.model, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
-    }
-
-    let agentId: string;
     try {
-      agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
+      const job = store.get(id);
+      if (!job?.enabled) return;
+
+      store.update(id, { lastStatus: "running" });
+
+      // Resolve model at fire time — registry contents may have changed since the
+      // job was created (auth added/removed). Fall back silently to spawn-default
+      // if resolution fails; the spawn path handles undefined model gracefully.
+      let resolvedModel: any | undefined;
+      if (job.model) {
+        const r = resolveModel(job.model, ctx.modelRegistry);
+        if (typeof r !== "string") resolvedModel = r;
+      }
+
+      const agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
@@ -315,42 +320,54 @@ export class SubagentScheduler {
         thinkingLevel: job.thinking,
         isolation: job.isolation,
       });
+
+      this.emit({ type: "fired", jobId: id, agentId, name: job.name });
+
+      const finalize = (status: "success" | "error") => {
+        try {
+          const next = this.getNextRun(id);
+          const current = store.get(id);
+          store.update(id, {
+            lastRun: new Date().toISOString(),
+            lastStatus: status,
+            runCount: (current?.runCount ?? 0) + 1,
+            nextRun: next,
+          });
+        } catch (err) {
+          this.reportJobError(id, err);
+        }
+      };
+
+      const record = manager.getRecord(agentId);
+      // AgentManager's promise resolves either way (its .catch returns ""), so we
+      // can't infer success/failure from the promise — read record.status instead.
+      // Terminal states: completed/steered = success; error/aborted/stopped = error.
+      if (record?.promise) {
+        record.promise
+          .then(() => {
+            const r = manager.getRecord(agentId);
+            const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
+            finalize(failed ? "error" : "success");
+          })
+          .catch(() => finalize("error"));
+      } else {
+        // Spawn returned without a promise (defensive — bypassQueue path always sets one).
+        finalize("success");
+      }
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
-      this.emit({ type: "error", jobId: id, error });
-      return;
+      this.reportJobError(id, err);
     }
+  }
 
-    this.emit({ type: "fired", jobId: id, agentId, name: job.name });
-
-    const record = manager.getRecord(agentId);
-    const finalize = (status: "success" | "error") => {
-      const next = this.getNextRun(id);
-      const current = store.get(id);
-      store.update(id, {
-        lastRun: new Date().toISOString(),
-        lastStatus: status,
-        runCount: (current?.runCount ?? 0) + 1,
-        nextRun: next,
-      });
-    };
-
-    // AgentManager's promise resolves either way (its .catch returns ""), so we
-    // can't infer success/failure from the promise — read record.status instead.
-    // Terminal states: completed/steered = success; error/aborted/stopped = error.
-    if (record?.promise) {
-      record.promise
-        .then(() => {
-          const r = manager.getRecord(agentId);
-          const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
-          finalize(failed ? "error" : "success");
-        })
-        .catch(() => finalize("error"));
-    } else {
-      // Spawn returned without a promise (defensive — bypassQueue path always sets one).
-      finalize("success");
+  /** Mark a firing job errored and surface the failure; never rethrows. */
+  private reportJobError(id: string, err: unknown): void {
+    const error = err instanceof Error ? err.message : String(err);
+    try {
+      this.store?.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+    } catch {
+      // Best effort — the error event below is the only reliable surface.
     }
+    this.emit({ type: "error", jobId: id, error });
   }
 
   private emit(event: ScheduleChangeEvent): void {
