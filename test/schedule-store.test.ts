@@ -167,19 +167,22 @@ describe("ScheduleStore", () => {
     const promoted = vi.fn(() => { throw new Error("listener blew up"); });
     store.onPromoted = promoted;
 
-    // Another writer adds a record between loads, so the next mutation really
-    // drains a promotion into the throwing listener.
-    writeStoreFile(file, [makeJob({ id: "late" })]);
+    // Another writer adds records between loads, so the next mutation really
+    // drains a promotion batch into the throwing listener.
+    writeStoreFile(file, [makeJob({ id: "late-a" }), makeJob({ id: "late-b" })]);
     const trigger = makeJob({ id: "trigger" });
     expect(() => store.add(trigger)).not.toThrow();
 
     // The mutation committed before the listener ran, and the drain is one-shot.
     const fresh = new ScheduleStore(file);
-    expect(fresh.get("late")).toBeDefined();
+    expect(fresh.get("late-a")).toBeDefined();
+    expect(fresh.get("late-b")).toBeDefined();
     expect(fresh.get("trigger")).toBeDefined();
     store.update(trigger.id, { lastStatus: "error" });
     expect(promoted).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed for [late]: listener blew up"));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("onPromoted callback failed for [late-a, late-b]: listener blew up"),
+    );
   });
 
   it("surfaces a save failure even when the onPromoted listener throws", () => {
