@@ -605,6 +605,38 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("emits the distant one-shot error once when a kept-state reload drains no promotion", () => {
+    const file = join(tmp, "s.json");
+    const farOnce = rawJob({
+      id: "far-once",
+      name: "far-once",
+      scheduleType: "once",
+      schedule: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    });
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [farOnce] }, null, 2));
+    store = new ScheduleStore(file);
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    // Enabled but intentionally unarmed: the far target is reported once and
+    // the record stays live for a later start.
+    expect(vi.getTimerCount()).toBe(0);
+    const errorsForFarOnce = () => pi.events.emit.mock.calls.filter(
+      (c: any[]) => c[0] === "subagents:scheduled" && c[1].type === "error" && c[1].jobId === farOnce.id,
+    );
+    expect(errorsForFarOnce()).toHaveLength(1);
+
+    // The file vanishes, then a mutation reloads. The constructor staged the
+    // id in pendingPromoted; a kept-state reload must not drain it, or the
+    // scheduler re-reports the same error for a record nothing reclassified.
+    rmSync(file);
+    scheduler.addJob({
+      name: "trigger", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "trigger",
+    });
+    expect(errorsForFarOnce()).toHaveLength(1);
+  });
+
   it("disarms a promoted record whose interval is outside the armable range", () => {
     const file = join(tmp, "s.json");
     setDefaultsDisabled(true);

@@ -120,10 +120,35 @@ describe("ScheduleStore", () => {
     const promoted = vi.fn();
     store.onPromoted = promoted;
 
-    // Constructing the store must not invoke the callback, and a reload that
-    // keeps the same live record is not a promotion.
-    expect(promoted).not.toHaveBeenCalled();
+    // A locked reload that keeps the same live record is not a promotion.
     store.update("seeded", { lastStatus: "error" });
+    expect(promoted).not.toHaveBeenCalled();
+  });
+
+  it("does not report a stale promotion when a reload finds no file", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "a" }), makeJob({ id: "b" })]);
+    const store = new ScheduleStore(file);
+    const promoted = vi.fn();
+    store.onPromoted = promoted;
+
+    // The constructor's load staged every live id; a reload that keeps the
+    // previous state must clear that staging instead of draining it as a
+    // promotion after the lock.
+    rmSync(file);
+    store.update("a", { lastStatus: "error" });
+    expect(promoted).not.toHaveBeenCalled();
+  });
+
+  it("does not report a stale promotion when a reload finds corrupt JSON", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "a" }), makeJob({ id: "b" })]);
+    const store = new ScheduleStore(file);
+    const promoted = vi.fn();
+    store.onPromoted = promoted;
+
+    writeFileSync(file, "{ truncated");
+    store.update("a", { lastStatus: "error" });
     expect(promoted).not.toHaveBeenCalled();
   });
 

@@ -221,6 +221,11 @@ export class ScheduleStore {
    * current in-memory state rather than clearing it.
    */
   private load(): void {
+    // A reload that keeps the previous state must not preserve an earlier
+    // promotion report: withLock drains pendingPromoted even when one of the
+    // kept-state early returns below fires, and records that were live before
+    // and after the reload are not promotions.
+    this.pendingPromoted = [];
     if (!existsSync(this.filePath)) return;
     let parsed: unknown;
     try {
