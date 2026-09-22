@@ -8,7 +8,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveStorePath, ScheduleStore } from "../src/schedule-store.js";
 import type { ScheduledSubagent } from "../src/types.js";
 
@@ -29,6 +29,17 @@ function makeJob(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent 
   };
 }
 
+function writeStoreFile(file: string, jobs: unknown[]): void {
+  writeFileSync(file, JSON.stringify({ version: 1, jobs }, null, 2));
+}
+
+/** Every field makeJob sets, minus id — so each test can plant a broken id. */
+function makeRawJob(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  const raw = { ...makeJob() } as Record<string, unknown>;
+  delete raw.id;
+  return { ...raw, ...overrides };
+}
+
 describe("ScheduleStore", () => {
   let tmp: string;
 
@@ -37,6 +48,7 @@ describe("ScheduleStore", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -175,5 +187,98 @@ describe("ScheduleStore", () => {
     store.remove(job.id);
     store.deleteFileIfEmpty();
     expect(existsSync(file)).toBe(false);
+  });
+
+  it("skips a malformed entry between valid jobs without losing or erasing the rest", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "job-a", name: "a" }), null, makeJob({ id: "job-b", name: "b" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["job-a", "job-b"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/invalid scheduled-job record/i);
+
+    // A real mutation saves again — the skipped entry must survive on disk and
+    // the warning must not repeat for the same skip set.
+    expect(store.remove("job-a")).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => (j === null ? null : j.id))).toEqual(["job-b", null]);
+  });
+
+  it("treats a non-array jobs container as empty and repairs it on the next save", () => {
+    const file = join(tmp, "s.json");
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: { not: "an array" } }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.add(makeJob({ id: "repaired" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["repaired"]);
+  });
+
+  const NO_ID: Array<[string, Record<string, unknown>]> = [
+    ["missing", {}],
+    ["empty", { id: "" }],
+    ["non-string", { id: 42 }],
+  ];
+  it.each(NO_ID)("skips a record with a %s id and preserves it on disk", (_name, idPatch) => {
+    const file = join(tmp, "s.json");
+    const raw = makeRawJob(idPatch);
+    writeStoreFile(file, [raw]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // The unmanageable record must not be erased by an unrelated mutation.
+    store.add(makeJob({ id: "valid" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", raw.id]);
+    expect(onDisk.jobs[1]).toEqual(raw);
+  });
+
+  it("drops a wrong-typed optional model instead of passing it to spawn", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "bad-model" }), model: 42 }]);
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0].model).toBeUndefined();
+    // The rest of the record is untouched and manageable.
+    expect(store.get("bad-model")?.prompt).toBe("hello");
+    expect(store.remove("bad-model")).toBe(true);
+  });
+
+  it("loads a non-boolean enabled as disabled", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "bad-enabled" }), enabled: "yes" }]);
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toHaveLength(1);
+    expect(store.list()[0].enabled).toBe(false);
+
+    const fresh = new ScheduleStore(file);
+    expect(fresh.list()[0].enabled).toBe(false);
+  });
+
+  it("skips a record with an unknown scheduleType and preserves it on disk", () => {
+    const file = join(tmp, "s.json");
+    const raw = { ...makeJob({ id: "bad-type" }), scheduleType: "every-so-often" };
+    writeStoreFile(file, [raw]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    store.add(makeJob({ id: "valid" }));
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id)).toEqual(["valid", "bad-type"]);
   });
 });
