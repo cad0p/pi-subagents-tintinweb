@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - Declare engines node >=22.19.0 (pi's minimum) ([#22](https://github.com/cad0p/pi-subagents-tintinweb/pull/22))
+- *(notifications)* Render completion reports as markdown and drop the custom renderer (closes #27)
 
 ### 🐛 Bug Fixes
 
