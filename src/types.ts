@@ -67,8 +67,6 @@ export interface AgentConfig {
   source?: "default" | "project" | "global";
 }
 
-export type JoinMode = 'async' | 'group' | 'smart';
-
 export type ResultPreviewMode = "plain" | "markdown";
 
 /**
@@ -93,8 +91,6 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
-  groupId?: string;
-  joinMode?: JoinMode;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
@@ -103,8 +99,6 @@ export interface AgentRecord {
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string };
-  /** The tool_use_id from the original Agent tool call. */
-  toolCallId?: string;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
@@ -193,8 +187,6 @@ export interface NotificationDetails {
   outputFile?: string;
   error?: string;
   resultPreview: string;
-  /** Additional agents in a group notification. */
-  others?: NotificationDetails[];
 }
 
 export interface EnvInfo {

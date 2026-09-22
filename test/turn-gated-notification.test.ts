@@ -18,7 +18,7 @@
  * firing; the send closures re-check it at fire time.
  *
  * Timer notes (fake timers, mirrors print-mode.test.ts): with the
- * immediately-resolving runAgent mock, completion beats batch registration, so
+ * immediately-resolving runAgent mock, completion happens via microtasks, so
  * the nudge arms at t=0 and fires at t=200 (the hold window) unless parked.
  */
 
@@ -72,8 +72,7 @@ const mockTheme = {
 const textOf = (r: any): string => r.content[0].text;
 
 // Hermetic HOME + agent dir: without this the extension loads the developer's
-// real ~/.pi/agent/subagents.json (e.g. defaultJoinMode: "async"), silently
-// changing join/batching behavior under test.
+// real ~/.pi/agent/subagents.json, silently changing delivery behavior under test.
 let hermeticHome: string;
 let previousHome: string | undefined;
 let previousAgentDir: string | undefined;
@@ -129,8 +128,7 @@ describe("turn-gated completion notifications", () => {
     lifecycle.get("turn_start")({}, ctx());
     await spawnCompleting(tools);
 
-    await vi.advanceTimersByTimeAsync(100); // batch debounce → nudge parked, not armed
-    await vi.advanceTimersByTimeAsync(1000); // well past the hold window
+    await vi.advanceTimersByTimeAsync(1000); // hold expires mid-turn → nudge parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     // The parent's current tool returns — the first boundary after completion.
@@ -170,8 +168,8 @@ describe("turn-gated completion notifications", () => {
     subagentsExtension(pi);
     vi.useFakeTimers();
 
-    // With an immediately-resolving runAgent, completion beats batch
-    // registration — the nudge is armed at completion (t=0), firing at t=200.
+    // With an immediately-resolving runAgent, completion happens via
+    // microtasks — the nudge is armed at completion (t=0), firing at t=200.
     await spawnCompleting(tools);
     await vi.advanceTimersByTimeAsync(100); // halfway through the hold
 
@@ -190,8 +188,7 @@ describe("turn-gated completion notifications", () => {
     vi.useFakeTimers();
 
     await spawnCompleting(tools);
-    await vi.advanceTimersByTimeAsync(100); // batch debounce
-    await vi.advanceTimersByTimeAsync(200); // hold window
+    await vi.advanceTimersByTimeAsync(300); // hold window
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
@@ -212,35 +209,25 @@ describe("turn-gated completion notifications", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("a batched pair's group notification is parked mid-turn and released at the next boundary", async () => {
+  it("two mid-turn completions park two nudges and release both at the next boundary", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     vi.useFakeTimers();
 
-    // Manually-resolved runs: both agents stay "running" through batch
-    // finalization so the group forms before any completion (production
-    // timing — the immediately-resolving mock races the 100ms debounce).
-    const completions: ((v: any) => void)[] = [];
-    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => completions.push(res)));
-    const runResult = () => ({ responseText: "R", session: { dispose: vi.fn() } as any, aborted: false, steered: false });
-
-    await tools.get("Agent").execute("tc-spawn-1", { prompt: "go", description: "one", subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx());
-    await tools.get("Agent").execute("tc-spawn-2", { prompt: "go", description: "two", subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx());
-
-    await vi.advanceTimersByTimeAsync(100); // batch debounce → group registered
-    expect(completions.length).toBe(2);
-
     lifecycle.get("turn_start")({}, ctx());
-    for (const resolve of completions) resolve(runResult());
-    await vi.advanceTimersByTimeAsync(1000); // both complete mid-turn → group nudge parked
+    await spawnCompleting(tools);
+    await spawnCompleting(tools);
+    await vi.advanceTimersByTimeAsync(1000); // hold expires mid-turn → both nudges parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     lifecycle.get("tool_execution_end")({}, ctx());
 
-    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
-    expect(pi.sendMessage.mock.calls[0][0].content).toContain("Background agent group completed");
-    expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(pi.sendMessage).toHaveBeenCalledTimes(2);
+    for (const call of pi.sendMessage.mock.calls) {
+      expect(call[0].customType).toBe("subagent-notification");
+      expect(call[0].content).not.toContain("Background agent group completed");
+      expect(call[1]).toEqual({ deliverAs: "steer", triggerTurn: true });
+    }
   });
 });
 

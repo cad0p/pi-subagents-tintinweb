@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveAgentInvocationConfig, resolveJoinMode } from "../src/invocation-config.js";
+import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
 import type { AgentConfig } from "../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -100,17 +100,5 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.inheritContext).toBe(false);
     expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
-  });
-});
-
-describe("resolveJoinMode", () => {
-  it("returns the global default for background agents", () => {
-    expect(resolveJoinMode("smart", true)).toBe("smart");
-    expect(resolveJoinMode("async", true)).toBe("async");
-  });
-
-  it("ignores join mode for foreground agents", () => {
-    expect(resolveJoinMode("smart", false)).toBeUndefined();
-    expect(resolveJoinMode("group", false)).toBeUndefined();
   });
 });

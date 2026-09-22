@@ -12,7 +12,8 @@
  *     of dispatching a user message — schedule fires bypass maxConcurrent so
  *     a 5-minute interval can't be deferred behind 4 long-running agents.
  *   - Result delivery is implicit: spawn → background completion → existing
- *     `subagent-notification` followUp path. No new delivery code.
+ *     completion notification, delivered through the steering queue. No new
+ *     delivery code.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

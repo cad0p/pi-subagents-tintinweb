@@ -160,7 +160,6 @@ describe("result preview settings sanitizer + persistence", () => {
         setMaxConcurrent: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
-        setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setResultPreviewMode: vi.fn(),

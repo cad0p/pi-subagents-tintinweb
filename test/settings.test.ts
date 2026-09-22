@@ -67,17 +67,16 @@ describe("settings persistence", () => {
   });
 
   it("loads from project when no global file", () => {
-    writeProject({ maxConcurrent: 8, defaultJoinMode: "group" });
-    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 8, defaultJoinMode: "group" });
+    writeProject({ maxConcurrent: 8, graceTurns: 3 });
+    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 8, graceTurns: 3 });
   });
 
   it("merges global + project with project winning on conflicts", () => {
-    writeGlobal({ maxConcurrent: 16, graceTurns: 10, defaultJoinMode: "async" });
+    writeGlobal({ maxConcurrent: 16, graceTurns: 10 });
     writeProject({ maxConcurrent: 4, defaultMaxTurns: 50 });
     expect(loadSettings(projectDir)).toEqual({
       maxConcurrent: 4, // project wins
       graceTurns: 10, // from global
-      defaultJoinMode: "async", // from global
       defaultMaxTurns: 50, // from project only
     });
   });
@@ -87,7 +86,6 @@ describe("settings persistence", () => {
       maxConcurrent: 7,
       defaultMaxTurns: 30,
       graceTurns: 3,
-      defaultJoinMode: "smart" as const,
       schedulingEnabled: false,
       toolDescriptionMode: "compact" as const,
     };
@@ -211,22 +209,6 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
-    it("drops invalid defaultJoinMode values", () => {
-      writeProject({ defaultJoinMode: "invalid" });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ defaultJoinMode: 42 });
-      expect(loadSettings(projectDir)).toEqual({});
-      writeProject({ defaultJoinMode: "" });
-      expect(loadSettings(projectDir)).toEqual({});
-    });
-
-    it("accepts all three valid join modes", () => {
-      for (const mode of ["async", "group", "smart"] as const) {
-        writeProject({ defaultJoinMode: mode });
-        expect(loadSettings(projectDir)).toEqual({ defaultJoinMode: mode });
-      }
-    });
-
     it("accepts scopeModels boolean (true and false)", () => {
       writeProject({ scopeModels: true });
       expect(loadSettings(projectDir)).toEqual({ scopeModels: true });
@@ -290,7 +272,6 @@ describe("settings persistence", () => {
         maxConcurrent: 4, // ok
         defaultMaxTurns: -5, // dropped
         graceTurns: 3, // ok
-        defaultJoinMode: "nope", // dropped
       });
       expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 4, graceTurns: 3 });
     });
@@ -369,7 +350,6 @@ describe("settings persistence", () => {
         setMaxConcurrent: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
-        setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
@@ -385,7 +365,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
-      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
@@ -397,7 +376,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(4);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
-      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
     });
@@ -408,7 +386,6 @@ describe("settings persistence", () => {
           maxConcurrent: 8,
           defaultMaxTurns: 50,
           graceTurns: 7,
-          defaultJoinMode: "group",
           schedulingEnabled: false,
           scopeModels: true,
           disableDefaultAgents: true,
@@ -421,7 +398,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(8);
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(50);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
-      expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
@@ -517,7 +493,6 @@ describe("settings persistence", () => {
         setMaxConcurrent: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
-        setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
@@ -538,7 +513,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(16);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
-      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
 
       expect(emit).toHaveBeenCalledTimes(1);
       expect(emit).toHaveBeenCalledWith("subagents:settings_loaded", {
@@ -558,7 +532,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
-      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
     });
   });
 

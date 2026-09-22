@@ -1,6 +1,6 @@
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { subagentNotificationRenderBody, subagentNotificationRenderer } from "../src/index.js";
+import { subagentNotificationRenderBody } from "../src/index.js";
 import type { NotificationDetails } from "../src/types.js";
 
 // Mock theme
@@ -136,32 +136,5 @@ describe("markdown rendering branch", () => {
     expect(markdown.text).not.toContain("const z = 3;"); // Third line of code should be truncated
     expect(markdown.text).not.toContain("```\nLine 15"); // Closing fence + content should not be present
     expect(markdown.text).toContain("(5 more lines, ctrl+O to expand)"); // Expand hint should be appended
-  });
-
-  it("mixed success/failure in d.others renders correctly", () => {
-    const main = createDetails({ status: "completed" });
-    const failed = createDetails({ status: "error", id: "test-2", resultPreview: "Error occurred" });
-    const stopped = createDetails({ status: "stopped", id: "test-3", resultPreview: "No output." });
-    main.others = [failed, stopped];
-    
-    const rendered = subagentNotificationRenderer(
-      { details: main },
-      { expanded: true },
-      mockTheme,
-      "markdown",
-      false
-    );
-    
-    expect(rendered).toBeInstanceOf(Container);
-    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
-    
-    // Verify each renders appropriately for its status
-    const mainContainer = rendered.children[0] as Container;
-    const failedContainer = rendered.children[2] as Container;
-    const stoppedContainer = rendered.children[4] as Container;
-    
-    expect(mainContainer).toBeInstanceOf(Container);
-    expect(failedContainer).toBeInstanceOf(Container);
-    expect(stoppedContainer).toBeInstanceOf(Container);
   });
 });
