@@ -200,6 +200,21 @@ describe("turn-gated completion notifications", () => {
     expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
   });
 
+  it("warns with the agent id instead of dropping silently when the send throws", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    pi.sendMessage.mockImplementation(() => { throw new Error("send exploded"); });
+
+    const id = await spawnCompleting(tools);
+    await vi.advanceTimersByTimeAsync(300); // hold window
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain(id);
+    expect(warn.mock.calls[0][0]).toContain("send exploded");
+  });
+
   it("session_shutdown drops parked nudges — nothing fires after teardown", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);

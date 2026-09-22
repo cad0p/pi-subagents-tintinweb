@@ -92,6 +92,20 @@ describe("usage", () => {
     it("renders a real 0.0% instead of omitting it", () => {
       expect(formatSessionContext(statsWith(0, 200_000))).toBe("0.0% of 200k");
     });
+
+    it("returns null for non-finite or negative percent values", () => {
+      expect(formatSessionContext(statsWith(Number.NaN, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(Number.POSITIVE_INFINITY, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(Number.NEGATIVE_INFINITY, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(-1, 200_000))).toBeNull();
+    });
+
+    it("returns null for a zero, negative, or non-finite context window", () => {
+      expect(formatSessionContext(statsWith(61, 0))).toBeNull();
+      expect(formatSessionContext(statsWith(61, -200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(61, Number.NaN))).toBeNull();
+      expect(formatSessionContext(statsWith(61, Number.POSITIVE_INFINITY))).toBeNull();
+    });
   });
 
   describe("getLifetimeTotal", () => {

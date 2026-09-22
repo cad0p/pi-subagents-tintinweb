@@ -153,20 +153,28 @@ function partialOutputSuffix(record: AgentRecord): string {
 /** Human-readable status word for the completion report header. */
 function getStatusWord(status: string): string {
   switch (status) {
+    case "completed": return "completed";
     case "error": return "error";
     case "stopped": return "stopped";
     case "aborted": return "aborted";
     case "steered": return "wrapped up (turn limit)";
-    default: return "completed";
+    default: return status;
   }
 }
 
-/** Collapse newlines/CRs so header text cannot forge report metadata. */
+/**
+ * Collapse newlines/CRs and strip C0/C1 control bytes and bidi overrides
+ * from text that is composed into the report header or metadata lines.
+ */
 function sanitizeHeaderText(s: string): string {
-  return s.replace(/\r\n?|\n/g, " ").trim();
+  return s
+    .replace(/\r\n?|\n/g, " ")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
 }
 
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
+const HEADER_ERROR_PREVIEW_MAX_CHARS = 300;
 
 /** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
 function safeTruncate(s: string, maxChars: number): string {
@@ -202,24 +210,28 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const stats: string[] = [];
   const turnCount = record.turnCount ?? 0;
-  if (turnCount > 0) stats.push(formatTurns(turnCount, record.effectiveMaxTurns));
-  if (record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
-  if (totalTokens > 0) stats.push(formatTokens(totalTokens));
+  if (Number.isFinite(turnCount) && turnCount > 0) stats.push(formatTurns(turnCount, record.effectiveMaxTurns));
+  if (Number.isFinite(record.toolUses) && record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
+  if (Number.isFinite(totalTokens) && totalTokens > 0) stats.push(formatTokens(totalTokens));
   if (context !== null) stats.push(`ctx ${context}`);
-  if (record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
-  if (durationMs > 0) stats.push(formatMs(durationMs));
+  if (Number.isFinite(record.compactionCount) && record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
+  if (Number.isFinite(durationMs) && durationMs > 0) stats.push(formatMs(durationMs));
 
   const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-  const description = sanitizeHeaderText(record.description ?? "");
+  const description = sanitizeHeaderText(String(record.description ?? "")) || "(no description)";
   let header = `**${isError ? "✗" : "✓"} Subagent ${getStatusWord(record.status)}: ${description}**`;
   if (record.error && (record.status === "error" || record.status === "stopped")) {
-    header += ` — ${sanitizeHeaderText(record.error)}`;
+    const errorText = sanitizeHeaderText(String(record.error));
+    const errorPreview = errorText.length > HEADER_ERROR_PREVIEW_MAX_CHARS
+      ? `${safeTruncate(errorText, HEADER_ERROR_PREVIEW_MAX_CHARS)}…`
+      : errorText;
+    header += ` — ${errorPreview}`;
   }
   header += getStatusNote(record.status);
   if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
 
-  const metadata = [`Agent: ${record.id}`];
-  if (record.outputFile) metadata.push(`Transcript: ${record.outputFile}`);
+  const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];
+  if (record.outputFile) metadata.push(`Transcript: ${sanitizeHeaderText(String(record.outputFile))}`);
 
   return [header, "", metadata.join("\n"), "", "Result:", "", buildResultPreview(record, settings)].join("\n");
 }
@@ -337,11 +349,16 @@ export default function (pi: ExtensionAPI) {
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    pi.sendMessage({
-      customType: "subagent-notification",
-      content: formatTaskNotification(record, { failurePreviewMaxChars }),
-      display: true,
-    }, { deliverAs: "steer", triggerTurn: true });
+    try {
+      pi.sendMessage({
+        customType: "subagent-notification",
+        content: formatTaskNotification(record, { failurePreviewMaxChars }),
+        display: true,
+      }, { deliverAs: "steer", triggerTurn: true });
+    } catch (err) {
+      // Nudge release paths swallow throws; surface the drop with the agent id.
+      console.warn(`[pi-subagents] failed to send completion notification for ${record.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   function sendIndividualNudge(record: AgentRecord) {

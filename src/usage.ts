@@ -66,14 +66,18 @@ function formatContextWindow(contextWindow: number): string {
 
 /**
  * Context-window utilization as `<percent>% of <window>` (e.g. "61.0% of 200k"),
- * or null when unavailable (no model contextWindow, post-compaction, or a
- * disposed/throwing session). A real 0.0% renders — the gate is null, not 0.
+ * or null when unavailable (no model contextWindow, post-compaction, a
+ * disposed/throwing session, a non-finite/negative percent, or a non-finite
+ * window ≤ 0). A real 0.0% renders — the percent gate is not 0.
  */
 export function formatSessionContext(session: SessionLike | undefined): string | null {
   if (!session) return null;
   try {
     const usage = session.getSessionStats().contextUsage;
-    if (usage?.percent == null || usage.contextWindow == null) return null;
-    return `${usage.percent.toFixed(1)}% of ${formatContextWindow(usage.contextWindow)}`;
+    const percent = usage?.percent;
+    const contextWindow = usage?.contextWindow;
+    if (percent == null || !Number.isFinite(percent) || percent < 0) return null;
+    if (contextWindow == null || !Number.isFinite(contextWindow) || contextWindow <= 0) return null;
+    return `${percent.toFixed(1)}% of ${formatContextWindow(contextWindow)}`;
   } catch { return null; }
 }
