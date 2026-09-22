@@ -152,6 +152,8 @@ Found 5 files related to authentication:
 - src/auth.ts
 ```
 
+The report is markdown-wrapped child output with terminal control sequences (OSC/CSI escapes, CR, and invisible format characters) stripped from the header, metadata, and body before it is rendered or persisted; markdown structure and body text are otherwise unchanged.
+
 Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 
 ## Default Agent Types
