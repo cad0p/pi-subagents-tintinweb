@@ -12,10 +12,11 @@
  * text. CR is dropped, so CRLF collapses to LF and a
  * lone CR cannot overwrite the rendered line. A guard against terminal control
  * and invisible text, not a content filter: markdown and XML-ish characters
- * pass through untouched. Each unpaired UTF-16 surrogate becomes U+FFFD:
- * a terminal renders the replacement glyph one column wide, while width
- * helpers can count a lone surrogate as zero columns, so leaving the raw
- * code unit in place lets a padded or clamped row overflow its frame.
+ * pass through untouched. The result is always well-formed UTF-16: an
+ * unpaired surrogate becomes U+FFFD, or the paired character when a removal
+ * above brings a high and a low surrogate together. Leaving one in place
+ * would let a padded or clamped row overflow — a terminal renders it as
+ * U+FFFD one column wide, while width helpers count it as zero columns.
  *
  * The invisible/format set includes the Unicode Tag block (U+E0001,
  * U+E0020–U+E007F), which encodes invisible ASCII payloads, plus CGJ (U+034F),
