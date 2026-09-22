@@ -170,6 +170,19 @@ describe("showSchedulesMenu", () => {
     expect(lines.slice(9)).toEqual([""]);
   });
 
+  it("truncates the prompt preview on a code-point boundary", async () => {
+    const prompt = "a".repeat(199) + "😀tail";
+    const { scheduler } = fakeScheduler([job({ id: "job-1", prompt })]);
+    const { ctx, details } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+
+    const preview = details[0].slice(details[0].indexOf("prompt:\n") + "prompt:\n".length);
+    // The 200-unit cut lands on the astral pair, which is dropped whole.
+    expect(preview).toBe("a".repeat(199) + "…");
+    expect(preview).not.toMatch(LONE_SURROGATE);
+  });
+
   it("truncates a padded name on a code-point boundary", async () => {
     const name = `${"a".repeat(17)}😀tail`;
     const { scheduler } = fakeScheduler([job({ id: "job-1", name })]);
