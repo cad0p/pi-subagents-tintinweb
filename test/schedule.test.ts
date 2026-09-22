@@ -285,6 +285,24 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(scheduler.getNextRun(job.id)).toBe(future);
   });
 
+  it("canonicalizes a store-seeded once schedule in getNextRun", () => {
+    // Valid but non-canonical ISO (no milliseconds): the once branch must
+    // return the canonical form, not the raw store string.
+    store.add({
+      id: "raw-once",
+      name: "raw-once",
+      description: "x",
+      schedule: "2030-01-01T00:00:00Z",
+      scheduleType: "once",
+      subagent_type: "general-purpose",
+      prompt: "p",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      runCount: 0,
+    });
+    expect(scheduler.getNextRun("raw-once")).toBe("2030-01-01T00:00:00.000Z");
+  });
+
   it("getNextRun reports the next cron occurrence", () => {
     const job = scheduler.addJob({
       name: "valid-cron", description: "x", schedule: "0 0 9 * * 1",
