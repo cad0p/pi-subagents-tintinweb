@@ -10,7 +10,7 @@
  *   - Concurrency-bypass option flows through to manager.spawn
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +41,7 @@ function makeMockCtx() {
   } as any;
 }
 
-/** A raw store record in the shape the scheduler persists, for file-seeded fixtures. */
+/** Store record fixture for seeded jobs. */
 function rawJob(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent {
   return {
     id: "job",
@@ -273,19 +273,7 @@ describe("SubagentScheduler — lifecycle", () => {
   // A record the arm path disables must not advertise a next run either, or
   // the menu promises a fire that can never happen.
   function seedInterval(intervalMs: unknown): void {
-    store.add({
-      id: "seeded-interval",
-      name: "seeded-interval",
-      description: "x",
-      schedule: "1s",
-      scheduleType: "interval",
-      intervalMs: intervalMs as number,
-      subagent_type: "general-purpose",
-      prompt: "p",
-      enabled: true,
-      createdAt: new Date().toISOString(),
-      runCount: 0,
-    });
+    store.add(rawJob({ id: "seeded-interval", name: "seeded-interval", prompt: "p", intervalMs: intervalMs as number }));
   }
 
   const UNARMABLE_INTERVAL_NEXT_RUNS: Array<[string, unknown]> = [
@@ -351,18 +339,10 @@ describe("SubagentScheduler — lifecycle", () => {
   it("canonicalizes a store-seeded once schedule in getNextRun", () => {
     // Valid but non-canonical ISO (no milliseconds): the once branch must
     // return the canonical form, not the raw store string.
-    store.add({
-      id: "raw-once",
-      name: "raw-once",
-      description: "x",
-      schedule: "2030-01-01T00:00:00Z",
-      scheduleType: "once",
-      subagent_type: "general-purpose",
-      prompt: "p",
-      enabled: true,
-      createdAt: new Date().toISOString(),
-      runCount: 0,
-    });
+    store.add(rawJob({
+      id: "raw-once", name: "raw-once", prompt: "p",
+      schedule: "2030-01-01T00:00:00Z", scheduleType: "once", intervalMs: undefined,
+    }));
     expect(scheduler.getNextRun("raw-once")).toBe("2030-01-01T00:00:00.000Z");
   });
 
@@ -384,18 +364,10 @@ describe("SubagentScheduler — lifecycle", () => {
     const past = new Date(Date.now() - 60_000).toISOString();
     // Direct store insert bypasses addJob's upfront validation, mimicking a
     // record that was valid when written but is now stale on reload.
-    store.add({
-      id: "reload-test",
-      name: "reload",
-      description: "reload",
-      schedule: past,
-      scheduleType: "once",
-      subagent_type: "general-purpose",
-      prompt: "x",
-      enabled: true,
-      createdAt: past,
-      runCount: 0,
-    });
+    store.add(rawJob({
+      id: "reload-test", name: "reload", description: "reload",
+      schedule: past, scheduleType: "once", createdAt: past, intervalMs: undefined,
+    }));
     // Re-arm: stop drops timers, start re-reads store.list() and calls scheduleJob
     // for every enabled job → the past-branch fires for our seeded record.
     scheduler.stop();
@@ -669,8 +641,23 @@ describe("SubagentScheduler — fire path", () => {
     scheduler.start(pi, ctx, manager, store);
     expect(vi.getTimerCount()).toBe(0);
 
-    // The promote path arms the record and the arm guard disarms it again —
-    // from outside the non-re-entrant store lock, so this must not throw.
+    // The promote path arms the record from the drain, which runs after the
+    // mutation lock is released, and the arm guard disarms it again with a
+    // nested store write. Every write the guard performs must therefore see no
+    // lock file. Moving the drain inside the lock would make that nested update
+    // re-enter acquireLock while the lock is held — under fake timers its
+    // busy-wait never advances, so the regression would hang, not fail.
+    const lockFile = file + ".lock";
+    const lockObserved: boolean[] = [];
+    const originalUpdate = store.update.bind(store);
+    vi.spyOn(store, "update").mockImplementation((id, patch) => {
+      const lockPresent = existsSync(lockFile);
+      lockObserved.push(lockPresent);
+      // Do not re-enter the real update while the lock is held: the nested
+      // acquireLock would spin forever and hide this assertion.
+      return lockPresent ? undefined : originalUpdate(id, patch);
+    });
+
     setDefaultsDisabled(false);
     registerAgents(new Map());
     expect(() => scheduler.addJob({
@@ -678,6 +665,8 @@ describe("SubagentScheduler — fire path", () => {
       subagent_type: "general-purpose", prompt: "trigger",
     })).not.toThrow();
 
+    expect(lockObserved.length).toBeGreaterThan(0);
+    expect(lockObserved).not.toContain(true);
     const stored = scheduler.list().find(j => j.id === seeded.id);
     expect(stored?.enabled).toBe(false);
     expect(stored?.lastStatus).toBe("error");
