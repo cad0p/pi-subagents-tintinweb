@@ -240,7 +240,7 @@ export class ScheduleStore {
     this.warnedSkips = signature;
     const details: string[] = [];
     if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
-    if (this.shadowed.length > 0) details.push(`${this.shadowed.length} shadowed duplicate record(s) kept on disk`);
+    if (this.shadowed.length > 0) details.push(`${this.shadowed.length} shadowed duplicate record(s) retained verbatim on disk and discarded when their id is deleted`);
     if (this.droppedCount > 0) details.push(`${this.droppedCount} unserializable scheduled-job record(s) dropped`);
     if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
     if (this.fileShapeInvalid) details.push("the file is not a versioned store object and will be rewritten");
