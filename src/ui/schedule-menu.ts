@@ -103,13 +103,21 @@ export async function showSchedulesMenu(
 
   // Labels are the user-facing rows, so two jobs whose names collapse to the
   // same text would otherwise be indistinguishable. Make each generated label
-  // unique and resolve the selection through this map — never by index — so
-  // confirm/cancel always act on the job the user picked.
+  // unique and resolve the selected label back to its job, so confirm/cancel
+  // act on the row the user picked.
   const jobByLabel = new Map<string, ScheduledSubagent>();
+  const nextSuffix = new Map<string, number>();
   const labels = jobs.map(j => {
     const base = formatJob(j, scheduler);
     let label = base;
-    for (let n = 2; jobByLabel.has(label); n++) label = `${base} (${n})`;
+    if (jobByLabel.has(label)) {
+      // Resume from this base's last used suffix, so a fully-conflicting set
+      // costs one step per row instead of rescanning from 2 every time.
+      let n = nextSuffix.get(base) ?? 2;
+      while (jobByLabel.has(`${base} (${n})`)) n++;
+      label = `${base} (${n})`;
+      nextSuffix.set(base, n + 1);
+    }
     jobByLabel.set(label, j);
     return label;
   });

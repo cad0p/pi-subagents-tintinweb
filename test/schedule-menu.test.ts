@@ -62,7 +62,7 @@ function fakeCtx(selectIndex: number) {
 }
 
 describe("showSchedulesMenu", () => {
-  it("resolves the selected job by identity when two rendered labels collide", async () => {
+  it("maps the selected colliding row to its own job", async () => {
     const jobs = [
       job({ id: "job-1", name: "job\na", prompt: "first prompt" }),
       job({ id: "job-2", name: "job a", prompt: "second prompt" }),
@@ -72,8 +72,9 @@ describe("showSchedulesMenu", () => {
 
     await showSchedulesMenu(ctx, scheduler);
 
-    // Both names collapse to the same single-line text, so the labels must be
-    // made unique for the second row to be selectable at all.
+    // Both names collapse to the same single-line text; the labels are made
+    // unique so each row is selectable, and the selected label resolves to
+    // that row's own job record.
     expect(labels[0]).toHaveLength(2);
     expect(labels[0][0]).not.toBe(labels[0][1]);
     expect(details).toHaveLength(1);
@@ -135,6 +136,26 @@ describe("showSchedulesMenu", () => {
     expect(labels[0][0]).not.toContain("\u001b");
     expect(labels[0][0]).not.toContain("\n");
     expect(labels[0][0]).not.toContain("\r");
+  });
+
+  // A fully-colliding set suffixes every row after the first; the labels must
+  // still be unique and the last row must resolve to its own job. The bound
+  // catches a return to rescanning from 2 for every row — quadratic, ~4s at
+  // this size — while the resume map keeps it in the low milliseconds.
+  it("uniquifies a large colliding set and resolves the selected row", async () => {
+    const count = 5000;
+    const jobs = Array.from({ length: count }, (_, i) => job({ id: `job-${i}`, name: "same" }));
+    const { scheduler, removeJob } = fakeScheduler(jobs);
+    const { ctx, labels } = fakeCtx(count - 1);
+
+    const started = performance.now();
+    await showSchedulesMenu(ctx, scheduler);
+    const elapsed = performance.now() - started;
+
+    expect(labels[0]).toHaveLength(count);
+    expect(new Set(labels[0]).size).toBe(count);
+    expect(removeJob).toHaveBeenCalledWith(`job-${count - 1}`);
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   it("tolerates a non-string prompt from a corrupted store entry", async () => {
