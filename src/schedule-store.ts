@@ -85,16 +85,26 @@ function skipSignature(raw: unknown): string {
 }
 
 /**
- * Queue a record for verbatim re-write on save, but only when it round-trips
- * through JSON.stringify: a preserved record that cannot be serialized would
- * make every later save() throw. Returns false when the record was dropped.
+ * True when a preserved record survives a round-trip inside the exact shape
+ * save() writes. The wrapper's extra object/array frames are what tips a
+ * near-limit value over the stack; proving the record standalone is not enough.
  */
-function preserveRecord(raw: unknown, into: unknown[]): boolean {
+function canSerializeInPayload(raw: unknown): boolean {
   try {
-    JSON.stringify(raw);
+    JSON.stringify({ version: 1, jobs: [raw] });
+    return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Queue a record for verbatim re-write on save, but only when it round-trips
+ * inside the save payload: a preserved record that cannot be serialized would
+ * make every later save() throw. Returns false when the record was dropped.
+ */
+function preserveRecord(raw: unknown, into: unknown[]): boolean {
+  if (!canSerializeInPayload(raw)) return false;
   into.push(raw);
   return true;
 }
@@ -240,6 +250,10 @@ export class ScheduleStore {
 
   /** Atomic write via temp file + rename (POSIX-atomic). */
   private save(): void {
+    // Final gate: the load-time proof runs a few frames deeper, but a value at
+    // the stack limit can still tip over here. Drop anything that cannot
+    // survive the payload shape so no preserved entry can wedge a mutation.
+    if (this.dropUnserializablePreserved() > 0) this.warnAboutSkips();
     // Preserved entries are written back verbatim so an unrelated mutation
     // cannot silently erase a record the user can still repair by hand.
     // Shadowed duplicates live under their own key: never promoted, never armed.
@@ -266,6 +280,20 @@ export class ScheduleStore {
       try { unlinkSync(tmp); } catch { /* ignore */ }
       throw err;
     }
+  }
+
+  /** Drop preserved records that cannot be serialized inside the save payload. */
+  private dropUnserializablePreserved(): number {
+    let dropped = 0;
+    const keep = (raw: unknown): boolean => {
+      if (canSerializeInPayload(raw)) return true;
+      dropped++;
+      return false;
+    };
+    this.skipped = this.skipped.filter(keep);
+    this.shadowed = this.shadowed.filter(keep);
+    this.droppedCount += dropped;
+    return dropped;
   }
 
   /** Acquire lock → reload → mutate → save → release. */
