@@ -203,18 +203,21 @@ describe("markdown completion report", () => {
     const report = formatTaskNotification(
       createRecord({
         id: "a\u001b\u0000\u200e",
-        description: "desc\u001b\u0000\u009b\u202e",
+        description: "desc\u001b[31mRED\u001b[0m\u202e",
         status: "error",
-        error: "err\u001b]8;;https://evil.example\u0007click",
+        error: "err\u001b]8;;https://evil.example\u0007click\u001b[2Jtail",
         outputFile: "/tmp/p\u001b\u0000.tmp",
         result: "clean body",
       }),
       settings,
     );
     const [header, , metadata] = report.split("\n");
-    expect(report).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+    expect(report).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200d\u200e\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/);
+    // Complete OSC/CSI sequences are consumed, not left as printable residue.
+    expect(header).not.toContain("[2J");
+    expect(header).not.toContain("]8;;");
     expect(header).toBe(
-      "**✗ Subagent error: desc** — err]8;;https://evil.exampleclick · 2 tool uses · 150 token · 5.0s",
+      "**✗ Subagent error: descRED** — errclicktail · 2 tool uses · 150 token · 5.0s",
     );
     expect(metadata).toContain("Agent: a");
     expect(report).toContain("Transcript: /tmp/p.tmp");

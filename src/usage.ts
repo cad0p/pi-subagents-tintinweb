@@ -55,8 +55,12 @@ export function getSessionTokens(session: SessionLike | undefined): number {
  */
 export function getSessionContextPercent(session: SessionLike | undefined): number | null {
   if (!session) return null;
-  try { return session.getSessionStats().contextUsage?.percent ?? null; }
-  catch { return null; }
+  try {
+    const percent = session.getSessionStats().contextUsage?.percent;
+    // A non-finite/negative percent would render `Context: NaN%` (or a nonsense
+    // negative) in the tool text and skew the widget/viewer thresholds.
+    return typeof percent === "number" && Number.isFinite(percent) && percent >= 0 ? percent : null;
+  } catch { return null; }
 }
 
 /** Format a context-window size for the report: "1.0M" at ≥1M, else "NNNk". */

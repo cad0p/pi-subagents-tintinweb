@@ -158,23 +158,35 @@ function getStatusWord(status: string): string {
     case "stopped": return "stopped";
     case "aborted": return "aborted";
     case "steered": return "wrapped up (turn limit)";
-    default: return status;
+    default: return sanitizeHeaderText(status) || "unknown";
   }
 }
 
 /**
- * Collapse newlines/CRs and strip C0/C1 control bytes and bidi overrides
- * from text that is composed into the report header or metadata lines.
+ * Strip terminal control sequences and invisible/forging characters, keeping
+ * tab, newlines, and printable non-ASCII. Complete OSC/CSI sequences are
+ * consumed whole; a dangling introducer goes with its ESC/C1 byte so no
+ * `[2J`/`]8;;`-style residue is left. A guard against terminal control and
+ * invisible text, not a content filter.
+ */
+function stripControlChars(s: string): string {
+  return s
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // complete OSC: ESC ] … BEL | ST
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // complete CSI: ESC [ … final byte
+    .replace(/[\u001b\u009b][[\]()#;?]*/g, "") // dangling ESC/C1 plus its introducer
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200d\u2028\u2029\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g, "");
+}
+
+/**
+ * Collapse newlines/CRs and strip control/invisible characters from text that
+ * is composed into the report header or metadata lines.
  */
 function sanitizeHeaderText(s: string): string {
-  return s
-    .replace(/\r\n?|\n/g, " ")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-    .trim();
+  return stripControlChars(s.replace(/\r\n?|\n/g, " ")).trim();
 }
 
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
-const HEADER_ERROR_PREVIEW_MAX_CHARS = 300;
+const HEADER_PREVIEW_MAX_CHARS = 300; // ~one wrapped line; description/error are untrusted input.
 
 /** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
 function safeTruncate(s: string, maxChars: number): string {
@@ -183,11 +195,18 @@ function safeTruncate(s: string, maxChars: number): string {
   return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
 }
 
+/** Bound a sanitized header field to the shared preview cap, marking truncation. */
+function headerPreview(s: string): string {
+  return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
+}
+
 /** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
-  const body = record.result ?? record.error ?? "";
-  if (!body) return "No output.";
   const isFailure = record.status === "error" || record.status === "stopped";
+  // `record.result` bodies are accepted raw (Call 12); the error fallback is the
+  // same string the header sanitizes, so strip terminal controls from it too.
+  const body = record.result ?? (isFailure ? stripControlChars(String(record.error ?? "")) : record.error ?? "");
+  if (!body) return "No output.";
   if (isFailure && typeof settings.failurePreviewMaxChars !== "number") {
     throw new Error("buildResultPreview: failurePreviewMaxChars must be a number on failure status");
   }
@@ -210,7 +229,9 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const stats: string[] = [];
   const turnCount = record.turnCount ?? 0;
-  if (Number.isFinite(turnCount) && turnCount > 0) stats.push(formatTurns(turnCount, record.effectiveMaxTurns));
+  if (Number.isFinite(turnCount) && turnCount > 0) {
+    stats.push(formatTurns(turnCount, Number.isFinite(record.effectiveMaxTurns) ? record.effectiveMaxTurns : undefined));
+  }
   if (Number.isFinite(record.toolUses) && record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
   if (Number.isFinite(totalTokens) && totalTokens > 0) stats.push(formatTokens(totalTokens));
   if (context !== null) stats.push(`ctx ${context}`);
@@ -218,22 +239,29 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   if (Number.isFinite(durationMs) && durationMs > 0) stats.push(formatMs(durationMs));
 
   const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-  const description = sanitizeHeaderText(String(record.description ?? "")) || "(no description)";
+  const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
+  const description = headerPreview(descriptionText) || "(no description)";
   let header = `**${isError ? "✗" : "✓"} Subagent ${getStatusWord(record.status)}: ${description}**`;
-  if (record.error && (record.status === "error" || record.status === "stopped")) {
-    const errorText = sanitizeHeaderText(String(record.error));
-    const errorPreview = errorText.length > HEADER_ERROR_PREVIEW_MAX_CHARS
-      ? `${safeTruncate(errorText, HEADER_ERROR_PREVIEW_MAX_CHARS)}…`
-      : errorText;
-    header += ` — ${errorPreview}`;
-  }
+  const errorText = record.error && (record.status === "error" || record.status === "stopped")
+    ? sanitizeHeaderText(String(record.error))
+    : "";
+  const errorPreview = headerPreview(errorText);
+  if (errorPreview) header += ` — ${errorPreview}`;
   header += getStatusNote(record.status);
   if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
 
   const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];
   if (record.outputFile) metadata.push(`Transcript: ${sanitizeHeaderText(String(record.outputFile))}`);
+  const body = buildResultPreview(record, settings);
+  // The header only previews the error. When a partial result replaces the error
+  // in the body, carry the full sanitized error here so its tail is not lost.
+  if (errorText.length > HEADER_PREVIEW_MAX_CHARS && record.result != null) {
+    const cap = settings.failurePreviewMaxChars as number; // validated by buildResultPreview above
+    const fullError = errorText.length > cap ? `${safeTruncate(errorText, cap)}\n…(truncated, see transcript)` : errorText;
+    metadata.push(`Error: ${fullError}`);
+  }
 
-  return [header, "", metadata.join("\n"), "", "Result:", "", buildResultPreview(record, settings)].join("\n");
+  return [header, "", metadata.join("\n"), "", "Result:", "", body].join("\n");
 }
 
 /** Build AgentDetails from a base + record-specific fields. */
@@ -1361,8 +1389,11 @@ Terse command-style prompts produce shallow, generic work.
 
     renderResult(result, _options, theme) {
       const report = result.content[0]?.type === "text" ? result.content[0].text : "";
-      return report
-        ? new Markdown(report, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
+      // Display copy only: the tool text returned to the parent model keeps its
+      // raw bytes (Call 12 posture for result/error bodies).
+      const display = stripControlChars(report);
+      return display
+        ? new Markdown(display, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
         : new Text("", 0, 0);
     },
   }));
