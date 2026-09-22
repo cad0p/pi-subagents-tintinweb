@@ -11,7 +11,10 @@
  * that payload as visible text. CR is dropped, so CRLF collapses to LF and a
  * lone CR cannot overwrite the rendered line. A guard against terminal control
  * and invisible text, not a content filter: markdown and XML-ish characters
- * pass through untouched.
+ * pass through untouched. Each unpaired UTF-16 surrogate becomes U+FFFD:
+ * a terminal renders the replacement glyph one column wide, while width
+ * helpers can count a lone surrogate as zero columns, so leaving the raw
+ * code unit in place lets a padded or clamped row overflow its frame.
  *
  * The invisible/format set includes the Unicode Tag block (U+E0001,
  * U+E0020–U+E007F), which encodes invisible ASCII payloads, plus CGJ (U+034F),
@@ -33,6 +36,10 @@ export function stripControlChars(s: string): string {
     .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // complete OSC: ESC ] … BEL | ST
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // complete CSI: ESC [ … final byte
     .replace(/[\u001b\u009b][[\]()#;?]*/g, "") // dangling ESC/C1 plus its introducer
+    .replace(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+      "\uFFFD",
+    ) // coerce unpaired surrogates
     .replace(
       /[\u{e0100}-\u{e01ef}\u034f\x00-\x08\x0b-\x0d\x0e-\x1f\x7f-\x9f\u00ad\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\u3164\ufeff\uffa0\u{e0001}\u{e0020}-\u{e007f}]/gu,
       "",

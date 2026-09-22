@@ -639,8 +639,10 @@ describe("markdown completion report", () => {
       { failurePreviewMaxChars: 8 },
     );
     const body = report.slice(report.indexOf("Result:\n\n") + "Result:\n\n".length);
-    expect(body).toBe(`hello${String.fromCharCode(0xdc00)}wo\n…(truncated, see transcript)`);
-    expect(report).not.toContain("\uFFFD");
+    // The unpaired surrogate is coerced to U+FFFD before the truncation check,
+    // so neither the report nor the cut span carries one.
+    expect(body).toBe("hello\uFFFDwo\n…(truncated, see transcript)");
+    expect(report).not.toMatch(/(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/);
   });
 
   it("does not truncate when the input length equals failurePreviewMaxChars", () => {

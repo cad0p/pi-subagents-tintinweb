@@ -64,6 +64,21 @@ describe("stripControlChars", () => {
     expect(stripControlChars("a\u001b]0;payload")).toBe("a0;payload");
   });
 
+  it("replaces each unpaired surrogate with U+FFFD", () => {
+    expect(stripControlChars("a\uD83Db")).toBe("a\uFFFDb");
+    expect(stripControlChars("a\uDE00b")).toBe("a\uFFFDb");
+    expect(stripControlChars("a\uD83D\uD83Db")).toBe("a\uFFFD\uFFFDb");
+    expect(stripControlChars("\uDE00\uD83D")).toBe("\uFFFD\uFFFD");
+  });
+
+  it("keeps well-formed astral pairs intact and is idempotent", () => {
+    const astral = "a\u{1F600}\u{1D11E}b";
+    expect(stripControlChars(astral)).toBe(astral);
+    const once = stripControlChars("a\uD83D\uD83D\uDE00b\uDE00");
+    expect(once).toBe("a\uFFFD\u{1F600}b\uFFFD");
+    expect(stripControlChars(once)).toBe(once);
+  });
+
   it("drops CR so CRLF collapses to LF", () => {
     expect(stripControlChars("a\r\nb")).toBe("a\nb");
     expect(stripControlChars("a\rb")).toBe("ab");
