@@ -10,7 +10,8 @@
 import { CustomMessageComponent, getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { formatTaskNotification } from "../src/index.js";
-import type { AgentRecord, SubagentsSettings } from "../src/types.js";
+import type { SubagentsSettings } from "../src/settings.js";
+import type { AgentRecord } from "../src/types.js";
 
 const settings: SubagentsSettings = { failurePreviewMaxChars: 65536 };
 

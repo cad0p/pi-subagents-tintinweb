@@ -249,7 +249,7 @@ describe("turn-gated completion notifications", () => {
       expect(call[0].content).not.toContain("Background agent group completed");
       expect(call[1]).toEqual({ deliverAs: "steer", triggerTurn: true });
     }
-    const contents = pi.sendMessage.mock.calls.map((call) => call[0].content as string).join("\n");
+    const contents = pi.sendMessage.mock.calls.map((call: any[]) => call[0].content as string).join("\n");
     expect(contents).toContain("**✓ Subagent completed: first task**");
     expect(contents).toContain("**✓ Subagent completed: second task**");
   });

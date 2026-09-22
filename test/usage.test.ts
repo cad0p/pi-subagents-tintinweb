@@ -48,6 +48,20 @@ describe("usage", () => {
       };
       expect(getSessionContextPercent(session)).toBe(25);
     });
+
+    it("returns null for non-finite or negative percent values but keeps a real 0", () => {
+      const withPercent = (percent: number | null) => ({
+        getSessionStats: () => ({
+          tokens: { input: 10, output: 20, cacheWrite: 5 },
+          contextUsage: { percent, contextWindow: 200_000 },
+        }),
+      });
+      expect(getSessionContextPercent(withPercent(Number.NaN))).toBeNull();
+      expect(getSessionContextPercent(withPercent(Number.POSITIVE_INFINITY))).toBeNull();
+      expect(getSessionContextPercent(withPercent(Number.NEGATIVE_INFINITY))).toBeNull();
+      expect(getSessionContextPercent(withPercent(-1))).toBeNull();
+      expect(getSessionContextPercent(withPercent(0))).toBe(0);
+    });
   });
 
   describe("formatSessionContext", () => {

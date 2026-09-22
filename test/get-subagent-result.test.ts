@@ -702,6 +702,27 @@ describe("get_subagent_result output shapes", () => {
     expect(rendered.text).toContain("Done implementing the subsystem.");
   });
 
+  it("strips terminal controls from the rendered markdown but not the tool text", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    const error = "boom\u001b[2J\u001b]8;;https://evil.example\u0007click";
+    settleRecord(id, { status: "error", error, completedAt: Date.now() });
+
+    const tool = tools.get("get_subagent_result");
+    const res = await tool.execute("gsr-tc", { agent_id: id }, undefined, undefined, {} as any);
+    // The model-visible tool text keeps the raw bytes (accepted body posture).
+    expect(textOf(res)).toContain(error);
+
+    const rendered = tool.renderResult(res, { expanded: false, isPartial: false }, {
+      fg: (_color: string, text: string) => text,
+    });
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).not.toContain("]8;;");
+    expect(rendered.text).toContain("boomclick");
+  });
+
   // ---- resultConsumed is set on terminal reads, not on running reads ----
   it("reading a running agent does not mark the result consumed", async () => {
     const { tools, id } = await setupAgent({});
