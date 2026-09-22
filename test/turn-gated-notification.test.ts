@@ -351,6 +351,36 @@ describe("foreground Agent result rendering", () => {
     expect(res.content[0].text).toBe(text);
   });
 
+  it("the no-details fallback strips terminal controls from the display copy but not the tool text", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const text = "x\u001b[2Jy";
+    const res = { content: [{ type: "text" as const, text }], details: undefined };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme);
+    expect(rendered.text).not.toContain("\u001b");
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).toBe("xy");
+    // The tool text handed to the model keeps its raw bytes.
+    expect(res.content[0].text).toBe(text);
+  });
+
+  it("running activity strips terminal controls from the display copy", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const res = {
+      content: [{ type: "text" as const, text: "partial" }],
+      details: details({ status: "running", activity: `read${control}files` }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
+    const text = rendered.render(120).join("\n");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("[2J");
+    expect(text).not.toContain("]8;;");
+    expect(text).toContain("readfiles");
+  });
+
   it("renderCall strips terminal controls from the description", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
