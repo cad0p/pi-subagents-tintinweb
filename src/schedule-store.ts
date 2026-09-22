@@ -276,7 +276,8 @@ export class ScheduleStore {
     // Promotion is reported after the lock (see withLock): arming a promoted
     // record can write to the store on the arm-guard branches, which cannot
     // run while withLock holds the non-re-entrant lock.
-    this.pendingPromoted = [...jobs.keys()].filter(id => !previousLiveIds.includes(id));
+    const previousLive = new Set(previousLiveIds);
+    this.pendingPromoted = [...jobs.keys()].filter(id => !previousLive.has(id));
   }
 
   /** Warn once per distinct invalid-entry summary — load() runs before every mutation. */
