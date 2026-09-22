@@ -501,6 +501,49 @@ describe("ScheduleStore", () => {
     expect(onDisk.shadowed).toEqual([]);
   });
 
+  it("removes a skipped-only id whose live twin never loaded", () => {
+    const file = join(tmp, "s.json");
+    // The only record with this id is malformed, so it lands in `skipped` at
+    // load and the no-op fast path must still find it.
+    const badOnly = { ...makeRawJob({ id: "orphan" }), scheduleType: "every-so-often" };
+    writeStoreFile(file, [badOnly]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+    expect(store.remove("orphan")).toBe(true);
+
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([]);
+    expect(onDisk.shadowed).toEqual([]);
+
+    // A later save must not write the preserved record back either.
+    const fresh = new ScheduleStore(file);
+    fresh.add(makeJob({ id: "other", name: "other" }));
+    const after = JSON.parse(readFileSync(file, "utf-8"));
+    expect(after.jobs.map((j: any) => j.id)).toEqual(["other"]);
+    expect(after.shadowed).toEqual([]);
+  });
+
+  it("removes a shadowed-only id and keeps it gone", () => {
+    const file = join(tmp, "s.json");
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [], shadowed: [makeJob({ id: "ghost" })] }, null, 2));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toEqual([]);
+
+    // The record is not live, but the id really is on disk and the cancel
+    // reports the removal truthfully.
+    expect(store.remove("ghost")).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([]);
+    expect(onDisk.shadowed).toEqual([]);
+
+    const fresh = new ScheduleStore(file);
+    expect(fresh.remove("ghost")).toBe(false);
+  });
+
   it("never promotes a shadowed duplicate across repeated load/save cycles", () => {
     const file = join(tmp, "s.json");
     writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);

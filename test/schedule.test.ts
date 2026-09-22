@@ -728,6 +728,38 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).not.toHaveBeenCalled();
   });
 
+  // The menu reads the job list, then the user confirms the cancel. A reload
+  // in that window (a fire aborting on an invalidated type) reclassifies the
+  // record out of the live set, so removeJob() arrives with the id preserved
+  // only. The cancel must still purge it and keep it gone.
+  it("cancels a stale menu row whose record an earlier reload reclassified", () => {
+    const job = scheduler.addJob({
+      name: "stale", description: "x", schedule: "1h",
+      subagent_type: "Explore", prompt: "x",
+    });
+
+    // The type vanishes mid-session; a prior mutation's reload moves the
+    // record out of the live set and clears its timer.
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    store.update(job.id, { lastStatus: "error" });
+    expect(scheduler.list()).toEqual([]);
+
+    expect(scheduler.removeJob(job.id)).toBe(true);
+    expect(scheduler.list()).toEqual([]);
+
+    // Restoring the type and reloading must not resurrect the cancelled id.
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+    scheduler.addJob({
+      name: "trigger", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    const fresh = new ScheduleStore(join(tmp, "s.json"));
+    expect(fresh.list().some(j => j.id === job.id)).toBe(false);
+    expect(fresh.remove(job.id)).toBe(false);
+  });
+
   it("emits fired event with agentId on successful spawn", () => {
     scheduler.addJob({
       name: "fire-once", description: "x", schedule: "+1s",
