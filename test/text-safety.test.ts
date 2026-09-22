@@ -51,11 +51,19 @@ describe("stripControlChars", () => {
     expect(stripControlChars("a\u001b[?25lb")).toBe("ab");
   });
 
+  it("removes C1-introduced CSI sequences", () => {
+    // The 8-bit form carries no `[`: U+009B is the introducer itself.
+    expect(stripControlChars("a\u009b31mred")).toBe("ared");
+    expect(stripControlChars("a\u009b?25lb")).toBe("ab");
+    // Zero parameters still makes it a complete sequence with final `b`.
+    expect(stripControlChars("a\u009bb")).toBe("a");
+  });
+
   it("removes a dangling ESC/C1 introducer together with its introducer bytes", () => {
     expect(stripControlChars("a\u001b")).toBe("a");
     expect(stripControlChars("a\u001b]")).toBe("a");
     expect(stripControlChars("a\u001b(")).toBe("a");
-    expect(stripControlChars("a\u009bb")).toBe("ab");
+    expect(stripControlChars("a\u009b")).toBe("a");
   });
 
   it("leaves an unterminated OSC payload as visible text (documented behavior)", () => {

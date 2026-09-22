@@ -5,10 +5,11 @@
 
 /**
  * Strip terminal control sequences and invisible/forging characters, keeping
- * tab, LF, and printable non-ASCII. Complete OSC/CSI sequences are consumed
- * whole; a dangling introducer goes with its ESC/C1 byte, while an
- * unterminated payload (an OSC/DCS sequence missing its terminator) may leave
- * that payload as visible text. CR is dropped, so CRLF collapses to LF and a
+ * tab, LF, and printable non-ASCII. Complete OSC and CSI sequences are consumed
+ * whole, including the 8-bit C1 form of CSI (U+009B with no `[`); a dangling
+ * introducer goes with its ESC/C1 byte, while an unterminated payload (an
+ * OSC/DCS sequence missing its terminator) may leave that payload as visible
+ * text. CR is dropped, so CRLF collapses to LF and a
  * lone CR cannot overwrite the rendered line. A guard against terminal control
  * and invisible text, not a content filter: markdown and XML-ish characters
  * pass through untouched. Each unpaired UTF-16 surrogate becomes U+FFFD:
@@ -35,6 +36,7 @@ export function stripControlChars(s: string): string {
   return s
     .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // complete OSC: ESC ] … BEL | ST
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // complete CSI: ESC [ … final byte
+    .replace(/\u009b[0-?]*[ -/]*[@-~]/g, "") // complete C1 CSI: U+009B … final byte
     .replace(/[\u001b\u009b][[\]()#;?]*/g, "") // dangling ESC/C1 plus its introducer
     .replace(
       /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
