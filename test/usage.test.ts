@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getLifetimeTotal, getSessionContextPercent, getSessionTokens } from "../src/usage.js";
+import { formatSessionContext, getLifetimeTotal, getSessionContextPercent, getSessionTokens } from "../src/usage.js";
 
 // Regression for issue #38 — token semantics + context indicator
 describe("usage", () => {
@@ -47,6 +47,78 @@ describe("usage", () => {
         }),
       };
       expect(getSessionContextPercent(session)).toBe(25);
+    });
+
+    it("returns null for non-finite or negative percent values but keeps a real 0", () => {
+      const withPercent = (percent: number | null) => ({
+        getSessionStats: () => ({
+          tokens: { input: 10, output: 20, cacheWrite: 5 },
+          contextUsage: { percent, contextWindow: 200_000 },
+        }),
+      });
+      expect(getSessionContextPercent(withPercent(Number.NaN))).toBeNull();
+      expect(getSessionContextPercent(withPercent(Number.POSITIVE_INFINITY))).toBeNull();
+      expect(getSessionContextPercent(withPercent(Number.NEGATIVE_INFINITY))).toBeNull();
+      expect(getSessionContextPercent(withPercent(-1))).toBeNull();
+      expect(getSessionContextPercent(withPercent(0))).toBe(0);
+    });
+  });
+
+  describe("formatSessionContext", () => {
+    const statsWith = (percent: number | null, contextWindow?: number | null) => ({
+      getSessionStats: () => ({
+        tokens: { input: 10, output: 20, cacheWrite: 5 },
+        contextUsage: { percent, contextWindow },
+      }),
+    });
+
+    it("formats percent + window as X.X% of NNNk", () => {
+      expect(formatSessionContext(statsWith(61, 200_000))).toBe("61.0% of 200k");
+    });
+
+    it("formats a small window with toFixed(0)", () => {
+      expect(formatSessionContext(statsWith(12.34, 32_000))).toBe("12.3% of 32k");
+    });
+
+    it("formats a window at exactly 1M as 1.0M", () => {
+      expect(formatSessionContext(statsWith(50, 1_000_000))).toBe("50.0% of 1.0M");
+    });
+
+    it("rounds a just-under-1M window to 1000k", () => {
+      expect(formatSessionContext(statsWith(50, 999_999))).toBe("50.0% of 1000k");
+    });
+
+    it("returns null when percent is null (post-compaction)", () => {
+      expect(formatSessionContext(statsWith(null, 200_000))).toBeNull();
+    });
+
+    it("returns null when the context window is missing", () => {
+      expect(formatSessionContext(statsWith(61))).toBeNull();
+      expect(formatSessionContext(statsWith(61, null))).toBeNull();
+    });
+
+    it("returns null for a session-less record and for a throwing session", () => {
+      expect(formatSessionContext(undefined)).toBeNull();
+      const broken = { getSessionStats: () => { throw new Error("disposed"); } } as any;
+      expect(formatSessionContext(broken)).toBeNull();
+    });
+
+    it("renders a real 0.0% instead of omitting it", () => {
+      expect(formatSessionContext(statsWith(0, 200_000))).toBe("0.0% of 200k");
+    });
+
+    it("returns null for non-finite or negative percent values", () => {
+      expect(formatSessionContext(statsWith(Number.NaN, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(Number.POSITIVE_INFINITY, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(Number.NEGATIVE_INFINITY, 200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(-1, 200_000))).toBeNull();
+    });
+
+    it("returns null for a zero, negative, or non-finite context window", () => {
+      expect(formatSessionContext(statsWith(61, 0))).toBeNull();
+      expect(formatSessionContext(statsWith(61, -200_000))).toBeNull();
+      expect(formatSessionContext(statsWith(61, Number.NaN))).toBeNull();
+      expect(formatSessionContext(statsWith(61, Number.POSITIVE_INFINITY))).toBeNull();
     });
   });
 

@@ -35,7 +35,6 @@ function makePi() {
   const lifecycle = new Map<string, any>(); // pi.on(...) — session_start, session_shutdown, …
   const busHandlers = new Map<string, (raw: any) => unknown>(); // pi.events.on(...) — rpc channels
   const pi = {
-    registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),

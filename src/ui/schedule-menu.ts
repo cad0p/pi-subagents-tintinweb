@@ -10,6 +10,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentScheduler } from "../schedule.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { ScheduledSubagent } from "../types.js";
 
 /** Format an ISO timestamp as relative time ("in 4h", "2d ago", "—"). */
@@ -40,29 +41,44 @@ function statusIcon(j: ScheduledSubagent): string {
 /** Compact selectable row — name, schedule, agent type, next/last run, count. */
 function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id);
+  // runCount is typed number but comes from unvalidated JSON; coerce before the
+  // single-line sanitizer, which returns "" for non-string input.
+  const runCount = Number(j.runCount);
   return [
     statusIcon(j),
-    j.name.padEnd(18).slice(0, 18),
-    j.schedule.padEnd(14).slice(0, 14),
-    `[${j.subagent_type}]`,
+    safeTruncate(toSingleLine(j.name), 18).padEnd(18),
+    safeTruncate(toSingleLine(j.schedule), 14).padEnd(14),
+    `[${toSingleLine(j.subagent_type)}]`,
     `next ${relTime(next)}`,
     `last ${relTime(j.lastRun)}`,
-    `runs ${j.runCount}`,
+    `runs ${toSingleLine(String(Number.isFinite(runCount) ? runCount : 0))}`,
   ].join("  ");
 }
 
 /** Multi-line details block for the cancel confirm. */
 function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id) ?? "—";
+  // The prompt is the only multi-line field and goes last, under its own
+  // label, so nothing it contains can forge a metadata line above it. The
+  // store is not validated per field, so a corrupted entry can hand it a
+  // non-string; coerce before the sanitizer touches it.
+  const rawPrompt = typeof j.prompt === "string" ? j.prompt : "";
+  const prompt = stripControlChars(rawPrompt);
+  const promptPreview = prompt.length > 200 ? `${safeTruncate(prompt, 200)}…` : prompt;
+  // runCount is typed number but comes from unvalidated JSON; coerce before the
+  // single-line sanitizer, which returns "" for non-string input.
+  const runCount = Number(j.runCount);
   return [
-    `name:      ${j.name}`,
-    `schedule:  ${j.schedule} (${j.scheduleType})`,
-    `agent:     ${j.subagent_type}`,
-    `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
-    `created:   ${j.createdAt}`,
-    `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,
-    `next run:  ${next}`,
-    `runs:      ${j.runCount}`,
+    `name:      ${toSingleLine(j.name)}`,
+    `schedule:  ${toSingleLine(j.schedule)} (${toSingleLine(j.scheduleType)})`,
+    `agent:     ${toSingleLine(j.subagent_type)}`,
+    `created:   ${toSingleLine(j.createdAt)}`,
+    `last run:  ${toSingleLine(j.lastRun ?? "—")} (${toSingleLine(j.lastStatus ?? "—")})`,
+    `next run:  ${toSingleLine(next)}`,
+    `runs:      ${toSingleLine(String(Number.isFinite(runCount) ? runCount : 0))}`,
+    "",
+    "prompt:",
+    promptPreview,
   ].join("\n");
 }
 
@@ -85,20 +101,48 @@ export async function showSchedulesMenu(
     return;
   }
 
-  const labels = jobs.map(j => formatJob(j, scheduler));
+  // Labels are the user-facing rows, so two jobs whose names collapse to the
+  // same text would otherwise be indistinguishable. Make each generated label
+  // unique and resolve the selected label back to its job, so confirm/cancel
+  // act on the row the user picked.
+  const jobByLabel = new Map<string, ScheduledSubagent>();
+  const nextSuffix = new Map<string, number>();
+  const labels = jobs.map(j => {
+    const base = formatJob(j, scheduler);
+    let label = base;
+    if (jobByLabel.has(label)) {
+      // A repeated base (rows can truncate to the same text) is load-bearing:
+      // the suffix keeps the labels distinct. Resume from the last used suffix
+      // so a fully-conflicting set costs one step per row.
+      let n = nextSuffix.get(base) ?? 2;
+      // The rescan is unreachable today (every base ends with its `runs N`
+      // tail), but keep it: a duplicate label would let the user cancel the
+      // wrong job if the row shape changes.
+      while (jobByLabel.has(`${base} (${n})`)) n++;
+      label = `${base} (${n})`;
+      nextSuffix.set(base, n + 1);
+    }
+    jobByLabel.set(label, j);
+    return label;
+  });
   const choice = await ctx.ui.select(
     `Scheduled jobs (${jobs.length}) — select to cancel`,
     labels,
   );
   if (!choice) return;
 
-  const idx = labels.indexOf(choice);
-  if (idx < 0) return;
-  const job = jobs[idx];
+  const job = jobByLabel.get(choice);
+  if (!job) return;
 
-  const ok = await ctx.ui.confirm(`Cancel "${job.name}"?`, formatDetails(job, scheduler));
+  const ok = await ctx.ui.confirm(`Cancel "${toSingleLine(job.name)}"?`, formatDetails(job, scheduler));
   if (!ok) return;
 
-  scheduler.removeJob(job.id);
-  ctx.ui.notify(`Cancelled "${job.name}".`, "info");
+  const removed = scheduler.removeJob(job.id);
+  if (removed) {
+    ctx.ui.notify(`Cancelled "${toSingleLine(job.name)}".`, "info");
+  } else {
+    // The record vanished between the list read and the removal — do not
+    // claim a cancellation that did not happen.
+    ctx.ui.notify(`Could not cancel "${toSingleLine(job.name)}" — it is no longer a scheduled job.`, "warning");
+  }
 }

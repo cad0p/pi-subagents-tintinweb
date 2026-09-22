@@ -24,7 +24,7 @@ export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
 /** Minimal shape we read from upstream `getSessionStats()`. */
 export type SessionStatsLike = {
   tokens: { input: number; output: number; cacheWrite: number };
-  contextUsage?: { percent: number | null };
+  contextUsage?: { percent: number | null; contextWindow?: number | null };
 };
 export type SessionLike = { getSessionStats(): SessionStatsLike };
 
@@ -55,6 +55,33 @@ export function getSessionTokens(session: SessionLike | undefined): number {
  */
 export function getSessionContextPercent(session: SessionLike | undefined): number | null {
   if (!session) return null;
-  try { return session.getSessionStats().contextUsage?.percent ?? null; }
-  catch { return null; }
+  try {
+    const percent = session.getSessionStats().contextUsage?.percent;
+    // A non-finite/negative percent would render `Context: NaN%` (or a nonsense
+    // negative) in the tool text and skew the widget/viewer thresholds.
+    return typeof percent === "number" && Number.isFinite(percent) && percent >= 0 ? percent : null;
+  } catch { return null; }
+}
+
+/** Format a context-window size for the report: "1.0M" at ≥1M, else "NNNk". */
+function formatContextWindow(contextWindow: number): string {
+  return contextWindow >= 1_000_000 ? "1.0M" : `${(contextWindow / 1000).toFixed(0)}k`;
+}
+
+/**
+ * Context-window utilization as `<percent>% of <window>` (e.g. "61.0% of 200k"),
+ * or null when unavailable (no model contextWindow, post-compaction, a
+ * disposed/throwing session, a non-finite/negative percent, or a non-finite
+ * window ≤ 0). A real 0.0% renders — the percent gate is not 0.
+ */
+export function formatSessionContext(session: SessionLike | undefined): string | null {
+  if (!session) return null;
+  try {
+    const usage = session.getSessionStats().contextUsage;
+    const percent = usage?.percent;
+    const contextWindow = usage?.contextWindow;
+    if (percent == null || !Number.isFinite(percent) || percent < 0) return null;
+    if (contextWindow == null || !Number.isFinite(contextWindow) || contextWindow <= 0) return null;
+    return `${percent.toFixed(1)}% of ${formatContextWindow(contextWindow)}`;
+  } catch { return null; }
 }

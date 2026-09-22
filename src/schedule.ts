@@ -12,16 +12,42 @@
  *     of dispatching a user message — schedule fires bypass maxConcurrent so
  *     a 5-minute interval can't be deferred behind 4 long-running agents.
  *   - Result delivery is implicit: spawn → background completion → existing
- *     `subagent-notification` followUp path. No new delivery code.
+ *     completion notification, delivered through the steering queue. No new
+ *     delivery code.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
+import { isValidType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
+
+/**
+ * Smallest armable interval. The parsers' smallest unit is one second, so a
+ * sub-second value can only come from a corrupt store; the values closest to
+ * zero are the ones Node clamps to ~1 ms.
+ */
+const MIN_ARMABLE_INTERVAL_MS = 1000;
+
+/**
+ * Largest delay `setTimeout`/`setInterval` accept. Node clamps anything above
+ * this to ~1 ms and warns, so an out-of-range delay would hot-loop instead of
+ * staying inert.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** True when a stored interval is a real integer the JS timer can hold. */
+function isArmableInterval(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_ARMABLE_INTERVAL_MS &&
+    value <= MAX_TIMER_DELAY_MS
+  );
+}
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
@@ -59,6 +85,10 @@ export class SubagentScheduler {
     this.ctx = ctx;
     this.manager = manager;
     this.store = store;
+    store.onReclassified = ids => {
+      for (const id of ids) this.unscheduleJob(id);
+    };
+    store.onPromoted = ids => this.armPromoted(ids);
 
     for (const job of store.list()) {
       if (job.enabled) this.scheduleJob(job);
@@ -71,6 +101,10 @@ export class SubagentScheduler {
     this.jobs.clear();
     for (const t of this.intervals.values()) clearTimeout(t);
     this.intervals.clear();
+    if (this.store) {
+      this.store.onReclassified = undefined;
+      this.store.onPromoted = undefined;
+    }
     this.store = undefined;
     this.pi = undefined;
     this.ctx = undefined;
@@ -121,14 +155,18 @@ export class SubagentScheduler {
     const job = this.buildJob(input);
     store.add(job);
     if (job.enabled) this.scheduleJob(job);
-    this.emit({ type: "added", job });
-    return job;
+    // The arm guard can disable the fresh record; report what the store holds.
+    const stored = store.get(job.id) ?? job;
+    this.emit({ type: "added", job: stored });
+    return stored;
   }
 
   removeJob(id: string): boolean {
     const store = this.requireStore();
-    if (!store.get(id)) return false;
     this.unscheduleJob(id);
+    // No pre-check on store.get(id): an id reclassified out of the live set
+    // still has a preserved record to purge, and store.remove() reports
+    // whether anything was actually removed.
     const ok = store.remove(id);
     if (ok) this.emit({ type: "removed", jobId: id });
     return ok;
@@ -141,48 +179,108 @@ export class SubagentScheduler {
     if (!updated) return undefined;
     this.unscheduleJob(id);
     if (updated.enabled) this.scheduleJob(updated);
-    this.emit({ type: "updated", job: updated });
-    return updated;
+    // The arm guard can disable the patched record; report what the store holds.
+    const stored = store.get(id) ?? updated;
+    this.emit({ type: "updated", job: stored });
+    return stored;
   }
 
-  /** Next-run time as ISO, or undefined if not currently armed. */
+  /**
+   * Next-run time as ISO, or undefined when there is none (disabled, unknown
+   * type, or corrupt interval). A valid one-shot too distant for the JS timer
+   * still reports its date — the store keeps it enabled for a later start.
+   */
   getNextRun(jobId: string): string | undefined {
     const cron = this.jobs.get(jobId);
     if (cron) return cron.nextRun()?.toISOString();
     const job = this.store?.get(jobId);
     if (!job?.enabled) return undefined;
-    if (job.scheduleType === "once") return job.schedule;
-    if (job.scheduleType === "interval" && job.intervalMs) {
+    if (job.scheduleType === "once") {
+      if (typeof job.schedule !== "string") return undefined;
+      const d = new Date(job.schedule);
+      return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+    }
+    if (job.scheduleType === "interval") {
+      // The same armable predicate as scheduleJob: a record that cannot arm
+      // has no next run to advertise.
+      const intervalMs = job.intervalMs;
+      if (!isArmableInterval(intervalMs)) return undefined;
       // Before the first fire there's no `lastRun`, so fall back to "now" —
       // accurate at create time (setInterval was just armed) and within
       // intervalMs of correct in any pre-first-fire view.
       const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
-      return new Date(base + job.intervalMs).toISOString();
+      const next = base + intervalMs;
+      const d = new Date(next);
+      if (Number.isNaN(d.getTime())) return undefined;
+      return d.toISOString();
     }
     return undefined;
   }
 
   // ── Scheduling primitives ────────────────────────────────────────────
 
+  /**
+   * Arm records the store promoted back into the live set. Called from the
+   * store after it released the mutation lock, so the arm guard's writes are
+   * safe. A record this scheduler already holds a timer for is skipped, so a
+   * promotion report cannot double-arm.
+   */
+  private armPromoted(ids: string[]): void {
+    const store = this.store;
+    if (!store) return; // stopped between the load and the drain
+    for (const id of ids) {
+      if (this.jobs.has(id) || this.intervals.has(id)) continue;
+      const job = store.get(id);
+      if (job?.enabled) this.scheduleJob(job);
+    }
+  }
+
   private scheduleJob(job: ScheduledSubagent): void {
     const store = this.store;
     if (!store) return;
     try {
-      if (job.scheduleType === "interval" && job.intervalMs) {
-        const t = setInterval(() => this.executeJob(job.id), job.intervalMs);
-        this.intervals.set(job.id, t);
+      if (job.scheduleType === "interval") {
+        const intervalMs = job.intervalMs;
+        if (!isArmableInterval(intervalMs)) {
+          // Outside the timer range and cannot be honored — Node clamps the
+          // delay to ~1 ms, turning the job into a hot loop. Disable it and
+          // mark it broken, mirroring the past-one-shot branch below.
+          store.update(job.id, { enabled: false, lastStatus: "error" });
+          this.emit({
+            type: "error",
+            jobId: job.id,
+            error: `Interval ${job.intervalMs} is outside the armable range (${MIN_ARMABLE_INTERVAL_MS}–${MAX_TIMER_DELAY_MS} ms)`,
+          });
+        } else {
+          const t = setInterval(() => this.executeJob(job.id), intervalMs);
+          this.intervals.set(job.id, t);
+        }
       } else if (job.scheduleType === "once") {
         const target = new Date(job.schedule).getTime();
         const delay = target - Date.now();
         if (delay > 0) {
-          const t = setTimeout(() => {
-            this.executeJob(job.id);
-            // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-            store.update(job.id, { enabled: false });
-            const updated = store.get(job.id);
-            if (updated) this.emit({ type: "updated", job: updated });
-          }, delay);
-          this.intervals.set(job.id, t);
+          if (delay > MAX_TIMER_DELAY_MS) {
+            // A valid but distant target: leave it enabled so a later start can
+            // arm it once the target comes inside the timer range.
+            this.emit({
+              type: "error",
+              jobId: job.id,
+              error: `Scheduled time ${job.schedule} is more than ${MAX_TIMER_DELAY_MS} ms away — not armed`,
+            });
+          } else {
+            const t = setTimeout(() => {
+              try {
+                this.executeJob(job.id);
+                // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
+                store.update(job.id, { enabled: false });
+                const updated = store.get(job.id);
+                if (updated) this.emit({ type: "updated", job: updated });
+              } catch (err) {
+                this.reportJobError(job.id, err);
+              }
+            }, delay);
+            this.intervals.set(job.id, t);
+          }
         } else {
           // Past timestamp — disable, mark error, never fire
           store.update(job.id, { enabled: false, lastStatus: "error" });
@@ -214,7 +312,9 @@ export class SubagentScheduler {
   /**
    * Fire a job: persist running state, spawn (bypassing the concurrency
    * queue), persist completion. Fire-and-forget: the timer tick returns
-   * immediately so other jobs keep firing.
+   * immediately so other jobs keep firing. Never throws: this runs from a
+   * bare timer callback, where an escaping error would be an uncaught
+   * exception and take the host process down.
    */
   private executeJob(id: string): void {
     const store = this.store;
@@ -222,23 +322,36 @@ export class SubagentScheduler {
     const ctx = this.ctx;
     const manager = this.manager;
     if (!store || !pi || !ctx || !manager) return;
-    const job = store.get(id);
-    if (!job?.enabled) return;
-
-    store.update(id, { lastStatus: "running" });
-
-    // Resolve model at fire time — registry contents may have changed since the
-    // job was created (auth added/removed). Fall back silently to spawn-default
-    // if resolution fails; the spawn path handles undefined model gracefully.
-    let resolvedModel: any | undefined;
-    if (job.model) {
-      const r = resolveModel(job.model, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
-    }
-
-    let agentId: string;
     try {
-      agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
+      const job = store.get(id);
+      if (!job?.enabled) return;
+
+      // The registry can change after arming (e.g. the user disables default
+      // agents). Re-check at fire time: spawn() would otherwise fall back to a
+      // write-capable general-purpose config the user never scheduled.
+      if (!isValidType(job.subagent_type)) {
+        // The fire aborts here, so stop the timer: an interval that keeps
+        // ticking would outlive the record the store is about to reclassify
+        // into `skipped`, and a later load could revive and fire it.
+        this.unscheduleJob(id);
+        this.reportJobError(id, `Agent type "${job.subagent_type}" is not available`);
+        return;
+      }
+
+      // Persist the running state before spawning. A missing record means the
+      // job vanished (removed elsewhere) between get() and update() — abort.
+      if (!store.update(id, { lastStatus: "running" })) return;
+
+      // Resolve model at fire time — registry contents may have changed since the
+      // job was created (auth added/removed). Fall back silently to spawn-default
+      // if resolution fails; the spawn path handles undefined model gracefully.
+      let resolvedModel: any | undefined;
+      if (job.model) {
+        const r = resolveModel(job.model, ctx.modelRegistry);
+        if (typeof r !== "string") resolvedModel = r;
+      }
+
+      const agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
@@ -248,42 +361,54 @@ export class SubagentScheduler {
         thinkingLevel: job.thinking,
         isolation: job.isolation,
       });
+
+      this.emit({ type: "fired", jobId: id, agentId, name: job.name });
+
+      const finalize = (status: "success" | "error") => {
+        try {
+          const next = this.getNextRun(id);
+          const current = store.get(id);
+          store.update(id, {
+            lastRun: new Date().toISOString(),
+            lastStatus: status,
+            runCount: (current?.runCount ?? 0) + 1,
+            nextRun: next,
+          });
+        } catch (err) {
+          this.reportJobError(id, err);
+        }
+      };
+
+      const record = manager.getRecord(agentId);
+      // AgentManager's promise resolves either way (its .catch returns ""), so we
+      // can't infer success/failure from the promise — read record.status instead.
+      // Terminal states: completed/steered = success; error/aborted/stopped = error.
+      if (record?.promise) {
+        record.promise
+          .then(() => {
+            const r = manager.getRecord(agentId);
+            const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
+            finalize(failed ? "error" : "success");
+          })
+          .catch(() => finalize("error"));
+      } else {
+        // Spawn returned without a promise (defensive — bypassQueue path always sets one).
+        finalize("success");
+      }
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
-      this.emit({ type: "error", jobId: id, error });
-      return;
+      this.reportJobError(id, err);
     }
+  }
 
-    this.emit({ type: "fired", jobId: id, agentId, name: job.name });
-
-    const record = manager.getRecord(agentId);
-    const finalize = (status: "success" | "error") => {
-      const next = this.getNextRun(id);
-      const current = store.get(id);
-      store.update(id, {
-        lastRun: new Date().toISOString(),
-        lastStatus: status,
-        runCount: (current?.runCount ?? 0) + 1,
-        nextRun: next,
-      });
-    };
-
-    // AgentManager's promise resolves either way (its .catch returns ""), so we
-    // can't infer success/failure from the promise — read record.status instead.
-    // Terminal states: completed/steered = success; error/aborted/stopped = error.
-    if (record?.promise) {
-      record.promise
-        .then(() => {
-          const r = manager.getRecord(agentId);
-          const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
-          finalize(failed ? "error" : "success");
-        })
-        .catch(() => finalize("error"));
-    } else {
-      // Spawn returned without a promise (defensive — bypassQueue path always sets one).
-      finalize("success");
+  /** Mark a firing job errored and surface the failure; never rethrows. */
+  private reportJobError(id: string, err: unknown): void {
+    const error = err instanceof Error ? err.message : String(err);
+    try {
+      this.store?.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+    } catch {
+      // Best effort — the error event below is the only reliable surface.
     }
+    this.emit({ type: "error", jobId: id, error });
   }
 
   private emit(event: ScheduleChangeEvent): void {
@@ -309,7 +434,14 @@ export class SubagentScheduler {
     if (rel !== null) return { type: "once", normalized: rel };
     // "5m" — interval
     const ivl = SubagentScheduler.parseInterval(trimmed);
-    if (ivl !== null) return { type: "interval", intervalMs: ivl, normalized: trimmed };
+    if (ivl !== null) {
+      if (!isArmableInterval(ivl)) {
+        throw new Error(
+          `Interval "${trimmed}" is not armable — use between ${MIN_ARMABLE_INTERVAL_MS} ms (1s) and ${MAX_TIMER_DELAY_MS} ms (about 24.8 days).`,
+        );
+      }
+      return { type: "interval", intervalMs: ivl, normalized: trimmed };
+    }
     // ISO timestamp — one-shot. Reject past timestamps upfront so we never
     // create a dead-on-arrival record (scheduleJob's safety net still catches
     // micro-races from `+0s`-style relatives).
@@ -340,8 +472,9 @@ export class SubagentScheduler {
       };
     }
     try {
-      // Croner validates by construction.
-      new Cron(expr, () => {});
+      // Validate without arming: a Cron constructed with a callback schedules
+      // itself and would keep the process alive until stopped.
+      new Cron(expr, { paused: true }, () => {}).stop();
       return { valid: true };
     } catch (e) {
       return { valid: false, error: e instanceof Error ? e.message : "Invalid cron expression" };
@@ -353,13 +486,16 @@ export class SubagentScheduler {
     const m = s.match(/^\+(\d+)(s|m|h|d)$/);
     if (!m) return null;
     const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
-    return new Date(Date.now() + ms).toISOString();
+    const d = new Date(Date.now() + ms);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString();
   }
 
-  /** "10s"/"5m"/"1h"/"2d" → milliseconds. */
+  /** "10s"/"5m"/"1h"/"2d" → milliseconds, or null when outside the Date range. */
   static parseInterval(s: string): number | null {
     const m = s.match(/^(\d+)(s|m|h|d)$/);
     if (!m) return null;
-    return parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    return Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime()) ? ms : null;
   }
 }

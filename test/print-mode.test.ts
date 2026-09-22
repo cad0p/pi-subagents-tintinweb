@@ -18,7 +18,6 @@ function makePi() {
 
   return {
     pi: {
-      registerMessageRenderer: vi.fn(),
       registerTool: vi.fn((tool: any) => {
         tools.set(tool.name, tool);
       }),
@@ -96,8 +95,7 @@ describe("print mode background notifications", () => {
       makeHeadlessCtx(),
     );
 
-    await vi.advanceTimersByTimeAsync(100); // smart-join batch debounce
-    await vi.advanceTimersByTimeAsync(200); // notification hold window
+    await vi.advanceTimersByTimeAsync(300); // notification hold window
 
     expect(pi.sendMessage).toHaveBeenCalled();
 

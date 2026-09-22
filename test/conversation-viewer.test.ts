@@ -1,4 +1,9 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
@@ -68,6 +73,9 @@ function assertAllLinesFit(lines: string[], width: number) {
     expect(vw, `line ${i} exceeds width (${vw} > ${width}): ${JSON.stringify(lines[i])}`).toBeLessThanOrEqual(width);
   }
 }
+
+/** Matches an unpaired UTF-16 surrogate (a split astral code point). */
+const LONE_SURROGATE = /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/;
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
@@ -257,6 +265,49 @@ describe("ConversationViewer", () => {
     });
   });
 
+  describe("untrusted text collapsing", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const W = 600;
+
+    it("collapses a control/newline payload in a tool-call name", () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check that." },
+            { type: "toolCall", toolUseId: "t1", name: `read${control}\n[Tool: forged]`, input: {} },
+          ],
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+
+      const joined = (viewer as any).buildContentLines(W).join("\n");
+      expect(joined).toContain("[Tool: read [Tool: forged]]");
+      expect(joined).not.toContain(control);
+      expect(joined).not.toContain("\n[Tool: forged]");
+    });
+
+    it("collapses a control/newline payload in the running activity line", () => {
+      const activity = {
+        activeTools: new Map([["k1", `read${control}\n[forged]`]]),
+        toolUses: 1,
+        tokens: "1k",
+        responseText: "",
+      };
+      const messages = [{ role: "user", content: "go" }];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord({ status: "running" }), activity as any, ansiTheme(), vi.fn(),
+      );
+
+      const joined = (viewer as any).buildContentLines(W).join("\n");
+      expect(joined).toContain("read [forged]…");
+      expect(joined).not.toContain(control);
+      expect(joined).not.toContain("\n[forged]");
+    });
+  });
+
   describe("safety net against upstream wrapTextWithAnsi bugs", () => {
     // These tests call buildContentLines() directly (via the private method)
     // because render() has its own truncation via row(). The safety net in
@@ -339,6 +390,28 @@ describe("ConversationViewer", () => {
         mockTui(30, w), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
       );
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
+    });
+  });
+
+  describe("500-unit truncation", () => {
+    const W = 600;
+
+    it("does not split an astral code point in toolResult or bashExecution output", () => {
+      const payload = `${"a".repeat(499)}😀tail`;
+      const messages = [
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text: payload }] },
+        {
+          role: "bashExecution", command: "cat", output: payload,
+          exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now(),
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+
+      const rendered = (viewer as any).buildContentLines(W).join("\n");
+      expect(rendered).not.toMatch(LONE_SURROGATE);
+      expect(rendered).toContain(`${"a".repeat(499)}... (truncated)`);
     });
   });
 
@@ -489,6 +562,96 @@ describe("ConversationViewer", () => {
         for (const ch of "x".repeat(200)) viewer.handleInput(ch);
         assertAllLinesFit(viewer.render(w), w);
       }
+    });
+  });
+
+  describe("header sanitization", () => {
+    it("collapses and strips the record description in the header", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const viewer = new ConversationViewer(
+        mockTui(30, 80),
+        mockSession(),
+        mockRecord({ description: `desc${control}tail\nforged` }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain("\u001b]52;");
+      expect(out).toContain("desctail forged");
+      expect(out).not.toContain("\nforged");
+    });
+
+    it("sanitizes a frontmatter display_name in the header", () => {
+      const control = "\u001b[2J";
+      const dir = mkdtempSync(join(tmpdir(), "pi-viewer-agent-"));
+      try {
+        mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+        writeFileSync(
+          join(dir, ".pi", "agents", "evil.md"),
+          `---\ndisplay_name: ${JSON.stringify(`dan${control}ger`)}\n---\n\nbody\n`,
+          "utf-8",
+        );
+        registerAgents(loadCustomAgents(dir));
+
+        const viewer = new ConversationViewer(
+          mockTui(30, 80),
+          mockSession(),
+          mockRecord({ type: "evil" }),
+          undefined,
+          ansiTheme(),
+          vi.fn(),
+        );
+        const out = viewer.render(80).join("\n");
+        expect(out).not.toContain(control);
+        expect(out).toContain("danger");
+      } finally {
+        registerAgents(new Map());
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("collapses the invocation model and tags into one line", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const viewer = new ConversationViewer(
+        mockTui(30, 80),
+        mockSession(),
+        mockRecord({
+          invocation: { modelName: `haiku${control}`, thinking: `high\nforged` as any },
+        }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain(control);
+      expect(out).toContain("thinking: high forged");
+      expect(out).not.toContain("\nforged");
+    });
+
+    it("strips terminal controls from message bodies while keeping their lines", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const messages = [
+        { role: "user", content: `ask${control}\nsecond line` },
+        { role: "assistant", content: [{ type: "text", text: `answer${control}\nmore` }] },
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text: `tool${control}\nout` }] },
+        {
+          role: "bashExecution", command: `ls${control}`,
+          output: `file${control}\nlist`,
+          exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now(),
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, 80), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain(control);
+      expect(out).toContain("ask");
+      expect(out).toContain("second line");
+      expect(out).toContain("answer");
+      expect(out).toContain("tool");
+      expect(out).toContain("file");
+      expect(out).toContain("list");
     });
   });
 });

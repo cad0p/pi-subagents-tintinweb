@@ -8,6 +8,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
@@ -137,7 +138,7 @@ export class ConversationViewer implements Component {
 
     // Header
     lines.push(hrTop);
-    const name = getDisplayName(this.record.type);
+    const name = toSingleLine(getDisplayName(this.record.type));
     const modeLabel = getPromptModeLabel(this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
     const statusIcon = this.record.status === "running"
@@ -159,7 +160,7 @@ export class ConversationViewer implements Component {
     }
 
     lines.push(row(
-      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", toSingleLine(this.record.description))} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));
@@ -275,7 +276,8 @@ export class ConversationViewer implements Component {
 
   private invocationLine(): string | undefined {
     const { modelName, tags } = buildInvocationTags(this.record.invocation);
-    const parts = modelName ? [modelName, ...tags] : tags;
+    const sanitizedTags = tags.map(t => toSingleLine(t));
+    const parts = modelName ? [toSingleLine(modelName), ...sanitizedTags] : sanitizedTags;
     if (parts.length === 0) return undefined;
     return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
   }
@@ -295,9 +297,9 @@ export class ConversationViewer implements Component {
     let needsSeparator = false;
     for (const msg of messages) {
       if (msg.role === "user") {
-        const text = typeof msg.content === "string"
+        const text = stripControlChars(typeof msg.content === "string"
           ? msg.content
-          : extractText(msg.content);
+          : extractText(msg.content));
         if (!text.trim()) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("accent", "[User]"));
@@ -308,9 +310,9 @@ export class ConversationViewer implements Component {
         const textParts: string[] = [];
         const toolCalls: string[] = [];
         for (const c of msg.content) {
-          if (c.type === "text" && c.text) textParts.push(c.text);
+          if (c.type === "text" && c.text) textParts.push(stripControlChars(c.text));
           else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
+            toolCalls.push(toSingleLine((c as any).name ?? (c as any).toolName) || "unknown");
           }
         }
         if (needsSeparator) lines.push(th.fg("dim", "───"));
@@ -324,8 +326,8 @@ export class ConversationViewer implements Component {
           lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
         }
       } else if (msg.role === "toolResult") {
-        const text = extractText(msg.content);
-        const truncated = text.length > 500 ? text.slice(0, 500) + "... (truncated)" : text;
+        const text = stripControlChars(extractText(msg.content));
+        const truncated = text.length > 500 ? safeTruncate(text, 500) + "... (truncated)" : text;
         if (!truncated.trim()) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("dim", "[Result]"));
@@ -335,11 +337,12 @@ export class ConversationViewer implements Component {
       } else if ((msg as any).role === "bashExecution") {
         const bash = msg as any;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
+        lines.push(truncateToWidth(th.fg("muted", `  $ ${toSingleLine(bash.command)}`), width));
         if (bash.output?.trim()) {
-          const out = bash.output.length > 500
-            ? bash.output.slice(0, 500) + "... (truncated)"
-            : bash.output;
+          const rawOut = stripControlChars(bash.output);
+          const out = rawOut.length > 500
+            ? safeTruncate(rawOut, 500) + "... (truncated)"
+            : rawOut;
           for (const line of wrapTextWithAnsi(out.trim(), width)) {
             lines.push(th.fg("dim", line));
           }
@@ -352,7 +355,7 @@ export class ConversationViewer implements Component {
 
     // Streaming indicator for running agents
     if (this.record.status === "running" && this.activity) {
-      const act = describeActivity(this.activity.activeTools, this.activity.responseText);
+      const act = toSingleLine(describeActivity(this.activity.activeTools, this.activity.responseText));
       lines.push("");
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }

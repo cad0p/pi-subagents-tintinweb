@@ -67,10 +67,6 @@ export interface AgentConfig {
   source?: "default" | "project" | "global";
 }
 
-export type JoinMode = 'async' | 'group' | 'smart';
-
-export type ResultPreviewMode = "plain" | "markdown";
-
 /**
  * Display mode for the persistent above-editor agent widget.
  * - `all`: show every agent (foreground + background).
@@ -93,8 +89,6 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
-  groupId?: string;
-  joinMode?: JoinMode;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
@@ -103,8 +97,6 @@ export interface AgentRecord {
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string };
-  /** The tool_use_id from the original Agent tool call. */
-  toolCallId?: string;
   /** Path to the streaming output transcript file. */
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
@@ -180,23 +172,6 @@ export interface AgentInvocation {
   isolation?: IsolationMode;
 }
 
-/** Details attached to custom notification messages for visual rendering. */
-export interface NotificationDetails {
-  id: string;
-  description: string;
-  status: string;
-  toolUses: number;
-  turnCount: number;
-  maxTurns?: number;
-  totalTokens: number;
-  durationMs: number;
-  outputFile?: string;
-  error?: string;
-  resultPreview: string;
-  /** Additional agents in a group notification. */
-  others?: NotificationDetails[];
-}
-
 export interface EnvInfo {
   isGitRepo: boolean;
   branch: string;
@@ -244,4 +219,10 @@ export interface ScheduleStoreData {
   /** For future migrations. */
   version: 1;
   jobs: ScheduledSubagent[];
+  /**
+   * Records shadowed by an earlier duplicate with the same id. Written back
+   * verbatim, never promoted to live jobs; deleting an id purges its shadowed
+   * records too.
+   */
+  shadowed?: ScheduledSubagent[];
 }

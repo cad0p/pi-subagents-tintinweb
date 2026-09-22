@@ -8,6 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
@@ -177,9 +178,10 @@ export function buildInvocationTags(
 
 /** Truncate text to a single line, max `len` chars. */
 function truncateLine(text: string, len = 60): string {
-  const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  const raw = text.split("\n").find(l => l.trim())?.trim() ?? "";
+  const line = stripControlChars(raw);
   if (line.length <= len) return line;
-  return line.slice(0, len) + "…";
+  return safeTruncate(line, len) + "…";
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */
@@ -307,7 +309,7 @@ export class AgentWidget {
 
   /** Render a finished agent line. */
   private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
-    const name = getDisplayName(a.type);
+    const name = toSingleLine(getDisplayName(a.type));
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
 
@@ -324,7 +326,8 @@ export class AgentWidget {
       statusText = theme.fg("dim", " stopped");
     } else if (a.status === "error") {
       icon = theme.fg("error", "✗");
-      const errMsg = a.error ? `: ${a.error.slice(0, 60)}` : "";
+      const err = a.error ? toSingleLine(a.error) : "";
+      const errMsg = err ? `: ${safeTruncate(err, 60)}` : "";
       statusText = theme.fg("error", ` error${errMsg}`);
     } else {
       // aborted
@@ -339,7 +342,7 @@ export class AgentWidget {
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-    return `${icon} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
+    return `${icon} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
   }
 
   /**
@@ -377,7 +380,7 @@ export class AgentWidget {
 
     const runningLines: string[][] = []; // each entry is [header, activity]
     for (const a of running) {
-      const name = getDisplayName(a.type);
+      const name = toSingleLine(getDisplayName(a.type));
       const modeLabel = getPromptModeLabel(a.type);
       const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
       const elapsed = formatMs(Date.now() - a.startedAt);
@@ -395,10 +398,10 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const activity = toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }

@@ -21,15 +21,15 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isD
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
-import { GroupJoinManager } from "./group-join.js";
-import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
+import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type ResultPreviewMode, type SubagentType, type WidgetMode } from "./types.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -49,7 +49,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
@@ -151,71 +151,145 @@ function partialOutputSuffix(record: AgentRecord): string {
   return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
 }
 
-/** Human-readable status label for agent completion. */
-function getStatusLabel(status: string, error?: string): string {
+/** Human-readable status word for the completion report header. */
+function getStatusWord(status: string): string {
   switch (status) {
-    case "error": return `Error: ${error ?? "unknown"}`;
-    case "aborted": return "Aborted (max turns exceeded)";
-    case "steered": return "Wrapped up (turn limit)";
-    case "stopped": return "Stopped";
-    default: return "Done";
+    case "completed": return "completed";
+    case "error": return "error";
+    case "stopped": return "stopped";
+    case "aborted": return "aborted";
+    case "steered": return "wrapped up (turn limit)";
+    default: return sanitizeHeaderText(String(status)) || "unknown";
   }
 }
 
-/** Escape XML special characters to prevent injection in structured notifications. */
-function escapeXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** Completion-report glyph: success only for terminal success statuses. */
+function getStatusGlyph(status: string): string {
+  switch (status) {
+    case "completed":
+    case "steered": return "✓";
+    case "error":
+    case "stopped":
+    case "aborted": return "✗";
+    default: return "○";
+  }
 }
 
-// Collapsed preview line limit - matches pi's read/write tool precedent
-const COLLAPSED_PREVIEW_LINES = 10;
-const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
-const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
+/**
+ * Collapse newlines/CRs/tabs and strip control/invisible characters from text
+ * that is composed into the report header or metadata lines.
+ */
+function sanitizeHeaderText(s: string): string {
+  return toSingleLine(s);
+}
+
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
+const HEADER_PREVIEW_MAX_CHARS = 300; // ~one wrapped line; description/error are untrusted input.
 
-/** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
-function safeTruncate(s: string, maxChars: number): string {
-  if (s.length <= maxChars) return s;
-  const high = s.charCodeAt(maxChars - 1);
-  return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
+/** Bound a sanitized header field to the shared preview cap, marking truncation. */
+function headerPreview(s: string): string {
+  return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
 }
 
-/** Build the preview body shared by XML payload + UI details. Caps failure-mode bodies; success/aborted/steered uncapped. */
-function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
-  const body = record.result ?? record.error ?? "";
-  if (!body) return "No output.";
-  const isFailure = record.status === "error" || record.status === "stopped";
-  if (isFailure && typeof settings.failurePreviewMaxChars !== "number") {
-    throw new Error("buildResultPreview: failurePreviewMaxChars must be a number on failure status");
+/** The settings contract for the failure preview cap: a positive integer within the settings ceiling. */
+function isValidFailurePreviewCap(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= FAILURE_PREVIEW_MAX_CHARS_CEILING;
+}
+
+/**
+ * @internal Coerce the in-memory failure preview cap for the send path:
+ * an out-of-contract value (a settings regression) falls back to the default
+ * instead of throwing away the completion. Warns once per invalid episode —
+ * a valid value re-arms the latch so a later distinct regression warns again,
+ * while a still-broken value does not log on every completion.
+ */
+let warnedInvalidFailurePreviewCap = false;
+export function effectiveFailurePreviewCap(value: number): number {
+  if (isValidFailurePreviewCap(value)) {
+    warnedInvalidFailurePreviewCap = false;
+    return value;
   }
-  const cap = isFailure ? (settings.failurePreviewMaxChars as number) : Number.POSITIVE_INFINITY;
+  if (!warnedInvalidFailurePreviewCap) {
+    warnedInvalidFailurePreviewCap = true;
+    console.warn(
+      `[pi-subagents] ignoring out-of-contract failurePreviewMaxChars (${String(value)}); using the default ${DEFAULT_FAILURE_PREVIEW_MAX_CHARS} for this notification`,
+    );
+  }
+  return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
+}
+
+/** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
+function failurePreviewCap(settings: SubagentsSettings): number {
+  const cap = settings.failurePreviewMaxChars;
+  if (typeof cap !== "number" || !isValidFailurePreviewCap(cap)) {
+    throw new Error("failurePreviewMaxChars must be a positive integer within the settings ceiling on failure status");
+  }
+  return cap;
+}
+
+/** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
+function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
+  const isFailure = record.status === "error" || record.status === "stopped";
+  // Terminal-safety strip only: markdown structure and XML-ish text pass
+  // through untouched, while escape/control bytes (OSC clipboard writes and
+  // links, CSI screen clears, C0/C1, invisible format characters) never reach
+  // the terminal.
+  const body = stripControlChars(String(record.result ?? record.error ?? ""));
+  // Validate before the empty-body return: the metadata `Error:` line uses the
+  // same cap and must see the same validated value.
+  const cap = isFailure ? failurePreviewCap(settings) : Number.POSITIVE_INFINITY;
+  if (!body) return "No output.";
   return body.length > cap
     ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
     : body;
 }
 
-/** @internal Format a structured task notification matching Claude Code's <task-notification> XML. */
+/**
+ * @internal Format a background completion as a markdown report. The report is
+ * both the parent model's context and the text pi renders in its default
+ * custom-message box: terminal control sequences are stripped from every field
+ * while markdown stays intact, and the body goes last (an unbalanced fence in
+ * it cannot swallow the metadata above).
+ */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
-  const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-  const contextPercent = getSessionContextPercent(record.session);
-  const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
-  const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
+  const context = formatSessionContext(record.session);
 
-  const resultPreview = buildResultPreview(record, settings);
+  const stats: string[] = [];
+  const turnCount = record.turnCount ?? 0;
+  if (Number.isFinite(turnCount) && turnCount > 0) {
+    stats.push(formatTurns(turnCount, Number.isFinite(record.effectiveMaxTurns) ? record.effectiveMaxTurns : undefined));
+  }
+  if (Number.isFinite(record.toolUses) && record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
+  if (Number.isFinite(totalTokens) && totalTokens > 0) stats.push(formatTokens(totalTokens));
+  if (context !== null) stats.push(`ctx ${context}`);
+  if (Number.isFinite(record.compactionCount) && record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
+  if (Number.isFinite(durationMs) && durationMs > 0) stats.push(formatMs(durationMs));
 
-  return [
-    `<task-notification>`,
-    `<task-id>${record.id}</task-id>`,
-    record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
-    record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
-    `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
-    `<result>${escapeXml(resultPreview)}</result>`,
-    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
-    `</task-notification>`,
-  ].filter(Boolean).join('\n');
+  const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
+  const description = headerPreview(descriptionText) || "(no description)";
+  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status)}: ${description}**`;
+  const errorText = record.error && (record.status === "error" || record.status === "stopped")
+    ? sanitizeHeaderText(String(record.error))
+    : "";
+  const errorPreview = headerPreview(errorText);
+  if (errorPreview) header += ` — ${errorPreview}`;
+  header += getStatusNote(record.status);
+  if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
+
+  const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];
+  if (record.outputFile) metadata.push(`Transcript: ${sanitizeHeaderText(String(record.outputFile))}`);
+  const body = buildResultPreview(record, settings);
+  // The header only previews the error. When a partial result replaces the error
+  // in the body, carry the full sanitized error here so its tail is not lost.
+  if (errorText.length > HEADER_PREVIEW_MAX_CHARS && record.result != null) {
+    const cap = failurePreviewCap(settings); // same validated cap as the body
+    const fullError = errorText.length > cap ? `${safeTruncate(errorText, cap)}\n…(truncated, see transcript)` : errorText;
+    metadata.push(`Error: ${fullError}`);
+  }
+
+  return [header, "", metadata.join("\n"), "", "Result:", "", body].join("\n");
 }
 
 /** Build AgentDetails from a base + record-specific fields. */
@@ -239,127 +313,7 @@ function buildDetails(
   };
 }
 
-/** @internal Build notification details for the custom message renderer. */
-export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
-  const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-
-  const resultPreview = buildResultPreview(record, settings);
-
-  return {
-    id: record.id,
-    description: record.description,
-    status: record.status,
-    toolUses: record.toolUses,
-    turnCount: activity?.turnCount ?? 0,
-    maxTurns: activity?.maxTurns,
-    totalTokens,
-    durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
-    outputFile: record.outputFile,
-    error: record.error,
-    resultPreview,
-  };
-}
-
-/** @internal Render notification header with icon, description, status, and stats. */
-export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
-  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-  const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-  const statusText = isError ? d.status
-    : d.status === "steered" ? "completed (steered)"
-    : "completed";
-
-  // Line 1: icon + agent description + status
-  let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
-
-  // Line 2: stats
-  const parts: string[] = [];
-  if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
-  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-  if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
-  if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
-  if (parts.length) {
-    line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
-  }
-
-  return new Text(line, 0, 0);
-}
-
-/** @internal Render notification body with markdown or plain mode dispatch. */
-export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
-  if (mode === "markdown") {
-    let body = d.resultPreview;
-    if (!expanded) {
-      const lines = body.split("\n");
-      if (lines.length > COLLAPSED_PREVIEW_LINES) {
-        const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
-        body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
-      }
-    }
-    
-    const container = new Container();
-    if (body.trim()) {
-      container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
-    }
-    if (d.outputFile) {
-      container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
-    }
-    return container;
-  } else {
-    let bodyText = "";
-    if (expanded) {
-      const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
-      for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
-    } else {
-      const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
-      bodyText = theme.fg("dim", `  ⎿  ${preview}`);
-    }
-
-    if (d.outputFile) {
-      bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
-    }
-
-    return new Text(bodyText, 0, 0);
-  }
-}
-
-/** @internal Main subagent notification renderer. */
-export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
-  const d = message.details;
-  if (!d) return undefined;
-
-  const effectiveExpanded = resultPreviewExpanded ? true : options.expanded;
-
-  function renderOne(d: NotificationDetails): any {
-    const header = subagentNotificationRenderHeader(d, theme);
-    const body = subagentNotificationRenderBody(d, effectiveExpanded, resultPreviewMode, theme);
-    const container = new Container();
-    container.addChild(header);
-    container.addChild(body);
-    return container;
-  }
-
-  const all = [d, ...(d.others ?? [])];
-  if (all.length === 1) {
-    return renderOne(all[0]);
-  } else {
-    const container = new Container();
-    for (let i = 0; i < all.length; i++) {
-      if (i > 0) container.addChild(new Spacer());
-      container.addChild(renderOne(all[i]));
-    }
-    return container;
-  }
-}
-
 export default function (pi: ExtensionAPI) {
-  // ---- Register custom notification renderer ----
-  pi.registerMessageRenderer<NotificationDetails>(
-    "subagent-notification",
-    (message, { expanded }, theme) => {
-      return subagentNotificationRenderer(message, { expanded }, theme, resultPreviewMode, resultPreviewExpanded);
-    }
-  );
-
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = () => {
     const userAgents = loadCustomAgents(process.cwd());
@@ -447,19 +401,20 @@ export default function (pi: ExtensionAPI) {
     for (const [key, send] of parked) scheduleNudge(key, send);
   });
 
-  // ---- Individual nudge helper (async join mode) ----
+  // ---- Completion notification ----
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    const notification = formatTaskNotification(record, { failurePreviewMaxChars });
-    const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
-
-    pi.sendMessage<NotificationDetails>({
-      customType: "subagent-notification",
-      content: notification + footer,
-      display: true,
-      details: buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id)),
-    }, { deliverAs: "steer", triggerTurn: true });
+    try {
+      pi.sendMessage({
+        customType: "subagent-notification",
+        content: formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }),
+        display: true,
+      }, { deliverAs: "steer", triggerTurn: true });
+    } catch (err) {
+      // Nudge release paths swallow throws; surface the drop with the agent id.
+      console.warn(`[pi-subagents] failed to send completion notification for ${record.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -469,40 +424,6 @@ export default function (pi: ExtensionAPI) {
     scheduleNudge(record.id, () => emitIndividualNudge(record));
     widget.update();
   }
-
-  // ---- Group join manager ----
-  const groupJoin = new GroupJoinManager(
-    (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
-
-      const groupKey = `group:${records.map(r => r.id).join(",")}`;
-      scheduleNudge(groupKey, () => {
-        // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
-        if (unconsumed.length === 0) { widget.update(); return; }
-
-        const notifications = unconsumed.map(r => formatTaskNotification(r, { failurePreviewMaxChars })).join('\n\n');
-        const label = partial
-          ? `${unconsumed.length} agent(s) finished (partial — others still running)`
-          : `${unconsumed.length} agent(s) finished`;
-
-        const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, { failurePreviewMaxChars }, agentActivity.get(first.id));
-        if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, { failurePreviewMaxChars }, agentActivity.get(r.id)));
-        }
-
-        pi.sendMessage<NotificationDetails>({
-          customType: "subagent-notification",
-          content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
-          display: true,
-          details,
-        }, { deliverAs: "steer", triggerTurn: true });
-      });
-      widget.update();
-    },
-    30_000,
-  );
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
@@ -529,7 +450,7 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // Background completion: route through group join or send individual nudge
+  // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
@@ -556,19 +477,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // If this agent is pending batch finalization (debounce window still open),
-    // don't send an individual nudge — finalizeBatch will pick it up retroactively.
-    if (currentBatchAgents.some(a => a.id === record.id)) {
-      widget.update();
-      return;
-    }
-
-    const result = groupJoin.onAgentComplete(record);
-    if (result === 'pass') {
-      sendIndividualNudge(record);
-    }
-    // 'held' → do nothing, group will fire later
-    // 'delivered' → group callback already fired
+    sendIndividualNudge(record);
     widget.update();
   }, undefined, (record) => {
     // Emit started event when agent transitions to running (including from queue)
@@ -718,11 +627,6 @@ export default function (pi: ExtensionAPI) {
   function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
   function setOutputTranscript(b: boolean): void { outputTranscriptDefault = b; }
 
-  // ---- Join mode configuration ----
-  let defaultJoinMode: JoinMode = 'smart';
-  function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
-  function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
-
   // Master switch for the schedule subagent feature. Defaults to enabled.
   // Read once at extension init (before tool registration) so the Agent tool's
   // param schema reflects the persisted setting. Runtime toggles via /agents
@@ -744,12 +648,8 @@ export default function (pi: ExtensionAPI) {
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
-  // ---- Result preview configuration ----
-  let resultPreviewMode: ResultPreviewMode = "markdown";
-  let resultPreviewExpanded = true;
+  // ---- Failure preview configuration ----
   let failurePreviewMaxChars = DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
-  function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
-  function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
   function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
 
   // ---- Disable default agents configuration ----
@@ -771,49 +671,6 @@ export default function (pi: ExtensionAPI) {
   let toolDescriptionMode: ToolDescriptionMode = "full";
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
-
-  // ---- Batch tracking for smart join mode ----
-  // Collects background agent IDs spawned in the current turn for smart grouping.
-  // Uses a debounced timer: each new agent resets the 100ms window so that all
-  // parallel tool calls (which may be dispatched across multiple microtasks by the
-  // framework) are captured in the same batch.
-  let currentBatchAgents: { id: string; joinMode: JoinMode }[] = [];
-  let batchFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
-  let batchCounter = 0;
-
-  /** Finalize the current batch: if 2+ smart-mode agents, register as a group. */
-  function finalizeBatch() {
-    batchFinalizeTimer = undefined;
-    const batchAgents = [...currentBatchAgents];
-    currentBatchAgents = [];
-
-    const smartAgents = batchAgents.filter(a => a.joinMode === 'smart' || a.joinMode === 'group');
-    if (smartAgents.length >= 2) {
-      const groupId = `batch-${++batchCounter}`;
-      const ids = smartAgents.map(a => a.id);
-      groupJoin.registerGroup(groupId, ids);
-      // Retroactively process agents that already completed during the debounce window.
-      // Their onComplete fired but was deferred (agent was in currentBatchAgents),
-      // so we feed them into the group now.
-      for (const id of ids) {
-        const record = manager.getRecord(id);
-        if (!record) continue;
-        record.groupId = groupId;
-        if (record.completedAt != null && !record.resultConsumed) {
-          groupJoin.onAgentComplete(record);
-        }
-      }
-    } else {
-      // No group formed — send individual nudges for any agents that completed
-      // during the debounce window and had their notification deferred.
-      for (const { id } of batchAgents) {
-        const record = manager.getRecord(id);
-        if (record?.completedAt != null && !record.resultConsumed) {
-          sendIndividualNudge(record);
-        }
-      }
-    }
-  }
 
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
@@ -873,11 +730,8 @@ export default function (pi: ExtensionAPI) {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setDefaultMaxTurns,
       setGraceTurns,
-      setDefaultJoinMode,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
-      setResultPreviewMode,
-      setResultPreviewExpanded,
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -901,6 +755,7 @@ export default function (pi: ExtensionAPI) {
         description:
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+          'Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. ' +
           'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
@@ -1079,23 +934,24 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Custom rendering: Claude Code style ----
 
     renderCall(args, theme) {
-      const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
-      const desc = args.description ?? "";
+      const displayName = typeof args.subagent_type === "string" ? toSingleLine(getDisplayName(args.subagent_type)) : "Agent";
+      const desc = typeof args.description === "string" ? toSingleLine(args.description) : "";
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
     renderResult(result, { expanded, isPartial }, theme) {
       const details = result.details as AgentDetails | undefined;
+      // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
         const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(text, 0, 0);
+        return new Text(typeof text === "string" ? stripControlChars(text) : "", 0, 0);
       }
 
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
         const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
-        if (d.tags) parts.push(...d.tags);
+        if (d.modelName) parts.push(toSingleLine(d.modelName));
+        if (d.tags) parts.push(...d.tags.map(t => toSingleLine(t)));
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
         }
@@ -1108,7 +964,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        return renderRunningAgentStatus(frame, s, details.activity ?? "thinking…", theme);
+        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? toSingleLine(details.activity) : "thinking…", theme);
       }
 
       // ---- Background agent launched ----
@@ -1126,7 +982,8 @@ Terse command-style prompts produce shallow, generic work.
         line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
 
         if (expanded) {
-          const resultText = result.content[0]?.type === "text" ? result.content[0].text : "";
+          const rawText = result.content[0]?.type === "text" ? result.content[0].text : "";
+          const resultText = typeof rawText === "string" ? stripControlChars(rawText) : "";
           if (resultText) {
             const lines = resultText.split("\n").slice(0, 50);
             for (const l of lines) {
@@ -1156,7 +1013,7 @@ Terse command-style prompts produce shallow, generic work.
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
       if (details.status === "error") {
-        line += "\n" + theme.fg("error", `  ⎿  Error: ${details.error ?? "unknown"}`);
+        line += "\n" + theme.fg("error", `  ⎿  Error: ${toSingleLine(String(details.error ?? "")) || "unknown"}`);
       } else {
         line += "\n" + theme.fg("warning", "  ⎿  Aborted (max turns exceeded)");
       }
@@ -1166,7 +1023,7 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Execute ----
 
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -1206,8 +1063,8 @@ Terse command-style prompts produce shallow, generic work.
       if (isScopeModelsEnabled() && model) {
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
-          const agentLabel = customConfig?.displayName ?? subagentType;
-          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
+          const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
+          const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
           ctx.ui.notify(
             `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
             "warning",
@@ -1359,26 +1216,10 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(err instanceof Error ? err.message : String(err));
         }
 
-        // Set output file + join mode synchronously after spawn, before the
-        // event loop yields — onSessionCreated is async so this is safe.
-        const joinMode = resolveJoinMode(defaultJoinMode, true);
+        // Set the output file synchronously after spawn, before the event loop
+        // yields — onSessionCreated is async so this is safe.
         const record = manager.getRecord(id);
-        if (record && joinMode) {
-          record.joinMode = joinMode;
-          record.toolCallId = toolCallId;
-          attachTranscript(record, id);
-        }
-
-        if (joinMode == null || joinMode === 'async') {
-          // Foreground/no join mode or explicit async — not part of any batch
-        } else {
-          // smart or group — add to current batch
-          currentBatchAgents.push({ id, joinMode });
-          // Debounce: reset timer on each new agent so parallel tool calls
-          // dispatched across multiple event loop ticks are captured together
-          if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
-          batchFinalizeTimer = setTimeout(finalizeBatch, 100);
-        }
+        if (record) attachTranscript(record, id);
 
         agentActivity.set(id, bgState);
         widget.ensureTimer();
@@ -1568,43 +1409,32 @@ Terse command-style prompts produce shallow, generic work.
 
       // Mark result as consumed — suppresses the completion notification.
       // Queued agents return above; this block only runs for terminal statuses.
-      // Note: for group-batched agents the nudge is keyed `group:<ids>`, so
-      // cancelNudge(agent_id) is a no-op there — the group send closure's
-      // resultConsumed re-check is what filters this agent out instead.
       record.resultConsumed = true;
       cancelNudge(params.agent_id);
 
-      // Attach notification details so renderResult can render the report as
-      // markdown, mirroring the completion notification the parent just
-      // suppressed by consuming synchronously.
-      const details = buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id));
-
       if (record.status === "error") {
-        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true), details);
+        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
       }
-      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false), details);
+      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
     },
 
-    renderResult(result, { expanded }, theme) {
-      const details = result.details as NotificationDetails | undefined;
-      if (!details) {
-        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(text, 0, 0);
-      }
-      const effectiveExpanded = resultPreviewExpanded ? true : expanded;
-      const container = new Container();
-      container.addChild(subagentNotificationRenderHeader(details, theme));
-      container.addChild(subagentNotificationRenderBody(details, effectiveExpanded, resultPreviewMode, theme));
-      return container;
+    renderResult(result, _options, theme) {
+      const report = result.content[0]?.type === "text" ? result.content[0].text : "";
+      // Display copy only: the tool text returned to the parent model keeps its
+      // raw result/error bodies; the builders collapse its single-line metadata.
+      const display = typeof report === "string" ? stripControlChars(report) : "";
+      return display
+        ? new Markdown(display, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
+        : new Text("", 0, 0);
     },
   }));
 
   /** Queued subagent: no file paths, result body, or footer — nothing produced yet. */
   function renderQueued(record: AgentRecord): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     return (
-      `Agent: ${record.id} (queued — not started yet)\n` +
-      `Type: ${displayName} | Description: ${record.description}\n\n` +
+      `Agent: ${toSingleLine(record.id)} (queued — not started yet)\n` +
+      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n` +
       `This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.`
     );
   }
@@ -1615,15 +1445,15 @@ Terse command-style prompts produce shallow, generic work.
     checkpointsPath: string | undefined,
     transcriptPath: string | undefined,
   ): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     const turn = record.turnCount ?? 0;
     const maxTurns = record.effectiveMaxTurns;
     const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
     const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
 
     let output =
-      `Agent: ${record.id} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
-      `Type: ${displayName} | Description: ${record.description}\n\n`;
+      `Agent: ${toSingleLine(record.id)} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
+      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n`;
 
     if (record.lastCheckpoint) {
       output +=
@@ -1662,7 +1492,7 @@ Terse command-style prompts produce shallow, generic work.
 
   /** Shared header for completed/errored shapes (Status + stats + status note). */
   function completedHeader(record: AgentRecord): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     const duration = formatDuration(record.startedAt, record.completedAt);
     const tokens = formatLifetimeTokens(record);
     const contextPercent = getSessionContextPercent(record.session);
@@ -1672,9 +1502,9 @@ Terse command-style prompts produce shallow, generic work.
     if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
     statsParts.push(`Duration: ${duration}`);
     return (
-      `Agent: ${record.id}\n` +
-      `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-      `Description: ${record.description}`
+      `Agent: ${toSingleLine(record.id)}\n` +
+      `Type: ${displayName} | Status: ${toSingleLine(record.status)}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+      `Description: ${toSingleLine(record.description)}`
     );
   }
 
@@ -1685,8 +1515,8 @@ Terse command-style prompts produce shallow, generic work.
     footer: string,
   ): string {
     let s = "";
-    if (checkpointsPath) s += `Checkpoint history: ${checkpointsPath}\n`;
-    if (transcriptPath) s += `Full transcript:   ${transcriptPath}\n`;
+    if (checkpointsPath) s += `Checkpoint history: ${toSingleLine(checkpointsPath)}\n`;
+    if (transcriptPath) s += `Full transcript:   ${toSingleLine(transcriptPath)}\n`;
     s += footer;
     return s;
   }
@@ -1936,14 +1766,17 @@ Terse command-style prompts produce shallow, generic work.
       const cfg = getAgentConfig(name);
       const disabled = cfg?.enabled === false;
       const model = getModelLabel(name, ctx.modelRegistry);
+      const displayName = toSingleLine(name);
       return {
         id: name,
-        label: `${sourceIndicator(cfg)}${name}`,
-        currentValue: model,
-        description: disabled ? "(disabled)" : (cfg?.description ?? name),
+        label: `${sourceIndicator(cfg)}${displayName}`,
+        currentValue: toSingleLine(model),
+        description: disabled ? "(disabled)" : toSingleLine(cfg?.description ?? name),
         // Single-value list so Enter "activates" the row (fires onChange with the
-        // agent's id) without offering anything to actually cycle.
-        values: [model],
+        // agent's id) without offering anything to actually cycle. The value is
+        // the sanitized display copy: SettingsList copies values[0] back into
+        // currentValue on activation, so a raw label would reappear.
+        values: [toSingleLine(model)],
       };
     });
 
@@ -1988,9 +1821,9 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const options = agents.map(a => {
-      const dn = getDisplayName(a.type);
+      const dn = toSingleLine(getDisplayName(a.type));
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${toSingleLine(a.status)} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);
@@ -2020,7 +1853,7 @@ Terse command-style prompts produce shallow, generic work.
       (tui, theme, keybindings, done) => {
         return new ConversationViewer(tui, session, record, activity, theme, done, () => {
           if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
+            ctx.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           }
         }, keybindings, (message: string) => manager.steer(record.id, message));
       },
@@ -2034,7 +1867,7 @@ Terse command-style prompts produce shallow, generic work.
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
     const cfg = getAgentConfig(name);
     if (!cfg) {
-      ctx.ui.notify(`Agent config not found for "${name}".`, "warning");
+      ctx.ui.notify(`Agent config not found for "${toSingleLine(name)}".`, "warning");
       return;
     }
 
@@ -2059,33 +1892,33 @@ Terse command-style prompts produce shallow, generic work.
       menuOptions = ["Edit", "Disable", "Delete", "Back"];
     }
 
-    const choice = await ctx.ui.select(name, menuOptions);
+    const choice = await ctx.ui.select(toSingleLine(name), menuOptions);
     if (!choice || choice === "Back") return;
 
     if (choice === "Edit" && file) {
       const content = readFileSync(file.path, "utf-8");
-      const edited = await ctx.ui.editor(`Edit ${name}`, content);
+      const edited = await ctx.ui.editor(`Edit ${toSingleLine(name)}`, content);
       if (edited !== undefined && edited !== content) {
         const { writeFileSync } = await import("node:fs");
         writeFileSync(file.path, edited, "utf-8");
         reloadCustomAgents();
-        ctx.ui.notify(`Updated ${file.path}`, "info");
+        ctx.ui.notify(`Updated ${toSingleLine(file.path)}`, "info");
       }
     } else if (choice === "Delete") {
       if (file) {
-        const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${name} from ${file.location} (${file.path})?`);
+        const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${toSingleLine(name)} from ${file.location} (${toSingleLine(file.path)})?`);
         if (confirmed) {
           unlinkSync(file.path);
           reloadCustomAgents();
-          ctx.ui.notify(`Deleted ${file.path}`, "info");
+          ctx.ui.notify(`Deleted ${toSingleLine(file.path)}`, "info");
         }
       }
     } else if (choice === "Reset to default" && file) {
-      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
+      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${toSingleLine(file.path)} and restore embedded default?`);
       if (confirmed) {
         unlinkSync(file.path);
         reloadCustomAgents();
-        ctx.ui.notify(`Restored default ${name}`, "info");
+        ctx.ui.notify(`Restored default ${toSingleLine(name)}`, "info");
       }
     } else if (choice.startsWith("Eject")) {
       await ejectAgent(ctx, name, cfg);
@@ -2109,7 +1942,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const targetPath = join(targetDir, `${name}.md`);
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
@@ -2140,7 +1973,7 @@ Terse command-style prompts produce shallow, generic work.
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
+    ctx.ui.notify(`Ejected ${toSingleLine(name)} to ${toSingleLine(targetPath)}`, "info");
   }
 
   /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
@@ -2150,14 +1983,14 @@ Terse command-style prompts produce shallow, generic work.
       // Existing file — set enabled: false in frontmatter (idempotent)
       const content = readFileSync(file.path, "utf-8");
       if (content.includes("\nenabled: false\n")) {
-        ctx.ui.notify(`${name} is already disabled.`, "info");
+        ctx.ui.notify(`${toSingleLine(name)} is already disabled.`, "info");
         return;
       }
       const updated = content.replace(/^---\n/, "---\nenabled: false\n");
       const { writeFileSync } = await import("node:fs");
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
-      ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
+      ctx.ui.notify(`Disabled ${toSingleLine(name)} (${toSingleLine(file.path)})`, "info");
       return;
     }
 
@@ -2175,7 +2008,7 @@ Terse command-style prompts produce shallow, generic work.
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
+    ctx.ui.notify(`Disabled ${toSingleLine(name)} (${toSingleLine(targetPath)})`, "info");
   }
 
   /** Enable a disabled agent by removing enabled: false from its frontmatter. */
@@ -2191,11 +2024,11 @@ Terse command-style prompts produce shallow, generic work.
     if (updated.trim() === "---\n---" || updated.trim() === "---\n---\n") {
       unlinkSync(file.path);
       reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
+      ctx.ui.notify(`Enabled ${toSingleLine(name)} (removed ${toSingleLine(file.path)})`, "info");
     } else {
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
+      ctx.ui.notify(`Enabled ${toSingleLine(name)} (${toSingleLine(file.path)})`, "info");
     }
   }
 
@@ -2232,7 +2065,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const targetPath = join(targetDir, `${name}.md`);
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
@@ -2284,14 +2117,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
     });
 
     if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${record.error}`, "warning");
+      ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning");
       return;
     }
 
     reloadCustomAgents();
 
     if (existsSync(targetPath)) {
-      ctx.ui.notify(`Created ${targetPath}`, "info");
+      ctx.ui.notify(`Created ${toSingleLine(targetPath)}`, "info");
     } else {
       ctx.ui.notify("Agent generation completed but file was not created. Check the agent output.", "warning");
     }
@@ -2368,14 +2201,14 @@ ${systemPrompt}
     const targetPath = join(targetDir, `${name}.md`);
 
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Created ${targetPath}`, "info");
+    ctx.ui.notify(`Created ${toSingleLine(targetPath)}`, "info");
   }
 
   function snapshotSettings(): SubagentsSettings {
@@ -2385,11 +2218,8 @@ ${systemPrompt}
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
-      defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
-      resultPreviewMode,
-      resultPreviewExpanded,
       failurePreviewMaxChars,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -2430,13 +2260,6 @@ ${systemPrompt}
           values: [String(gt)],
         },
         {
-          id: "joinMode",
-          label: "Join mode",
-          description: "Default join mode for background agents",
-          currentValue: getDefaultJoinMode(),
-          values: ["smart", "async", "group"],
-        },
-        {
           id: "schedulingEnabled",
           label: "Scheduling",
           description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
@@ -2448,20 +2271,6 @@ ${systemPrompt}
           label: "Scope models",
           description: "Validate subagent models against scoped models (/scoped-models)",
           currentValue: isScopeModelsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "resultPreviewMode",
-          label: "Result preview mode",
-          description: "Render result body as markdown or plain text",
-          currentValue: resultPreviewMode,
-          values: ["markdown", "plain"],
-        },
-        {
-          id: "resultPreviewExpanded",
-          label: "Result preview expanded by default",
-          description: "Always show expanded result preview, ignoring pi's expanded flag",
-          currentValue: resultPreviewExpanded ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -2531,9 +2340,6 @@ ${systemPrompt}
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
-      } else if (id === "joinMode") {
-        setDefaultJoinMode(value as JoinMode);
-        notifyApplied(ctx, `Default join mode set to ${value}`);
       } else if (id === "schedulingEnabled") {
         const enabled = value === "on";
         if (enabled === isSchedulingEnabled()) {
@@ -2550,16 +2356,9 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "resultPreviewMode") {
-        setResultPreviewMode(value as ResultPreviewMode);
-        notifyApplied(ctx, `Result preview mode set to ${value}`);
-      } else if (id === "resultPreviewExpanded") {
-        const expanded = value === "on";
-        setResultPreviewExpanded(expanded);
-        notifyApplied(ctx, `Result preview expanded by default ${expanded ? "enabled" : "disabled"}`);
       } else if (id === "failurePreviewMaxChars") {
         const n = parseInt(value, 10);
-        if (n >= 1 && n <= RESULT_PREVIEW_MAX_CHARS_CEILING) {
+        if (n >= 1 && n <= FAILURE_PREVIEW_MAX_CHARS_CEILING) {
           setFailurePreviewMaxChars(n);
           notifyApplied(ctx, `Failure preview max chars set to ${n}`);
         }
@@ -2630,17 +2429,13 @@ ${systemPrompt}
 
     // If a numeric field ID was returned, prompt for typed input
     if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent"
-        ? String(manager.getMaxConcurrent())
-        : result === "defaultMaxTurns"
-          ? String(getDefaultMaxTurns() ?? 0)
-          : String(getGraceTurns());
-
-      const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
-        : result === "defaultMaxTurns"
-          ? "Default max turns (0 = unlimited)"
-          : "Grace turns (1+)";
+      const numericPrompt: Record<string, { current: string; label: string }> = {
+        maxConcurrent: { current: String(manager.getMaxConcurrent()), label: "Max concurrency (1+)" },
+        defaultMaxTurns: { current: String(getDefaultMaxTurns() ?? 0), label: "Default max turns (0 = unlimited)" },
+        graceTurns: { current: String(getGraceTurns()), label: "Grace turns (1+)" },
+        failurePreviewMaxChars: { current: String(failurePreviewMaxChars), label: "Failure preview max chars (1+)" },
+      };
+      const { current, label } = numericPrompt[result];
 
       // Loop until user enters a valid integer or cancels (Esc / null).
       // Silently trims whitespace; rejects non-numeric input by re-prompting.

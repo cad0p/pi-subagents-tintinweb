@@ -26,7 +26,6 @@ function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
   const pi = {
-    registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
@@ -83,9 +82,9 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     process.env.HOME = agentDir;
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    // async join → completion routes straight to sendIndividualNudge (no batch
-    // debounce), so fleet.onAgentFinished fires synchronously on the result.
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "async" }));
+    // Completion routes straight to the individual notification (no fork-level
+    // batching), so fleet.onAgentFinished fires synchronously on the result.
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     process.chdir(tmpDir);
   });
 
