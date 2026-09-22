@@ -85,27 +85,13 @@ function skipSignature(raw: unknown): string {
 }
 
 /**
- * True when a preserved record survives a round-trip inside the exact shape
- * save() writes. The wrapper's extra object/array frames are what tips a
- * near-limit value over the stack; proving the record standalone is not enough.
- */
-function canSerializeInPayload(raw: unknown): boolean {
-  try {
-    JSON.stringify({ version: 1, jobs: [raw] });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Deepest JSON nesting a preserved record may have. A real scheduled job is a
  * flat object; anything past a handful of levels is hand-written or corrupt.
  * The bound is deliberately far below the smallest JSON.stringify stack
  * ceiling observed on the supported engines (~6k nesting frames on the Node
- * 22/24 main thread; worker threads are much higher), so the payload proof
- * below can never overflow for an accepted record and the drop decision no
- * longer depends on the ambient stack depth.
+ * 22/24 main thread; worker threads are much higher), so an accepted record
+ * can always be re-serialized and the drop decision does not depend on the
+ * ambient stack depth.
  */
 export const MAX_PRESERVED_DEPTH = 64;
 
@@ -126,15 +112,13 @@ function isWithinDepth(value: unknown, budget: number): boolean {
 
 /**
  * Queue a record for verbatim re-write on save, but only when it nests no
- * deeper than MAX_PRESERVED_DEPTH and round-trips inside the save payload: a
- * preserved record that cannot be serialized would make every later save()
- * throw. The depth bound is the deterministic guard; the payload proof stays
- * as the general mechanism for anything else the shape rejects. Returns false
- * when the record was dropped.
+ * deeper than MAX_PRESERVED_DEPTH. Preserved records come straight from
+ * JSON.parse output, so the depth bound is the whole serializability
+ * guarantee: parsed values cannot carry cycles, BigInt, getters, or a
+ * `toJSON`. Returns false when the record was dropped.
  */
 function preserveRecord(raw: unknown, into: unknown[]): boolean {
   if (!isWithinDepth(raw, MAX_PRESERVED_DEPTH)) return false;
-  if (!canSerializeInPayload(raw)) return false;
   into.push(raw);
   return true;
 }

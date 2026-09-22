@@ -392,9 +392,9 @@ describe("ScheduleStore", () => {
     expect(existsSync(file + ".tmp")).toBe(false);
   });
 
-  // The depth bound is the deterministic half of the guarantee: it is checked
-  // before the payload proof, so the drop decision never depends on the stack
-  // depth of the process (or the vitest pool) running the test.
+  // The depth bound is the whole drop guarantee: it is checked at load, so the
+  // decision never depends on the stack depth of the process (or the vitest
+  // pool) running the test.
   it("preserves a record at the depth bound verbatim", () => {
     const file = join(tmp, "s.json");
     const atBound = JSON.parse("[".repeat(MAX_PRESERVED_DEPTH) + "]".repeat(MAX_PRESERVED_DEPTH));
