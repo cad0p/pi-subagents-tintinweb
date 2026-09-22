@@ -199,12 +199,16 @@ function isValidFailurePreviewCap(value: number): boolean {
 /**
  * @internal Coerce the in-memory failure preview cap for the send path:
  * an out-of-contract value (a settings regression) falls back to the default
- * instead of throwing away the completion. Warns once while the bad value
- * persists — every completion would otherwise log the same regression.
+ * instead of throwing away the completion. Warns once per invalid episode —
+ * a valid value re-arms the latch so a later distinct regression warns again,
+ * while a still-broken value does not log on every completion.
  */
 let warnedInvalidFailurePreviewCap = false;
 export function effectiveFailurePreviewCap(value: number): number {
-  if (isValidFailurePreviewCap(value)) return value;
+  if (isValidFailurePreviewCap(value)) {
+    warnedInvalidFailurePreviewCap = false;
+    return value;
+  }
   if (!warnedInvalidFailurePreviewCap) {
     warnedInvalidFailurePreviewCap = true;
     console.warn(
@@ -945,8 +949,8 @@ Terse command-style prompts produce shallow, generic work.
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
         const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
-        if (d.tags) parts.push(...d.tags);
+        if (d.modelName) parts.push(toSingleLine(d.modelName));
+        if (d.tags) parts.push(...d.tags.map(t => toSingleLine(t)));
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
         }
@@ -959,7 +963,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? stripControlChars(details.activity) : "thinking…", theme);
+        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? toSingleLine(details.activity) : "thinking…", theme);
       }
 
       // ---- Background agent launched ----
@@ -1058,8 +1062,8 @@ Terse command-style prompts produce shallow, generic work.
       if (isScopeModelsEnabled() && model) {
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
-          const agentLabel = customConfig?.displayName ?? subagentType;
-          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
+          const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
+          const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
           ctx.ui.notify(
             `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
             "warning",
@@ -1426,7 +1430,7 @@ Terse command-style prompts produce shallow, generic work.
 
   /** Queued subagent: no file paths, result body, or footer — nothing produced yet. */
   function renderQueued(record: AgentRecord): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     return (
       `Agent: ${toSingleLine(record.id)} (queued — not started yet)\n` +
       `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n` +
@@ -1440,7 +1444,7 @@ Terse command-style prompts produce shallow, generic work.
     checkpointsPath: string | undefined,
     transcriptPath: string | undefined,
   ): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     const turn = record.turnCount ?? 0;
     const maxTurns = record.effectiveMaxTurns;
     const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
@@ -1487,7 +1491,7 @@ Terse command-style prompts produce shallow, generic work.
 
   /** Shared header for completed/errored shapes (Status + stats + status note). */
   function completedHeader(record: AgentRecord): string {
-    const displayName = getDisplayName(record.type);
+    const displayName = toSingleLine(getDisplayName(record.type));
     const duration = formatDuration(record.startedAt, record.completedAt);
     const tokens = formatLifetimeTokens(record);
     const contextPercent = getSessionContextPercent(record.session);
@@ -1761,11 +1765,12 @@ Terse command-style prompts produce shallow, generic work.
       const cfg = getAgentConfig(name);
       const disabled = cfg?.enabled === false;
       const model = getModelLabel(name, ctx.modelRegistry);
+      const displayName = toSingleLine(name);
       return {
         id: name,
-        label: `${sourceIndicator(cfg)}${name}`,
-        currentValue: model,
-        description: disabled ? "(disabled)" : (cfg?.description ?? name),
+        label: `${sourceIndicator(cfg)}${displayName}`,
+        currentValue: toSingleLine(model),
+        description: disabled ? "(disabled)" : toSingleLine(cfg?.description ?? name),
         // Single-value list so Enter "activates" the row (fires onChange with the
         // agent's id) without offering anything to actually cycle.
         values: [model],
@@ -1815,7 +1820,7 @@ Terse command-style prompts produce shallow, generic work.
     const options = agents.map(a => {
       const dn = toSingleLine(getDisplayName(a.type));
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${toSingleLine(a.status)} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);
@@ -1859,7 +1864,7 @@ Terse command-style prompts produce shallow, generic work.
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
     const cfg = getAgentConfig(name);
     if (!cfg) {
-      ctx.ui.notify(`Agent config not found for "${name}".`, "warning");
+      ctx.ui.notify(`Agent config not found for "${toSingleLine(name)}".`, "warning");
       return;
     }
 
@@ -1884,33 +1889,33 @@ Terse command-style prompts produce shallow, generic work.
       menuOptions = ["Edit", "Disable", "Delete", "Back"];
     }
 
-    const choice = await ctx.ui.select(name, menuOptions);
+    const choice = await ctx.ui.select(toSingleLine(name), menuOptions);
     if (!choice || choice === "Back") return;
 
     if (choice === "Edit" && file) {
       const content = readFileSync(file.path, "utf-8");
-      const edited = await ctx.ui.editor(`Edit ${name}`, content);
+      const edited = await ctx.ui.editor(`Edit ${toSingleLine(name)}`, content);
       if (edited !== undefined && edited !== content) {
         const { writeFileSync } = await import("node:fs");
         writeFileSync(file.path, edited, "utf-8");
         reloadCustomAgents();
-        ctx.ui.notify(`Updated ${file.path}`, "info");
+        ctx.ui.notify(`Updated ${toSingleLine(file.path)}`, "info");
       }
     } else if (choice === "Delete") {
       if (file) {
-        const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${name} from ${file.location} (${file.path})?`);
+        const confirmed = await ctx.ui.confirm("Delete agent", `Delete ${toSingleLine(name)} from ${file.location} (${toSingleLine(file.path)})?`);
         if (confirmed) {
           unlinkSync(file.path);
           reloadCustomAgents();
-          ctx.ui.notify(`Deleted ${file.path}`, "info");
+          ctx.ui.notify(`Deleted ${toSingleLine(file.path)}`, "info");
         }
       }
     } else if (choice === "Reset to default" && file) {
-      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${file.path} and restore embedded default?`);
+      const confirmed = await ctx.ui.confirm("Reset to default", `Delete override ${toSingleLine(file.path)} and restore embedded default?`);
       if (confirmed) {
         unlinkSync(file.path);
         reloadCustomAgents();
-        ctx.ui.notify(`Restored default ${name}`, "info");
+        ctx.ui.notify(`Restored default ${toSingleLine(name)}`, "info");
       }
     } else if (choice.startsWith("Eject")) {
       await ejectAgent(ctx, name, cfg);
@@ -1934,7 +1939,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const targetPath = join(targetDir, `${name}.md`);
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
@@ -1965,7 +1970,7 @@ Terse command-style prompts produce shallow, generic work.
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
+    ctx.ui.notify(`Ejected ${toSingleLine(name)} to ${toSingleLine(targetPath)}`, "info");
   }
 
   /** Disable an agent: set enabled: false in its .md file, or create a stub for built-in defaults. */
@@ -1975,14 +1980,14 @@ Terse command-style prompts produce shallow, generic work.
       // Existing file — set enabled: false in frontmatter (idempotent)
       const content = readFileSync(file.path, "utf-8");
       if (content.includes("\nenabled: false\n")) {
-        ctx.ui.notify(`${name} is already disabled.`, "info");
+        ctx.ui.notify(`${toSingleLine(name)} is already disabled.`, "info");
         return;
       }
       const updated = content.replace(/^---\n/, "---\nenabled: false\n");
       const { writeFileSync } = await import("node:fs");
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
-      ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
+      ctx.ui.notify(`Disabled ${toSingleLine(name)} (${toSingleLine(file.path)})`, "info");
       return;
     }
 
@@ -2000,7 +2005,7 @@ Terse command-style prompts produce shallow, generic work.
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
+    ctx.ui.notify(`Disabled ${toSingleLine(name)} (${toSingleLine(targetPath)})`, "info");
   }
 
   /** Enable a disabled agent by removing enabled: false from its frontmatter. */
@@ -2016,11 +2021,11 @@ Terse command-style prompts produce shallow, generic work.
     if (updated.trim() === "---\n---" || updated.trim() === "---\n---\n") {
       unlinkSync(file.path);
       reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (removed ${file.path})`, "info");
+      ctx.ui.notify(`Enabled ${toSingleLine(name)} (removed ${toSingleLine(file.path)})`, "info");
     } else {
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
-      ctx.ui.notify(`Enabled ${name} (${file.path})`, "info");
+      ctx.ui.notify(`Enabled ${toSingleLine(name)} (${toSingleLine(file.path)})`, "info");
     }
   }
 
@@ -2057,7 +2062,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const targetPath = join(targetDir, `${name}.md`);
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
@@ -2116,7 +2121,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     reloadCustomAgents();
 
     if (existsSync(targetPath)) {
-      ctx.ui.notify(`Created ${targetPath}`, "info");
+      ctx.ui.notify(`Created ${toSingleLine(targetPath)}`, "info");
     } else {
       ctx.ui.notify("Agent generation completed but file was not created. Check the agent output.", "warning");
     }
@@ -2193,14 +2198,14 @@ ${systemPrompt}
     const targetPath = join(targetDir, `${name}.md`);
 
     if (existsSync(targetPath)) {
-      const overwrite = await ctx.ui.confirm("Overwrite", `${targetPath} already exists. Overwrite?`);
+      const overwrite = await ctx.ui.confirm("Overwrite", `${toSingleLine(targetPath)} already exists. Overwrite?`);
       if (!overwrite) return;
     }
 
     const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
-    ctx.ui.notify(`Created ${targetPath}`, "info");
+    ctx.ui.notify(`Created ${toSingleLine(targetPath)}`, "info");
   }
 
   function snapshotSettings(): SubagentsSettings {

@@ -22,7 +22,7 @@
  * the nudge arms at t=0 and fires at t=200 (the hold window) unless parked.
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Markdown } from "@earendil-works/pi-tui";
@@ -50,6 +50,8 @@ vi.mock("../src/settings.js", async (importOriginal) => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
@@ -459,6 +461,104 @@ describe("foreground Agent result rendering", () => {
     expect(rendered.text).not.toContain("42");
   });
 
+  it("renderCall collapses a frontmatter display_name", async () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const dir = mkdtempSync(join(tmpdir(), "pi-call-agent-"));
+    try {
+      const { pi, tools } = makePi();
+      subagentsExtension(pi);
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil.md"),
+        `---\ndisplay_name: ${JSON.stringify(`evil${control}\nforged`)}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      registerAgents(loadCustomAgents(dir));
+
+      const rendered = tools.get("Agent").renderCall({ subagent_type: "evil", description: "x" }, mockTheme);
+      expect(rendered.text).not.toContain(control);
+      expect(rendered.text).not.toContain("\nforged");
+      expect(rendered.text).toContain("evil forged");
+    } finally {
+      registerAgents(new Map());
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("collapses invocation model names and tags in the stats line", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const res = {
+      content: [{ type: "text" as const, text: "done" }],
+      details: details({
+        status: "completed",
+        modelName: "haiku\u001b[2J",
+        tags: [`thinking: high${control}\nforged: yes`, "max turns: 5"],
+      }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme);
+    expect(rendered.text).not.toContain("\u001b");
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).not.toContain("\nforged: yes");
+    expect(rendered.text).toContain("thinking: high forged: yes");
+  });
+
+  it("strips frontmatter display_name and model from the out-of-scope model warning", async () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const dir = mkdtempSync(join(tmpdir(), "pi-scope-agent-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["allowed/only-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil.md"),
+        `---\ndisplay_name: ${JSON.stringify(`evil${control}\nforged`)}\nmodel: scope/evil-model\n---\n\nbody\n`,
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "ok",
+        session: { dispose: vi.fn() } as any,
+        aborted: false,
+        steered: false,
+      });
+      const { pi, tools } = makePi();
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: hermeticHome,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn(() => undefined),
+          getAvailable: vi.fn(() => [{ provider: "allowed", id: "only-model", name: "Only Model" }]),
+        },
+      };
+
+      await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description: "d", subagent_type: "evil" },
+        undefined, undefined, c,
+      );
+
+      const warnings = c.ui.notify.mock.calls
+        .map(([msg]: [string]) => msg)
+        .filter((msg: string) => msg.includes("out-of-scope"));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).not.toContain(control);
+      expect(warnings[0]).not.toContain("\nforged");
+      expect(warnings[0]).toContain("evil forged");
+      expect(warnings[0]).toContain("scope/evil-model");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the error line collapses newlines so a record field cannot add a display line", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
@@ -636,6 +736,52 @@ describe("agents command terminal surfaces", () => {
     expect(runningMenu?.options[0]).toContain("(desctail forged)");
     expect(runningMenu?.options.join("\n")).not.toContain("\u001b");
     expect(notifications.map(n => n.message)).toContain('Stopped "desctail forged".');
+  });
+
+  it("collapses a frontmatter display_name in the running-agents menu", async () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const dir = mkdtempSync(join(tmpdir(), "pi-menu-agent-"));
+    const previousCwd = process.cwd();
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil.md"),
+        `---\ndisplay_name: ${JSON.stringify(`evil${control}\ntail`)}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      process.chdir(dir);
+      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
+      const { pi, tools, commands } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+
+      const { c, selects } = commandCtx((title, options) => {
+        if (title === "Agents") {
+          return selects.filter(s => s.title === "Agents").length <= 1
+            ? options.find(o => o.startsWith("Running agents ("))
+            : undefined;
+        }
+        return undefined;
+      });
+
+      await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description: "d", subagent_type: "evil", run_in_background: true },
+        undefined, undefined, c,
+      );
+
+      await commands.get("agents").handler("", c);
+
+      const runningMenu = selects.find(s => s.title === "Running agents");
+      expect(runningMenu).toBeDefined();
+      expect(runningMenu?.options[0]).toContain("evil tail");
+      expect(runningMenu?.options.join("\n")).not.toContain(control);
+      expect(runningMenu?.options.join("\n")).not.toContain("\ntail");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    }
   });
 
   it("sanitizes the generation-failed notification", async () => {

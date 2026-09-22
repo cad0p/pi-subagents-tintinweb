@@ -259,6 +259,20 @@ describe("AgentWidget", () => {
     const lines = renderLines(finished, "finished", () => "background");
     expect(lines).not.toContain("42");
     expect(lines).toContain("error");
+    expect(lines).not.toContain("[object Object]");
+  });
+
+  it("collapses a newline in the tool activity line", () => {
+    const running = {
+      listAgents: () => [{ ...makeRecord("running", { isBackground: true }), type: "general-purpose" }],
+    };
+    const activity = {
+      ...makeActivity(),
+      activeTools: new Map([["t1", "read\nforged"]]),
+    };
+    const lines = renderLines(running, "running", () => "background", activity);
+    expect(lines).toContain("read forged…");
+    expect(lines).not.toContain("\nforged");
   });
 
   it("truncates the error preview without splitting a surrogate pair", () => {

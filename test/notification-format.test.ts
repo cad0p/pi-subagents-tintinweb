@@ -673,9 +673,12 @@ describe("markdown completion report", () => {
     }
   });
 
-  it("falls back to the default cap and warns once while an out-of-contract value persists", () => {
+  it("falls back to the default cap and warns once per invalid episode", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
+      // Reset the module-global latch so this test does not depend on the order
+      // of earlier invalid-cap calls in the same worker.
+      effectiveFailurePreviewCap(1);
       const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5, FAILURE_PREVIEW_MAX_CHARS_CEILING + 1];
       for (const bad of bads) {
         expect(effectiveFailurePreviewCap(bad)).toBe(65536);
@@ -686,6 +689,9 @@ describe("markdown completion report", () => {
       expect(effectiveFailurePreviewCap(1000)).toBe(1000);
       expect(effectiveFailurePreviewCap(FAILURE_PREVIEW_MAX_CHARS_CEILING)).toBe(FAILURE_PREVIEW_MAX_CHARS_CEILING);
       expect(warn).toHaveBeenCalledTimes(1); // in-contract values stay silent
+      // A later, distinct regression warns again after a valid value re-armed the latch.
+      expect(effectiveFailurePreviewCap(0)).toBe(65536);
+      expect(warn).toHaveBeenCalledTimes(2);
     } finally {
       warn.mockRestore();
     }

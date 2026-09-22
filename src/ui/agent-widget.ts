@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
+import { safeTruncate, toSingleLine } from "../text-safety.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
@@ -397,7 +397,7 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = stripControlChars(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
+      const activity = toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
 
       runningLines.push([
         truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),

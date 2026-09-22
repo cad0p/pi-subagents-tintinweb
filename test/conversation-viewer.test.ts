@@ -542,5 +542,48 @@ describe("ConversationViewer", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+
+    it("collapses the invocation model and tags into one line", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const viewer = new ConversationViewer(
+        mockTui(30, 80),
+        mockSession(),
+        mockRecord({
+          invocation: { modelName: `haiku${control}`, thinking: `high\nforged` as any },
+        }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain(control);
+      expect(out).toContain("thinking: high forged");
+      expect(out).not.toContain("\nforged");
+    });
+
+    it("strips terminal controls from message bodies while keeping their lines", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const messages = [
+        { role: "user", content: `ask${control}\nsecond line` },
+        { role: "assistant", content: [{ type: "text", text: `answer${control}\nmore` }] },
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text: `tool${control}\nout` }] },
+        {
+          role: "bashExecution", command: `ls${control}`,
+          output: `file${control}\nlist`,
+          exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now(),
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, 80), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain(control);
+      expect(out).toContain("ask");
+      expect(out).toContain("second line");
+      expect(out).toContain("answer");
+      expect(out).toContain("tool");
+      expect(out).toContain("file");
+      expect(out).toContain("list");
+    });
   });
 });

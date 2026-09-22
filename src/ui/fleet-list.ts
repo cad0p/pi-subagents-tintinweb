@@ -289,7 +289,7 @@ export class FleetList {
     const record = entry.record;
     if (!this.ui) return;
     if (!record.session) {
-      this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
+      this.ui.notify(`Agent is ${toSingleLine(record.status)} — no session available.`, "info");
       return;
     }
     const session = record.session;
