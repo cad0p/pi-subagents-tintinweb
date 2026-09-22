@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { effectiveFailurePreviewCap, formatTaskNotification } from "../src/index.js";
 import type { SubagentsSettings } from "../src/settings.js";
 import type { AgentRecord } from "../src/types.js";
@@ -673,11 +673,17 @@ describe("markdown completion report", () => {
   });
 
   it("falls back to the default cap when the in-memory value is not a positive integer", () => {
-    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5]) {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bads = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0, -5, 1.5];
+    for (const bad of bads) {
       expect(effectiveFailurePreviewCap(bad)).toBe(65536);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(String(bad)));
     }
+    expect(warn).toHaveBeenCalledTimes(bads.length);
     expect(effectiveFailurePreviewCap(1)).toBe(1);
     expect(effectiveFailurePreviewCap(1000)).toBe(1000);
+    expect(warn).toHaveBeenCalledTimes(bads.length); // in-contract values stay silent
+    warn.mockRestore();
   });
 
   it("handles surrogate pairs at the cap boundary without a lone surrogate", () => {

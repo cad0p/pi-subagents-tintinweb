@@ -145,4 +145,46 @@ describe("AgentWidget", () => {
     expect(lines).not.toContain("]8;;");
     expect(lines).toContain("xylink");
   });
+
+  it("strips terminal controls from record descriptions and errors", () => {
+    const control = "\u001b]52;c;aGFjaw==\u0007\u001b[2J";
+    const running = {
+      listAgents: () => [{
+        ...makeRecord("running", { isBackground: true }),
+        description: `desc${control}tail`,
+      }],
+    };
+    const runningLines = renderLines(running, "running", () => "background");
+    expect(runningLines).not.toContain("\u001b");
+    expect(runningLines).not.toContain("[2J");
+    expect(runningLines).not.toContain("]52;");
+    expect(runningLines).toContain("desctail");
+
+    const finished = {
+      listAgents: () => [{
+        ...makeRecord("finished", { isBackground: true }),
+        status: "error",
+        completedAt: Date.now(),
+        description: `desc${control}tail`,
+        error: `err${control}tail`,
+      }],
+    };
+    const finishedLines = renderLines(finished, "finished", () => "background");
+    expect(finishedLines).not.toContain("\u001b");
+    expect(finishedLines).not.toContain("[2J");
+    expect(finishedLines).not.toContain("]52;");
+    expect(finishedLines).toContain("desctail");
+    expect(finishedLines).toContain("error: errtail");
+  });
+
+  it("collapses newlines and tabs in the record description", () => {
+    const manager = {
+      listAgents: () => [{
+        ...makeRecord("multiline", { isBackground: true }),
+        description: "line one\nline two\tend",
+      }],
+    };
+    const lines = renderLines(manager, "multiline", () => "background");
+    expect(lines).toContain("line one line two end");
+  });
 });

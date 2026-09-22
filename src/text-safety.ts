@@ -28,3 +28,13 @@ export function stripControlChars(s: string): string {
       "",
     );
 }
+
+/**
+ * Collapse newlines/CRs/tabs to spaces and strip control/invisible characters,
+ * for untrusted text composed into a single terminal line (report headers and
+ * metadata, tool-call lines, widget rows). Use `stripControlChars` for body
+ * and display paths that preserve layout.
+ */
+export function toSingleLine(s: string): string {
+  return stripControlChars(s.replace(/\r\n?|\n/g, " ").replace(/\t/g, " ")).trim();
+}

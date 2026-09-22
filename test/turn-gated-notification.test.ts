@@ -224,9 +224,9 @@ describe("turn-gated completion notifications", () => {
     const id = await spawnCompleting(tools);
     await vi.advanceTimersByTimeAsync(300); // hold window
 
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain(id);
-    expect(warn.mock.calls[0][0]).toContain("send exploded");
+    const sendFailure = warn.mock.calls.map(([msg]) => String(msg)).find(msg => msg.includes("send exploded"));
+    expect(sendFailure).toBeDefined();
+    expect(sendFailure).toContain(id);
   });
 
   it("session_shutdown drops parked nudges — nothing fires after teardown", async () => {
@@ -261,7 +261,7 @@ describe("turn-gated completion notifications", () => {
     expect(textOf(spawn)).toContain("Agent ID:");
     await vi.advanceTimersByTimeAsync(300); // hold window
 
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("NaN"));
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload.content).toContain("**✗ Subagent error: failing task** — boom");
@@ -405,6 +405,58 @@ describe("foreground Agent result rendering", () => {
       mockTheme,
     );
     expect(rendered.text).toBe("");
+  });
+
+  it("renderCall collapses newlines and tabs in the description", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const rendered = tools.get("Agent").renderCall(
+      { subagent_type: "general-purpose", description: "find\nfiles\tnow" },
+      mockTheme,
+    );
+    expect(rendered.text).not.toContain("\n");
+    expect(rendered.text).not.toContain("\t");
+    expect(rendered.text).toContain("find files now");
+  });
+
+  it("renderCall tolerates a non-string description", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const rendered = tools.get("Agent").renderCall(
+      { subagent_type: "general-purpose", description: 42 as any },
+      mockTheme,
+    );
+    expect(rendered.text).toContain("Agent");
+    expect(rendered.text).not.toContain("42");
+  });
+
+  it("running activity tolerates a non-string value", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const res = {
+      content: [{ type: "text" as const, text: "partial" }],
+      details: details({ status: "running", activity: 42 as any }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
+    const text = rendered.render(120).join("\n");
+    expect(text).toContain("thinking…");
+    expect(text).not.toContain("42");
+  });
+
+  it("expanded results tolerate a non-string content text", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const res = {
+      content: [{ type: "text" as const, text: 42 as any }],
+      details: details({ status: "completed" }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: true, isPartial: false }, mockTheme);
+    expect(rendered.text).toContain("✓");
+    expect(rendered.text).not.toContain("42");
   });
 });
 

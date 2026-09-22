@@ -28,7 +28,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
-import { stripControlChars } from "./text-safety.js";
+import { stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -180,7 +180,7 @@ function getStatusGlyph(status: string): string {
  * that is composed into the report header or metadata lines.
  */
 function sanitizeHeaderText(s: string): string {
-  return stripControlChars(s.replace(/\r\n?|\n/g, " ").replace(/\t/g, " ")).trim();
+  return toSingleLine(s);
 }
 
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
@@ -209,7 +209,11 @@ function isValidFailurePreviewCap(value: number): boolean {
  * instead of throwing away the completion.
  */
 export function effectiveFailurePreviewCap(value: number): number {
-  return isValidFailurePreviewCap(value) ? value : DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
+  if (isValidFailurePreviewCap(value)) return value;
+  console.warn(
+    `[pi-subagents] ignoring out-of-contract failurePreviewMaxChars (${String(value)}); using the default ${DEFAULT_FAILURE_PREVIEW_MAX_CHARS} for this notification`,
+  );
+  return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
 
 /** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
@@ -928,7 +932,7 @@ Terse command-style prompts produce shallow, generic work.
 
     renderCall(args, theme) {
       const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
-      const desc = stripControlChars(args.description ?? "");
+      const desc = typeof args.description === "string" ? toSingleLine(args.description) : "";
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
@@ -957,7 +961,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        return renderRunningAgentStatus(frame, s, stripControlChars(details.activity ?? "thinking…"), theme);
+        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? stripControlChars(details.activity) : "thinking…", theme);
       }
 
       // ---- Background agent launched ----
@@ -975,7 +979,8 @@ Terse command-style prompts produce shallow, generic work.
         line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
 
         if (expanded) {
-          const resultText = stripControlChars(result.content[0]?.type === "text" ? result.content[0].text : "");
+          const rawText = result.content[0]?.type === "text" ? result.content[0].text : "";
+          const resultText = typeof rawText === "string" ? stripControlChars(rawText) : "";
           if (resultText) {
             const lines = resultText.split("\n").slice(0, 50);
             for (const l of lines) {
