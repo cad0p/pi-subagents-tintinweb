@@ -454,6 +454,23 @@ describe("ScheduleStore", () => {
     expect(fresh.list().map(j => j.id)).toEqual(["other"]);
   });
 
+  it("purges a same-id skipped record when the live id is removed", () => {
+    const file = join(tmp, "s.json");
+    // The malformed twin is skipped, so the menu only ever shows the live one;
+    // deleting that id must still take the preserved record with it.
+    const badTwin = { ...makeRawJob({ id: "twin" }), scheduleType: "every-so-often" };
+    writeStoreFile(file, [makeJob({ id: "twin" }), badTwin]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.list().map(j => j.id)).toEqual(["twin"]);
+
+    expect(store.remove("twin")).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([]);
+    expect(onDisk.shadowed).toEqual([]);
+  });
+
   it("never promotes a shadowed duplicate across repeated load/save cycles", () => {
     const file = join(tmp, "s.json");
     writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
@@ -505,5 +522,41 @@ describe("ScheduleStore", () => {
     expect(existsSync(file)).toBe(true);
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
     expect(onDisk.jobs).toEqual([null]);
+  });
+
+  it("does not unlink the file while a shadowed record exists", () => {
+    const file = join(tmp, "s.json");
+    // A shadowed duplicate whose live twin vanished outside the store: the
+    // jobs list is empty, but the preserved record must keep the file alive.
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [], shadowed: [makeJob({ id: "ghost" })] }, null, 2));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    store.deleteFileIfEmpty();
+
+    expect(existsSync(file)).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([]);
+    expect(onDisk.shadowed).toHaveLength(1);
+  });
+
+  it("re-warns when the shadowed set changes between loads", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // Materialize the shadowed list on disk, then hand-edit in another one.
+    store.add(makeJob({ id: "extra", name: "extra" }));
+    expect(warn).toHaveBeenCalledTimes(1);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    onDisk.shadowed.push(makeJob({ id: "ghost", name: "ghost" }));
+    writeFileSync(file, JSON.stringify(onDisk, null, 2));
+
+    // The next load sees a different shadowed set and must not stay quiet.
+    store.add(makeJob({ id: "extra-2", name: "extra-2" }));
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });

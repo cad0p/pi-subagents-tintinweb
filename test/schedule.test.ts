@@ -129,6 +129,7 @@ describe("SubagentScheduler — lifecycle", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     scheduler.stop();
     rmSync(tmp, { recursive: true, force: true });
   });
@@ -411,6 +412,7 @@ describe("SubagentScheduler — fire path", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     scheduler.stop();
     vi.useRealTimers();
     setDefaultsDisabled(false);
@@ -825,6 +827,7 @@ describe("SubagentScheduler — arm-path range guard", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     scheduler.stop();
     vi.useRealTimers();
     rmSync(tmp, { recursive: true, force: true });
