@@ -86,16 +86,26 @@ export async function showSchedulesMenu(
     return;
   }
 
-  const labels = jobs.map(j => formatJob(j, scheduler));
+  // Labels are the user-facing rows, so two jobs whose names collapse to the
+  // same text would otherwise be indistinguishable. Make each generated label
+  // unique and resolve the selection through this map — never by index — so
+  // confirm/cancel always act on the job the user picked.
+  const jobByLabel = new Map<string, ScheduledSubagent>();
+  const labels = jobs.map(j => {
+    const base = formatJob(j, scheduler);
+    let label = base;
+    for (let n = 2; jobByLabel.has(label); n++) label = `${base} (${n})`;
+    jobByLabel.set(label, j);
+    return label;
+  });
   const choice = await ctx.ui.select(
     `Scheduled jobs (${jobs.length}) — select to cancel`,
     labels,
   );
   if (!choice) return;
 
-  const idx = labels.indexOf(choice);
-  if (idx < 0) return;
-  const job = jobs[idx];
+  const job = jobByLabel.get(choice);
+  if (!job) return;
 
   const ok = await ctx.ui.confirm(`Cancel "${toSingleLine(job.name)}"?`, formatDetails(job, scheduler));
   if (!ok) return;
