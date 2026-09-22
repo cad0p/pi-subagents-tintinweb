@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Git worktree isolation** — run agents in isolated repo copies; changes auto-committed to branches on completion
 - **Skill preloading** — inject named skills into agent system prompts, discovered from `.pi/skills/`, `.agents/skills/`, and global locations (Pi-standard `<name>/SKILL.md` directory layout supported)
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
-- **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
+- **Markdown completion notifications** — each background completion arrives as its own markdown report (status line, agent ID, transcript path, result body) in pi's standard extension-message box, rendered by pi's default custom-message component. The same text is what the parent model reads; delivery goes through pi's steering queue, so `steeringMode: "all"` delivers several completions in one turn
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 - **Cross-extension RPC** — other pi extensions can spawn and stop subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same steering-queue notification path as manual background completions; manage via `/agents → Scheduled jobs`
@@ -136,18 +136,23 @@ Individual agent results render Claude Code-style in the conversation:
 | **Error** | `✗ ↻3 · 3 tool uses · 12.4k token (8%)` / `⎿ Error: timeout` |
 | **Aborted** | `✗ ↻55≤50 · 55 tool uses · 102.3k token (95% · ⇊3)` / `⎿ Aborted (max turns exceeded)` |
 
-Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
+Completed foreground `Agent` tool results can be expanded (ctrl+o in pi) to show the full agent output inline. Completion notifications render their full report directly — there is no separate collapse/expand for them.
 
-By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
+By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as markdown reports inside pi's standard extension-message box (`[subagent-notification]` label):
 
 ```
-✓ Find auth files completed
-  ↻3 · 3 tool uses · 12.4k token · 4.1s
-  ⎿  Found 5 files related to authentication...
-  transcript: .pi/output/agent-abc123.jsonl
+**✓ Subagent completed: Find auth files** · ↻3≤30 · 3 tool uses · 12.4k token · 4.1s
+
+Agent: 56493b20-4d5d-4de
+Transcript: /var/folders/.../tasks/56493b20-4d5d-4de.output
+
+Result:
+
+Found 5 files related to authentication:
+- src/auth.ts
 ```
 
-Group completions render each agent as a separate block. The LLM receives structured `<task-notification>` XML for parsing, while the user sees the themed visual.
+Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 
 ## Default Agent Types
 
@@ -598,7 +603,7 @@ This is useful for creating agents that inherit extension tools but should not h
 
 ```
 src/
-  index.ts            # Extension entry: tool/command registration, rendering
+  index.ts            # Extension entry: tool/command registration, notification reports
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
   default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Plan)
   agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
