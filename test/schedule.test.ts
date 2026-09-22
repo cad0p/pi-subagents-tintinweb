@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
+import type { ScheduledSubagent } from "../src/types.js";
 
 function makeMockManager() {
   const spawnFn = vi.fn(() => "agent-" + Math.random().toString(36).slice(2, 10));
@@ -499,6 +500,129 @@ describe("SubagentScheduler — fire path", () => {
       expect(scheduler.list().find(j => j.id === a.id)?.lastStatus).toBe("error");
       expect(scheduler.list().find(j => j.id === b.id)?.lastStatus).toBe("error");
     });
+  });
+});
+
+describe("SubagentScheduler — arm-path range guard", () => {
+  let tmp: string;
+  let store: ScheduleStore;
+  let scheduler: SubagentScheduler;
+  let manager: any;
+  let pi: any;
+  let ctx: any;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    tmp = mkdtempSync(join(tmpdir(), "scheduler-arm-"));
+    store = new ScheduleStore(join(tmp, "s.json"));
+    scheduler = new SubagentScheduler();
+    manager = makeMockManager();
+    pi = makeMockPi();
+    ctx = makeMockCtx();
+    scheduler.start(pi, ctx, manager, store);
+  });
+
+  afterEach(() => {
+    scheduler.stop();
+    vi.useRealTimers();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // Reload is the realistic path for a corrupt delay: start() re-arms every
+  // enabled record straight from the store.
+  function seedJob(id: string, patch: Partial<ScheduledSubagent>): void {
+    store.add({
+      id,
+      name: id,
+      description: "x",
+      schedule: "1s",
+      scheduleType: "interval",
+      subagent_type: "general-purpose",
+      prompt: "x",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      runCount: 0,
+      ...patch,
+    });
+  }
+
+  const OUT_OF_RANGE_INTERVALS: Array<[string, unknown]> = [
+    ["a finite delay past the timer ceiling", 1e16],
+    ["a huge numeric string", "1e100"],
+  ];
+  it.each(OUT_OF_RANGE_INTERVALS)("does not arm an interval with %s", (_name, intervalMs) => {
+    seedJob("hot-loop", { scheduleType: "interval", intervalMs: intervalMs as number });
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+
+    const stored = scheduler.list().find(j => j.id === "hot-loop");
+    expect(stored?.enabled).toBe(false);
+    expect(stored?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: "hot-loop",
+    }));
+  });
+
+  // 25d = 2,160,000,000 ms, past the 2^31-1 ceiling but accepted by
+  // detectSchedule; before the guard it was persisted and armed.
+  it("does not arm a freshly created 25d interval", () => {
+    const job = scheduler.addJob({
+      name: "over-ceiling", description: "x", schedule: "25d",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+
+    const stored = scheduler.list().find(j => j.id === job.id);
+    expect(stored?.enabled).toBe(false);
+    expect(stored?.lastStatus).toBe("error");
+  });
+
+  it("arms a valid interval on reload", () => {
+    seedJob("valid-interval", { scheduleType: "interval", intervalMs: 3_600_000 });
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(3_600_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not arm a one-shot more than the max timer delay away but keeps it enabled", () => {
+    const job = scheduler.addJob({
+      name: "far-once", description: "x", schedule: "+30d",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+
+    // Still a valid future schedule — a later start can arm it when it is closer.
+    const stored = scheduler.list().find(j => j.id === job.id);
+    expect(stored?.enabled).toBe(true);
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id,
+    }));
+  });
+
+  it("arms a one-shot inside the max timer delay on reload", () => {
+    seedJob("near-once", {
+      scheduleType: "once",
+      schedule: new Date(Date.now() + 60_000).toISOString(),
+    });
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(60_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 });
 

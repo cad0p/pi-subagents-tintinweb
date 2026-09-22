@@ -24,6 +24,13 @@ import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
+/**
+ * Largest delay `setTimeout`/`setInterval` accept. Node clamps anything above
+ * this to ~1 ms and warns, so an out-of-range delay would hot-loop instead of
+ * staying inert.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
   | { type: "added"; job: ScheduledSubagent }
@@ -182,21 +189,44 @@ export class SubagentScheduler {
     const store = this.store;
     if (!store) return;
     try {
-      if (job.scheduleType === "interval" && job.intervalMs) {
-        const t = setInterval(() => this.executeJob(job.id), job.intervalMs);
-        this.intervals.set(job.id, t);
+      if (job.scheduleType === "interval") {
+        const intervalMs = Number(job.intervalMs);
+        if (!Number.isFinite(intervalMs) || intervalMs <= 0 || intervalMs > MAX_TIMER_DELAY_MS) {
+          // Outside the timer range and cannot be honored — Node clamps the
+          // delay to ~1 ms, turning the job into a hot loop. Disable it and
+          // mark it broken, mirroring the past-one-shot branch below.
+          store.update(job.id, { enabled: false, lastStatus: "error" });
+          this.emit({
+            type: "error",
+            jobId: job.id,
+            error: `Interval ${job.intervalMs} is outside the armable range (1–${MAX_TIMER_DELAY_MS} ms)`,
+          });
+        } else {
+          const t = setInterval(() => this.executeJob(job.id), intervalMs);
+          this.intervals.set(job.id, t);
+        }
       } else if (job.scheduleType === "once") {
         const target = new Date(job.schedule).getTime();
         const delay = target - Date.now();
         if (delay > 0) {
-          const t = setTimeout(() => {
-            this.executeJob(job.id);
-            // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-            store.update(job.id, { enabled: false });
-            const updated = store.get(job.id);
-            if (updated) this.emit({ type: "updated", job: updated });
-          }, delay);
-          this.intervals.set(job.id, t);
+          if (delay > MAX_TIMER_DELAY_MS) {
+            // A valid but distant target: leave it enabled so a later start can
+            // arm it once the target comes inside the timer range.
+            this.emit({
+              type: "error",
+              jobId: job.id,
+              error: `Scheduled time ${job.schedule} is more than ${MAX_TIMER_DELAY_MS} ms away — not armed`,
+            });
+          } else {
+            const t = setTimeout(() => {
+              this.executeJob(job.id);
+              // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
+              store.update(job.id, { enabled: false });
+              const updated = store.get(job.id);
+              if (updated) this.emit({ type: "updated", job: updated });
+            }, delay);
+            this.intervals.set(job.id, t);
+          }
         } else {
           // Past timestamp — disable, mark error, never fire
           store.update(job.id, { enabled: false, lastStatus: "error" });
