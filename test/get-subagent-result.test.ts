@@ -868,6 +868,27 @@ describe("get_subagent_result output shapes", () => {
     expect(rendered.text).toContain("boomclick");
   });
 
+  it("strips terminal controls from a completed result body in the render, not the tool text", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    const result = "done\u001b[31mred\u001b]0;evil\u0007tail";
+    settleRecord(id, { status: "completed", result, completedAt: Date.now() });
+
+    const tool = tools.get("get_subagent_result");
+    const res = await tool.execute("gsr-tc", { agent_id: id }, undefined, undefined, {} as any);
+    // The model-visible tool text keeps the raw result bytes.
+    expect(textOf(res)).toContain(result);
+
+    const rendered = tool.renderResult(res, { expanded: false, isPartial: false }, {
+      fg: (_color: string, text: string) => text,
+    });
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/);
+    expect(rendered.text).not.toContain("[31m");
+    expect(rendered.text).not.toContain("]0;");
+    expect(rendered.text).toContain("doneredtail");
+  });
+
   it("renderResult tolerates a non-string content text", async () => {
     const { tools } = await setupAgent({});
     const tool = tools.get("get_subagent_result");
