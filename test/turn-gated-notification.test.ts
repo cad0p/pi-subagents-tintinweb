@@ -517,7 +517,10 @@ describe("foreground Agent result rendering", () => {
       mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
       writeFileSync(
         join(dir, ".pi", "agents", "evil.md"),
-        `---\ndisplay_name: ${JSON.stringify(`evil${control}\nforged`)}\nmodel: scope/evil-model\n---\n\nbody\n`,
+        // The model is a quoted YAML scalar whose escapes decode to an OSC and
+        // a newline. It is unresolvable, so the parent model is checked and the
+        // warning label uses this raw frontmatter value.
+        `---\ndisplay_name: ${JSON.stringify(`evil${control}\nforged`)}\nmodel: "scope/evil-model\\x1b]52;c;cGF3bmVk\\x07\\nforged"\n---\n\nbody\n`,
         "utf-8",
       );
       process.chdir(dir);
@@ -551,9 +554,10 @@ describe("foreground Agent result rendering", () => {
         .filter((msg: string) => msg.includes("out-of-scope"));
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).not.toContain(control);
+      expect(warnings[0]).not.toContain("\u001b");
       expect(warnings[0]).not.toContain("\nforged");
       expect(warnings[0]).toContain("evil forged");
-      expect(warnings[0]).toContain("scope/evil-model");
+      expect(warnings[0]).toContain('model "scope/evil-model forged"');
     } finally {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
