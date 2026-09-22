@@ -426,6 +426,7 @@ describe("settings persistence", () => {
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
+      expect(appliers.setFailurePreviewMaxChars).not.toHaveBeenCalled();
     });
 
     it("applies only the fields that are present", () => {
@@ -435,6 +436,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
+      expect(appliers.setFailurePreviewMaxChars).not.toHaveBeenCalled();
     });
 
     it("applies all fields when all are present", () => {
@@ -559,6 +561,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
