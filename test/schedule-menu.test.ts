@@ -79,4 +79,38 @@ describe("showSchedulesMenu", () => {
     expect(removeJob).toHaveBeenCalledTimes(1);
     expect(removeJob).toHaveBeenCalledWith("job-2");
   });
+
+  it("keeps forged metadata lines out of the details block", async () => {
+    const osc = "\u001b]0;evil\u0007";
+    const jobs = [
+      job({
+        id: "job-1",
+        name: `safe${osc}\r\nname: forged`,
+        createdAt: "2026-01-01T00:00:00.000Z\rcreated: forged",
+        lastStatus: "success\nruns: 999" as ScheduledSubagent["lastStatus"],
+        prompt: `line one\nline two${osc}`,
+      }),
+    ];
+    const { scheduler } = fakeScheduler(jobs);
+    const { ctx, details } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+
+    const lines = details[0].split("\n");
+    // Seven metadata lines, a blank separator, the label, and the two prompt
+    // lines — the LF/CR/OSC payloads in the scalar fields add none.
+    expect(lines).toHaveLength(11);
+    expect(lines.slice(0, 7)).toEqual([
+      "name:      safe name: forged",
+      "schedule:  5m (interval)",
+      "agent:     general-purpose",
+      "created:   2026-01-01T00:00:00.000Z created: forged",
+      "last run:  — (success runs: 999)",
+      "next run:  —",
+      "runs:      0",
+    ]);
+    expect(lines[7]).toBe("");
+    expect(lines[8]).toBe("prompt:");
+    expect(lines.slice(9)).toEqual(["line one", "line two"]);
+  });
 });

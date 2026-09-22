@@ -10,7 +10,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentScheduler } from "../schedule.js";
-import { stripControlChars, toSingleLine } from "../text-safety.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { ScheduledSubagent } from "../types.js";
 
 /** Format an ISO timestamp as relative time ("in 4h", "2d ago", "—"). */
@@ -55,16 +55,22 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
 /** Multi-line details block for the cancel confirm. */
 function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id) ?? "—";
-  return stripControlChars([
+  // The prompt is the only multi-line field and goes last, under its own
+  // label, so nothing it contains can forge a metadata line above it.
+  const prompt = stripControlChars(j.prompt);
+  const promptPreview = prompt.length > 200 ? `${safeTruncate(prompt, 200)}…` : prompt;
+  return [
     `name:      ${toSingleLine(j.name)}`,
-    `schedule:  ${toSingleLine(j.schedule)} (${j.scheduleType})`,
+    `schedule:  ${toSingleLine(j.schedule)} (${toSingleLine(j.scheduleType)})`,
     `agent:     ${toSingleLine(j.subagent_type)}`,
-    `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
-    `created:   ${j.createdAt}`,
-    `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,
-    `next run:  ${next}`,
+    `created:   ${toSingleLine(j.createdAt)}`,
+    `last run:  ${toSingleLine(j.lastRun ?? "—")} (${toSingleLine(j.lastStatus ?? "—")})`,
+    `next run:  ${toSingleLine(next)}`,
     `runs:      ${j.runCount}`,
-  ].join("\n"));
+    "",
+    "prompt:",
+    promptPreview,
+  ].join("\n");
 }
 
 /**
