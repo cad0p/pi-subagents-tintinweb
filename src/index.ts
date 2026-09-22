@@ -1442,28 +1442,17 @@ Terse command-style prompts produce shallow, generic work.
       record.resultConsumed = true;
       cancelNudge(params.agent_id);
 
-      // Attach notification details so renderResult can render the report as
-      // markdown, mirroring the completion notification the parent just
-      // suppressed by consuming synchronously.
-      const details = buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id));
-
       if (record.status === "error") {
-        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true), details);
+        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
       }
-      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false), details);
+      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
     },
 
-    renderResult(result, { expanded }, theme) {
-      const details = result.details as NotificationDetails | undefined;
-      if (!details) {
-        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(text, 0, 0);
-      }
-      const effectiveExpanded = resultPreviewExpanded ? true : expanded;
-      const container = new Container();
-      container.addChild(subagentNotificationRenderHeader(details, theme));
-      container.addChild(subagentNotificationRenderBody(details, effectiveExpanded, resultPreviewMode, theme));
-      return container;
+    renderResult(result, _options, theme) {
+      const report = result.content[0]?.type === "text" ? result.content[0].text : "";
+      return report
+        ? new Markdown(report, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
+        : new Text("", 0, 0);
     },
   }));
 

@@ -25,7 +25,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+import { Markdown } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -35,7 +35,6 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import type { NotificationDetails } from "../src/types.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -237,7 +236,7 @@ describe("get_subagent_result terminal rendering", () => {
     vi.useRealTimers();
   });
 
-  it("terminal results carry NotificationDetails and renderResult renders markdown", async () => {
+  it("terminal results render as markdown and carry no details", async () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
     vi.useFakeTimers();
@@ -248,21 +247,14 @@ describe("get_subagent_result terminal rendering", () => {
     const tool = tools.get("get_subagent_result");
     const result = await tool.execute("tc-gsr", { agent_id: id }, undefined, undefined, ctx());
 
-    const details = result.details as NotificationDetails;
-    expect(details).toBeDefined();
-    expect(details.id).toBe(id);
-    expect(details.status).toBe("completed");
-    expect(details.resultPreview).toContain("THE-RESULT-PAYLOAD");
+    expect(result.details).toBeUndefined();
 
     const rendered = tool.renderResult(result, { expanded: true, isPartial: false }, mockTheme);
-    expect(rendered).toBeInstanceOf(Container);
-    // [header Text, body Container] — the Markdown lives inside the body.
-    const body = (rendered as Container).children[1] as Container;
-    expect(body).toBeInstanceOf(Container);
-    expect(body.children.some((c: any) => c instanceof Markdown)).toBe(true);
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).toContain("THE-RESULT-PAYLOAD");
   });
 
-  it("running results have no details — renderResult falls back to plain text", async () => {
+  it("running results render as markdown too", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
     const { pi, tools } = makePi();
     subagentsExtension(pi);
@@ -281,6 +273,7 @@ describe("get_subagent_result terminal rendering", () => {
 
     expect(result.details).toBeUndefined();
     const rendered = tool.renderResult(result, { expanded: false, isPartial: false }, mockTheme);
-    expect(rendered).toBeInstanceOf(Text);
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).toContain("still running");
   });
 });

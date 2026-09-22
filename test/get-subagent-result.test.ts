@@ -15,6 +15,7 @@
 import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Markdown } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -661,6 +662,29 @@ describe("get_subagent_result output shapes", () => {
     // The footer references only the transcript, not "checkpoints / transcript".
     expect(out).toContain("grep or read the transcript for more detail.");
     expect(out).not.toContain("checkpoints / transcript");
+  });
+
+  // ---- renderResult: markdown view of the tool text, no details payload ----
+  it("terminal results render as markdown and carry no details", async () => {
+    const outputFile = "/tmp/pi-subagents-x/75616377.output";
+    const { tools, id } = await setupAgent({ outputFile });
+    settleRecord(id, {
+      status: "completed",
+      result: "Done implementing the subsystem.",
+      completedAt: Date.now(),
+      toolUses: 12,
+    });
+
+    const tool = tools.get("get_subagent_result");
+    const res = await tool.execute("gsr-tc", { agent_id: id }, undefined, undefined, {} as any);
+
+    expect(res.details).toBeUndefined();
+    const rendered = tool.renderResult(res, { expanded: false, isPartial: false }, {
+      fg: (_color: string, text: string) => text,
+    });
+    expect(rendered).toBeInstanceOf(Markdown);
+    expect(rendered.text).toContain(`Agent: ${id}`);
+    expect(rendered.text).toContain("Done implementing the subsystem.");
   });
 
   // ---- resultConsumed is set on terminal reads, not on running reads ----
