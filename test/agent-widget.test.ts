@@ -1,4 +1,9 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -186,5 +191,76 @@ describe("AgentWidget", () => {
     };
     const lines = renderLines(manager, "multiline", () => "background");
     expect(lines).toContain("line one line two end");
+  });
+
+  it("sanitizes a frontmatter display_name at both widget name sites", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const dir = mkdtempSync(join(tmpdir(), "pi-widget-agent-"));
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil.md"),
+        `---\ndisplay_name: ${JSON.stringify(`dan${control}ger`)}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      registerAgents(loadCustomAgents(dir));
+
+      const running = {
+        listAgents: () => [{ ...makeRecord("running", { isBackground: true }), type: "evil" }],
+      };
+      const runningLines = renderLines(running, "running", () => "background");
+      expect(runningLines).not.toContain(control);
+      expect(runningLines).toContain("danger");
+
+      const finished = {
+        listAgents: () => [{
+          ...makeRecord("finished", { isBackground: true }),
+          type: "evil",
+          status: "completed",
+          completedAt: Date.now(),
+        }],
+      };
+      const finishedLines = renderLines(finished, "finished", () => "background");
+      expect(finishedLines).not.toContain(control);
+      expect(finishedLines).toContain("danger");
+    } finally {
+      registerAgents(new Map());
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("tolerates non-string record descriptions and errors", () => {
+    const running = {
+      listAgents: () => [{ ...makeRecord("running", { isBackground: true }), description: 42 }],
+    };
+    expect(renderLines(running, "running", () => "background")).not.toContain("42");
+
+    const finished = {
+      listAgents: () => [{
+        ...makeRecord("finished", { isBackground: true }),
+        status: "error",
+        completedAt: Date.now(),
+        description: 42,
+        error: { message: "boom" },
+      }],
+    };
+    const lines = renderLines(finished, "finished", () => "background");
+    expect(lines).not.toContain("42");
+    expect(lines).toContain("error");
+  });
+
+  it("truncates the error preview without splitting a surrogate pair", () => {
+    const finished = {
+      listAgents: () => [{
+        ...makeRecord("finished", { isBackground: true }),
+        status: "error",
+        completedAt: Date.now(),
+        error: `${"e".repeat(59)}🚀tail`,
+      }],
+    };
+    const lines = renderLines(finished, "finished", () => "background");
+    expect(lines).toContain(`error: ${"e".repeat(59)}`);
+    // A naive slice(0, 60) would keep the rocket's lone high surrogate at index 59.
+    expect(lines).not.toContain("\ud83d");
   });
 });

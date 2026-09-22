@@ -8,6 +8,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
+import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
@@ -137,7 +138,7 @@ export class ConversationViewer implements Component {
 
     // Header
     lines.push(hrTop);
-    const name = getDisplayName(this.record.type);
+    const name = toSingleLine(getDisplayName(this.record.type));
     const modeLabel = getPromptModeLabel(this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
     const statusIcon = this.record.status === "running"
@@ -159,7 +160,7 @@ export class ConversationViewer implements Component {
     }
 
     lines.push(row(
-      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", toSingleLine(this.record.description))} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));

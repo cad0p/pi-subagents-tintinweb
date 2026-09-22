@@ -53,19 +53,21 @@ import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
+import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
 function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const commands = new Map<string, any>();
   const pi = {
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
+    registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle };
+  return { pi, tools, lifecycle, commands };
 }
 
 function ctx() {
@@ -445,6 +447,31 @@ describe("foreground Agent result rendering", () => {
     expect(rendered.text).not.toContain("42");
   });
 
+  it("renderCall tolerates a non-string subagent_type", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const rendered = tools.get("Agent").renderCall(
+      { subagent_type: 42 as any, description: "x" },
+      mockTheme,
+    );
+    expect(rendered.text).toContain("Agent");
+    expect(rendered.text).not.toContain("42");
+  });
+
+  it("the error line collapses newlines so a record field cannot add a display line", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const res = {
+      content: [{ type: "text" as const, text: "failed" }],
+      details: details({ status: "error", error: "boom\nforged: yes" }),
+    };
+
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme);
+    expect(rendered.text).toContain("Error: boom forged: yes");
+    expect(rendered.text).not.toContain("boom\n");
+  });
+
   it("running activity tolerates a non-string value", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
@@ -518,5 +545,125 @@ describe("get_subagent_result terminal rendering", () => {
     const rendered = tool.renderResult(result, { expanded: false, isPartial: false }, mockTheme);
     expect(rendered).toBeInstanceOf(Markdown);
     expect(rendered.text).toContain("still running");
+  });
+});
+
+describe("agents command terminal surfaces", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  /** Extension-context mock with a select/answer hook and recorded notifications. */
+  function commandCtx(answer: (title: string, options: string[]) => string | undefined) {
+    const notifications: Array<{ message: string; level?: string }> = [];
+    const selects: Array<{ title: string; options: string[] }> = [];
+    const c = {
+      hasUI: true,
+      ui: {
+        setStatus: vi.fn(),
+        setWidget: vi.fn(),
+        notify: vi.fn((message: string, level?: string) => { notifications.push({ message, level }); }),
+        select: vi.fn(async (title: string, options: string[]) => {
+          selects.push({ title, options });
+          return answer(title, options);
+        }),
+        input: vi.fn(async () => undefined),
+        confirm: vi.fn(async () => true),
+        custom: vi.fn(),
+      },
+      cwd: "/tmp",
+      model: undefined,
+      modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+      sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
+      getSystemPrompt: vi.fn(() => "parent"),
+    } as any;
+    return { c, notifications, selects };
+  }
+
+  it("sanitizes record fields in the running-agents menu and the stop notification", async () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const description = `desc${control}tail\nforged`;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
+    const { pi, tools, commands } = makePi();
+    // Claim the cross-extension manager registry for this extension instance so
+    // the spawned record is the one this test can look up.
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+
+    const { c, notifications, selects } = commandCtx((title, options) => {
+      if (title === "Agents") {
+        return selects.filter(s => s.title === "Agents").length <= 1
+          ? options.find(o => o.startsWith("Running agents ("))
+          : undefined;
+      }
+      if (title === "Running agents") {
+        return selects.filter(s => s.title === "Running agents").length <= 1 ? options[0] : undefined;
+      }
+      return undefined;
+    });
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+      undefined,
+      undefined,
+      c,
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    expect(id).toBeTruthy();
+
+    // runAgent never resolves, so onSessionCreated never fires; stamp the session
+    // the viewer needs, as a mid-flight record has it.
+    (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).session = {
+      subscribe: () => () => {},
+      messages: [],
+    };
+
+    c.ui.custom.mockImplementation((factory: any) =>
+      new Promise<undefined>(resolve => {
+        const viewer = factory({ terminal: { rows: 40, columns: 80 }, requestRender: vi.fn() }, mockTheme, undefined, resolve);
+        viewer.handleInput("x"); // arm stop
+        viewer.handleInput("x"); // confirm
+        resolve(undefined);
+      }),
+    );
+
+    await commands.get("agents").handler("", c);
+
+    const runningMenu = selects.find(s => s.title === "Running agents");
+    expect(runningMenu).toBeDefined();
+    expect(runningMenu?.options[0]).toContain("(desctail forged)");
+    expect(runningMenu?.options.join("\n")).not.toContain("\u001b");
+    expect(notifications.map(n => n.message)).toContain('Stopped "desctail forged".');
+  });
+
+  it("sanitizes the generation-failed notification", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-agent-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      vi.mocked(runAgent).mockRejectedValue(new Error(`boom\u001b]52;c;cGF3bmVk\u0007tail\nforged`));
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, notifications } = commandCtx(title => {
+        if (title === "Agents") return "Create new agent";
+        if (title === "Choose location") return "Project (.pi/agents/)";
+        if (title === "Creation method") return "Generate with Claude (recommended)";
+        return undefined;
+      });
+      c.ui.input.mockResolvedValueOnce("a test agent").mockResolvedValueOnce("gen-test");
+
+      await commands.get("agents").handler("", c);
+
+      const failed = notifications.find(n => n.message.startsWith("Generation failed:"));
+      expect(failed).toBeDefined();
+      expect(failed?.message).toBe("Generation failed: boomtail forged");
+      expect(failed?.message).not.toContain("\u001b");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

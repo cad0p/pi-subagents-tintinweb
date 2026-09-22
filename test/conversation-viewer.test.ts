@@ -1,4 +1,9 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
@@ -488,6 +493,53 @@ describe("ConversationViewer", () => {
         viewer.handleInput("\r"); // open composer
         for (const ch of "x".repeat(200)) viewer.handleInput(ch);
         assertAllLinesFit(viewer.render(w), w);
+      }
+    });
+  });
+
+  describe("header sanitization", () => {
+    it("collapses and strips the record description in the header", () => {
+      const control = "\u001b]52;c;cGF3bmVk\u0007";
+      const viewer = new ConversationViewer(
+        mockTui(30, 80),
+        mockSession(),
+        mockRecord({ description: `desc${control}tail\nforged` }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).not.toContain("\u001b]52;");
+      expect(out).toContain("desctail forged");
+      expect(out).not.toContain("\nforged");
+    });
+
+    it("sanitizes a frontmatter display_name in the header", () => {
+      const control = "\u001b[2J";
+      const dir = mkdtempSync(join(tmpdir(), "pi-viewer-agent-"));
+      try {
+        mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+        writeFileSync(
+          join(dir, ".pi", "agents", "evil.md"),
+          `---\ndisplay_name: ${JSON.stringify(`dan${control}ger`)}\n---\n\nbody\n`,
+          "utf-8",
+        );
+        registerAgents(loadCustomAgents(dir));
+
+        const viewer = new ConversationViewer(
+          mockTui(30, 80),
+          mockSession(),
+          mockRecord({ type: "evil" }),
+          undefined,
+          ansiTheme(),
+          vi.fn(),
+        );
+        const out = viewer.render(80).join("\n");
+        expect(out).not.toContain(control);
+        expect(out).toContain("danger");
+      } finally {
+        registerAgents(new Map());
+        rmSync(dir, { recursive: true, force: true });
       }
     });
   });

@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import { stripControlChars, toSingleLine } from "../text-safety.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
@@ -308,7 +308,7 @@ export class AgentWidget {
 
   /** Render a finished agent line. */
   private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
-    const name = getDisplayName(a.type);
+    const name = toSingleLine(getDisplayName(a.type));
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
 
@@ -326,7 +326,7 @@ export class AgentWidget {
     } else if (a.status === "error") {
       icon = theme.fg("error", "✗");
       const err = a.error ? toSingleLine(a.error) : "";
-      const errMsg = err ? `: ${err.slice(0, 60)}` : "";
+      const errMsg = err ? `: ${safeTruncate(err, 60)}` : "";
       statusText = theme.fg("error", ` error${errMsg}`);
     } else {
       // aborted
@@ -379,7 +379,7 @@ export class AgentWidget {
 
     const runningLines: string[][] = []; // each entry is [header, activity]
     for (const a of running) {
-      const name = getDisplayName(a.type);
+      const name = toSingleLine(getDisplayName(a.type));
       const modeLabel = getPromptModeLabel(a.type);
       const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
       const elapsed = formatMs(Date.now() - a.startedAt);

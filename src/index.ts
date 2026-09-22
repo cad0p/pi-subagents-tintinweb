@@ -28,7 +28,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
-import { stripControlChars, toSingleLine } from "./text-safety.js";
+import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -186,13 +186,6 @@ function sanitizeHeaderText(s: string): string {
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
 const HEADER_PREVIEW_MAX_CHARS = 300; // ~one wrapped line; description/error are untrusted input.
 
-/** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
-function safeTruncate(s: string, maxChars: number): string {
-  if (s.length <= maxChars) return s;
-  const high = s.charCodeAt(maxChars - 1);
-  return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
-}
-
 /** Bound a sanitized header field to the shared preview cap, marking truncation. */
 function headerPreview(s: string): string {
   return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
@@ -206,13 +199,18 @@ function isValidFailurePreviewCap(value: number): boolean {
 /**
  * @internal Coerce the in-memory failure preview cap for the send path:
  * an out-of-contract value (a settings regression) falls back to the default
- * instead of throwing away the completion.
+ * instead of throwing away the completion. Warns once while the bad value
+ * persists — every completion would otherwise log the same regression.
  */
+let warnedInvalidFailurePreviewCap = false;
 export function effectiveFailurePreviewCap(value: number): number {
   if (isValidFailurePreviewCap(value)) return value;
-  console.warn(
-    `[pi-subagents] ignoring out-of-contract failurePreviewMaxChars (${String(value)}); using the default ${DEFAULT_FAILURE_PREVIEW_MAX_CHARS} for this notification`,
-  );
+  if (!warnedInvalidFailurePreviewCap) {
+    warnedInvalidFailurePreviewCap = true;
+    console.warn(
+      `[pi-subagents] ignoring out-of-contract failurePreviewMaxChars (${String(value)}); using the default ${DEFAULT_FAILURE_PREVIEW_MAX_CHARS} for this notification`,
+    );
+  }
   return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
 
@@ -931,7 +929,7 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Custom rendering: Claude Code style ----
 
     renderCall(args, theme) {
-      const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
+      const displayName = typeof args.subagent_type === "string" ? toSingleLine(getDisplayName(args.subagent_type)) : "Agent";
       const desc = typeof args.description === "string" ? toSingleLine(args.description) : "";
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
@@ -1010,7 +1008,7 @@ Terse command-style prompts produce shallow, generic work.
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
       if (details.status === "error") {
-        line += "\n" + theme.fg("error", `  ⎿  Error: ${stripControlChars(String(details.error ?? "")) || "unknown"}`);
+        line += "\n" + theme.fg("error", `  ⎿  Error: ${toSingleLine(String(details.error ?? "")) || "unknown"}`);
       } else {
         line += "\n" + theme.fg("warning", "  ⎿  Aborted (max turns exceeded)");
       }
@@ -1430,8 +1428,8 @@ Terse command-style prompts produce shallow, generic work.
   function renderQueued(record: AgentRecord): string {
     const displayName = getDisplayName(record.type);
     return (
-      `Agent: ${record.id} (queued — not started yet)\n` +
-      `Type: ${displayName} | Description: ${record.description}\n\n` +
+      `Agent: ${toSingleLine(record.id)} (queued — not started yet)\n` +
+      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n` +
       `This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.`
     );
   }
@@ -1449,8 +1447,8 @@ Terse command-style prompts produce shallow, generic work.
     const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
 
     let output =
-      `Agent: ${record.id} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
-      `Type: ${displayName} | Description: ${record.description}\n\n`;
+      `Agent: ${toSingleLine(record.id)} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
+      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n`;
 
     if (record.lastCheckpoint) {
       output +=
@@ -1499,9 +1497,9 @@ Terse command-style prompts produce shallow, generic work.
     if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
     statsParts.push(`Duration: ${duration}`);
     return (
-      `Agent: ${record.id}\n` +
-      `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-      `Description: ${record.description}`
+      `Agent: ${toSingleLine(record.id)}\n` +
+      `Type: ${displayName} | Status: ${toSingleLine(record.status)}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+      `Description: ${toSingleLine(record.description)}`
     );
   }
 
@@ -1512,8 +1510,8 @@ Terse command-style prompts produce shallow, generic work.
     footer: string,
   ): string {
     let s = "";
-    if (checkpointsPath) s += `Checkpoint history: ${checkpointsPath}\n`;
-    if (transcriptPath) s += `Full transcript:   ${transcriptPath}\n`;
+    if (checkpointsPath) s += `Checkpoint history: ${toSingleLine(checkpointsPath)}\n`;
+    if (transcriptPath) s += `Full transcript:   ${toSingleLine(transcriptPath)}\n`;
     s += footer;
     return s;
   }
@@ -1815,9 +1813,9 @@ Terse command-style prompts produce shallow, generic work.
     }
 
     const options = agents.map(a => {
-      const dn = getDisplayName(a.type);
+      const dn = toSingleLine(getDisplayName(a.type));
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);
@@ -1847,7 +1845,7 @@ Terse command-style prompts produce shallow, generic work.
       (tui, theme, keybindings, done) => {
         return new ConversationViewer(tui, session, record, activity, theme, done, () => {
           if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
+            ctx.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           }
         }, keybindings, (message: string) => manager.steer(record.id, message));
       },
@@ -2111,7 +2109,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     });
 
     if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${record.error}`, "warning");
+      ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning");
       return;
     }
 

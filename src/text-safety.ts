@@ -38,8 +38,17 @@ export function stripControlChars(s: string): string {
  * Collapse newlines/CRs/tabs to spaces and strip control/invisible characters,
  * for untrusted text composed into a single terminal line (report headers and
  * metadata, tool-call lines, widget rows). Use `stripControlChars` for body
- * and display paths that preserve layout.
+ * and display paths that preserve layout. A display sanitizer, not a type
+ * guard: non-string input renders as the empty string.
  */
-export function toSingleLine(s: string): string {
+export function toSingleLine(s: unknown): string {
+  if (typeof s !== "string") return "";
   return stripControlChars(s.replace(/\r\n?|\n/g, " ").replace(/\t/g, " ")).trim();
+}
+
+/** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
+export function safeTruncate(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  const high = s.charCodeAt(maxChars - 1);
+  return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
 }

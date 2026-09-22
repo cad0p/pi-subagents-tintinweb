@@ -13,6 +13,7 @@
 
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
+import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, getDisplayName, type Theme } from "./agent-widget.js";
@@ -306,7 +307,7 @@ export class FleetList {
           theme,
           done,
           () => {
-            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           },
           keybindings,
           (message: string) => this.manager.steer(record.id, message),
@@ -371,7 +372,7 @@ export class FleetList {
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", getDisplayName(record.type))}  ${record.description}`;
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}  ${toSingleLine(record.description)}`;
     const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const right = theme.fg("dim", `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`);

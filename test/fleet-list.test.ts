@@ -1,6 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Editor, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
+import { registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed, formatFleetTokens } from "../src/ui/fleet-list.js";
@@ -63,6 +68,8 @@ interface Harness {
   closeOverlay: () => Promise<void>;
   /** The fake `tui` handed to the widget factory; tests set `focusedComponent` on it. */
   widgetTui: { requestRender(): void; focusedComponent?: unknown };
+  /** Every message passed to `ui.notify`, in order. */
+  notifications: string[];
 }
 
 function harness(agents: AgentRecord[]): Harness {
@@ -74,12 +81,13 @@ function harness(agents: AgentRecord[]): Harness {
   let overlayDone: ((r: undefined) => void) | undefined;
   let overlayComponent: { handleInput(data: string): void } | undefined;
   const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  const notifications: string[] = [];
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
-    notify: () => {},
+    notify: (message: string) => { notifications.push(message); },
     custom: ((factory: any) => {
       opened = true;
       return new Promise<undefined>((resolve) => {
@@ -109,6 +117,7 @@ function harness(agents: AgentRecord[]): Harness {
     overlayClosed: () => closed,
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
     widgetTui: fakeTui,
+    notifications,
   };
 }
 
@@ -424,5 +433,49 @@ describe("FleetList overlay lifecycle", () => {
     expect(harness([recent]).render().some(l => l.includes("recent done"))).toBe(true);
     const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000 });
     expect(harness([old]).render().some(l => l.includes("old done"))).toBe(false);
+  });
+});
+
+describe("FleetList sanitization", () => {
+  it("sanitizes the record description in the row and the stop notification", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const h = harness([makeRecord({ id: "live", description: `desc${control}tail\nforged` })]);
+
+    const row = h.render().find(l => l.includes("desctail"));
+    expect(row).toBeDefined();
+    expect(row).toContain("desctail forged");
+    expect(row).not.toContain("\u001b");
+
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // → the agent
+    h.press(ENTER); // open the conversation viewer
+    const viewer = h.overlayComponent();
+    expect(viewer).toBeDefined();
+    viewer?.handleInput("x"); // arm stop
+    viewer?.handleInput("x"); // confirm
+
+    expect(h.notifications).toContain('Stopped "desctail forged".');
+  });
+
+  it("sanitizes a frontmatter display_name in agent rows", () => {
+    const control = "\u001b[2J";
+    const dir = mkdtempSync(join(tmpdir(), "pi-fleet-agent-"));
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil.md"),
+        `---\ndisplay_name: ${JSON.stringify(`dan${control}ger`)}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      registerAgents(loadCustomAgents(dir));
+
+      const h = harness([makeRecord({ id: "live", description: "one", type: "evil" })]);
+      const row = h.render().find(l => l.includes("one"));
+      expect(row).toContain("danger");
+      expect(row).not.toContain(control);
+    } finally {
+      registerAgents(new Map());
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
