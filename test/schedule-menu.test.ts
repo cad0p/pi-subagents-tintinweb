@@ -137,6 +137,18 @@ describe("showSchedulesMenu", () => {
     expect(labels[0][0]).not.toContain("\r");
   });
 
+  it("tolerates a non-string prompt from a corrupted store entry", async () => {
+    const jobs = [job({ id: "job-1", prompt: 42 as unknown as string })];
+    const { scheduler } = fakeScheduler(jobs);
+    const { ctx, details } = fakeCtx(0);
+
+    await showSchedulesMenu(ctx, scheduler);
+
+    const lines = details[0].split("\n");
+    expect(lines[8]).toBe("prompt:");
+    expect(lines.slice(9)).toEqual([""]);
+  });
+
   it("truncates a padded name on a code-point boundary", async () => {
     const name = `${"a".repeat(17)}😀tail`;
     const { scheduler } = fakeScheduler([job({ id: "job-1", name })]);

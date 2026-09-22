@@ -59,8 +59,11 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
 function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id) ?? "—";
   // The prompt is the only multi-line field and goes last, under its own
-  // label, so nothing it contains can forge a metadata line above it.
-  const prompt = stripControlChars(j.prompt);
+  // label, so nothing it contains can forge a metadata line above it. The
+  // store is not validated per field, so a corrupted entry can hand it a
+  // non-string; coerce before the sanitizer touches it.
+  const rawPrompt = typeof j.prompt === "string" ? j.prompt : "";
+  const prompt = stripControlChars(rawPrompt);
   const promptPreview = prompt.length > 200 ? `${safeTruncate(prompt, 200)}…` : prompt;
   // runCount is typed number but comes from unvalidated JSON; coerce before the
   // single-line sanitizer, which returns "" for non-string input.
