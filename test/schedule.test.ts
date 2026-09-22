@@ -272,6 +272,7 @@ describe("SubagentScheduler — lifecycle", () => {
     ["a sub-second fraction", 0.5],
     ["a boolean", true],
     ["one millisecond under the minimum", 999],
+    ["a non-integer fraction", 1000.5],
     ["a numeric string", "1"],
   ];
   it.each(UNARMABLE_INTERVAL_NEXT_RUNS)("getNextRun reports no next run for an interval with %s", (_name, intervalMs) => {
@@ -441,6 +442,32 @@ describe("SubagentScheduler — fire path", () => {
 
     // Subsequent ticks shouldn't fire again
     vi.advanceTimersByTime(60_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the store's disabled record when a +0s one-shot cannot arm", () => {
+    const job = scheduler.addJob({
+      name: "zero-relative", description: "x", schedule: "+0s",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+
+    expect(job.enabled).toBe(false);
+    expect(job.lastStatus).toBe("error");
+    expect(scheduler.list().find(j => j.id === job.id)?.enabled).toBe(false);
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "added", job: expect.objectContaining({ id: job.id, enabled: false }),
+    }));
+  });
+
+  it("fires a job re-armed through updateJob", () => {
+    const job = scheduler.addJob({
+      name: "re-armed", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    expect(manager.spawn).not.toHaveBeenCalled();
+
+    scheduler.updateJob(job.id, { intervalMs: 1_000, schedule: "1s" });
+    vi.advanceTimersByTime(1_000);
     expect(manager.spawn).toHaveBeenCalledTimes(1);
   });
 
@@ -652,6 +679,7 @@ describe("SubagentScheduler — arm-path range guard", () => {
     ["zero", 0],
     ["a negative delay", -60_000],
     ["one millisecond under the minimum", 999],
+    ["a non-integer fraction", 1000.5],
     ["one millisecond past the ceiling", 2 ** 31],
   ];
   it.each(OUT_OF_RANGE_INTERVALS)("does not arm an interval with %s", (_name, intervalMs) => {
