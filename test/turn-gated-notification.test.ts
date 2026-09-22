@@ -25,6 +25,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -781,6 +782,56 @@ describe("agents command terminal surfaces", () => {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    }
+  });
+
+  it("keeps the sanitized model value after activating an agent-types row", async () => {
+    initTheme("dark");
+    const dir = mkdtempSync(join(tmpdir(), "pi-menu-model-"));
+    const previousCwd = process.cwd();
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      // One agent only, so the first row is the one activation lands on.
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ disableDefaultAgents: true }), "utf-8");
+      writeFileSync(
+        join(dir, ".pi", "agents", "evil-model.md"),
+        `---\ndescription: evil\nmodel: ${JSON.stringify("m\nmodel: forged")}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      process.chdir(dir);
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, selects } = commandCtx((title, options) => {
+        if (title === "Agents") {
+          return selects.filter(s => s.title === "Agents").length <= 1
+            ? options.find(o => o.startsWith("Agent types ("))
+            : undefined;
+        }
+        return undefined;
+      });
+
+      let renderedAfterActivate = "";
+      let customCalls = 0;
+      c.ui.custom.mockImplementation((factory: any) => {
+        if (customCalls++ > 0) return Promise.resolve(undefined);
+        return new Promise<undefined>(resolve => {
+          const list = factory({ terminal: { rows: 40, columns: 100 }, requestRender: vi.fn() }, mockTheme, undefined, resolve);
+          list.handleInput(" "); // activate the selected row
+          renderedAfterActivate = list.render(100).join("\n");
+          resolve(undefined);
+        });
+      });
+
+      await commands.get("agents").handler("", c);
+
+      // SettingsList copies values[0] back into currentValue on activation, so
+      // the copied value must be the sanitized display string.
+      expect(renderedAfterActivate).toContain("m model: forged");
+      expect(renderedAfterActivate).not.toContain("m\nmodel: forged");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

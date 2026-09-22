@@ -1772,8 +1772,10 @@ Terse command-style prompts produce shallow, generic work.
         currentValue: toSingleLine(model),
         description: disabled ? "(disabled)" : toSingleLine(cfg?.description ?? name),
         // Single-value list so Enter "activates" the row (fires onChange with the
-        // agent's id) without offering anything to actually cycle.
-        values: [model],
+        // agent's id) without offering anything to actually cycle. The value is
+        // the sanitized display copy: SettingsList copies values[0] back into
+        // currentValue on activation, so a raw label would reappear.
+        values: [toSingleLine(model)],
       };
     });
 
