@@ -51,7 +51,7 @@ vi.mock("../src/settings.js", async (importOriginal) => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
-import { registerAgents } from "../src/agent-types.js";
+import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
@@ -692,6 +692,12 @@ describe("agents command terminal surfaces", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    // The menu tests apply `disableDefaultAgents: true`, which flips a
+    // module-global; reset it (and the registry) so no later test silently
+    // runs without the default agent types.
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+    expect(isDefaultsDisabled()).toBe(false);
   });
 
   /** Extension-context mock with a select/answer hook and recorded notifications. */
@@ -1038,5 +1044,11 @@ describe("agents command terminal surfaces", () => {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  // Probe for a leak of the module-global the disable/override menu tests set:
+  // with the cleanup reset removed this fails after the first disable test.
+  it("sees the default-agent flag reset after the menu tests", () => {
+    expect(isDefaultsDisabled()).toBe(false);
   });
 });
