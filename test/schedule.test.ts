@@ -513,6 +513,64 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("clears the timer when a fire aborts on an invalid agent type", () => {
+    scheduler.addJob({
+      name: "read-only-timer", description: "x", schedule: "1s",
+      subagent_type: "Explore", prompt: "x",
+    });
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    // Isolate the guard from the reclassification path: a real
+    // reportJobError() update reloads the store, whose listener would clear
+    // the timer as a side effect. The guard must clear it on its own.
+    vi.spyOn(store, "update").mockReturnValue(undefined);
+
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.mocked(store.update).mockRestore();
+  });
+
+  it("clears the timer when a load reclassifies a live record into skipped", () => {
+    const job = scheduler.addJob({
+      name: "later-invalid", description: "x", schedule: "1h",
+      subagent_type: "Explore", prompt: "x",
+    });
+    expect(vi.getTimerCount()).toBe(1);
+
+    // The type vanishes mid-session; the next store mutation reloads and
+    // reclassifies the record out of the live set.
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+    store.update(job.id, { lastStatus: "error" });
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(scheduler.list()).toEqual([]);
+    vi.advanceTimersByTime(3_600_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a valid job's timer armed and firing across a reload", () => {
+    const a = scheduler.addJob({
+      name: "still-valid", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    scheduler.addJob({
+      name: "also-valid", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    expect(vi.getTimerCount()).toBe(2);
+
+    // A plain mutation reloads the store with both records still valid.
+    store.update(a.id, { lastStatus: "success" });
+    expect(vi.getTimerCount()).toBe(2);
+
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(2);
+  });
+
   it("still fires a job whose agent type is registered", () => {
     scheduler.addJob({
       name: "valid-type", description: "x", schedule: "1s",

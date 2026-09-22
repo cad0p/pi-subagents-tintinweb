@@ -85,6 +85,9 @@ export class SubagentScheduler {
     this.ctx = ctx;
     this.manager = manager;
     this.store = store;
+    store.onReclassified = ids => {
+      for (const id of ids) this.unscheduleJob(id);
+    };
 
     for (const job of store.list()) {
       if (job.enabled) this.scheduleJob(job);
@@ -97,6 +100,7 @@ export class SubagentScheduler {
     this.jobs.clear();
     for (const t of this.intervals.values()) clearTimeout(t);
     this.intervals.clear();
+    if (this.store) this.store.onReclassified = undefined;
     this.store = undefined;
     this.pi = undefined;
     this.ctx = undefined;
@@ -306,6 +310,10 @@ export class SubagentScheduler {
       // agents). Re-check at fire time: spawn() would otherwise fall back to a
       // write-capable general-purpose config the user never scheduled.
       if (!isValidType(job.subagent_type)) {
+        // The fire aborts here, so stop the timer: an interval that keeps
+        // ticking would outlive the record the store is about to reclassify
+        // into `skipped`, and a later load could revive and fire it.
+        this.unscheduleJob(id);
         this.reportJobError(id, `Agent type "${job.subagent_type}" is not available`);
         return;
       }

@@ -163,6 +163,15 @@ export class ScheduleStore {
   private fileShapeInvalid = false;
   /** Signature of the last skip set we warned about, so repeated locked loads stay quiet. */
   private warnedSkips: string | undefined;
+  /**
+   * Called by load() with the ids that were live in the previous cache but are
+   * not live after the reload — records reclassified into `skipped` (invalid
+   * type/cron/interval) or removed outside this store. The scheduler binds
+   * this to clear timers that would otherwise keep ticking a record the live
+   * set no longer contains. Never called when load() keeps the previous state
+   * (missing or corrupt file).
+   */
+  onReclassified: ((ids: string[]) => void) | undefined;
 
   constructor(filePath: string) {
     this.filePath = filePath;
@@ -191,6 +200,7 @@ export class ScheduleStore {
     } catch {
       return; // corrupt JSON — keep the current in-memory state
     }
+    const previousLiveIds = [...this.jobs.keys()];
     const data = isRecord(parsed) ? parsed : {};
     const rawJobs = data.jobs;
     const entries = Array.isArray(rawJobs) ? rawJobs : [];
@@ -225,6 +235,11 @@ export class ScheduleStore {
     this.jobsContainerInvalid = rawJobs !== undefined && !Array.isArray(rawJobs);
     this.fileShapeInvalid = !isRecord(parsed);
     this.warnAboutSkips();
+    // A record that left the live set must not keep a timer armed: the timer
+    // would keep firing a record the store no longer considers live, and a
+    // later load (e.g. after the agent type returns) would re-promote it.
+    const reclassified = previousLiveIds.filter(id => !jobs.has(id));
+    if (reclassified.length > 0) this.onReclassified?.(reclassified);
   }
 
   /** Warn once per distinct invalid-entry summary — load() runs before every mutation. */
