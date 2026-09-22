@@ -172,7 +172,7 @@ describe("ScheduleStore", () => {
     expect(fresh.get("trigger")).toBeDefined();
     store.update(trigger.id, { lastStatus: "error" });
     expect(promoted).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed: listener blew up"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed for [late]: listener blew up"));
   });
 
   it("surfaces a save failure even when the onPromoted listener throws", () => {
@@ -188,7 +188,7 @@ describe("ScheduleStore", () => {
     const poison: ScheduledSubagent & { self?: unknown } = { ...makeJob({ id: "poison" }) };
     poison.self = poison; // circular — JSON.stringify throws
     expect(() => store.add(poison)).toThrow(/Failed to serialize schedule store/);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed: listener blew up"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("onPromoted callback failed for [late]: listener blew up"));
   });
 
   it("hasName excludes a given id (for rename safety)", () => {

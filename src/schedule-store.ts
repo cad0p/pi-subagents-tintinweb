@@ -171,7 +171,7 @@ export class ScheduleStore {
    * their own list so a freed id can never re-promote them to live jobs.
    */
   private shadowed: unknown[] = [];
-  /** Skipped entries dropped at load — too deeply nested. */
+  /** Preserved entries dropped at load — too deeply nested. */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
   private fileShapeInvalid = false;
@@ -181,13 +181,16 @@ export class ScheduleStore {
   private pendingPromoted: string[] = [];
   /**
    * Called by load() with the ids that were live in the previous cache but are
-   * not live after an existing-file reload — records reclassified into
-   * `skipped` (unknown agent type or unparseable cron) or deleted from the file
-   * by another writer. The scheduler binds this to clear timers that would
-   * otherwise keep ticking a record the live set no longer contains. Never
-   * called when load() keeps the previous state: a missing file (the kept
-   * in-memory state is re-written by the next save, so a mid-session deletion
-   * only sticks if the session ends before that write) or corrupt JSON.
+   * no longer live after an existing-file reload: the record no longer
+   * sanitizes into a live job (for example an unregistered agent type, an
+   * unparseable cron, a wrong-typed load-bearing field, or an invalid
+   * `scheduleType`) or it is absent from the file (deleted by another writer,
+   * or dropped for exceeding the depth bound). The scheduler binds this to
+   * clear timers that would otherwise keep ticking a record the live set no
+   * longer contains. Never called when load() keeps the previous state: a
+   * missing file (the kept in-memory state is re-written by the next save, so
+   * a mid-session deletion only sticks if the session ends before that write)
+   * or corrupt JSON.
    */
   onReclassified: ((ids: string[]) => void) | undefined;
   /**
@@ -347,10 +350,12 @@ export class ScheduleStore {
   }
 
   /**
-   * Report ids the last load promoted, now that the lock is gone. A consumer
-   * callback failure is contained and logged: the mutation has already
-   * committed, and letting the listener's throw escape would either mask an
-   * in-flight save error or make a persisted mutation report failure.
+   * Report ids the last load promoted, now that the lock is gone. The mutation
+   * has either committed or already failed by the time this runs: it is called
+   * from withLock's `finally` after the lock is released, so a callback throw
+   * must not replace the mutation's own outcome. A callback failure aborts
+   * that report — the warning names the affected ids, and they are not
+   * re-reported; a later start() re-arms every live record.
    */
   private drainPromoted(): void {
     const ids = this.pendingPromoted;
@@ -360,7 +365,7 @@ export class ScheduleStore {
       this.onPromoted?.(ids);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[pi-subagents] ${this.filePath}: onPromoted callback failed: ${message}`);
+      console.warn(`[pi-subagents] ${this.filePath}: onPromoted callback failed for [${ids.join(", ")}]: ${message}`);
     }
   }
 
