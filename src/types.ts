@@ -219,4 +219,10 @@ export interface ScheduleStoreData {
   /** For future migrations. */
   version: 1;
   jobs: ScheduledSubagent[];
+  /**
+   * Records shadowed by an earlier duplicate with the same id. Written back
+   * verbatim, never promoted to live jobs; deleting an id purges its shadowed
+   * records too.
+   */
+  shadowed?: ScheduledSubagent[];
 }

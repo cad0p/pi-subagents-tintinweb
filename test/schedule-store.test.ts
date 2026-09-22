@@ -371,10 +371,70 @@ describe("ScheduleStore", () => {
     expect(store.list()[0].name).toBe("first");
     expect(warn).toHaveBeenCalledTimes(1);
 
-    // The shadowed duplicate survives the next save.
+    // The shadowed duplicate survives the next save — in its own non-promotable list.
     store.add(makeJob({ id: "other", name: "other" }));
     const onDisk = JSON.parse(readFileSync(file, "utf-8"));
-    expect(onDisk.jobs.map((j: any) => j.name)).toEqual(["first", "other", "second"]);
+    expect(onDisk.jobs.map((j: any) => j.name)).toEqual(["first", "other"]);
+    expect(onDisk.shadowed.map((j: any) => j.name)).toEqual(["second"]);
+  });
+
+  it("purges a shadowed duplicate when its live id is removed", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const store = new ScheduleStore(file);
+    expect(store.remove("dup")).toBe(true);
+
+    // Neither record is live, and the user's deletion reached both on disk.
+    expect(store.list()).toEqual([]);
+    expect(store.get("dup")).toBeUndefined();
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs).toEqual([]);
+    expect(onDisk.shadowed).toEqual([]);
+
+    // A later mutation and a fresh load must not resurrect it.
+    store.add(makeJob({ id: "other", name: "other" }));
+    const fresh = new ScheduleStore(file);
+    expect(fresh.list().map(j => j.id)).toEqual(["other"]);
+  });
+
+  it("never promotes a shadowed duplicate across repeated load/save cycles", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    let store = new ScheduleStore(file);
+    for (let i = 0; i < 3; i++) {
+      store.add(makeJob({ id: `extra-${i}`, name: `extra-${i}` }));
+      store = new ScheduleStore(file);
+      expect(store.list().filter(j => j.id === "dup").map(j => j.name)).toEqual(["first"]);
+    }
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.filter((j: any) => j.id === "dup").map((j: any) => j.name)).toEqual(["first"]);
+    expect(onDisk.shadowed.filter((j: any) => j.id === "dup").map((j: any) => j.name)).toEqual(["second"]);
+  });
+
+  it("keeps a shadowed duplicate dark after its live record vanishes outside the store", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [makeJob({ id: "dup", name: "first" }), makeJob({ id: "dup", name: "second" })]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Any mutation moves the shadowed record into its own key on disk.
+    new ScheduleStore(file).add(makeJob({ id: "other", name: "other" }));
+
+    // Simulate the live record being removed without going through remove().
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    onDisk.jobs = onDisk.jobs.filter((j: any) => j.id !== "dup");
+    writeFileSync(file, JSON.stringify(onDisk, null, 2));
+
+    const fresh = new ScheduleStore(file);
+    expect(fresh.get("dup")).toBeUndefined();
+    expect(fresh.list().map(j => j.id).sort()).toEqual(["other"]);
+
+    // Another cycle still must not promote it.
+    fresh.add(makeJob({ id: "third", name: "third" }));
+    expect(new ScheduleStore(file).get("dup")).toBeUndefined();
   });
 
   it("does not unlink the file while a skipped entry exists", () => {

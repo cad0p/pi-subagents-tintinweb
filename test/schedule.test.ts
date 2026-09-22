@@ -10,7 +10,7 @@
  *   - Concurrency-bypass option flows through to manager.spawn
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -492,6 +492,30 @@ describe("SubagentScheduler — fire path", () => {
     scheduler.updateJob(job.id, { enabled: false });
     vi.advanceTimersByTime(5_000);
     expect(manager.spawn).toHaveBeenCalledTimes(0);
+  });
+
+  it("does not arm a shadowed duplicate whose live twin was cancelled", () => {
+    const file = join(tmp, "s.json");
+    const first = {
+      id: "dup", name: "first", description: "x", schedule: "1s", scheduleType: "interval", intervalMs: 1_000,
+      subagent_type: "general-purpose", prompt: "x", enabled: true, createdAt: new Date().toISOString(), runCount: 0,
+    };
+    writeFileSync(file, JSON.stringify({ version: 1, jobs: [first, { ...first, name: "second" }] }, null, 2));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, new ScheduleStore(file));
+    expect(scheduler.list().map(j => j.name)).toEqual(["first"]);
+
+    // Cancel the live id, then start again from disk — the shadowed twin must
+    // not come back armed.
+    expect(scheduler.removeJob("dup")).toBe(true);
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, new ScheduleStore(file));
+    expect(scheduler.list()).toEqual([]);
+    vi.advanceTimersByTime(10_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("emits fired event with agentId on successful spawn", () => {

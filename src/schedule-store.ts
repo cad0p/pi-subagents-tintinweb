@@ -89,7 +89,7 @@ function skipSignature(raw: unknown): string {
  * through JSON.stringify: a preserved record that cannot be serialized would
  * make every later save() throw. Returns false when the record was dropped.
  */
-function preserveSkipped(raw: unknown, into: unknown[]): boolean {
+function preserveRecord(raw: unknown, into: unknown[]): boolean {
   try {
     JSON.stringify(raw);
   } catch {
@@ -142,6 +142,11 @@ export class ScheduleStore {
   private jobs = new Map<string, ScheduledSubagent>();
   /** Raw entries load() could not sanitize; written back on save so no user data is erased. */
   private skipped: unknown[] = [];
+  /**
+   * Raw records shadowed by an earlier duplicate id; written back verbatim in
+   * their own list so a freed id can never re-promote them to live jobs.
+   */
+  private shadowed: unknown[] = [];
   /** Skipped entries that could not be re-serialized; dropped instead of wedging save(). */
   private droppedCount = 0;
   private jobsContainerInvalid = false;
@@ -164,8 +169,9 @@ export class ScheduleStore {
    * Load from disk into the in-memory cache. A stray record must not abort the
    * scan (later valid entries would vanish and the next save erase them), so
    * entries that fail validation are skipped and kept in `this.skipped` for
-   * the next save to write back. Corrupt JSON keeps the current in-memory
-   * state rather than clearing it.
+   * the next save to write back. A record that duplicates a live id is kept
+   * verbatim in `this.shadowed` and is never promoted. Corrupt JSON keeps the
+   * current in-memory state rather than clearing it.
    */
   private load(): void {
     if (!existsSync(this.filePath)) return;
@@ -178,24 +184,33 @@ export class ScheduleStore {
     const data = isRecord(parsed) ? parsed : {};
     const rawJobs = data.jobs;
     const entries = Array.isArray(rawJobs) ? rawJobs : [];
+    const rawShadowed = data.shadowed;
     const jobs = new Map<string, ScheduledSubagent>();
     const skipped: unknown[] = [];
+    const shadowed: unknown[] = [];
     let dropped = 0;
     for (const raw of entries) {
       const job = sanitizeJob(raw);
       if (!job) {
-        if (!preserveSkipped(raw, skipped)) dropped++;
+        if (!preserveRecord(raw, skipped)) dropped++;
         continue;
       }
       if (jobs.has(job.id)) {
-        // First record wins; keep the shadowed duplicate so save() cannot erase it.
-        if (!preserveSkipped(raw, skipped)) dropped++;
+        // First record wins. The shadowed duplicate goes to its own list, so a
+        // later load can never promote it back to live even if the id is freed.
+        if (!preserveRecord(raw, shadowed)) dropped++;
         continue;
       }
       jobs.set(job.id, job);
     }
+    // Shadowed records are never candidates for the live set — that is the
+    // point of the separate list.
+    for (const raw of Array.isArray(rawShadowed) ? rawShadowed : []) {
+      if (!preserveRecord(raw, shadowed)) dropped++;
+    }
     this.jobs = jobs;
     this.skipped = skipped;
+    this.shadowed = shadowed;
     this.droppedCount = dropped;
     this.jobsContainerInvalid = rawJobs !== undefined && !Array.isArray(rawJobs);
     this.fileShapeInvalid = !isRecord(parsed);
@@ -206,6 +221,7 @@ export class ScheduleStore {
   private warnAboutSkips(): void {
     const signature = [
       this.skipped.map(skipSignature).join(","),
+      this.shadowed.map(skipSignature).join(","),
       `dropped:${this.droppedCount}`,
       `container:${this.jobsContainerInvalid}`,
       `file:${this.fileShapeInvalid}`,
@@ -214,6 +230,7 @@ export class ScheduleStore {
     this.warnedSkips = signature;
     const details: string[] = [];
     if (this.skipped.length > 0) details.push(`${this.skipped.length} invalid scheduled-job record(s) kept on disk`);
+    if (this.shadowed.length > 0) details.push(`${this.shadowed.length} shadowed duplicate record(s) kept on disk`);
     if (this.droppedCount > 0) details.push(`${this.droppedCount} unserializable scheduled-job record(s) dropped`);
     if (this.jobsContainerInvalid) details.push("the jobs container is not an array and will be rewritten");
     if (this.fileShapeInvalid) details.push("the file is not a versioned store object and will be rewritten");
@@ -223,11 +240,13 @@ export class ScheduleStore {
 
   /** Atomic write via temp file + rename (POSIX-atomic). */
   private save(): void {
-    // Skipped entries are written back verbatim so an unrelated mutation cannot
-    // silently erase a record the user can still repair by hand.
+    // Preserved entries are written back verbatim so an unrelated mutation
+    // cannot silently erase a record the user can still repair by hand.
+    // Shadowed duplicates live under their own key: never promoted, never armed.
     const data: ScheduleStoreData = {
       version: 1,
       jobs: [...this.jobs.values(), ...(this.skipped as ScheduledSubagent[])],
+      shadowed: this.shadowed as ScheduledSubagent[],
     };
     let json: string;
     try {
@@ -302,12 +321,20 @@ export class ScheduleStore {
   remove(id: string): boolean {
     // No-op fast path — see update().
     if (!this.jobs.has(id)) return false;
-    return this.withLock(() => this.jobs.delete(id));
+    return this.withLock(() => {
+      if (!this.jobs.delete(id)) return false;
+      // The user deleted this id, so its preserved records go too — including
+      // a shadowed duplicate the menu never exposed.
+      const sameId = (raw: unknown) => isRecord(raw) && raw.id === id;
+      this.skipped = this.skipped.filter(raw => !sameId(raw));
+      this.shadowed = this.shadowed.filter(raw => !sameId(raw));
+      return true;
+    });
   }
 
   /** Delete the backing file (used when no jobs remain, optional cleanup). */
   deleteFileIfEmpty(): void {
-    if (this.jobs.size === 0 && this.skipped.length === 0 && existsSync(this.filePath)) {
+    if (this.jobs.size === 0 && this.skipped.length === 0 && this.shadowed.length === 0 && existsSync(this.filePath)) {
       try { unlinkSync(this.filePath); } catch { /* ignore */ }
     }
   }
