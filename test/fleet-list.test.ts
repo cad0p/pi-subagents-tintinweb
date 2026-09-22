@@ -378,13 +378,12 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
-  it("collapses a newline in the status of the no-session notify", () => {
+  it("collapses a newline in the status of the defensive no-session notify", () => {
     const control = "\u001b]52;c;cGF3bmVk\u0007";
     const record = makeRecord({ status: `queued${control}\nforged` });
-    // The roster only lists records with a session (and a known status), so
-    // keep the row as the currently-viewed agent and expose the session while
-    // the roster is built, dropping it at the open check — the defensive race
-    // the notify covers.
+    // Direct coverage of the defensive no-session guard: the roster only lists
+    // records with a session, so production does not reach this branch. Drop
+    // the session between the roster read and the open check to enter it.
     const realSession = (record as any).session;
     let expire = false;
     let expireReads = 0;
