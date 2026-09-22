@@ -911,6 +911,106 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
+  it("collapses filename and description payloads in the agent-types menu", async () => {
+    initTheme("dark");
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const name = `evil${control}\nforged`;
+    const dir = mkdtempSync(join(tmpdir(), "pi-menu-types-"));
+    const previousCwd = process.cwd();
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ disableDefaultAgents: true }), "utf-8");
+      writeFileSync(
+        join(dir, ".pi", "agents", `${name}.md`),
+        `---\ndescription: ${JSON.stringify(`desc${control}\nforged`)}\n---\n\nbody\n`,
+        "utf-8",
+      );
+      process.chdir(dir);
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, selects } = commandCtx((title, options) => {
+        if (title === "Agents") {
+          return selects.filter(s => s.title === "Agents").length <= 1
+            ? options.find(o => o.startsWith("Agent types ("))
+            : undefined;
+        }
+        return undefined;
+      });
+
+      const renderedMenus: string[] = [];
+      c.ui.custom.mockImplementation((factory: any) =>
+        new Promise<undefined>(resolve => {
+          const list = factory({ terminal: { rows: 40, columns: 100 }, requestRender: vi.fn() }, mockTheme, undefined, resolve);
+          renderedMenus.push(list.render(100).join("\n"));
+          resolve(undefined);
+        }),
+      );
+
+      await commands.get("agents").handler("", c);
+
+      const rendered = renderedMenus.join("\n");
+      // The filename is the row label; the frontmatter description renders
+      // under the selected row. Neither payload may add a line or control byte.
+      expect(rendered).toContain("evil forged");
+      expect(rendered).toContain("desc forged");
+      expect(rendered).not.toContain(control);
+      expect(rendered).not.toContain("\nforged");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("collapses the disabled-agent notify for an adversarial agent name", async () => {
+    initTheme("dark");
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const name = `evil${control}\nforged`;
+    const dir = mkdtempSync(join(tmpdir(), "pi-menu-disable-"));
+    const previousCwd = process.cwd();
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ disableDefaultAgents: true }), "utf-8");
+      writeFileSync(join(dir, ".pi", "agents", `${name}.md`), "---\ndescription: desc\n---\n\nbody\n", "utf-8");
+      process.chdir(dir);
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, selects, notifications } = commandCtx((title, options) => {
+        if (title === "Agents") {
+          return selects.filter(s => s.title === "Agents").length <= 1
+            ? options.find(o => o.startsWith("Agent types ("))
+            : undefined;
+        }
+        if (title === "evil forged") return options.includes("Disable") ? "Disable" : undefined;
+        return undefined;
+      });
+
+      let customCalls = 0;
+      c.ui.custom.mockImplementation((factory: any) => {
+        if (customCalls++ > 0) return Promise.resolve(undefined);
+        return new Promise<undefined>(resolve => {
+          const list = factory({ terminal: { rows: 40, columns: 100 }, requestRender: vi.fn() }, mockTheme, undefined, resolve);
+          list.handleInput(" "); // activate the selected row → detail menu
+          resolve(undefined);
+        });
+      });
+
+      await commands.get("agents").handler("", c);
+
+      // The detail-menu title and the disable notification both name the agent.
+      expect(selects.some(s => s.title === "evil forged")).toBe(true);
+      const disabled = notifications.find(n => n.message.startsWith("Disabled "));
+      expect(disabled).toBeDefined();
+      expect(disabled?.message).toContain("Disabled evil forged (");
+      expect(disabled?.message).not.toContain(control);
+      expect(disabled?.message).not.toContain("\nforged");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("sanitizes the generation-failed notification", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-gen-agent-"));
     const previousCwd = process.cwd();
