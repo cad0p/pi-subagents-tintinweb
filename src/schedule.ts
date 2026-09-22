@@ -136,8 +136,10 @@ export class SubagentScheduler {
     const job = this.buildJob(input);
     store.add(job);
     if (job.enabled) this.scheduleJob(job);
-    this.emit({ type: "added", job });
-    return job;
+    // The arm guard can disable the fresh record; report what the store holds.
+    const stored = store.get(job.id) ?? job;
+    this.emit({ type: "added", job: stored });
+    return stored;
   }
 
   removeJob(id: string): boolean {
@@ -156,8 +158,10 @@ export class SubagentScheduler {
     if (!updated) return undefined;
     this.unscheduleJob(id);
     if (updated.enabled) this.scheduleJob(updated);
-    this.emit({ type: "updated", job: updated });
-    return updated;
+    // The arm guard can disable the patched record; report what the store holds.
+    const stored = store.get(id) ?? updated;
+    this.emit({ type: "updated", job: stored });
+    return stored;
   }
 
   /** Next-run time as ISO, or undefined if not currently armed. */
@@ -365,7 +369,14 @@ export class SubagentScheduler {
     if (rel !== null) return { type: "once", normalized: rel };
     // "5m" — interval
     const ivl = SubagentScheduler.parseInterval(trimmed);
-    if (ivl !== null) return { type: "interval", intervalMs: ivl, normalized: trimmed };
+    if (ivl !== null) {
+      if (ivl < MIN_ARMABLE_INTERVAL_MS || ivl > MAX_TIMER_DELAY_MS) {
+        throw new Error(
+          `Interval "${trimmed}" is not armable — use between ${MIN_ARMABLE_INTERVAL_MS} ms (1s) and ${MAX_TIMER_DELAY_MS} ms (about 24.8 days).`,
+        );
+      }
+      return { type: "interval", intervalMs: ivl, normalized: trimmed };
+    }
     // ISO timestamp — one-shot. Reject past timestamps upfront so we never
     // create a dead-on-arrival record (scheduleJob's safety net still catches
     // micro-races from `+0s`-style relatives).

@@ -103,6 +103,10 @@ describe("SubagentScheduler — static format parsers", () => {
     expect(() => SubagentScheduler.detectSchedule("999999999999999999999999d")).toThrow(/Invalid schedule/);
     expect(() => SubagentScheduler.detectSchedule("+100000000000d")).toThrow(/Invalid schedule/);
   });
+
+  it.each(["25d", "100000000d"])("detectSchedule rejects unarmable interval %s with the bound", (expr) => {
+    expect(() => SubagentScheduler.detectSchedule(expr)).toThrow(/2147483647/);
+  });
 });
 
 describe("SubagentScheduler — lifecycle", () => {
@@ -259,6 +263,16 @@ describe("SubagentScheduler — lifecycle", () => {
       name: "absurd-relative", description: "x", schedule: "+100000000000d",
       subagent_type: "general-purpose", prompt: "p",
     })).toThrow(/Invalid schedule/);
+    expect(scheduler.list()).toEqual([]);
+  });
+
+  // parseInterval accepts these (they fit the Date range), but they would
+  // overflow the JS timer and must be refused before a record exists.
+  it.each(["25d", "100000000d"])("addJob rejects unarmable interval %s without persisting", (expr) => {
+    expect(() => scheduler.addJob({
+      name: "unarmable", description: "x", schedule: expr,
+      subagent_type: "general-purpose", prompt: "p",
+    })).toThrow(/2147483647/);
     expect(scheduler.list()).toEqual([]);
   });
 
@@ -546,6 +560,9 @@ describe("SubagentScheduler — arm-path range guard", () => {
     });
   }
 
+  // 25d = 2,160,000,000 ms is rejected at creation now, so the store-reload
+  // path is exercised with seeded values instead. 1e16 and "1e100" are also
+  // outside the Date-representable range entirely.
   const OUT_OF_RANGE_INTERVALS: Array<[string, unknown]> = [
     ["a finite delay past the timer ceiling", 1e16],
     ["a huge numeric string", "1e100"],
@@ -592,21 +609,34 @@ describe("SubagentScheduler — arm-path range guard", () => {
     expect(scheduler.list().find(j => j.id === "armable")?.enabled).toBe(true);
   });
 
-  // 25d = 2,160,000,000 ms, past the 2^31-1 ceiling but accepted by
-  // detectSchedule; before the guard it was persisted and armed.
-  it("does not arm a freshly created 25d interval", () => {
+  it.each(["1s", "5m", "1h", "2d"])("still creates and arms %s end-to-end", (expr) => {
     const job = scheduler.addJob({
-      name: "over-ceiling", description: "x", schedule: "25d",
+      name: `valid-${expr}`, description: "x", schedule: expr,
       subagent_type: "general-purpose", prompt: "p",
     });
 
-    expect(vi.getTimerCount()).toBe(0);
-    vi.advanceTimersByTime(60_000);
-    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(job.scheduleType).toBe("interval");
+    expect(job.intervalMs).toBeGreaterThanOrEqual(1000);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(scheduler.list().find(j => j.id === job.id)?.enabled).toBe(true);
+  });
 
-    const stored = scheduler.list().find(j => j.id === job.id);
-    expect(stored?.enabled).toBe(false);
-    expect(stored?.lastStatus).toBe("error");
+  it("emits the post-arm record when a patch makes an interval unarmable", () => {
+    const job = scheduler.addJob({
+      name: "patch-to-corrupt", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    const returned = scheduler.updateJob(job.id, { intervalMs: 0.5 });
+
+    expect(returned?.enabled).toBe(false);
+    expect(returned?.lastStatus).toBe("error");
+    const updatedCalls = pi.events.emit.mock.calls.filter(
+      (c: any[]) => c[0] === "subagents:scheduled" && c[1].type === "updated",
+    );
+    expect(updatedCalls).toHaveLength(1);
+    expect(updatedCalls[0][1].job).toMatchObject({ id: job.id, enabled: false, lastStatus: "error" });
+    expect(scheduler.list().find(j => j.id === job.id)?.enabled).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("arms a valid interval on reload", () => {
