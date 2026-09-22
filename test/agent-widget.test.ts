@@ -82,10 +82,10 @@ describe("AgentWidget", () => {
   }
 
   /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
-  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode): string {
+  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode, activity: AgentActivity = makeActivity()): string {
     const widget = new AgentWidget(
       manager as any,
-      new Map([[activityId, makeActivity()]]),
+      new Map([[activityId, activity]]),
       mode,
     );
     let factory: any;
@@ -133,5 +133,16 @@ describe("AgentWidget", () => {
   it("renders nothing in 'off' mode", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "off")).toBe("");
+  });
+
+  it("strips terminal controls from the live activity line", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const activity = makeActivity();
+    activity.responseText = "x\u001b[2Jy\u001b]8;;https://evil.example\u0007link";
+    const lines = renderLines(manager, "background", () => "background", activity);
+    expect(lines).not.toContain("\u001b");
+    expect(lines).not.toContain("[2J");
+    expect(lines).not.toContain("]8;;");
+    expect(lines).toContain("xylink");
   });
 });

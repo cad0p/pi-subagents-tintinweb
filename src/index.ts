@@ -28,6 +28,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
+import { stripControlChars } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -163,28 +164,11 @@ function getStatusWord(status: string): string {
 }
 
 /**
- * Strip terminal control sequences and invisible/forging characters, keeping
- * tab, LF, and printable non-ASCII. Complete OSC/CSI sequences are consumed
- * whole; a dangling introducer goes with its ESC/C1 byte so no `[2J`/`]8;;`-
- * style residue is left. CR is dropped, so CRLF collapses to LF and a lone CR
- * cannot overwrite the rendered line. A guard against terminal control and
- * invisible text, not a content filter: markdown and XML-ish characters pass
- * through untouched.
- */
-function stripControlChars(s: string): string {
-  return s
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // complete OSC: ESC ] … BEL | ST
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "") // complete CSI: ESC [ … final byte
-    .replace(/[\u001b\u009b][[\]()#;?]*/g, "") // dangling ESC/C1 plus its introducer
-    .replace(/[\x00-\x08\x0b-\x0d\x0e-\x1f\x7f-\x9f\u00ad\u061c\u180e\u200b-\u200d\u200e\u200f\u2028\u2029\u202a-\u202e\u2060-\u2069\ufeff]/g, "");
-}
-
-/**
- * Collapse newlines/CRs and strip control/invisible characters from text that
- * is composed into the report header or metadata lines.
+ * Collapse newlines/CRs/tabs and strip control/invisible characters from text
+ * that is composed into the report header or metadata lines.
  */
 function sanitizeHeaderText(s: string): string {
-  return stripControlChars(s.replace(/\r\n?|\n/g, " ")).trim();
+  return stripControlChars(s.replace(/\r\n?|\n/g, " ").replace(/\t/g, " ")).trim();
 }
 
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
@@ -918,7 +902,7 @@ Terse command-style prompts produce shallow, generic work.
 
     renderCall(args, theme) {
       const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
-      const desc = args.description ?? "";
+      const desc = stripControlChars(args.description ?? "");
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
@@ -927,7 +911,7 @@ Terse command-style prompts produce shallow, generic work.
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
         const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(stripControlChars(text), 0, 0);
+        return new Text(typeof text === "string" ? stripControlChars(text) : "", 0, 0);
       }
 
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
@@ -1404,7 +1388,7 @@ Terse command-style prompts produce shallow, generic work.
       const report = result.content[0]?.type === "text" ? result.content[0].text : "";
       // Display copy only: the tool text returned to the parent model keeps its
       // raw bytes.
-      const display = stripControlChars(report);
+      const display = typeof report === "string" ? stripControlChars(report) : "";
       return display
         ? new Markdown(display, 0, 0, getMarkdownTheme(), { color: (t) => theme.fg("toolOutput", t) })
         : new Text("", 0, 0);

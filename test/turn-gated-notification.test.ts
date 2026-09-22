@@ -313,6 +313,32 @@ describe("foreground Agent result rendering", () => {
     // The tool text handed to the model keeps its raw bytes.
     expect(res.content[0].text).toBe(text);
   });
+
+  it("renderCall strips terminal controls from the description", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const rendered = tools.get("Agent").renderCall(
+      { subagent_type: "general-purpose", description: `find${control}files` },
+      mockTheme,
+    );
+    expect(rendered.text).not.toContain("\u001b");
+    expect(rendered.text).not.toContain("[2J");
+    expect(rendered.text).not.toContain("]8;;");
+    expect(rendered.text).toContain("findfiles");
+  });
+
+  it("the no-details renderResult fallback tolerates a non-string content text", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const rendered = tools.get("Agent").renderResult(
+      { content: [{ type: "text" as const, text: 42 as any }], details: undefined },
+      { expanded: false, isPartial: false },
+      mockTheme,
+    );
+    expect(rendered.text).toBe("");
+  });
 });
 
 describe("get_subagent_result terminal rendering", () => {

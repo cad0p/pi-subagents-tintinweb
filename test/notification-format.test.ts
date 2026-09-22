@@ -293,6 +293,67 @@ describe("markdown completion report", () => {
     }
   });
 
+  it("strips Unicode Tags, CGJ, Hangul fillers, and VS supplements from every copy", () => {
+    const families = [
+      "\u034f", // CGJ
+      "\u{e0001}", // language tag
+      "\u{e0041}", // tag "A" — invisible ASCII payload
+      "\u{e007f}", // cancel tag
+      "\u115f", // Hangul choseong filler
+      "\u1160", // Hangul jungseong filler
+      "\u3164", // Hangul filler
+      "\uffa0", // halfwidth Hangul filler
+      "\u{e0100}", // VS supplement
+      "\u{e01ef}", // VS supplement
+    ];
+    for (const ch of families) {
+      const report = formatTaskNotification(
+        createRecord({
+          id: `id${ch}tail`,
+          description: `desc${ch}tail`,
+          status: "error",
+          error: `err${ch}tail`,
+          outputFile: `/tmp/p${ch}tail`,
+          result: `body${ch}tail`,
+        }),
+        settings,
+      );
+      const [header, , metadata] = report.split("\n");
+      expect(report).not.toContain(ch);
+      expect(header).toContain("Subagent error: desctail");
+      expect(header).toContain("— errtail");
+      expect(metadata).toContain("Agent: idtail");
+      expect(report).toContain("Transcript: /tmp/ptail");
+      expect(report).toContain("Result:\n\nbodytail");
+    }
+  });
+
+  it("keeps the U+FE0E/U+FE0F presentation selectors", () => {
+    for (const ch of ["\ufe0e", "\ufe0f"]) {
+      const report = formatTaskNotification(createRecord({ description: `a${ch}b`, result: `c${ch}d` }), settings);
+      expect(report).toContain(`a${ch}b`);
+      expect(report).toContain(`c${ch}d`);
+    }
+  });
+
+  it("collapses TAB to a space in the header and metadata fields", () => {
+    const report = formatTaskNotification(
+      createRecord({
+        id: "a\tb",
+        description: "c\td",
+        status: "error",
+        error: "e\tf",
+        outputFile: "/tmp/g\th",
+        result: "body",
+      }),
+      settings,
+    );
+    const [header] = report.split("\n");
+    expect(header).toBe("**✗ Subagent error: c d** — e f · 2 tool uses · 150 token · 5.0s");
+    expect(report).toContain("Agent: a b");
+    expect(report).toContain("Transcript: /tmp/g h");
+  });
+
   it("consumes a dangling ESC/C1 introducer with its escape byte", () => {
     for (const dangling of ["boom\u001b[", "boom\u001b]", "boom\u009b"]) {
       const report = formatTaskNotification(

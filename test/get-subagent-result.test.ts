@@ -723,6 +723,17 @@ describe("get_subagent_result output shapes", () => {
     expect(rendered.text).toContain("boomclick");
   });
 
+  it("renderResult tolerates a non-string content text", async () => {
+    const { tools } = await setupAgent({});
+    const tool = tools.get("get_subagent_result");
+    const rendered = tool.renderResult(
+      { content: [{ type: "text", text: 42 }] } as any,
+      { expanded: false, isPartial: false },
+      { fg: (_color: string, text: string) => text },
+    );
+    expect(rendered.text).toBe("");
+  });
+
   // ---- resultConsumed is set on terminal reads, not on running reads ----
   it("reading a running agent does not mark the result consumed", async () => {
     const { tools, id } = await setupAgent({});
