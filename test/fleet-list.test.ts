@@ -378,6 +378,37 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
+  it("collapses a newline in the status of the no-session notify", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const record = makeRecord({ status: `queued${control}\nforged` });
+    // The roster only lists records with a session (and a known status), so
+    // keep the row as the currently-viewed agent and expose the session while
+    // the roster is built, dropping it at the open check — the defensive race
+    // the notify covers.
+    const realSession = (record as any).session;
+    let expire = false;
+    let expireReads = 0;
+    Object.defineProperty(record, "session", {
+      configurable: true,
+      get: () => {
+        if (!expire) return realSession;
+        expireReads += 1;
+        return expireReads === 1 ? realSession : undefined;
+      },
+    });
+
+    const h = harness([record]);
+    (h.fleet as any).viewingAgentId = "a1";
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // → the agent
+    expire = true;
+    h.press(ENTER); // roster filter sees the session; the open check does not
+
+    expect(h.notifications).toContain("Agent is queued forged — no session available.");
+    expect(h.notifications.join("\n")).not.toContain("\nforged");
+    expect(h.notifications.join("\n")).not.toContain("\u001b");
+  });
+
   it("keeps the cursor on the viewed agent after closing, even if the list reordered", async () => {
     const fakeSession = { subscribe: () => () => {}, messages: [] };
     const agents = [

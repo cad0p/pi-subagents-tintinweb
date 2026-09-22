@@ -265,6 +265,49 @@ describe("ConversationViewer", () => {
     });
   });
 
+  describe("untrusted text collapsing", () => {
+    const control = "\u001b]52;c;cGF3bmVk\u0007";
+    const W = 600;
+
+    it("collapses a control/newline payload in a tool-call name", () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check that." },
+            { type: "toolCall", toolUseId: "t1", name: `read${control}\n[Tool: forged]`, input: {} },
+          ],
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
+      );
+
+      const joined = (viewer as any).buildContentLines(W).join("\n");
+      expect(joined).toContain("[Tool: read [Tool: forged]]");
+      expect(joined).not.toContain(control);
+      expect(joined).not.toContain("\n[Tool: forged]");
+    });
+
+    it("collapses a control/newline payload in the running activity line", () => {
+      const activity = {
+        activeTools: new Map([["k1", `read${control}\n[forged]`]]),
+        toolUses: 1,
+        tokens: "1k",
+        responseText: "",
+      };
+      const messages = [{ role: "user", content: "go" }];
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(messages), mockRecord({ status: "running" }), activity as any, ansiTheme(), vi.fn(),
+      );
+
+      const joined = (viewer as any).buildContentLines(W).join("\n");
+      expect(joined).toContain("read [forged]…");
+      expect(joined).not.toContain(control);
+      expect(joined).not.toContain("\n[forged]");
+    });
+  });
+
   describe("safety net against upstream wrapTextWithAnsi bugs", () => {
     // These tests call buildContentLines() directly (via the private method)
     // because render() has its own truncation via row(). The safety net in
