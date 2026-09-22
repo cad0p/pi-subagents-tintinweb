@@ -14,9 +14,14 @@
  * pass through untouched.
  *
  * The invisible/format set includes the Unicode Tag block (U+E0001,
- * U+E0020–U+E007F), which encodes invisible ASCII payloads, plus CGJ, Hangul
- * fillers, and the variation-selector supplement. U+FE0E/U+FE0F are
- * deliberately kept: they carry emoji vs text presentation.
+ * U+E0020–U+E007F), which encodes invisible ASCII payloads, plus CGJ (U+034F),
+ * the Hangul fillers (U+115F/U+1160/U+3164/U+FFA0), and the variation-selector
+ * supplement (U+E0100–U+E01EF). Stripping those three families is a deliberate
+ * over-strip for Trojan-Source/covert-channel defense even though they have
+ * legitimate presentation roles — CGJ blocks Arabic/Indic ligatures, the VS
+ * supplement selects CJK ideographic glyph variants, and the Hangul fillers
+ * appear in old-Hangul text. U+FE0E/U+FE0F are deliberately kept: they carry
+ * emoji vs text presentation.
  */
 export function stripControlChars(s: string): string {
   return s
