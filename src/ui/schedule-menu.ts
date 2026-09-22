@@ -113,6 +113,8 @@ export async function showSchedulesMenu(
     if (jobByLabel.has(label)) {
       // Resume from this base's last used suffix, so a fully-conflicting set
       // costs one step per row instead of rescanning from 2 every time.
+      // Unreachable today (every base ends with its `runs N` tail), but keep
+      // the scan: a duplicate label would let the user cancel the wrong job.
       let n = nextSuffix.get(base) ?? 2;
       while (jobByLabel.has(`${base} (${n})`)) n++;
       label = `${base} (${n})`;
