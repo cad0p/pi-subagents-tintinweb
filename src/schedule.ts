@@ -25,6 +25,13 @@ import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
+ * Smallest armable interval. The parsers' smallest unit is one second, so
+ * anything sub-second can only come from a corrupt store — and Node clamps
+ * such a delay to 1 ms like any other out-of-range value.
+ */
+const MIN_ARMABLE_INTERVAL_MS = 1000;
+
+/**
  * Largest delay `setTimeout`/`setInterval` accept. Node clamps anything above
  * this to ~1 ms and warns, so an out-of-range delay would hot-loop instead of
  * staying inert.
@@ -190,8 +197,13 @@ export class SubagentScheduler {
     if (!store) return;
     try {
       if (job.scheduleType === "interval") {
-        const intervalMs = Number(job.intervalMs);
-        if (!Number.isFinite(intervalMs) || intervalMs <= 0 || intervalMs > MAX_TIMER_DELAY_MS) {
+        const intervalMs = job.intervalMs;
+        if (
+          typeof intervalMs !== "number" ||
+          !Number.isInteger(intervalMs) ||
+          intervalMs < MIN_ARMABLE_INTERVAL_MS ||
+          intervalMs > MAX_TIMER_DELAY_MS
+        ) {
           // Outside the timer range and cannot be honored — Node clamps the
           // delay to ~1 ms, turning the job into a hot loop. Disable it and
           // mark it broken, mirroring the past-one-shot branch below.
@@ -199,7 +211,7 @@ export class SubagentScheduler {
           this.emit({
             type: "error",
             jobId: job.id,
-            error: `Interval ${job.intervalMs} is outside the armable range (1–${MAX_TIMER_DELAY_MS} ms)`,
+            error: `Interval ${job.intervalMs} is outside the armable range (${MIN_ARMABLE_INTERVAL_MS}–${MAX_TIMER_DELAY_MS} ms)`,
           });
         } else {
           const t = setInterval(() => this.executeJob(job.id), intervalMs);

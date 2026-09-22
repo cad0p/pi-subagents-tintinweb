@@ -8,7 +8,8 @@
  * outcome. Catches integration bugs that fake-timer microtask scheduling
  * can hide.
  *
- * Uses very short timings (100–300ms) so the test stays fast.
+ * Uses very short timings (100–300 ms for one-shots; the 1 s minimum for
+ * intervals) so the test stays fast.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -139,19 +140,16 @@ describe("SubagentScheduler — end-to-end with real timers", () => {
     const pi = makePi();
     scheduler.start(pi, makeCtx(), manager, store);
 
-    // 100ms interval — wait for ~3 fires
+    // 1s is the smallest armable interval — wait for ~3 fires
     const job = scheduler.addJob({
       name: "e2e-interval",
       description: "test",
-      schedule: "100s",  // Will be too long; override below.
+      schedule: "1s",
       subagent_type: "general-purpose",
       prompt: "tick",
     });
-    // Replace with a literal 100ms interval — easier than crafting a parseable shorthand for ms.
-    // (parseInterval doesn't accept "ms"; we patch the persisted job and re-arm.)
-    scheduler.updateJob(job.id, { intervalMs: 100, schedule: "100ms" });
 
-    await waitFor(() => manager.spawn.mock.calls.length >= 3, 2000);
+    await waitFor(() => manager.spawn.mock.calls.length >= 3, 5000);
 
     const final = scheduler.list().find(j => j.id === job.id)!;
     expect(final.runCount).toBeGreaterThanOrEqual(3);

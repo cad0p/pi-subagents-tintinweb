@@ -549,6 +549,15 @@ describe("SubagentScheduler — arm-path range guard", () => {
   const OUT_OF_RANGE_INTERVALS: Array<[string, unknown]> = [
     ["a finite delay past the timer ceiling", 1e16],
     ["a huge numeric string", "1e100"],
+    ["a boolean", true],
+    ["a numeric string", "1"],
+    ["a single-element array", [1]],
+    ["a sub-second fraction", 0.5],
+    ["the smallest subnormal float", 5e-324],
+    ["zero", 0],
+    ["a negative delay", -60_000],
+    ["one millisecond under the minimum", 999],
+    ["one millisecond past the ceiling", 2 ** 31],
   ];
   it.each(OUT_OF_RANGE_INTERVALS)("does not arm an interval with %s", (_name, intervalMs) => {
     seedJob("hot-loop", { scheduleType: "interval", intervalMs: intervalMs as number });
@@ -565,6 +574,22 @@ describe("SubagentScheduler — arm-path range guard", () => {
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
       type: "error", jobId: "hot-loop",
     }));
+  });
+
+  const ARMABLE_INTERVALS: Array<[string, number]> = [
+    ["the minimum", 1000],
+    ["the timer ceiling", 2 ** 31 - 1],
+  ];
+  it.each(ARMABLE_INTERVALS)("arms an interval at %s", (_name, intervalMs) => {
+    seedJob("armable", { scheduleType: "interval", intervalMs });
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    expect(vi.getTimerCount()).toBe(1);
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: "armable",
+    }));
+    expect(scheduler.list().find(j => j.id === "armable")?.enabled).toBe(true);
   });
 
   // 25d = 2,160,000,000 ms, past the 2^31-1 ceiling but accepted by
