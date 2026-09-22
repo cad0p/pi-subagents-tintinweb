@@ -15,13 +15,16 @@
  *
  * The invisible/format set includes the Unicode Tag block (U+E0001,
  * U+E0020–U+E007F), which encodes invisible ASCII payloads, plus CGJ (U+034F),
- * the Hangul fillers (U+115F/U+1160/U+3164/U+FFA0), and the variation-selector
- * supplement (U+E0100–U+E01EF). Stripping those three families is a deliberate
- * over-strip for Trojan-Source/covert-channel defense even though they have
- * legitimate presentation roles — CGJ blocks Arabic/Indic ligatures, the VS
- * supplement selects CJK ideographic glyph variants, and the Hangul fillers
- * appear in old-Hangul text. U+FE0E/U+FE0F are deliberately kept: they carry
- * emoji vs text presentation.
+ * the Hangul fillers (U+115F/U+1160/U+3164/U+FFA0), the variation-selector
+ * supplement (U+E0100–U+E01EF), the zero-width/directional mark range
+ * (U+200B–U+200F, including ZWJ U+200D), the line/paragraph separators
+ * (U+2028/U+2029), and the bidi embedding/override controls (U+202A–U+202E).
+ * Stripping those families is a deliberate over-strip for Trojan-Source/
+ * covert-channel defense even though they have legitimate roles — CGJ blocks
+ * Arabic/Indic ligatures, the VS supplement selects CJK ideographic glyph
+ * variants, the Hangul fillers appear in old-Hangul text, ZWJ joins emoji and
+ * Indic sequences, and the bidi controls steer RTL layout. U+FE0E/U+FE0F are
+ * deliberately kept: they carry emoji vs text presentation.
  */
 export function stripControlChars(s: string): string {
   return s
