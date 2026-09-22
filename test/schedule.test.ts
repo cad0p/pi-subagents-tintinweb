@@ -41,6 +41,24 @@ function makeMockCtx() {
   } as any;
 }
 
+/** A raw store record in the shape the scheduler persists, for file-seeded fixtures. */
+function rawJob(overrides: Partial<ScheduledSubagent> = {}): ScheduledSubagent {
+  return {
+    id: "job",
+    name: "job",
+    description: "x",
+    schedule: "1s",
+    scheduleType: "interval",
+    intervalMs: 1_000,
+    subagent_type: "general-purpose",
+    prompt: "x",
+    enabled: true,
+    createdAt: new Date().toISOString(),
+    runCount: 0,
+    ...overrides,
+  };
+}
+
 describe("SubagentScheduler — static format parsers", () => {
   it("parseRelativeTime accepts +Ns/Nm/Nh/Nd and rejects bare numbers", () => {
     const before = Date.now();
@@ -665,10 +683,7 @@ describe("SubagentScheduler — fire path", () => {
 
   it("does not arm a shadowed duplicate whose live twin was cancelled", () => {
     const file = join(tmp, "s.json");
-    const first = {
-      id: "dup", name: "first", description: "x", schedule: "1s", scheduleType: "interval", intervalMs: 1_000,
-      subagent_type: "general-purpose", prompt: "x", enabled: true, createdAt: new Date().toISOString(), runCount: 0,
-    };
+    const first = rawJob({ id: "dup", name: "first" });
     writeFileSync(file, JSON.stringify({ version: 1, jobs: [first, { ...first, name: "second" }] }, null, 2));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -694,11 +709,7 @@ describe("SubagentScheduler — fire path", () => {
   // the user had cancelled.
   it("cancelling a job whose type was invalidated mid-session purges it from every list", () => {
     const file = join(tmp, "s.json");
-    const raw = {
-      id: "dead-type", name: "dead-type", description: "x", schedule: "1s", scheduleType: "interval",
-      intervalMs: 1_000, subagent_type: "Explore", prompt: "x", enabled: true,
-      createdAt: new Date().toISOString(), runCount: 0,
-    };
+    const raw = rawJob({ id: "dead-type", name: "dead-type", subagent_type: "Explore" });
     writeFileSync(file, JSON.stringify({ version: 1, jobs: [raw] }, null, 2));
     store = new ScheduleStore(file);
     scheduler.stop();
@@ -936,19 +947,7 @@ describe("SubagentScheduler — arm-path range guard", () => {
   // Reload is the realistic path for a corrupt delay: start() re-arms every
   // enabled record straight from the store.
   function seedJob(id: string, patch: Partial<ScheduledSubagent>): void {
-    store.add({
-      id,
-      name: id,
-      description: "x",
-      schedule: "1s",
-      scheduleType: "interval",
-      subagent_type: "general-purpose",
-      prompt: "x",
-      enabled: true,
-      createdAt: new Date().toISOString(),
-      runCount: 0,
-      ...patch,
-    });
+    store.add(rawJob({ id, name: id, ...patch }));
   }
 
   // 25d = 2,160,000,000 ms is rejected at creation now, so the store-reload
