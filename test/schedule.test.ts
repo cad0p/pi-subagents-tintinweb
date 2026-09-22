@@ -586,6 +586,7 @@ describe("SubagentScheduler — fire path", () => {
       name: "far-once",
       scheduleType: "once",
       schedule: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      intervalMs: undefined,
     });
     writeFileSync(file, JSON.stringify({ version: 1, jobs: [farOnce] }, null, 2));
     store = new ScheduleStore(file);

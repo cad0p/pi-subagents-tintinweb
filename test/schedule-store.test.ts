@@ -138,6 +138,13 @@ describe("ScheduleStore", () => {
     rmSync(file);
     store.update("a", { lastStatus: "error" });
     expect(promoted).not.toHaveBeenCalled();
+
+    // The kept in-memory state is re-written by the next save: the file is
+    // back and still holds both records, so the deletion only sticks if the
+    // session ends before that write.
+    expect(existsSync(file)).toBe(true);
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs.map((j: any) => j.id).sort()).toEqual(["a", "b"]);
   });
 
   it("does not report a stale promotion when a reload finds corrupt JSON", () => {
