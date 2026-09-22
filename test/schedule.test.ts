@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 import type { ScheduledSubagent } from "../src/types.js";
@@ -412,6 +413,8 @@ describe("SubagentScheduler — fire path", () => {
   afterEach(() => {
     scheduler.stop();
     vi.useRealTimers();
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -492,6 +495,44 @@ describe("SubagentScheduler — fire path", () => {
     scheduler.updateJob(job.id, { enabled: false });
     vi.advanceTimersByTime(5_000);
     expect(manager.spawn).toHaveBeenCalledTimes(0);
+  });
+
+  it("does not spawn a job whose agent type is unregistered before the fire", () => {
+    const dead = scheduler.addJob({
+      name: "read-only", description: "x", schedule: "1s",
+      subagent_type: "Explore", prompt: "x",
+    });
+    // The user disables default agents mid-session — Explore is gone.
+    setDefaultsDisabled(true);
+    registerAgents(new Map());
+
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: dead.id, error: expect.stringMatching(/Explore/),
+    }));
+  });
+
+  it("still fires a job whose agent type is registered", () => {
+    scheduler.addJob({
+      name: "valid-type", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts the fire when persisting the running state fails", () => {
+    scheduler.addJob({
+      name: "vanished", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+    });
+    // Simulate the record disappearing between get() and update().
+    vi.spyOn(store, "update").mockReturnValue(undefined);
+
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).not.toHaveBeenCalled();
+    vi.mocked(store.update).mockRestore();
   });
 
   it("does not arm a shadowed duplicate whose live twin was cancelled", () => {

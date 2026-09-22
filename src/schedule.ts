@@ -20,6 +20,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
+import { isValidType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
@@ -299,7 +300,17 @@ export class SubagentScheduler {
       const job = store.get(id);
       if (!job?.enabled) return;
 
-      store.update(id, { lastStatus: "running" });
+      // The registry can change after arming (e.g. the user disables default
+      // agents). Re-check at fire time: spawn() would otherwise fall back to a
+      // write-capable general-purpose config the user never scheduled.
+      if (!isValidType(job.subagent_type)) {
+        this.reportJobError(id, `Agent type "${job.subagent_type}" is not available`);
+        return;
+      }
+
+      // Persist the running state before spawning. A missing record means the
+      // job vanished (removed elsewhere) between get() and update() — abort.
+      if (!store.update(id, { lastStatus: "running" })) return;
 
       // Resolve model at fire time — registry contents may have changed since the
       // job was created (auth added/removed). Fall back silently to spawn-default
