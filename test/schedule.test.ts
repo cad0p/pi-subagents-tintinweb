@@ -56,6 +56,9 @@ describe("SubagentScheduler — static format parsers", () => {
     expect(SubagentScheduler.parseRelativeTime("10s")).toBeNull();
     expect(SubagentScheduler.parseRelativeTime("+5x")).toBeNull();
     expect(SubagentScheduler.parseRelativeTime("hello")).toBeNull();
+
+    // Offsets past the Date ceiling are not representable → null, not a throw
+    expect(SubagentScheduler.parseRelativeTime("+100000000000d")).toBeNull();
   });
 
   it("parseInterval converts unit-suffixed strings to milliseconds", () => {
@@ -67,6 +70,12 @@ describe("SubagentScheduler — static format parsers", () => {
     expect(SubagentScheduler.parseInterval("+5m")).toBeNull();   // relative isn't an interval
     expect(SubagentScheduler.parseInterval("5x")).toBeNull();
     expect(SubagentScheduler.parseInterval("five-minutes")).toBeNull();
+
+    // 100000000d is exactly the Date ceiling (8.64e15 ms); one day more is not
+    // representable and must be rejected rather than armed and persisted.
+    expect(SubagentScheduler.parseInterval("100000000d")).toBe(8.64e15);
+    expect(SubagentScheduler.parseInterval("100000001d")).toBeNull();
+    expect(SubagentScheduler.parseInterval("999999999999999999999999d")).toBeNull();
   });
 
   it("validateCronExpression rejects non-6-field expressions", () => {
@@ -88,6 +97,10 @@ describe("SubagentScheduler — static format parsers", () => {
     expect(r.normalized).toBe(iso);
 
     expect(() => SubagentScheduler.detectSchedule("garbage")).toThrow(/Invalid schedule/);
+
+    // Absurd magnitudes are creation errors, not records that brick the menu
+    expect(() => SubagentScheduler.detectSchedule("999999999999999999999999d")).toThrow(/Invalid schedule/);
+    expect(() => SubagentScheduler.detectSchedule("+100000000000d")).toThrow(/Invalid schedule/);
   });
 });
 
@@ -190,6 +203,10 @@ describe("SubagentScheduler — lifecycle", () => {
     ["a string interval", "5m"],
     ["NaN", Number.NaN],
     ["a negative interval", -60_000],
+    ["a finite interval past the Date range", 1e16],
+    ["the Date ceiling interval", 8.64e15],
+    ["a huge numeric string interval", "1e100"],
+    ["a Number.MAX_VALUE interval", Number.MAX_VALUE],
   ];
   it.each(CORRUPT_INTERVALS)("getNextRun returns undefined for %s", (_name, intervalMs) => {
     const job = scheduler.addJob({
@@ -203,6 +220,22 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(scheduler.getNextRun(job.id)).toBeUndefined();
   });
 
+  const CORRUPT_ONCE: Array<[string, unknown]> = [
+    ["a numeric schedule", 42],
+    ["an unparseable string", "not-a-date"],
+  ];
+  it.each(CORRUPT_ONCE)("getNextRun returns undefined for a once job carrying %s", (_name, schedule) => {
+    const job = scheduler.addJob({
+      name: "corrupt-once", description: "x", schedule: "+1h",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    // Unschedule first, then corrupt the record in place without re-arming.
+    scheduler.updateJob(job.id, { enabled: false });
+    store.update(job.id, { enabled: true, scheduleType: "once", schedule: schedule as string });
+    expect(() => scheduler.getNextRun(job.id)).not.toThrow();
+    expect(scheduler.getNextRun(job.id)).toBeUndefined();
+  });
+
   it("rejects past one-shot timestamps upfront — no record created", () => {
     const past = new Date(Date.now() - 60_000).toISOString();
     expect(() => scheduler.addJob({
@@ -210,6 +243,41 @@ describe("SubagentScheduler — lifecycle", () => {
     })).toThrow(/in the past/);
     // No dead-on-arrival record left behind
     expect(scheduler.list()).toEqual([]);
+  });
+
+  // A finite interval past the Date ceiling would pass the old finite check,
+  // get persisted and armed, then throw in getNextRun whenever the menu read it.
+  it("rejects an out-of-range interval upfront — no record created or armed", () => {
+    expect(() => scheduler.addJob({
+      name: "absurd", description: "x", schedule: "999999999999999999999999d",
+      subagent_type: "general-purpose", prompt: "p",
+    })).toThrow(/Invalid schedule/);
+    expect(scheduler.list()).toEqual([]);
+
+    expect(() => scheduler.addJob({
+      name: "absurd-relative", description: "x", schedule: "+100000000000d",
+      subagent_type: "general-purpose", prompt: "p",
+    })).toThrow(/Invalid schedule/);
+    expect(scheduler.list()).toEqual([]);
+  });
+
+  it("getNextRun returns the normalized schedule for a valid once job", () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const job = scheduler.addJob({
+      name: "valid-once", description: "x", schedule: future,
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    expect(scheduler.getNextRun(job.id)).toBe(future);
+  });
+
+  it("getNextRun reports the next cron occurrence", () => {
+    const job = scheduler.addJob({
+      name: "valid-cron", description: "x", schedule: "0 0 9 * * 1",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    const next = scheduler.getNextRun(job.id);
+    expect(next).toBeDefined();
+    expect(new Date(next!).getTime()).toBeGreaterThan(Date.now());
   });
 
   // The safety net in scheduleJob's past-branch only fires on store reload —

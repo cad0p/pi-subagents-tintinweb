@@ -152,11 +152,16 @@ export class SubagentScheduler {
     if (cron) return cron.nextRun()?.toISOString();
     const job = this.store?.get(jobId);
     if (!job?.enabled) return undefined;
-    if (job.scheduleType === "once") return job.schedule;
+    if (job.scheduleType === "once") {
+      if (typeof job.schedule !== "string") return undefined;
+      const d = new Date(job.schedule);
+      return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+    }
     if (job.scheduleType === "interval") {
       // The store is not validated per field, so coerce before the arithmetic:
-      // a string or NaN interval would otherwise reach toISOString() and throw
-      // RangeError, taking the whole scheduled-jobs menu down.
+      // a string, NaN, or finite-but-out-of-range interval would otherwise
+      // reach toISOString() and throw RangeError, taking the whole
+      // scheduled-jobs menu down.
       const intervalMs = Number(job.intervalMs);
       if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
       // Before the first fire there's no `lastRun`, so fall back to "now" —
@@ -164,8 +169,9 @@ export class SubagentScheduler {
       // intervalMs of correct in any pre-first-fire view.
       const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
       const next = base + intervalMs;
-      if (!Number.isFinite(next)) return undefined;
-      return new Date(next).toISOString();
+      const d = new Date(next);
+      if (Number.isNaN(d.getTime())) return undefined;
+      return d.toISOString();
     }
     return undefined;
   }
@@ -361,13 +367,16 @@ export class SubagentScheduler {
     const m = s.match(/^\+(\d+)(s|m|h|d)$/);
     if (!m) return null;
     const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
-    return new Date(Date.now() + ms).toISOString();
+    const d = new Date(Date.now() + ms);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString();
   }
 
-  /** "10s"/"5m"/"1h"/"2d" → milliseconds. */
+  /** "10s"/"5m"/"1h"/"2d" → milliseconds, or null when outside the Date range. */
   static parseInterval(s: string): number | null {
     const m = s.match(/^(\d+)(s|m|h|d)$/);
     if (!m) return null;
-    return parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    const ms = parseInt(m[1], 10) * { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] as "s" | "m" | "h" | "d"];
+    return Number.isFinite(ms) && !Number.isNaN(new Date(ms).getTime()) ? ms : null;
   }
 }
