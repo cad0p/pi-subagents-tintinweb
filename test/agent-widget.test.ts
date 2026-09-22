@@ -141,6 +141,10 @@ describe("AgentWidget", () => {
   });
 
   it("strips terminal controls from the live activity line", () => {
+    // Direct call pins truncateLine's own stripControlChars, which every widget
+    // call site would otherwise mask by piping the result through toSingleLine.
+    expect(describeActivity(new Map(), "x\u001b[2Jy")).toBe("xy");
+
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     const activity = makeActivity();
     activity.responseText = "x\u001b[2Jy\u001b]8;;https://evil.example\u0007link";
