@@ -152,7 +152,7 @@ Found 5 files related to authentication:
 - src/auth.ts
 ```
 
-The report is markdown-wrapped child output with terminal control sequences (OSC/CSI escapes, CR, and invisible format characters) stripped from the header, metadata, and body before it is rendered or persisted; markdown structure and body text are otherwise unchanged.
+The notification report is markdown-wrapped child output with terminal control sequences (OSC/CSI escapes, CR, and invisible format characters) stripped from the header, metadata, and body before the notification is rendered or persisted; markdown structure and body text are otherwise unchanged. The LLM-facing tool text (`get_subagent_result`, foreground `Agent` results) is unchanged: it keeps the raw bytes by design.
 
 Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 
@@ -331,7 +331,7 @@ The `/agents` command opens an interactive menu:
 Running agents (2) — 1 running, 1 done     ← only shown when agents exist
 Agent types (6)                             ← unified list: defaults + custom
 Create new agent                            ← manual wizard or AI-generated
-Settings                                    ← max concurrency, max turns, grace turns
+Settings                                    ← max concurrency, max turns, grace turns, failure preview max chars
 ```
 
 - **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion.
@@ -343,7 +343,7 @@ Settings                                    ← max concurrency, max turns, grac
 - **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
-- **Settings** — configure max concurrency, default max turns, and grace turns at runtime
+- **Settings** — configure max concurrency, default max turns, grace turns, and failure preview max chars at runtime
 
 ## Graceful Max Turns
 
