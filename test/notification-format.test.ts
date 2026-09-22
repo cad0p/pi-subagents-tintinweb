@@ -311,6 +311,7 @@ describe("markdown completion report", () => {
     const families = [
       "\u034f", // CGJ
       "\u{e0001}", // language tag
+      "\u{e0020}", // tag space — Tags range lower bound
       "\u{e0041}", // tag "A" — invisible ASCII payload
       "\u{e007f}", // cancel tag
       "\u115f", // Hangul choseong filler
