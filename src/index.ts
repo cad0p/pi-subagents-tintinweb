@@ -12,8 +12,8 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText } from "@earendil-works/pi-coding-agent";
+import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -189,6 +189,29 @@ const HEADER_PREVIEW_MAX_CHARS = 300; // ~one wrapped line; description/error ar
 /** Bound a sanitized header field to the shared preview cap, marking truncation. */
 function headerPreview(s: string): string {
   return s.length > HEADER_PREVIEW_MAX_CHARS ? `${safeTruncate(s, HEADER_PREVIEW_MAX_CHARS)}…` : s;
+}
+
+const INSTRUCTION_PREVIEW_SCAN_CHARS = 512;   // per-render sanitizer window for the steer preview
+const INSTRUCTION_PREVIEW_COLS = 80;          // column budget for the steer preview (Call 5a-i)
+
+/** Expanded body copy of a parent→child instruction — full text, no caps (Call 6). */
+function instructionBody(raw: string, theme: Pick<Theme, "fg">): string {
+  const text = stripControlChars(raw).trimEnd();
+  if (!text.trim()) return "";   // whitespace-only → no stray blank line (adv F9)
+  return text
+    .split("\n")
+    .map((l) => theme.fg("dim", `  ${l}`))
+    .join("\n");
+}
+
+/** Pure hint formatter — no global keybinding dependency, exported for tests (F2). */
+export function formatInstructionHint(key: string, theme: Pick<Theme, "fg">): string {
+  return key ? theme.fg("dim", ` (${key} to expand)`) : "";
+}
+
+/** ` (ctrl+o to expand)` for the user's current binding — omitted when unbound/headless. */
+function instructionHint(theme: Pick<Theme, "fg">): string {
+  return formatInstructionHint(keyText("app.tools.expand"), theme);
 }
 
 /** The settings contract for the failure preview cap: a positive integer within the settings ceiling. */
@@ -933,13 +956,20 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Custom rendering: Claude Code style ----
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       const displayName = typeof args.subagent_type === "string" ? toSingleLine(getDisplayName(args.subagent_type)) : "Agent";
-      const desc = typeof args.description === "string" ? toSingleLine(args.description) : "";
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
+      const desc = typeof args.description === "string" ? headerPreview(toSingleLine(args.description)) : "";
+      const marker = context.expanded ? "▾" : "▸";
+      let head = marker + " " + theme.fg("toolTitle", theme.bold(displayName));
+      if (desc) head += "  " + theme.fg("muted", desc);
+
+      const raw = typeof (args as { prompt?: unknown })?.prompt === "string" ? (args as { prompt: string }).prompt : "";
+      const body = instructionBody(raw, theme);
+      if (context.expanded && body) return new Text(head + "\n" + body, 0, 0);
+      return new Text(head, 0, 0);
     },
 
-    renderResult(result, { expanded, isPartial }, theme) {
+    renderResult(result, { expanded, isPartial }, theme, context) {
       const details = result.details as AgentDetails | undefined;
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
@@ -969,7 +999,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // ---- Background agent launched ----
       if (details.status === "background") {
-        return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`), 0, 0);
+        const hint = !expanded && typeof (context.args as { prompt?: unknown })?.prompt === "string"
+          ? instructionHint(theme)
+          : "";
+        return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})${hint}`), 0, 0);
       }
 
       // ---- Completed / Steered ----
@@ -1539,6 +1572,9 @@ Terse command-style prompts produce shallow, generic work.
 
   // ---- steer_subagent tool ----
 
+  type SteerOutcome = "sent" | "queued" | "not-found" | "not-running" | "failed";
+  const steerResult = (msg: string, steerOutcome: SteerOutcome) => textResult(msg, { steerOutcome });
+
   pi.registerTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
@@ -1554,20 +1590,77 @@ Terse command-style prompts produce shallow, generic work.
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
       }),
     }),
+
+    renderCall(args, theme, context) {
+      const a = (args ?? {}) as { agent_id?: unknown; message?: unknown };
+      const agentId = typeof a.agent_id === "string" ? a.agent_id : "";
+      const raw = typeof a.message === "string" ? a.message : "";
+      const state = context.state as { steerDesc?: string };
+
+      // Freeze the first resolved description so record eviction cannot flip the row.
+      if (!state.steerDesc && agentId) {
+        const desc = toSingleLine(manager.getRecord(agentId)?.description);
+        if (desc) state.steerDesc = desc;
+      }
+      // Both header parts are display copies: sanitize + cap (adv F3).
+      const target = headerPreview(state.steerDesc ?? "") || headerPreview(toSingleLine(agentId));
+
+      const marker = context.expanded ? "▾" : "▸";
+      let head = marker + " " + theme.fg("toolTitle", theme.bold("Steer"));
+      if (target) head += "  " + theme.fg("muted", target);
+
+      const body = instructionBody(raw, theme);
+      // Expanded: the result renderer owns the body once a result exists; while the
+      // call is still pending (no result applied, e.g. replay after an abort) the
+      // call shows it so the instruction is never invisible (adv F6).
+      if (context.expanded) {
+        return new Text(body && context.isPartial ? head + "\n" + body : head, 0, 0);
+      }
+
+      const plain = toSingleLine(safeTruncate(raw, INSTRUCTION_PREVIEW_SCAN_CHARS));
+      const shown = truncateToWidth(plain, INSTRUCTION_PREVIEW_COLS, "…");
+      // A blind 512-unit cut hides content without changing `plain` (adv F4).
+      const hidden = shown !== plain || raw.length > INSTRUCTION_PREVIEW_SCAN_CHARS || /[\n\r\t]/.test(raw);
+      if (!shown) return new Text(head + (hidden ? instructionHint(theme) : ""), 0, 0);
+      const hint = hidden ? instructionHint(theme) : "";
+      return new Text(head + "  " + theme.fg("muted", shown) + hint, 0, 0);
+    },
+
+    renderResult(result, { expanded }, theme, context) {
+      const outcome = (result.details as { steerOutcome?: SteerOutcome } | undefined)?.steerOutcome;
+      const failure = outcome === "not-found" || outcome === "not-running" || outcome === "failed";
+      // A synthetic abort/error result carries no details (adv F8).
+      const color = context.isError || failure ? "error" : "dim";
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const status = (typeof text === "string" ? stripControlChars(text) : "")
+        .trimEnd()
+        .split("\n")
+        .map((l) => theme.fg(color, `  ⎿  ${l}`))
+        .join("\n");
+      const raw = typeof (context.args as { message?: unknown })?.message === "string"
+        ? (context.args as { message: string }).message
+        : "";
+      const body = instructionBody(raw, theme);
+      if (expanded && body) {
+        return new Text(body + (status ? "\n" + status : ""), 0, 0);
+      }
+      return new Text(status, 0, 0);
+    },
+
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+        return steerResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`, "not-found");
       }
       if (record.status !== "running") {
-        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
+        return steerResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`, "not-running");
       }
       if (!record.session) {
         // Session not ready yet — queue the steer for delivery once initialized
         if (!record.pendingSteers) record.pendingSteers = [];
         record.pendingSteers.push(params.message);
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
-        return textResult(`Steering message queued for agent ${record.id}. It will be delivered once the session initializes.`);
+        return steerResult(`Steering message queued for agent ${record.id}. It will be delivered once the session initializes.`, "queued");
       }
 
       try {
@@ -1580,12 +1673,13 @@ Terse command-style prompts produce shallow, generic work.
         stateParts.push(`${record.toolUses} tool ${record.toolUses === 1 ? "use" : "uses"}`);
         if (contextPercent !== null) stateParts.push(`context ${Math.round(contextPercent)}% full`);
         if (record.compactionCount) stateParts.push(`${record.compactionCount} compaction${record.compactionCount === 1 ? "" : "s"}`);
-        return textResult(
+        return steerResult(
           `Steering message sent to agent ${record.id}. The agent will process it after its current tool execution.\n` +
           `Current state: ${stateParts.join(" · ")}`,
+          "sent",
         );
       } catch (err) {
-        return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
+        return steerResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`, "failed");
       }
     },
   }));
