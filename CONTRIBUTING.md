@@ -53,6 +53,9 @@ npm run build       # tsc
 All four must pass. `npm run lint:fix` will auto-fix most style issues, and
 `npm run test:e2e` runs the end-to-end suite if your change touches that surface.
 
+For the full pre-review checklist — manual TUI/session checks and evidence
+expectations — see [`docs/verification-checklist.md`](docs/verification-checklist.md).
+
 Other guidelines:
 
 - Keep PRs focused — one logical change per PR. Unrelated refactors make review
