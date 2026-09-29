@@ -11,9 +11,10 @@
  *
  * Hint tests deliberately avoid a global keymap: this repo's pnpm layout can
  * resolve two physical pi-tui copies, so a root-specifier `setKeybindings`
- * write does not reach pi-coding-agent's `keyText` instance. The pure
- * exported `formatInstructionHint` is unit-tested and renderer assertions use
- * the current `keyText("app.tools.expand")` output (empty headless).
+ * write does not reach pi-coding-agent's `keyText` instance. Instead the
+ * module is mocked so `keyText` returns `ctrl+o` and the renderers' hint path
+ * is asserted literally; the pure `formatInstructionHint` is unit-tested
+ * separately. Real binding resolution stays on the live checklist.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +26,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
   return { ...actual, runAgent: vi.fn() };
+});
+
+// The real `keyText` is empty headless, which would make every renderer hint
+// assertion vacuous. Mock it so the hint path is pinned literally.
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...actual, keyText: () => "ctrl+o" };
 });
 
 import { runAgent } from "../src/agent-runner.js";
@@ -50,7 +58,7 @@ function makeTheme(): StubTheme {
   };
 }
 
-/** The hint the renderer appends right now — empty headless/unbound. */
+/** The hint the renderer appends right now — ` (ctrl+o to expand)` under the mock. */
 function currentHint(theme: StubTheme): string {
   return formatInstructionHint(keyText("app.tools.expand"), theme);
 }
@@ -162,6 +170,7 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "x".repeat(200) }, theme);
       expect(stripAnsi(text)).toBe(`▸ Steer  abc  ${"x".repeat(79)}…` + currentHint(theme));
+      expect(stripAnsi(text)).toContain("(ctrl+o to expand)");
     });
 
     it("flattens a multi-line preview and keeps the content visible", () => {
@@ -250,14 +259,16 @@ describe("instruction rendering", () => {
       expect(args).toEqual({ agent_id: "abc", message: "keep\u001b[2Jthis\nnext\tline\rCR" });
     });
 
-    it("keeps the preview UTF-16 well-formed across the 512-unit window and the 80-column clip", () => {
+    it("keeps the preview UTF-16 well-formed when the clip boundary splits a surrogate", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      for (const message of ["a".repeat(510) + "😀tail", "a".repeat(511) + "😀tail", "a".repeat(512) + "😀tail"]) {
-        const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message }, theme);
-        const shown = text.slice("▸ Steer  ".length);
-        expect(isWellFormed(shown)).toBe(true);
-      }
+      // 78 ASCII columns + a 2-column emoji + tail: the 80-column clip lands
+      // inside the emoji, so the boundary must not emit half of it.
+      const message = "a".repeat(78) + "😀" + "tail";
+      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message }, theme);
+      expect(stripAnsi(text)).toBe(`▸ Steer  ${"a".repeat(78)}…` + currentHint(theme));
+      expect(isWellFormed(text)).toBe(true);
+      expect(text).not.toContain("tail");
     });
 
     it("bounds a CJK preview by columns, not code units", () => {
@@ -265,9 +276,20 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message: "漢".repeat(60) }, theme);
       const shown = stripAnsi(text).slice("▸ Steer  ".length);
-      expect(shown.endsWith("…")).toBe(true);
-      expect(shown.length).toBeLessThan(60);
-      expect(visibleWidth(shown)).toBeLessThanOrEqual(80);
+      const hint = currentHint(theme);
+      const preview = shown.slice(0, shown.length - hint.length);
+      expect(preview.endsWith("…")).toBe(true);
+      expect(preview.length).toBeLessThan(60);
+      expect(visibleWidth(preview)).toBeLessThanOrEqual(80);
+    });
+
+    it("does not build the expanded body on a collapsed render", () => {
+      const { tools } = registerTools();
+      const theme = makeTheme();
+      const message = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
+      renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message }, theme);
+      // The body path emits `  <line>`; a collapsed render must not reach it.
+      expect(theme.calls.some(([, text]) => text.startsWith("  line "))).toBe(false);
     });
 
     it("tolerates undefined args, {}, and non-string fields", () => {
@@ -405,6 +427,7 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "q".repeat(200) }, theme);
       expect(text.endsWith(currentHint(theme))).toBe(true);
+      expect(text).toContain("(ctrl+o to expand)");
       expect(text).not.toContain("( to expand)");
     });
   });
@@ -521,7 +544,7 @@ describe("instruction rendering", () => {
       expect(text).toContain(body);
     });
 
-    it("tolerates non-text content without throwing", () => {
+    it("renders an empty status for non-text content without throwing", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(
@@ -529,7 +552,8 @@ describe("instruction rendering", () => {
         { content: [{ type: "image", data: "aGk=", mimeType: "image/png" }], details: { steerOutcome: "sent" } },
         theme,
       );
-      expect(text).toBe("  ⎿  ");
+      expect(text).toBe("");
+      expect(text).not.toContain("⎿");
     });
 
     it("renders the same collapsed status for a partial result", () => {
@@ -633,6 +657,26 @@ describe("instruction rendering", () => {
       expect(text).toBe("▾ Agent  Find auth files\n  Search the repo.\n  List every file.");
     });
 
+    it("reveals the prompt for a resume call", () => {
+      const { tools } = registerTools();
+      const theme = makeTheme();
+      const text = renderCallText(
+        tools.get("Agent"),
+        { resume: "56493b20-4d5d-4de", description: "Continue auth work", prompt: "Pick up where you left off." },
+        theme,
+        { expanded: true },
+      );
+      expect(text).toBe("▾ Agent  Continue auth work\n  Pick up where you left off.");
+    });
+
+    it("does not build the prompt body on a collapsed render", () => {
+      const { tools } = registerTools();
+      const theme = makeTheme();
+      const prompt = Array.from({ length: 60 }, (_, i) => `p${i}`).join("\n");
+      renderCallText(tools.get("Agent"), { subagent_type: "general-purpose", description: "d", prompt }, theme);
+      expect(theme.calls.some(([, text]) => text.startsWith("  p"))).toBe(false);
+    });
+
     it("handles a partial or absent prompt without throwing", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
@@ -685,6 +729,7 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const text = renderResultText(tools.get("Agent"), background, theme, { args: { prompt: "do the thing" } });
       expect(text).toBe("  ⎿  Running in background (ID: id-1)" + currentHint(theme));
+      expect(text).toContain("(ctrl+o to expand)");
     });
 
     it("omits the hint when expanded or when no prompt exists", () => {

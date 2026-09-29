@@ -963,9 +963,11 @@ Terse command-style prompts produce shallow, generic work.
       let head = marker + " " + theme.fg("toolTitle", theme.bold(displayName));
       if (desc) head += "  " + theme.fg("muted", desc);
 
-      const raw = typeof (args as { prompt?: unknown })?.prompt === "string" ? (args as { prompt: string }).prompt : "";
-      const body = instructionBody(raw, theme);
-      if (context.expanded && body) return new Text(head + "\n" + body, 0, 0);
+      if (context.expanded) {
+        const raw = typeof (args as { prompt?: unknown })?.prompt === "string" ? (args as { prompt: string }).prompt : "";
+        const body = instructionBody(raw, theme);
+        if (body) return new Text(head + "\n" + body, 0, 0);
+      }
       return new Text(head, 0, 0);
     },
 
@@ -1609,12 +1611,13 @@ Terse command-style prompts produce shallow, generic work.
       let head = marker + " " + theme.fg("toolTitle", theme.bold("Steer"));
       if (target) head += "  " + theme.fg("muted", target);
 
-      const body = instructionBody(raw, theme);
       // Expanded: the result renderer owns the body once a result exists; while the
       // call is still pending (no result applied, e.g. replay after an abort) the
-      // call shows it so the instruction is never invisible (adv F6).
+      // call shows it so the instruction is never invisible (adv F6). The body is
+      // built only when it can be shown, so collapsed renders stay O(preview window).
       if (context.expanded) {
-        return new Text(body && context.isPartial ? head + "\n" + body : head, 0, 0);
+        const body = context.isPartial ? instructionBody(raw, theme) : "";
+        return new Text(body ? head + "\n" + body : head, 0, 0);
       }
 
       const plain = toSingleLine(safeTruncate(raw, INSTRUCTION_PREVIEW_SCAN_CHARS));
@@ -1632,11 +1635,10 @@ Terse command-style prompts produce shallow, generic work.
       // A synthetic abort/error result carries no details (adv F8).
       const color = context.isError || failure ? "error" : "dim";
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-      const status = (typeof text === "string" ? stripControlChars(text) : "")
-        .trimEnd()
-        .split("\n")
-        .map((l) => theme.fg(color, `  ⎿  ${l}`))
-        .join("\n");
+      const cleaned = typeof text === "string" ? stripControlChars(text).trimEnd() : "";
+      const status = cleaned.trim()
+        ? cleaned.split("\n").map((l) => theme.fg(color, `  ⎿  ${l}`)).join("\n")
+        : "";
       const raw = typeof (context.args as { message?: unknown })?.message === "string"
         ? (context.args as { message: string }).message
         : "";
