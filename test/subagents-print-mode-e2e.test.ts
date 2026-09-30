@@ -114,8 +114,9 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   });
 
   // The headless contract after removing foreground mode: `pi -p` returns at the
-  // parent settle, running children are aborted at shutdown, and no completion
-  // report is delivered. The hold design that would keep them alive lives in #35.
+  // parent settle and aborts running children at shutdown; the post-dispose
+  // completion send is discarded by the torn-down sender, so no report reaches
+  // the conversation. The hold design that would keep them alive lives in #35.
   it("headless print mode exits at the parent settle — the child is aborted and its report is not delivered (#35)", async () => {
     let releaseChild!: () => void;
     const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });

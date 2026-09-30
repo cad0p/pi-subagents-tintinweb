@@ -85,11 +85,12 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
-  /** Whether the run promise has fully unwound. Tri-state: `undefined` = this
-   *  record never started a run (fresh queued, or aborted while queued); `false`
-   *  = a run is in flight or a `stopped` run's promise is still settling; `true`
-   *  = the completion tail finished. Resuming keys on `=== false` so a record
-   *  that never ran is not blocked. */
+  /** Whether the run promise has fully unwound. Tri-state: `undefined` = no run
+   *  began (fresh queued, aborted while queued, or a start that failed in
+   *  `drainQueue` before the counter/`settled` write); `false` = a run is in
+   *  flight or a `stopped` run's promise is still settling; `true` = the
+   *  completion tail finished. Resuming keys on `=== false` so a record that
+   *  never ran is not blocked. */
   settled?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;

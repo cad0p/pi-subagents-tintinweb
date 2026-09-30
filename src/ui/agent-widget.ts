@@ -73,9 +73,9 @@ export interface AgentDetails {
   tokens: string;
   durationMs: number;
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
-  /** Human-readable description of what the agent is currently doing. */
+  /** Retained for legacy replay payloads only; no producer or renderer remains. */
   activity?: string;
-  /** Current spinner frame index (for animated running indicator). */
+  /** Retained for legacy replay payloads only; no producer or renderer remains. */
   spinnerFrame?: number;
   /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
   modelName?: string;
