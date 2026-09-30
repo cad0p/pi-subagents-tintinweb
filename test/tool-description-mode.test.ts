@@ -128,6 +128,18 @@ describe("toolDescriptionMode", () => {
     }
   });
 
+  it("the full Agent description no longer advertises the removed execution knobs", () => {
+    const desc: string = setup().get("Agent").description;
+    expect(desc).not.toContain("run_in_background");
+    expect(desc).not.toContain("sequentially");
+  });
+
+  it("the compact Agent description no longer advertises the removed execution knobs", () => {
+    const desc: string = setup({ toolDescriptionMode: "compact" }).get("Agent").description;
+    expect(desc).not.toContain("run_in_background");
+    expect(desc).not.toContain("sequentially");
+  });
+
   it("get_subagent_result carries the approved status/result contract and no run_in_background reference", () => {
     const tools = setup();
     const tool = tools.get("get_subagent_result");
