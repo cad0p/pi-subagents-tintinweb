@@ -119,7 +119,8 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   it("headless print mode exits at the parent settle — the child is aborted and its report is not delivered (#35)", async () => {
     let releaseChild!: () => void;
     const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
-    let childStarted = false;
+    let signalChildStarted!: () => void;
+    const childStarted = new Promise<void>((resolve) => { signalChildStarted = resolve; });
 
     run = await runPrintMode({
       prompt: "Spawn a background agent and do not wait for it.",
@@ -130,16 +131,20 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           const spawned = ctx.messages.some(
             (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
           );
-          return spawned ? "parent done" : agentCall({ description: "latched", prompt: "Wait for the gate." });
+          if (!spawned) return agentCall({ description: "latched", prompt: "Wait for the gate." });
+          // Settle only after the child has entered its own model call, so a
+          // genuinely running child is in flight at the parent settle.
+          await childStarted;
+          return "parent done";
         }
-        childStarted = true;
+        signalChildStarted();
         await childGate; // latch deterministically until the test releases it
         return "CHILD_TOKEN_SHOULD_NOT_APPEAR";
       },
     });
 
-    // The child is genuinely in flight at the parent settle.
-    await vi.waitFor(() => expect(childStarted).toBe(true));
+    // The parent settled after the child started, so its live record is the
+    // one captured here — no wall-clock wait on async startup.
     const records = run.manager?.listAgents() ?? run.subagents;
     const record = records.find((r) => r.description === "latched") as Record<string, unknown> | undefined;
     expect(record).toBeDefined();
