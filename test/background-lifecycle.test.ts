@@ -314,6 +314,7 @@ describe("background lifecycle — resume", () => {
     const id = await spawnSettled();
     const record = manager.getRecord(id)!;
     record.resultConsumed = true; // a prior pull the resume must not lose on rollback
+    record.turnCount = 7; // the prior run's final count
     const before = {
       status: record.status,
       result: record.result,
@@ -321,6 +322,7 @@ describe("background lifecycle — resume", () => {
       error: record.error,
       resultConsumed: record.resultConsumed,
       abortController: record.abortController,
+      turnCount: record.turnCount,
     };
 
     shouldThrow = true;
@@ -334,6 +336,30 @@ describe("background lifecycle — resume", () => {
     expect(record.error).toBe(before.error);
     expect(record.resultConsumed).toBe(before.resultConsumed);
     expect(record.abortController).toBe(before.abortController);
+    expect(record.turnCount).toBe(7);
+  });
+
+  it("rolls back and refuses when the runner throws synchronously on resume", async () => {
+    manager = new AgentManager(undefined, 1);
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    record.turnCount = 7;
+    const beforeController = record.abortController;
+    vi.mocked(resumeAgent).mockImplementation(() => { throw new Error("resume start failed"); });
+
+    expect(manager.resume(id, "more")).toBeUndefined();
+    // The pre-resume snapshot is restored, the slot is not held, and the run
+    // is not left looking active.
+    expect(record.status).toBe("completed");
+    expect(record.turnCount).toBe(7);
+    expect(record.abortController).toBe(beforeController);
+    expect(record.settled).toBe(true);
+
+    // The pool is balanced — a fresh spawn still runs.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const next = manager.spawn(mockPi, mockCtx, "X", "next", { description: "next" });
+    expect(manager.getRecord(next)!.status).toBe("running");
+    manager.abort(next);
   });
 
   it("a refused resume leaks no pool slot — a queued spawn still starts after the blocker settles", async () => {
