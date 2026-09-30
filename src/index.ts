@@ -174,19 +174,19 @@ function headerPreview(s: string): string {
 }
 
 const INSTRUCTION_PREVIEW_SCAN_CHARS = 512;   // per-render sanitizer window for the steer preview
-const INSTRUCTION_PREVIEW_COLS = 80;          // column budget for the steer preview (Call 5a-i)
+const INSTRUCTION_PREVIEW_COLS = 80;          // column budget for the steer preview
 
-/** Expanded body copy of a parent→child instruction — full text, no caps (Call 6). */
+/** Expanded body copy of a parent→child instruction — full text, no caps. */
 function instructionBody(raw: string, theme: Pick<Theme, "fg">): string {
   const text = stripControlChars(raw).trimEnd();
-  if (!text.trim()) return "";   // whitespace-only → no stray blank line (adv F9)
+  if (!text.trim()) return "";   // whitespace-only → no stray blank line
   return text
     .split("\n")
     .map((l) => theme.fg("dim", `  ${l}`))
     .join("\n");
 }
 
-/** Pure hint formatter — no global keybinding dependency, exported for tests (F2). */
+/** Pure hint formatter — no global keybinding dependency, exported for tests. */
 export function formatInstructionHint(key: string, theme: Pick<Theme, "fg">): string {
   return key ? theme.fg("dim", ` (${key} to expand)`) : "";
 }
@@ -1400,7 +1400,7 @@ Terse command-style prompts produce shallow, generic work.
         const desc = toSingleLine(manager.getRecord(agentId)?.description);
         if (desc) state.steerDesc = desc;
       }
-      // Both header parts are display copies: sanitize + cap (adv F3).
+      // Both header parts are display copies: sanitize + cap.
       const target = headerPreview(state.steerDesc ?? "") || headerPreview(toSingleLine(agentId));
 
       const marker = context.expanded ? "▾" : "▸";
@@ -1409,7 +1409,7 @@ Terse command-style prompts produce shallow, generic work.
 
       // Expanded: the result renderer owns the body once a result exists; while the
       // call is still pending (no result applied, e.g. replay after an abort) the
-      // call shows it so the instruction is never invisible (adv F6). The body is
+      // call shows it so the instruction is never invisible. The body is
       // built only when it can be shown, so collapsed renders stay O(preview window).
       if (context.expanded) {
         const body = context.isPartial ? instructionBody(raw, theme) : "";
@@ -1418,7 +1418,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const plain = toSingleLine(safeTruncate(raw, INSTRUCTION_PREVIEW_SCAN_CHARS));
       const shown = truncateToWidth(plain, INSTRUCTION_PREVIEW_COLS, "…");
-      // A blind 512-unit cut hides content without changing `plain` (adv F4).
+      // A blind 512-unit cut hides content without changing `plain`.
       const hidden = shown !== plain || raw.length > INSTRUCTION_PREVIEW_SCAN_CHARS || /[\n\r\t]/.test(raw);
       if (!shown) return new Text(head + (hidden ? instructionHint(theme) : ""), 0, 0);
       const hint = hidden ? instructionHint(theme) : "";
@@ -1428,7 +1428,7 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, { expanded }, theme, context) {
       const outcome = (result.details as { steerOutcome?: SteerOutcome } | undefined)?.steerOutcome;
       const failure = outcome === "not-found" || outcome === "not-running" || outcome === "failed";
-      // A synthetic abort/error result carries no details (adv F8).
+      // A synthetic abort/error result carries no details.
       const color = context.isError || failure ? "error" : "dim";
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
       const cleaned = typeof text === "string" ? stripControlChars(text).trimEnd() : "";

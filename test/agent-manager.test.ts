@@ -765,9 +765,6 @@ describe("AgentManager — abort() state machine", () => {
   });
 });
 
-// Regression for #44: ESC during a parent turn delivers a parent AbortSignal;
-// the manager wires the signal's "abort" event to this.abort(id) for callers
-// that opt in to forwarding one.
 describe("AgentManager — steer()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -815,6 +812,9 @@ describe("AgentManager — steer()", () => {
   });
 });
 
+// Regression for #44: ESC during a parent turn delivers a parent AbortSignal;
+// the manager wires the signal's "abort" event to this.abort(id), stopping the
+// child.
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
