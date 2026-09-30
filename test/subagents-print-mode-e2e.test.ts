@@ -15,7 +15,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentCall,
@@ -145,10 +145,15 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   // completion send is discarded by the torn-down sender, so no report reaches
   // the conversation. The hold design that would keep them alive lives in #35.
   it("headless print mode exits at the parent settle — the child is aborted and its report is not delivered (#35)", async () => {
+    // The child produces a marker in a first turn, then latches on its next
+    // model call. The marker is therefore part of the child's accumulated
+    // output before dispose, so a report delivered before shutdown would be
+    // observable — unlike a token that only exists after the post-dispose release.
+    const CHILD_MARKER = "CHILD_PRE_MARKER_SHOULD_NOT_APPEAR";
     let releaseChild!: () => void;
     const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
-    let signalChildStarted!: () => void;
-    const childStarted = new Promise<void>((resolve) => { signalChildStarted = resolve; });
+    let signalChildLatched!: () => void;
+    const childLatched = new Promise<void>((resolve) => { signalChildLatched = resolve; });
 
     run = await runPrintMode({
       prompt: "Spawn a background agent and do not wait for it.",
@@ -160,23 +165,33 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
             (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
           );
           if (!spawned) return agentCall({ description: "latched", prompt: "Wait for the gate." });
-          // Settle only after the child has entered its own model call, so a
-          // genuinely running child is in flight at the parent settle.
-          await childStarted;
+          // Settle only after the child has produced its marker and latched, so
+          // a genuinely running child is in flight at the parent settle.
+          await childLatched;
           return "parent done";
         }
-        signalChildStarted();
+        const producedMarker = ctx.messages.some(
+          (m) => m.role === "assistant" && JSON.stringify(m.content).includes(CHILD_MARKER),
+        );
+        if (!producedMarker) {
+          return [fauxText(CHILD_MARKER), fauxToolCall("bash", { command: "true" })];
+        }
+        signalChildLatched();
         await childGate; // latch deterministically until the test releases it
         return "CHILD_TOKEN_SHOULD_NOT_APPEAR";
       },
     });
 
-    // The parent settled after the child started, so its live record is the
-    // one captured here — no wall-clock wait on async startup.
+    // The parent settled after the child marker was produced, so its live record
+    // is the one captured here — no wall-clock wait on async startup.
     const records = run.manager?.listAgents() ?? run.subagents;
     const record = records.find((r) => r.description === "latched") as Record<string, unknown> | undefined;
     expect(record).toBeDefined();
     expect(record!.status).toBe("running");
+    // The marker is in the child's transcript before dispose, so the parent
+    // assertion below cannot pass vacuously.
+    const childSession = record!.session as { messages: unknown[] };
+    expect(JSON.stringify(childSession.messages)).toContain(CHILD_MARKER);
     const capturedPromise = record!.promise as Promise<unknown>;
     const parentSession = run.parentSession;
 
@@ -191,6 +206,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 
     expect(record!.status).toBe("stopped");
     const transcript = conversationText(parentSession);
+    expect(transcript).not.toContain(CHILD_MARKER);
     expect(transcript).not.toContain("CHILD_TOKEN_SHOULD_NOT_APPEAR");
     expect(transcript).not.toMatch(/Subagent (completed|error|stopped)/);
   });
