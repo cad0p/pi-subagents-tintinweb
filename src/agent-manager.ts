@@ -394,7 +394,7 @@ export class AgentManager {
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
-        this.onComplete?.(record);
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
     }
   }
