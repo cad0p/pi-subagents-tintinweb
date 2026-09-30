@@ -298,6 +298,8 @@ Launch a sub-agent.
 | `isolation` | `"worktree"` | no | Run in an isolated git worktree |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
+Press ctrl+o to show the initial prompt in the tool row (the collapsed row shows only the type and description).
+
 ### `get_subagent_result`
 
 Check status and retrieve results from a background agent.
@@ -314,6 +316,8 @@ Send a steering message to a running agent. The message interrupts after the cur
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
+
+The message shows as a one-line preview in the tool row; press ctrl+o to expand the full text.
 
 ### `checkpoint`
 

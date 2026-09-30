@@ -90,6 +90,9 @@ const mockTheme = {
   bold: (text: string) => `**${text}**`,
 };
 
+/** Minimal ToolRenderContext for direct renderCall calls (the renderer reads `expanded`). */
+const renderCallContext = { args: {}, state: {}, expanded: false, isPartial: false, isError: false };
+
 /** Set by the out-of-contract cap test before extension init; the settings mock
  *  forwards it to the real loader's appliers. */
 let capOverride: number | undefined;
@@ -420,6 +423,7 @@ describe("foreground Agent result rendering", () => {
     const rendered = tools.get("Agent").renderCall(
       { subagent_type: "general-purpose", description: `find${control}files` },
       mockTheme,
+      renderCallContext,
     );
     expect(rendered.text).not.toContain("\u001b");
     expect(rendered.text).not.toContain("[2J");
@@ -446,6 +450,7 @@ describe("foreground Agent result rendering", () => {
     const rendered = tools.get("Agent").renderCall(
       { subagent_type: "general-purpose", description: "find\nfiles\tnow" },
       mockTheme,
+      renderCallContext,
     );
     expect(rendered.text).not.toContain("\n");
     expect(rendered.text).not.toContain("\t");
@@ -459,6 +464,7 @@ describe("foreground Agent result rendering", () => {
     const rendered = tools.get("Agent").renderCall(
       { subagent_type: "general-purpose", description: 42 as any },
       mockTheme,
+      renderCallContext,
     );
     expect(rendered.text).toContain("Agent");
     expect(rendered.text).not.toContain("42");
@@ -471,6 +477,7 @@ describe("foreground Agent result rendering", () => {
     const rendered = tools.get("Agent").renderCall(
       { subagent_type: 42 as any, description: "x" },
       mockTheme,
+      renderCallContext,
     );
     expect(rendered.text).toContain("Agent");
     expect(rendered.text).not.toContain("42");
@@ -490,7 +497,7 @@ describe("foreground Agent result rendering", () => {
       );
       registerAgents(loadCustomAgents(dir));
 
-      const rendered = tools.get("Agent").renderCall({ subagent_type: "evil", description: "x" }, mockTheme);
+      const rendered = tools.get("Agent").renderCall({ subagent_type: "evil", description: "x" }, mockTheme, renderCallContext);
       expect(rendered.text).not.toContain(control);
       expect(rendered.text).not.toContain("\nforged");
       expect(rendered.text).toContain("evil forged");
