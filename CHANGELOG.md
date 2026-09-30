@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Drop prepublishOnly gate from npm publish path ([#20](https://github.com/cad0p/pi-subagents-tintinweb/pull/20))
 - Publish-blocking tsc error against current pi types ([#21](https://github.com/cad0p/pi-subagents-tintinweb/pull/21))
 - Drop upstream tintinweb media URLs from pi manifest (fork) ([#23](https://github.com/cad0p/pi-subagents-tintinweb/pull/23))
+- Declare @sinclair/typebox as a peer dependency (closes #33)
 
 ### ⚙️ Miscellaneous Tasks
 
