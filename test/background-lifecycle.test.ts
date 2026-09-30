@@ -230,14 +230,22 @@ describe("background lifecycle — resume", () => {
     await record.promise;
   });
 
-  it("does not treat a never-started record (settled undefined) as winding down", async () => {
-    manager = new AgentManager();
-    const id = await spawnSettled();
-    const record = manager.getRecord(id)!;
-    record.settled = undefined;
-    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed" });
-    expect(manager.resume(id, "more")).toBe(record);
-    await record.promise;
+  it("refuses a record aborted while queued through the session guard, not the winding-down guard", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    // Occupy the only slot, then queue a second record that never starts.
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
+    const record = manager.getRecord(queued)!;
+    expect(record.status).toBe("queued");
+    expect(record.session).toBeUndefined();
+    expect(record.settled).toBeUndefined();
+
+    manager.abort(queued);
+    expect(record.status).toBe("stopped");
+    vi.mocked(resumeAgent).mockClear();
+    expect(manager.resume(queued, "more")).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
   });
 
   it("keeps a stopped resume stopped instead of overwriting it", async () => {
@@ -530,6 +538,47 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(handle.getRecord(id1).status).toBe("running");
     expect(handle.getRecord(id2).status).toBe("queued");
     expect(handle.hasRunning()).toBe(true);
+  });
+
+  it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const { pi, tools, lifecycle, busHandlers } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
+    await lifecycle.get("session_start")({}, bindCtx);
+
+    await tools.get("Agent").execute(
+      "tc-block",
+      { prompt: "a", description: "a", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const queued = await tools.get("Agent").execute(
+      "tc-queued",
+      { prompt: "b", description: "b", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(queued);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    expect(handle.getRecord(id).status).toBe("queued");
+
+    // The real stop path pulls the queued record and leaves it session-less.
+    await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-queued", agentId: id });
+    expect(handle.getRecord(id).status).toBe("stopped");
+
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    // The active-status guard does not claim a queued-then-stopped record; the
+    // session guard is what refuses it.
+    expect(textOf(resume)).toBe(`Agent "${id}" has no active session to resume.`);
   });
 
   it("returns a background envelope from a resume and re-attaches the transcript", async () => {
