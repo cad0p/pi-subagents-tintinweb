@@ -529,7 +529,9 @@ describe("background lifecycle — model-visible surfaces", () => {
 
     busHandlers.get("subagents:rpc:spawn")!({ requestId: "r1", type: "general-purpose", prompt: "a" });
     await vi.waitFor(() => expect(replyFor("r1")).toBeDefined());
-    busHandlers.get("subagents:rpc:spawn")!({ requestId: "r2", type: "general-purpose", prompt: "b" });
+    // A caller-supplied isBackground is ignored: the record still queues behind
+    // the full pool exactly like a spawn that omits it.
+    busHandlers.get("subagents:rpc:spawn")!({ requestId: "r2", type: "general-purpose", prompt: "b", options: { isBackground: false } });
     await vi.waitFor(() => expect(replyFor("r2")).toBeDefined());
 
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];

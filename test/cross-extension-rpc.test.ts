@@ -99,6 +99,25 @@ describe("cross-extension RPC", () => {
       );
     });
 
+    it("forwards a caller-supplied isBackground unchanged and still spawns it", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s2b", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s2b", type: "general-purpose", prompt: "do stuff",
+        options: { isBackground: false },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      // The flag is neither declared nor interpreted any more: the record is
+      // created through the same pooled manager.spawn path as any other spawn.
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "do stuff",
+        { isBackground: false },
+      );
+    });
+
     it("returns error when no active session", async () => {
       ctx = undefined;
       registerRpcHandlers(deps);
