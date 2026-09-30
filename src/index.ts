@@ -328,6 +328,10 @@ export default function (pi: ExtensionAPI) {
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const parkedNudges = new Map<string, () => void>();
   const NUDGE_HOLD_MS = 200;
+  /** Poll interval while the wizard waits for a queued generator to start. The
+   *  wizard is interactive, so it re-checks the record until it leaves `queued`
+   *  (or is stopped) instead of blocking on a promise that does not exist yet. */
+  const WIZARD_QUEUE_POLL_MS = 100;
   let mainTurnActive = false;
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
@@ -2012,7 +2016,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       return;
     }
     const record = manager.getRecord(id)!;
-    while (record.status === "queued") await new Promise((r) => setTimeout(r, 100));  // exit on stopped too
+    while (record.status === "queued") await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));  // exit on stopped too
     await record.promise;                       // undefined when stopped-while-queued → resolves
     if (record.status === "error") { ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning"); return; }
     if (record.status === "stopped") { ctx.ui.notify("Generation cancelled.", "info"); return; }
