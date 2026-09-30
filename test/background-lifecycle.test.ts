@@ -28,6 +28,12 @@ const mockSession = () => ({
   subscribe: () => () => {},
 } as any);
 
+/** Minimal theme for asserting rendered widget text (colors stay legible wrappers). */
+const mockTheme = {
+  fg: (color: string, text: string) => `[${color}]${text}[/${color}]`,
+  bold: (text: string) => `**${text}**`,
+};
+
 function resolvedRun(responseText = "done") {
   return vi.mocked(runAgent).mockResolvedValue({
     responseText,
@@ -623,11 +629,11 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(payload.id).toBe(id);
   });
 
-  it("seeds the resumed activity state with the existing session", async () => {
+  it("seeds the resumed activity state so the widget renders the resumed context fill", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools, lifecycle } = makeRpcPi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -641,21 +647,44 @@ describe("background lifecycle — model-visible surfaces", () => {
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
     await handle.getRecord(id).promise;
 
-    // The activity state lives in a closure-local map; the shared Map#set is the
-    // only readout, so capture the state the resume branch registers.
-    const setSpy = vi.spyOn(Map.prototype, "set");
-    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+    // The context fill is computed from the activity state's session, not the
+    // record's. Bind the widget's UI ctx, then read the factory it hands to
+    // `ui.setWidget` when the resumed run (running) starts it.
+    const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
+    await lifecycle.get("tool_execution_start")({}, { ui });
+    handle.getRecord(id).session = {
+      ...mockSession(),
+      getSessionStats: () => ({
+        tokens: { input: 1000, output: 0, cacheWrite: 0 },
+        contextUsage: { percent: 42, contextWindow: 200_000 },
+      }),
+    };
+
+    // The resume starts a fresh activity state with its session seeded from the
+    // record and stamps usage; if the session is not seeded, the readout loses
+    // the `(42%)` context annotation while still showing the token count.
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation((_session, _prompt, opts: any) => {
+      opts.onAssistantUsage({ input: 1000, output: 0, cacheWrite: 0 });
+      return new Promise((r) => { resolveResume = r; });
+    });
     await tools.get("Agent").execute(
       "tc-resume",
       { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
-      undefined, undefined, spawnCtx(tmpDir),
+      undefined, undefined, { ...spawnCtx(tmpDir), ui },
     );
 
-    const entry = setSpy.mock.calls.find(([key, value]) =>
-      key === id && value !== null && typeof value === "object" && "activeTools" in value,
-    );
-    expect(entry).toBeDefined();
-    expect((entry![1] as { session?: unknown }).session).toBe(handle.getRecord(id).session);
+    const widgetFactory = ui.setWidget.mock.calls.find(
+      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+    )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
+    expect(widgetFactory).toBeTypeOf("function");
+    const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)
+      .render()
+      .join("\n");
+    expect(rendered).toContain("42%");
+
+    resolveResume({ text: "second" });
+    await handle.getRecord(id).promise;
   });
 
   it("steers a queued agent through the steer_subagent tool", async () => {
