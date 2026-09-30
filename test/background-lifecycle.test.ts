@@ -148,21 +148,41 @@ describe("background lifecycle — resume", () => {
     expect(record.result).toBe("second");
   });
 
-  it("refuses to resume a running agent", async () => {
+  it("refuses to resume a running agent through the active-status guard", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    // Past the !session guard: a running agent with a live session must still be refused.
+    record.session = mockSession();
+    expect(record.session).toBeDefined();
     expect(manager.resume(id, "more")).toBeUndefined();
     manager.abort(id);
   });
 
-  it("refuses to resume a queued agent", async () => {
+  it("refuses to resume a queued agent through the active-status guard, not the session guard", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     manager.spawn(mockPi, mockCtx, "X", "p1", { description: "block" });
     const queued = manager.spawn(mockPi, mockCtx, "X", "p2", { description: "queued" });
-    expect(manager.getRecord(queued)!.status).toBe("queued");
+    const record = manager.getRecord(queued)!;
+    expect(record.status).toBe("queued");
+    // A queued record has settled === undefined, so with a session present the
+    // active-status guard is the only one that can refuse this resume.
+    record.session = mockSession();
     expect(manager.resume(queued, "more")).toBeUndefined();
+  });
+
+  it("refuses a completed record whose session is gone (the session guard)", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("completed");
+    expect(record.settled).toBe(true);
+    record.session = undefined; // e.g. a record restored without its session
+    vi.mocked(resumeAgent).mockClear();
+    expect(manager.resume(id, "more")).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
   });
 
   it("refuses to resume while the prior run is winding down, then allows it once settled", async () => {
