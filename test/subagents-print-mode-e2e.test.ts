@@ -71,6 +71,33 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
 
+  it("accepts a stale run_in_background argument through real tool-call validation", async () => {
+    run = await runPrintMode({
+      prompt: "Delegate despite the stale execution flag.",
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "general-purpose",
+          description: "stale flag",
+          prompt: "Reply with STALE_ARG_OK.",
+          run_in_background: true,
+        }),
+        parentFinal: "Relayed.",
+        subagent: "STALE_ARG_OK",
+      }),
+    });
+
+    // The model actually emitted the undeclared key — so the assertions below
+    // exercise real pi-ai validation, not a fixture that dropped it.
+    expect(agentToolCalls(run.parentSession)[0].run_in_background).toBe(true);
+    // Real pi-ai validation accepted the undeclared key (Type.Object emits no
+    // additionalProperties:false), so the spawn still backgrounded and the child's
+    // output arrived through the held completion notification.
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain("STALE_ARG_OK");
+    });
+  });
+
   it("the hold condition is load-bearing: it keeps a BACKGROUND child alive (vs abandoned without it)", async () => {
     // The child takes a beat to "think" (a real delay in its faux turn). That
     // delay is what makes the contrast causal and deterministic:

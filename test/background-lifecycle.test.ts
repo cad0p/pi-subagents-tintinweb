@@ -485,6 +485,35 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.result).toBe("second");
   });
 
+  it("returns the still-active envelope when resuming a running agent", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const { pi, tools } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    expect(textOf(resume)).toBe(
+      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
+    );
+    // The tool-level guard fires before the manager is ever touched.
+    expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("running");
+  });
+
   it("seeds the resumed activity state with the existing session", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);

@@ -31,7 +31,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
 vi.mock("../src/settings.js", async (importOriginal) => {
@@ -50,7 +50,7 @@ vi.mock("../src/settings.js", async (importOriginal) => {
   };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
@@ -228,6 +228,52 @@ describe("turn-gated completion notifications", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(pi.sendMessage.mock.calls[0][0].customType).toBe("subagent-notification");
+  });
+
+  it("a successful resume cancels the prior run's armed nudge and notifies once for the resume", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    // The prior run completes while the main session is idle, so its nudge is
+    // armed as a real 200ms timer (not parked).
+    const childSession = { dispose: vi.fn(), sessionId: "child-session", messages: [], subscribe: () => () => {} };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "FIRST-RESULT",
+      session: childSession as any,
+      aborted: false,
+      steered: false,
+    });
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "first task", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    await vi.advanceTimersByTimeAsync(100); // halfway through the hold
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    // Resume before the armed nudge fires; the resumed run is held open.
+    let resolveResume!: (v: { text: string }) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "first task", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, ctx(),
+    );
+    expect(textOf(resume)).toContain("Agent resumed in background.");
+
+    // A resume cancels the prior run's still-armed nudge — no stale notification.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    // The resumed completion arms and fires its own notification.
+    resolveResume({ text: "SECOND-RESULT" });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.content).toContain("SECOND-RESULT");
+    expect(payload.content).not.toContain("FIRST-RESULT");
   });
 
   it("warns with the agent id instead of dropping silently when the send throws", async () => {
