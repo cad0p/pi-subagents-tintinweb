@@ -755,6 +755,38 @@ describe("agents command terminal surfaces", () => {
     return { c, notifications, selects };
   }
 
+  /** pi mock that also captures the `pi.events.on` handlers, so a test can drive
+   *  the stop RPC (the real `manager.abort` path) against a running/queued record. */
+  function busPi() {
+    const tools = new Map<string, any>();
+    const lifecycle = new Map<string, any>();
+    const commands = new Map<string, any>();
+    const busHandlers = new Map<string, (raw: any) => unknown>();
+    const pi = {
+      registerTool: vi.fn((t: any) => tools.set(t.name, t)),
+      registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
+      on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
+      events: {
+        emit: vi.fn(),
+        on: vi.fn((event: string, handler: (raw: any) => unknown) => {
+          busHandlers.set(event, handler);
+          return vi.fn();
+        }),
+      },
+      appendEntry: vi.fn(),
+      sendMessage: vi.fn(),
+    } as any;
+    return { pi, tools, lifecycle, commands, busHandlers };
+  }
+
+  /** The select answers that route the `/agents` command into the generate wizard. */
+  function generateAnswers(title: string) {
+    if (title === "Agents") return "Create new agent";
+    if (title === "Choose location") return "Project (.pi/agents/)";
+    if (title === "Creation method") return "Generate with Claude (recommended)";
+    return undefined;
+  }
+
   it("sanitizes record fields in the running-agents menu and the stop notification", async () => {
     const control = "\u001b]52;c;cGF3bmVk\u0007";
     const description = `desc${control}tail\nforged`;
@@ -1105,6 +1137,203 @@ describe("agents command terminal surfaces", () => {
           expect.anything(),
         );
       });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("waits out a queued generator and toasts Created once the pool frees", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-queued-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+      const targetPath = join(cwd, ".pi", "agents", "gen-queued.md");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
+        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+          mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+          writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
+          return Promise.resolve({ responseText: "created", session: { dispose: vi.fn() } as any, aborted: false, steered: false });
+        }
+        return new Promise((r) => { releaseFiller = r; });
+      });
+
+      const { pi, tools, lifecycle, commands } = busPi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      // Occupy the only slot so the generation has to queue.
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a queued agent").mockResolvedValueOnce("gen-queued");
+
+      const handler = commands.get("agents").handler("", c);
+      await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-queued agent");
+        expect(rec?.status).toBe("queued");
+      });
+
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+      await handler;
+
+      expect(
+        notifications.map(n => n.message).some(m => m.startsWith("Created ") && m.endsWith("gen-queued.md")),
+      ).toBe(true);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a queued generator when its record is stopped", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-qcancel-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { releaseFiller = r; }));
+
+      const { pi, tools, lifecycle, commands, busHandlers } = busPi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a queued agent").mockResolvedValueOnce("gen-qcancel");
+
+      const handler = commands.get("agents").handler("", c);
+      const queuedId = await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-qcancel agent");
+        expect(rec?.status).toBe("queued");
+        return rec.id as string;
+      });
+
+      // The real stop path removes the queued record and marks it stopped.
+      await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-q", agentId: queuedId });
+      await handler;
+
+      const messages = notifications.map(n => n.message);
+      expect(messages).toContain("Generation cancelled.");
+      expect(messages.some(m => m.startsWith("Created "))).toBe(false);
+      expect(messages.some(m => m.includes("file was not created"))).toBe(false);
+
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a running generator when its record is stopped", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-rcancel-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      // The generation run stays in flight until the abort signal settles it.
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts: any) =>
+        new Promise((resolve) => {
+          opts.signal.addEventListener("abort", () =>
+            resolve({ responseText: "", aborted: true, steered: false, session: undefined }), { once: true });
+        }),
+      );
+
+      const { pi, lifecycle, commands, busHandlers } = busPi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a running agent").mockResolvedValueOnce("gen-rcancel");
+
+      const handler = commands.get("agents").handler("", c);
+      const runningId = await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-rcancel agent");
+        expect(rec?.status).toBe("running");
+        return rec.id as string;
+      });
+
+      await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-r", agentId: runningId });
+      await handler;
+
+      const messages = notifications.map(n => n.message);
+      expect(messages).toContain("Generation cancelled.");
+      expect(messages.some(m => m.startsWith("Created "))).toBe(false);
+      expect(messages.some(m => m.includes("file was not created"))).toBe(false);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("reports Generation failed when a queued generator fails to start", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-drainfail-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
+        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+          throw new Error("drain start failed");
+        }
+        return new Promise((r) => { releaseFiller = r; });
+      });
+
+      const { pi, tools, lifecycle, commands } = busPi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a failing agent").mockResolvedValueOnce("gen-drainfail");
+
+      const handler = commands.get("agents").handler("", c);
+      await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-drainfail agent");
+        expect(rec?.status).toBe("queued");
+      });
+
+      // Freeing the slot drains the queue; the generation's startAgent throws.
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+      await handler;
+
+      const failed = notifications.find(n => n.message.startsWith("Generation failed"));
+      expect(failed).toBeDefined();
+      expect(failed?.message).toContain("drain start failed");
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
