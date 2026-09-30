@@ -410,6 +410,7 @@ export class AgentManager {
       result: record.result,
       error: record.error,
       resultConsumed: record.resultConsumed,
+      abortController: record.abortController,
     };
     record.status = "running";
     record.startedAt = Date.now();

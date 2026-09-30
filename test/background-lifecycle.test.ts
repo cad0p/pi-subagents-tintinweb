@@ -244,18 +244,35 @@ describe("background lifecycle — resume", () => {
 
   it("rolls the record back and refuses when the started listener throws", async () => {
     let shouldThrow = false;
-    manager = new AgentManager(undefined, 4, () => {
-      if (shouldThrow) throw new Error("stale extension context");
+    let seenController: AbortController | undefined;
+    manager = new AgentManager(undefined, 4, (rec) => {
+      if (!shouldThrow) return;
+      seenController = rec.abortController;
+      throw new Error("stale extension context");
     });
     const id = await spawnSettled();
     const record = manager.getRecord(id)!;
-    const before = { status: record.status, result: record.result, completedAt: record.completedAt };
+    record.resultConsumed = true; // a prior pull the resume must not lose on rollback
+    const before = {
+      status: record.status,
+      result: record.result,
+      completedAt: record.completedAt,
+      error: record.error,
+      resultConsumed: record.resultConsumed,
+      abortController: record.abortController,
+    };
 
     shouldThrow = true;
     expect(manager.resume(id, "more")).toBeUndefined();
+    // A fresh controller was swapped in before the listener ran...
+    expect(seenController).not.toBe(before.abortController);
+    // ...and the rollback restored the pre-resume record, controller included.
     expect(record.status).toBe(before.status);
     expect(record.result).toBe(before.result);
     expect(record.completedAt).toBe(before.completedAt);
+    expect(record.error).toBe(before.error);
+    expect(record.resultConsumed).toBe(before.resultConsumed);
+    expect(record.abortController).toBe(before.abortController);
   });
 
   it("forwards activity callbacks and stamps the record", async () => {

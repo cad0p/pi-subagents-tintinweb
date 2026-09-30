@@ -1106,11 +1106,13 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
         if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
-        cancelNudge(params.resume);
         const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(existing.effectiveMaxTurns);
         const resumeStart = existing.session.messages.length;
         const record = manager.resume(params.resume, params.prompt, resumeCallbacks);
         if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
+        // Only once the resume is accepted — a refused resume must not drop the
+        // prior run's still-pending completion nudge.
+        cancelNudge(params.resume);
         agentActivity.set(record.id, resumeState);
         if (record.outputFile && record.session) {
           record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);
