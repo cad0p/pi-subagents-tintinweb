@@ -196,16 +196,21 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   });
 
   it("delivers one markdown notification per background agent, in completion order", async () => {
-    // The first child finishes first (the second one sleeps), so the two
-    // notifications fire in a deterministic order: first bg, then second bg.
+    // Deterministic ordering: the second child's turn does not return until the
+    // first child's run has fully unwound (its completion notification
+    // enqueued), so both run concurrently but completion order is fixed.
     const respond = async (ctx: Context) => {
       const isParent = (ctx.tools ?? []).some((t) => t.name === "Agent");
       if (!isParent) {
         const prompt = ctx.messages
           .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
           .join("\n");
-        if (prompt.includes("Reply with BETA")) await new Promise((r) => setTimeout(r, 80));
-        return prompt.includes("Reply with ALPHA") ? "ALPHA-OUTPUT" : "BETA-OUTPUT";
+        if (prompt.includes("Reply with ALPHA")) return "ALPHA-OUTPUT";
+        const manager = (globalThis as Record<symbol, any>)[Symbol.for("pi-subagents:manager")];
+        const first = manager?.listAgents?.().find((r: { description?: string }) => r.description === "first bg");
+        if (!first?.promise) throw new Error("first child not started");
+        await first.promise;
+        return "BETA-OUTPUT";
       }
       const spawned = ctx.messages.some(
         (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
