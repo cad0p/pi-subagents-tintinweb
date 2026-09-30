@@ -250,8 +250,10 @@ export class AgentManager {
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
     this.runningBackground++;
+    const priorSettled = record.settled;
     record.settled = false;
-    const promise = runAgent(ctx, type, prompt, {
+    try {
+      const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
       model: options.model,
@@ -357,7 +359,15 @@ export class AgentManager {
       })
       .finally(() => this.afterRun(record));
 
-    record.promise = promise;
+      record.promise = promise;
+    } catch (err) {
+      // A synchronous throw from the runner never wires the completion chain:
+      // release the slot and restore `settled` before surfacing the error.
+      this.runningBackground--;
+      record.settled = priorSettled;
+      detach();
+      throw err;
+    }
   }
 
   /** Shared completion tail: release the slot, flush the transcript, notify, drain. */
@@ -412,6 +422,7 @@ export class AgentManager {
       resultConsumed: record.resultConsumed,
       abortController: record.abortController,
       turnCount: record.turnCount,
+      settled: record.settled,
     };
     record.status = "running";
     record.startedAt = Date.now();
@@ -432,7 +443,8 @@ export class AgentManager {
     }
     record.settled = false;
     this.runningBackground++; // counted while running; a resume never queues
-    const promise = resumeAgent(record.session, prompt, {
+    try {
+      const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         callbacks?.onToolActivity?.(activity);
@@ -470,7 +482,14 @@ export class AgentManager {
         return "";
       })
       .finally(() => this.afterRun(record));
-    record.promise = promise;
+      record.promise = promise;
+    } catch {
+      // A synchronous throw from the runner never wires the completion chain:
+      // restore the pre-resume snapshot and refuse, like the started-listener path.
+      this.runningBackground--;
+      Object.assign(record, prior);
+      return undefined;
+    }
     return record;
   }
 

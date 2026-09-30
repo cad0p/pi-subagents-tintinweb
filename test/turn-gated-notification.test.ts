@@ -1301,7 +1301,7 @@ describe("agents command terminal surfaces", () => {
       let releaseFiller!: (v: any) => void;
       vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
         if (prompt.includes("Create a custom pi sub-agent definition file")) {
-          throw new Error("drain start failed");
+          return Promise.reject(new Error("drain start failed"));
         }
         return new Promise((r) => { releaseFiller = r; });
       });
@@ -1327,13 +1327,84 @@ describe("agents command terminal surfaces", () => {
         expect(rec?.status).toBe("queued");
       });
 
-      // Freeing the slot drains the queue; the generation's startAgent throws.
+      // Freeing the slot drains the queue; the generation's start rejects.
       releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
       await handler;
 
       const failed = notifications.find(n => n.message.startsWith("Generation failed"));
       expect(failed).toBeDefined();
       expect(failed?.message).toContain("drain start failed");
+
+      // The failed start released its slot — a fresh spawn still runs.
+      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+      await tools.get("Agent").execute(
+        "tc-after-failure",
+        { prompt: "after failure", description: "after failure", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+      const recovered = handle.listAgents().find((r: any) => r.description === "after failure");
+      expect(recovered?.status).toBe("running");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("reports Generation failed and keeps the pool balanced when a queued start throws synchronously", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-drainthrow-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
+        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+          throw new Error("drain start failed");
+        }
+        return new Promise((r) => { releaseFiller = r; });
+      });
+
+      const { pi, tools, lifecycle, commands } = busPi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a throwing agent").mockResolvedValueOnce("gen-drainthrow");
+
+      const handler = commands.get("agents").handler("", c);
+      await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-drainthrow agent");
+        expect(rec?.status).toBe("queued");
+      });
+
+      // Freeing the slot drains the queue; the generation's startAgent throws
+      // before the runner wires its completion chain.
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+      await handler;
+
+      const failed = notifications.find(n => n.message.startsWith("Generation failed"));
+      expect(failed).toBeDefined();
+      expect(failed?.message).toContain("drain start failed");
+
+      // The synchronous throw released its slot — a fresh spawn still runs.
+      vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+      await tools.get("Agent").execute(
+        "tc-after-throw",
+        { prompt: "after throw", description: "after throw", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+      const recovered = handle.listAgents().find((r: any) => r.description === "after throw");
+      expect(recovered?.status).toBe("running");
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
