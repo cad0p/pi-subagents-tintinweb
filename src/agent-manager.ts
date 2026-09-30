@@ -3,7 +3,6 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
- * Foreground agents bypass the queue (they block the parent anyway).
  */
 
 import { randomUUID } from "node:crypto";
@@ -62,7 +61,6 @@ interface SpawnOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
-  isBackground?: boolean;
   /**
    * Skip the maxConcurrent queue check for this spawn — start immediately even
    * if the configured concurrency limit would otherwise queue it. Used by the
@@ -162,7 +160,7 @@ export class AgentManager {
       id,
       type,
       description: options.description,
-      status: options.isBackground ? "queued" : "running",
+      status: "queued",
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
@@ -173,19 +171,13 @@ export class AgentManager {
       // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
       // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
       effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
-      // Raw tri-state (not coerced to a boolean): true = background, false =
-      // foreground (has an inline tool-result surface), undefined = caller never
-      // declared it (e.g. a cross-extension RPC spawn). The widget's background-
-      // only filter excludes only explicit `false`, so undefined agents — which
-      // have no inline surface — stay visible instead of vanishing.
-      isBackground: options.isBackground,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (!options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
@@ -240,7 +232,6 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
@@ -252,6 +243,8 @@ export class AgentManager {
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
+    this.runningBackground++;
+    record.settled = false;
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
@@ -321,12 +314,6 @@ export class AgentManager {
 
         detach();
 
-        // Final flush of streaming output file
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
-
         // Clean up worktree if used
         if (record.worktree) {
           const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
@@ -340,16 +327,6 @@ export class AgentManager {
           }
         }
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-        } else {
-          this.runningBackground--;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-          this.drainQueue();
-        }
         return responseText;
       })
       .catch((err) => {
@@ -362,12 +339,6 @@ export class AgentManager {
 
         detach();
 
-        // Final flush of streaming output file on error
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
-
         // Best-effort worktree cleanup on error
         if (record.worktree) {
           try {
@@ -376,25 +347,21 @@ export class AgentManager {
           } catch { /* ignore cleanup errors */ }
         }
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          this.onComplete?.(record);
-        } else {
-          this.runningBackground--;
-          this.onComplete?.(record);
-          this.drainQueue();
-        }
         return "";
-      });
+      })
+      .finally(() => this.afterRun(record));
 
     record.promise = promise;
+  }
 
-    // Notify caller that spawn is complete (record is in the map, promise is set).
-    // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
-    // Used by spawnAndWait to let the caller set up output files before streaming starts.
-    this.onSpawned?.(id);
+  /** Shared completion tail: release the slot, flush the transcript, notify, drain. */
+  private afterRun(record: AgentRecord): void {
+    this.runningBackground--;
+    try { record.outputCleanup?.(); } catch { /* ignore */ }
+    record.outputCleanup = undefined;
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    try { this.drainQueue(); } catch { /* a throwing drain must not reject the run promise */ }
+    record.settled = true;
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -402,7 +369,7 @@ export class AgentManager {
     while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
       const next = this.queue.shift()!;
       const record = this.agents.get(next.id);
-      if (!record || record.status !== "queued") continue;
+      if (record?.status !== "queued") continue;
       try {
         this.startAgent(next.id, record, next.args);
       } catch (err) {
@@ -413,42 +380,6 @@ export class AgentManager {
         record.completedAt = Date.now();
         this.onComplete?.(record);
       }
-    }
-  }
-
-  /**
-   * Called synchronously right after spawn, before onSessionCreated fires.
-   * Lets the caller set up the output file path on the record.
-   * The record is guaranteed to be in this.agents at this point.
-   */
-  private onSpawned?: (id: string) => void;
-
-  /**
-   * Spawn an agent and wait for completion (foreground use).
-   * Foreground agents bypass the concurrency queue.
-   * Returns { id, record } so callers can access the agent ID.
-   *
-   * @param onSpawned - Called synchronously after spawn(), before onSessionCreated fires.
-   *   Use this to set record.outputFile so streamToOutputFile can pick it up.
-   */
-  async spawnAndWait(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    type: SubagentType,
-    prompt: string,
-    options: Omit<SpawnOptions, "isBackground">,
-    onSpawned?: (id: string) => void,
-  ): Promise<{ id: string; record: AgentRecord }> {
-    // Temporarily register the onSpawned hook so startAgent can call it.
-    const prevOnSpawned = this.onSpawned;
-    this.onSpawned = onSpawned;
-    try {
-      const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
-      const record = this.agents.get(id)!;
-      await record.promise;
-      return { id, record };
-    } finally {
-      this.onSpawned = prevOnSpawned;
     }
   }
 

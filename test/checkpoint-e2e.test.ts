@@ -78,7 +78,7 @@ describe("checkpoint end-to-end (real tools, full flow)", () => {
     const { root, child } = makeRootAndChild();
     const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description: "checkpoint work", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "checkpoint work", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);

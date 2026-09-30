@@ -76,7 +76,7 @@ async function spawnCompletedBackgroundAgent(tools: Map<string, any>): Promise<s
   });
   const spawn = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

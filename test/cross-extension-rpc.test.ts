@@ -89,13 +89,13 @@ describe("cross-extension RPC", () => {
       events.on("subagents:rpc:spawn:reply:req-s2", reply);
       events.emit("subagents:rpc:spawn", {
         requestId: "req-s2", type: "Explore", prompt: "find it",
-        options: { description: "search", isBackground: true },
+        options: { description: "search" },
       });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "Explore", "find it",
-        { description: "search", isBackground: true },
+        { description: "search" },
       );
     });
 

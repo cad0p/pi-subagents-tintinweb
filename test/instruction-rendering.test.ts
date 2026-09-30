@@ -143,7 +143,7 @@ describe("instruction rendering", () => {
   async function spawnBackground(tools: Map<string, any>, description = "Find auth files") {
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description, subagent_type: "general-purpose" },
       undefined,
       undefined,
       spawnCtx(cwd),
@@ -806,7 +806,7 @@ describe("instruction rendering", () => {
       const component = new ToolExecutionComponent(
         "Agent",
         "tc-agent-1",
-        { subagent_type: "general-purpose", description: "Find auth files", prompt, run_in_background: true },
+        { subagent_type: "general-purpose", description: "Find auth files", prompt },
         {},
         tools.get("Agent"),
         { requestRender: () => {} } as any,

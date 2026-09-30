@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
-import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
 
@@ -47,18 +46,6 @@ describe("formatSessionTokens", () => {
   });
 });
 
-describe("renderRunningAgentStatus", () => {
-  it("renders running status as separate component lines", () => {
-    const theme = { fg: (_c: string, s: string) => s };
-    const component = renderRunningAgentStatus("⠋", "thinking: xhigh · 4 tool uses", "thinking…", theme);
-
-    expect(component.render(120).map((line) => line.trimEnd())).toEqual([
-      "⠋ thinking: xhigh · 4 tool uses",
-      "  ⎿  thinking…",
-    ]);
-  });
-});
-
 describe("AgentWidget", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
@@ -72,7 +59,7 @@ describe("AgentWidget", () => {
     };
   }
 
-  function makeRecord(id: string, opts: { isBackground?: boolean } = {}) {
+  function makeRecord(id: string) {
     return {
       id,
       type: "general-purpose",
@@ -82,7 +69,6 @@ describe("AgentWidget", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
-      isBackground: opts.isBackground,
     };
   }
 
@@ -106,38 +92,16 @@ describe("AgentWidget", () => {
   }
 
   // "all" (and the no-policy constructor default) shows every agent.
-  it("shows foreground agents in 'all' mode (and by default)", () => {
-    const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
-    expect(renderLines(manager, "foreground")).toContain("foreground description");
-    expect(renderLines(manager, "foreground", () => "all")).toContain("foreground description");
+  it("shows agents in 'all' mode (and by default)", () => {
+    const manager = { listAgents: () => [makeRecord("agent")] };
+    expect(renderLines(manager, "agent")).toContain("agent description");
+    expect(renderLines(manager, "agent", () => "all")).toContain("agent description");
   });
 
-  it("excludes foreground agents in 'background' mode", () => {
-    const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
-    expect(renderLines(manager, "foreground", () => "background")).toBe("");
-  });
-
-  // Also covers scheduler-spawned agents (isBackground=true, no `invocation`
-  // snapshot): if the filter still keyed off `invocation.runInBackground` —
-  // #118's original approach — this would wrongly vanish.
-  it("renders background agents in 'background' mode", () => {
-    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
-    const lines = renderLines(manager, "background", () => "background");
-    expect(lines).toContain("Agents");
-    expect(lines).toContain("background description");
-  });
-
-  // 'background' excludes only agents *known* to be foreground; one with no
-  // isBackground flag (e.g. a cross-extension RPC spawn) is kept, not hidden.
-  it("keeps agents with no isBackground flag in 'background' mode", () => {
-    const manager = { listAgents: () => [makeRecord("unflagged", {})] };
-    expect(renderLines(manager, "unflagged", () => "background")).toContain("unflagged description");
-  });
-
-  // "off" hides the widget entirely — even a background agent renders nothing.
+  // "off" hides the widget entirely.
   it("renders nothing in 'off' mode", () => {
-    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
-    expect(renderLines(manager, "background", () => "off")).toBe("");
+    const manager = { listAgents: () => [makeRecord("agent")] };
+    expect(renderLines(manager, "agent", () => "off")).toBe("");
   });
 
   it("strips terminal controls from the live activity line", () => {
@@ -145,27 +109,27 @@ describe("AgentWidget", () => {
     // call site would otherwise mask by piping the result through toSingleLine.
     expect(describeActivity(new Map(), "x\u001b[2Jy")).toBe("xy");
 
-    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const manager = { listAgents: () => [makeRecord("agent")] };
     const activity = makeActivity();
     activity.responseText = "x\u001b[2Jy\u001b]8;;https://evil.example\u0007link";
-    const lines = renderLines(manager, "background", () => "background", activity);
+    const lines = renderLines(manager, "agent", () => "all", activity);
     expect(lines).not.toContain("\u001b");
     expect(lines).not.toContain("[2J");
     expect(lines).not.toContain("]8;;");
     expect(lines).toContain("xylink");
   });
 
-  // The widget/foreground call sites run the activity string through
-  // toSingleLine, which would coerce a lone surrogate to U+FFFD and hide a
-  // mid-pair cut; drive describeActivity directly to pin the boundary.
+  // The widget call sites run the activity string through toSingleLine, which
+  // would coerce a lone surrogate to U+FFFD and hide a mid-pair cut; drive
+  // describeActivity directly to pin the boundary.
   it("truncates the activity line on a code-point boundary", () => {
     const text = "a".repeat(59) + "😀tail";
     expect(describeActivity(new Map(), text)).toBe("a".repeat(59) + "…");
 
-    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const manager = { listAgents: () => [makeRecord("agent")] };
     const activity = makeActivity();
     activity.responseText = text;
-    const lines = renderLines(manager, "background", () => "background", activity);
+    const lines = renderLines(manager, "agent", () => "all", activity);
     // End to end the row drops the astral pair rather than showing U+FFFD.
     expect(lines).toContain("a".repeat(59) + "…");
     expect(lines).not.toContain("\uFFFD");
@@ -175,11 +139,11 @@ describe("AgentWidget", () => {
     const control = "\u001b]52;c;aGFjaw==\u0007\u001b[2J";
     const running = {
       listAgents: () => [{
-        ...makeRecord("running", { isBackground: true }),
+        ...makeRecord("running"),
         description: `desc${control}tail`,
       }],
     };
-    const runningLines = renderLines(running, "running", () => "background");
+    const runningLines = renderLines(running, "running", () => "all");
     expect(runningLines).not.toContain("\u001b");
     expect(runningLines).not.toContain("[2J");
     expect(runningLines).not.toContain("]52;");
@@ -187,14 +151,14 @@ describe("AgentWidget", () => {
 
     const finished = {
       listAgents: () => [{
-        ...makeRecord("finished", { isBackground: true }),
+        ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),
         description: `desc${control}tail`,
         error: `err${control}tail`,
       }],
     };
-    const finishedLines = renderLines(finished, "finished", () => "background");
+    const finishedLines = renderLines(finished, "finished", () => "all");
     expect(finishedLines).not.toContain("\u001b");
     expect(finishedLines).not.toContain("[2J");
     expect(finishedLines).not.toContain("]52;");
@@ -205,22 +169,22 @@ describe("AgentWidget", () => {
   it("collapses newlines and tabs in the record description on running and finished rows", () => {
     const running = {
       listAgents: () => [{
-        ...makeRecord("multiline", { isBackground: true }),
+        ...makeRecord("multiline"),
         description: "line one\nline two\tend",
       }],
     };
-    expect(renderLines(running, "multiline", () => "background")).toContain("line one line two end");
+    expect(renderLines(running, "multiline", () => "all")).toContain("line one line two end");
 
     const finished = {
       listAgents: () => [{
-        ...makeRecord("multiline-finished", { isBackground: true }),
+        ...makeRecord("multiline-finished"),
         status: "error",
         completedAt: Date.now(),
         description: "line one\nline two\tend",
         error: "err\nsecond line",
       }],
     };
-    const finishedLines = renderLines(finished, "multiline-finished", () => "background");
+    const finishedLines = renderLines(finished, "multiline-finished", () => "all");
     expect(finishedLines).toContain("line one line two end");
     expect(finishedLines).toContain("error: err second line");
   });
@@ -238,21 +202,21 @@ describe("AgentWidget", () => {
       registerAgents(loadCustomAgents(dir));
 
       const running = {
-        listAgents: () => [{ ...makeRecord("running", { isBackground: true }), type: "evil" }],
+        listAgents: () => [{ ...makeRecord("running"), type: "evil" }],
       };
-      const runningLines = renderLines(running, "running", () => "background");
+      const runningLines = renderLines(running, "running", () => "all");
       expect(runningLines).not.toContain(control);
       expect(runningLines).toContain("danger");
 
       const finished = {
         listAgents: () => [{
-          ...makeRecord("finished", { isBackground: true }),
+          ...makeRecord("finished"),
           type: "evil",
           status: "completed",
           completedAt: Date.now(),
         }],
       };
-      const finishedLines = renderLines(finished, "finished", () => "background");
+      const finishedLines = renderLines(finished, "finished", () => "all");
       expect(finishedLines).not.toContain(control);
       expect(finishedLines).toContain("danger");
     } finally {
@@ -263,20 +227,20 @@ describe("AgentWidget", () => {
 
   it("tolerates non-string record descriptions and errors", () => {
     const running = {
-      listAgents: () => [{ ...makeRecord("running", { isBackground: true }), description: 42 }],
+      listAgents: () => [{ ...makeRecord("running"), description: 42 }],
     };
-    expect(renderLines(running, "running", () => "background")).not.toContain("42");
+    expect(renderLines(running, "running", () => "all")).not.toContain("42");
 
     const finished = {
       listAgents: () => [{
-        ...makeRecord("finished", { isBackground: true }),
+        ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),
         description: 42,
         error: { message: "boom" },
       }],
     };
-    const lines = renderLines(finished, "finished", () => "background");
+    const lines = renderLines(finished, "finished", () => "all");
     expect(lines).not.toContain("42");
     expect(lines).toContain("error");
     expect(lines).not.toContain("[object Object]");
@@ -284,13 +248,13 @@ describe("AgentWidget", () => {
 
   it("collapses a newline in the tool activity line", () => {
     const running = {
-      listAgents: () => [{ ...makeRecord("running", { isBackground: true }), type: "general-purpose" }],
+      listAgents: () => [{ ...makeRecord("running"), type: "general-purpose" }],
     };
     const activity = {
       ...makeActivity(),
       activeTools: new Map([["t1", "read\nforged"]]),
     };
-    const lines = renderLines(running, "running", () => "background", activity);
+    const lines = renderLines(running, "running", () => "all", activity);
     expect(lines).toContain("read forged…");
     expect(lines).not.toContain("\nforged");
   });
@@ -298,13 +262,13 @@ describe("AgentWidget", () => {
   it("truncates the error preview without splitting a surrogate pair", () => {
     const finished = {
       listAgents: () => [{
-        ...makeRecord("finished", { isBackground: true }),
+        ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),
         error: `${"e".repeat(59)}🚀tail`,
       }],
     };
-    const lines = renderLines(finished, "finished", () => "background");
+    const lines = renderLines(finished, "finished", () => "all");
     expect(lines).toContain(`error: ${"e".repeat(59)}`);
     // A naive slice(0, 60) would keep the rocket's lone high surrogate at index 59.
     expect(lines).not.toContain("\ud83d");

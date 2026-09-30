@@ -132,7 +132,7 @@ async function spawnCompleting(tools: Map<string, any>, description = "research 
   });
   const spawn = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description, subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),
@@ -271,7 +271,7 @@ describe("turn-gated completion notifications", () => {
 
       const spawn = await tools.get("Agent").execute(
         "tc-spawn",
-        { prompt: "go", description: "failing task", subagent_type: "general-purpose", run_in_background: true },
+        { prompt: "go", description: "failing task", subagent_type: "general-purpose" },
         undefined,
         undefined,
         ctx(),
@@ -314,7 +314,7 @@ describe("turn-gated completion notifications", () => {
   });
 });
 
-describe("foreground Agent result rendering", () => {
+describe("Agent result rendering", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -334,24 +334,40 @@ describe("foreground Agent result rendering", () => {
     };
   }
 
-  it("expanded results strip terminal controls from the display copy but not the tool text", () => {
+  it("fresh spawn defaults to a background result with no onUpdate streaming", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    });
     const { pi, tools } = makePi();
     subagentsExtension(pi);
-    const text = `# Report\n${control}BOOM`;
+    const onUpdate = vi.fn();
+
+    const res = await tools.get("Agent").execute(
+      "tc-bg",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined,
+      onUpdate,
+      ctx(),
+    );
+
+    expect(textOf(res)).toContain("started in background");
+    expect((res.details as AgentDetails).status).toBe("background");
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("renders the background launch row with the agent id", () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
     const res = {
-      content: [{ type: "text" as const, text }],
-      details: details({ status: "completed" }),
+      content: [{ type: "text" as const, text: "Agent started in background." }],
+      details: details({ status: "background", agentId: "abc123" }),
     };
 
-    const rendered = tools.get("Agent").renderResult(res, { expanded: true, isPartial: false }, mockTheme);
-    expect(rendered.text).not.toContain("\u001b");
-    expect(rendered.text).not.toContain("[2J");
-    expect(rendered.text).not.toContain("]8;;");
-    expect(rendered.text).not.toContain("\u009f");
-    expect(rendered.text).toContain("# Report");
-    expect(rendered.text).toContain("BOOM");
-    // The tool text handed to the model keeps its raw bytes.
-    expect(res.content[0].text).toBe(text);
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme, renderCallContext);
+    expect(rendered.text).toContain("Running in background (ID: abc123)");
   });
 
   it("error lines strip terminal controls from the display copy", () => {
@@ -384,36 +400,6 @@ describe("foreground Agent result rendering", () => {
     expect(rendered.text).toBe("xy");
     // The tool text handed to the model keeps its raw bytes.
     expect(res.content[0].text).toBe(text);
-  });
-
-  it("running activity strips terminal controls from the display copy", () => {
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const res = {
-      content: [{ type: "text" as const, text: "partial" }],
-      details: details({ status: "running", activity: `read${control}files` }),
-    };
-
-    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
-    const text = rendered.render(120).join("\n");
-    expect(text).not.toContain("\u001b");
-    expect(text).not.toContain("[2J");
-    expect(text).not.toContain("]8;;");
-    expect(text).toContain("readfiles");
-  });
-
-  it("collapses a newline in running activity so it cannot add a display line", () => {
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const res = {
-      content: [{ type: "text" as const, text: "partial" }],
-      details: details({ status: "running", activity: "read files\nforged: yes" }),
-    };
-
-    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
-    const text = rendered.render(120).join("\n");
-    expect(text).toContain("read files forged: yes");
-    expect(text).not.toContain("read files\nforged: yes");
   });
 
   it("renderCall strips terminal controls from the description", () => {
@@ -598,31 +584,20 @@ describe("foreground Agent result rendering", () => {
     expect(rendered.text).not.toContain("boom\n");
   });
 
-  it("running activity tolerates a non-string value", () => {
+  it("replays a retired inline status through the error/aborted tail without throwing", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
-    const res = {
-      content: [{ type: "text" as const, text: "partial" }],
-      details: details({ status: "running", activity: 42 as any }),
-    };
 
-    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: true }, mockTheme);
-    const text = rendered.render(120).join("\n");
-    expect(text).toContain("thinking…");
-    expect(text).not.toContain("42");
-  });
+    for (const status of ["running", "completed", "steered", "stopped"] as const) {
+      const res = {
+        content: [{ type: "text" as const, text: 42 as any }],
+        details: details({ status }),
+      };
 
-  it("expanded results tolerate a non-string content text", () => {
-    const { pi, tools } = makePi();
-    subagentsExtension(pi);
-    const res = {
-      content: [{ type: "text" as const, text: 42 as any }],
-      details: details({ status: "completed" }),
-    };
-
-    const rendered = tools.get("Agent").renderResult(res, { expanded: true, isPartial: false }, mockTheme);
-    expect(rendered.text).toContain("✓");
-    expect(rendered.text).not.toContain("42");
+      const rendered = tools.get("Agent").renderResult(res, { expanded: true, isPartial: false }, mockTheme);
+      expect(rendered.text).toContain("Aborted (max turns exceeded)");
+      expect(rendered.text).not.toContain("42");
+    }
   });
 });
 
@@ -678,7 +653,7 @@ describe("get_subagent_result terminal rendering", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
-      { prompt: "go", description: "research thing", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "research thing", subagent_type: "general-purpose" },
       undefined,
       undefined,
       ctx(),
@@ -758,7 +733,7 @@ describe("agents command terminal surfaces", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
-      { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description, subagent_type: "general-purpose" },
       undefined,
       undefined,
       c,
@@ -808,7 +783,7 @@ describe("agents command terminal surfaces", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, c,
     );
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
@@ -856,7 +831,7 @@ describe("agents command terminal surfaces", () => {
 
       await tools.get("Agent").execute(
         "tc-spawn",
-        { prompt: "go", description: "d", subagent_type: "evil", run_in_background: true },
+        { prompt: "go", description: "d", subagent_type: "evil" },
         undefined, undefined, c,
       );
 
@@ -1047,6 +1022,43 @@ describe("agents command terminal surfaces", () => {
       expect(failed).toBeDefined();
       expect(failed?.message).toBe("Generation failed: boomtail forged");
       expect(failed?.message).not.toContain("\u001b");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("treats the generation run as a normal pooled spawn whose notification is not suppressed", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-ok-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      const targetPath = join(cwd, ".pi", "agents", "gen-ok.md");
+      vi.mocked(runAgent).mockImplementation(async () => {
+        mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+        writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
+        return { responseText: "created", session: { dispose: vi.fn() } as any, aborted: false, steered: false };
+      });
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+      const { c, notifications } = commandCtx(title => {
+        if (title === "Agents") return "Create new agent";
+        if (title === "Choose location") return "Project (.pi/agents/)";
+        if (title === "Creation method") return "Generate with Claude (recommended)";
+        return undefined;
+      });
+      c.ui.input.mockResolvedValueOnce("a test agent").mockResolvedValueOnce("gen-ok");
+
+      await commands.get("agents").handler("", c);
+
+      expect(notifications.map(n => n.message).some(m => m.startsWith("Created ") && m.endsWith("gen-ok.md"))).toBe(true);
+      // Not suppressed: the run reports like any other subagent.
+      await vi.waitFor(() => {
+        expect(pi.sendMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ customType: "subagent-notification" }),
+          expect.anything(),
+        );
+      });
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });

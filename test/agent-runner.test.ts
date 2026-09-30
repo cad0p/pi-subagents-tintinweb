@@ -82,7 +82,6 @@ vi.mock("../src/agent-types.js", () => ({
     systemPrompt: "You are Explore.",
     promptMode: "replace",
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
   })),
   getMemoryToolNames: vi.fn(() => []),
@@ -587,7 +586,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     systemPrompt: "Test.",
     promptMode: "replace" as const,
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
     ...overrides,
   };

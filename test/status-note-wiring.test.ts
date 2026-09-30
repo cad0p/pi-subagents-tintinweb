@@ -61,7 +61,7 @@ const textOf = (r: any): string => r.content[0].text;
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("foreground turn-limit abort → the Agent result flags an incomplete outcome", async () => {
+  it("background turn-limit abort → get_subagent_result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "partial work so far",
       session: { dispose: vi.fn() } as any,
@@ -71,10 +71,18 @@ describe("status note reaches the parent through the real handlers", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
 
-    const res = await tools.get("Agent").execute(
+    const spawn = await tools.get("Agent").execute(
       "tc1",
       { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
+    expect(id, "spawn should surface an agent id").toBeTruthy();
+    // Let the mocked run settle so the record reaches its terminal status.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const res = await tools.get("get_subagent_result").execute(
+      "tc2", { agent_id: id }, undefined, undefined, ctx(),
     );
 
     const out = textOf(res);
@@ -92,7 +100,7 @@ describe("status note reaches the parent through the real handlers", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, ctx(),
     );
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];

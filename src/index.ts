@@ -35,7 +35,6 @@ import {
   type AgentDetails,
   AgentWidget,
   buildInvocationTags,
-  describeActivity,
   fgPreservingNestedStyles,
   formatDuration,
   formatMs,
@@ -43,7 +42,6 @@ import {
   formatTurns,
   getDisplayName,
   getPromptModeLabel,
-  SPINNER,
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
@@ -67,18 +65,6 @@ function checkpointsFilePath(outputFile: string | undefined): string | undefined
   return `${outputFile}.checkpoints.md`;
 }
 
-export function renderRunningAgentStatus(
-  frame: string,
-  statsText: string,
-  activity: string,
-  theme: Pick<Theme, "fg">,
-): Container {
-  const container = new Container();
-  container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-  container.addChild(new Text(theme.fg("dim", `  ⎿  ${activity}`), 0, 0));
-  return container;
-}
-
 /** Format an agent's lifetime token total, or "" when zero. */
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
   const t = getLifetimeTotal(o.lifetimeUsage);
@@ -87,9 +73,9 @@ function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
 
 /**
  * Create an AgentActivity state and spawn callbacks for tracking tool usage.
- * Used by both foreground and background paths to avoid duplication.
+ * Used by the background spawn and resume paths to avoid duplication.
  */
-function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
+function createActivityTracker(maxTurns?: number) {
   const state: AgentActivity = {
     activeTools: new Map(),
     toolUses: 0,
@@ -110,22 +96,18 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
         }
         state.toolUses++;
       }
-      onStreamUpdate?.();
     },
     onTextDelta: (_delta: string, fullText: string) => {
       state.responseText = fullText;
-      onStreamUpdate?.();
     },
     onTurnEnd: (turnCount: number) => {
       state.turnCount = turnCount;
-      onStreamUpdate?.();
     },
     onSessionCreated: (session: any) => {
       state.session = session;
     },
     onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
       addUsage(state.lifetimeUsage, usage);
-      onStreamUpdate?.();
     },
   };
 
@@ -628,11 +610,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Live widget: show running agents above editor.
-  // widgetMode (default "background") selects what the widget shows: "all" =
-  // every agent; "background" = hide foreground (they already render inline as
-  // the Agent tool result, so showing them here too is a duplicate, #118), keep
-  // everything else; "off" = hide the widget entirely. Read live at render time.
-  let widgetMode: WidgetMode = "background";
+  // widgetMode (default "all") selects what the widget shows: "all" = every
+  // agent; "off" = hide the widget entirely. Read live at render time.
+  let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
@@ -779,7 +759,7 @@ export default function (pi: ExtensionAPI) {
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
           'Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. ' +
-          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+          'Incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
   };
@@ -800,8 +780,8 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
-- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- You will be notified on subagent completion/failure — never poll or sleep.
+- Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
 - isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
 
@@ -821,18 +801,13 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 ## Usage notes
 
 - Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses, with run_in_background: true on each, so they run concurrently. If the user specifies that they want agents run "in parallel", you MUST send a single message with multiple tool calls. Foreground calls run sequentially — only one executes at a time.
-- When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
+- When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.
-- Use run_in_background for work you don't need immediately. You will be notified when it completes — do NOT poll or sleep waiting for it. Continue with other work or respond to the user instead.
-- Foreground vs background: use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
+- Use steer_subagent to send mid-run messages to a running subagent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -902,7 +877,7 @@ Terse command-style prompts produce shallow, generic work.
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
+      "You will be notified on subagent completion/failure — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
     parameters: Type.Object({
@@ -924,11 +899,6 @@ Terse command-style prompts produce shallow, generic work.
         Type.Number({
           description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
           minimum: 1,
-        }),
-      ),
-      run_in_background: Type.Optional(
-        Type.Boolean({
-          description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
         }),
       ),
       resume: Type.Optional(
@@ -971,7 +941,7 @@ Terse command-style prompts produce shallow, generic work.
       return new Text(head, 0, 0);
     },
 
-    renderResult(result, { expanded, isPartial }, theme, context) {
+    renderResult(result, { expanded }, theme, context) {
       const details = result.details as AgentDetails | undefined;
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
@@ -992,13 +962,6 @@ Terse command-style prompts produce shallow, generic work.
         return parts.map(p => fgPreservingNestedStyles(theme, "dim", p)).join(" " + theme.fg("dim", "·") + " ");
       };
 
-      // ---- While running (streaming) ----
-      if (isPartial || details.status === "running") {
-        const frame = SPINNER[details.spinnerFrame ?? 0];
-        const s = stats(details);
-        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? toSingleLine(details.activity) : "thinking…", theme);
-      }
-
       // ---- Background agent launched ----
       if (details.status === "background") {
         const hint = !expanded && typeof (context.args as { prompt?: unknown })?.prompt === "string"
@@ -1007,43 +970,9 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})${hint}`), 0, 0);
       }
 
-      // ---- Completed / Steered ----
-      if (details.status === "completed" || details.status === "steered") {
-        const duration = formatMs(details.durationMs);
-        const isSteered = details.status === "steered";
-        const icon = isSteered ? theme.fg("warning", "✓") : theme.fg("success", "✓");
-        const s = stats(details);
-        let line = icon + (s ? " " + s : "");
-        line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
-
-        if (expanded) {
-          const rawText = result.content[0]?.type === "text" ? result.content[0].text : "";
-          const resultText = typeof rawText === "string" ? stripControlChars(rawText) : "";
-          if (resultText) {
-            const lines = resultText.split("\n").slice(0, 50);
-            for (const l of lines) {
-              line += "\n" + theme.fg("dim", `  ${l}`);
-            }
-            if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (read the .output transcript file for full detail)");
-            }
-          }
-        } else {
-          const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
-          line += "\n" + theme.fg("dim", `  ⎿  ${doneText}`);
-        }
-        return new Text(line, 0, 0);
-      }
-
-      // ---- Stopped (user-initiated abort) ----
-      if (details.status === "stopped") {
-        const s = stats(details);
-        let line = theme.fg("dim", "■") + (s ? " " + s : "");
-        line += "\n" + theme.fg("dim", "  ⎿  Stopped");
-        return new Text(line, 0, 0);
-      }
-
       // ---- Error / Aborted (hard max_turns) ----
+      // Legacy fallthrough: a replayed pre-change row carrying a retired inline
+      // status (running/completed/steered/stopped) lands here.
       const s = stats(details);
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
@@ -1058,7 +987,7 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Execute ----
 
-    execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -1068,7 +997,6 @@ Terse command-style prompts produce shallow, generic work.
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
       const subagentType = resolved ?? "general-purpose";
-      const fellBack = resolved === undefined;
 
       const displayName = getDisplayName(subagentType);
 
@@ -1109,7 +1037,6 @@ Terse command-style prompts produce shallow, generic work.
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
-      const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
@@ -1138,7 +1065,6 @@ Terse command-style prompts produce shallow, generic work.
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
         inheritContext,
-        runInBackground,
         isolation,
       };
       // Tool-result render shows the mode label too; viewer's header already does.
@@ -1163,9 +1089,6 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (params.inherit_context) {
           return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
-        }
-        if (params.run_in_background === false) {
-          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
         if (!scheduler.isActive()) {
           return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
@@ -1202,7 +1125,7 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const record = await manager.resume(params.resume, params.prompt, _signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
@@ -1218,7 +1141,7 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Background execution
-      if (runInBackground) {
+      {
         const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
 
         // Wrap onSessionCreated to wire output file streaming.
@@ -1242,7 +1165,6 @@ Terse command-style prompts produce shallow, generic work.
             isolated,
             inheritContext,
             thinkingLevel: thinking,
-            isBackground: true,
             isolation,
             invocation: agentInvocation,
             ...bgCallbacks,
@@ -1267,7 +1189,6 @@ Terse command-style prompts produce shallow, generic work.
           id,
           type: subagentType,
           description: params.description,
-          isBackground: true,
         });
 
         const isQueued = record?.status === "queued";
@@ -1278,129 +1199,13 @@ Terse command-style prompts produce shallow, generic work.
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-          `\nYou will be notified when this agent completes.\n` +
+          `\nYou will be notified on subagent completion/failure.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
           { ...detailBase, toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
       }
 
-      // Foreground (synchronous) execution — stream progress via onUpdate
-      let spinnerFrame = 0;
-      const startedAt = Date.now();
-      let fgId: string | undefined;
-
-      const streamUpdate = () => {
-        const details: AgentDetails = {
-          ...detailBase,
-          toolUses: fgState.toolUses,
-          tokens: formatLifetimeTokens(fgState),
-          turnCount: fgState.turnCount,
-          maxTurns: fgState.maxTurns,
-          durationMs: Date.now() - startedAt,
-          status: "running",
-          activity: describeActivity(fgState.activeTools, fgState.responseText),
-          spinnerFrame: spinnerFrame % SPINNER.length,
-        };
-        onUpdate?.({
-          content: [{ type: "text", text: `${fgState.toolUses} tool uses...` }],
-          details: details as any,
-        });
-      };
-
-      const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
-
-      // Wire session creation: register in widget + stream to output file.
-      // The output file path is set synchronously after spawn (below),
-      // before onSessionCreated fires — same pattern as background agents.
-      const origOnSession = fgCallbacks.onSessionCreated;
-      fgCallbacks.onSessionCreated = (session: any) => {
-        origOnSession(session);
-        for (const a of manager.listAgents()) {
-          if (a.session === session) {
-            fgId = a.id;
-            agentActivity.set(a.id, fgState);
-            widget.ensureTimer();
-            fleet.ensureTimer();
-            fleet.update();
-            break;
-          }
-        }
-        // Stream conversation to output file (foreground agent logging)
-        if (fgId) {
-          const rec = manager.getRecord(fgId);
-          if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
-          }
-        }
-      };
-
-      // Animate spinner at ~80ms (smooth rotation through 10 braille frames)
-      const spinnerInterval = setInterval(() => {
-        spinnerFrame++;
-        streamUpdate();
-      }, 80);
-
-      streamUpdate();
-
-      let record: AgentRecord;
-      try {
-        const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
-          description: params.description,
-          model,
-          maxTurns: effectiveMaxTurns,
-          isolated,
-          inheritContext,
-          thinkingLevel: thinking,
-          isolation,
-          invocation: agentInvocation,
-          signal,
-          ...fgCallbacks,
-        }, (fgAgentId) => {
-          // onSpawned: called synchronously after spawn, before onSessionCreated fires.
-          // Set up the output file so streamToOutputFile can pick it up.
-          const fgRec = manager.getRecord(fgAgentId);
-          attachTranscript(fgRec, fgAgentId);
-        });
-        record = fgResult.record;
-      } catch (err) {
-        clearInterval(spinnerInterval);
-        return textResult(err instanceof Error ? err.message : String(err));
-      }
-
-      clearInterval(spinnerInterval);
-
-      // Clean up foreground agent from widget
-      if (fgId) {
-        agentActivity.delete(fgId);
-        widget.markFinished(fgId);
-        fleet.onAgentFinished(fgId);
-      }
-
-      // Get final token count
-      const tokenText = formatLifetimeTokens(fgState);
-
-      const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
-
-      // "general-purpose" may itself be unregistered (defaults disabled, no
-      // user override) — getConfig then uses the hardcoded fallback config.
-      const fallbackNote = fellBack
-        ? `Note: Unknown agent type "${rawType}" — using ${resolveType("general-purpose") ? "general-purpose" : "the fallback agent config"}.\n\n`
-        : "";
-
-      if (record.status === "error") {
-        // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
-      }
-
-      const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
-      const statsParts = [`${record.toolUses} tool uses`];
-      if (tokenText) statsParts.push(tokenText);
-      return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
-        details,
-      );
     },
   }));
 
@@ -1410,8 +1215,8 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
-      "Check status and retrieve results from a background agent. Use the agent ID returned by Agent with run_in_background.",
-    promptSnippet: "Check status and retrieve results from a background agent",
+      "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool.",
+    promptSnippet: "Check a subagent's status and retrieve its result",
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to check.",
@@ -1581,12 +1386,12 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
-    promptSnippet: "Send a steering message to redirect a running background agent",
+      "Send a steering message to a subagent. The message will interrupt the agent after its current tool execution " +
+      "and be injected into its conversation, allowing you to redirect its work mid-run.",
+    promptSnippet: "Send a steering message to redirect a subagent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running).",
+        description: "The agent ID to steer (must be running or queued).",
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
@@ -2058,7 +1863,6 @@ Terse command-style prompts produce shallow, generic work.
     else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
-    if (cfg.runInBackground) fmFields.push("run_in_background: true");
     if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
     if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
@@ -2185,7 +1989,6 @@ extensions: <true (inherit all MCP/extension tools), false (none), or comma-sepa
 skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
-run_in_background: <true to run in background by default. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
@@ -2207,15 +2010,21 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
-      description: `Generate ${name} agent`,
-      maxTurns: 5,
-    });
-
-    if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning");
+    let id: string;
+    try {
+      id = manager.spawn(pi, ctx, "general-purpose", generatePrompt, {
+        description: `Generate ${name} agent`,
+        maxTurns: 5,
+      });
+    } catch (err) {
+      ctx.ui.notify(`Generation failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
       return;
     }
+    const record = manager.getRecord(id)!;
+    while (record.status === "queued") await new Promise((r) => setTimeout(r, 100));  // exit on stopped too
+    await record.promise;                       // undefined when stopped-while-queued → resolves
+    if (record.status === "error") { ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning"); return; }
+    if (record.status === "stopped") { ctx.ui.notify("Generation cancelled.", "info"); return; }
 
     reloadCustomAgents();
 
@@ -2400,9 +2209,9 @@ ${systemPrompt}
         {
           id: "widgetMode",
           label: "Widget",
-          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          description: "Above-editor agent widget: all = every agent; off = hide the widget.",
           currentValue: getWidgetMode(),
-          values: ["all", "background", "off"],
+          values: ["all", "off"],
         },
         {
           id: "toolDescriptionMode",

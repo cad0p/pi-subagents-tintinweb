@@ -171,7 +171,6 @@ export function buildInvocationTags(
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
-  if (invocation.runInBackground) tags.push("background");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
   return { modelName: invocation.modelName, tags };
 }
@@ -235,8 +234,7 @@ export class AgentWidget {
     private agentActivity: Map<string, AgentActivity>,
     /**
      * Read live at render time. Selects which agents the widget shows — see
-     * `WidgetMode`. Defaults to `"all"` when a caller supplies no policy; the
-     * extension supplies one defaulting to `"background"`.
+     * `WidgetMode`. Defaults to `"all"`; the extension supplies the same default.
      */
     private mode: () => WidgetMode = () => "all",
   ) {}
@@ -244,21 +242,11 @@ export class AgentWidget {
   /**
    * Agents eligible for the widget, per the current `WidgetMode`:
    *   - `off`: none (the widget's existing empty-state path hides it entirely).
-   *   - `background`: drop only agents *known* to be foreground
-   *     (`isBackground === false`); keep everything else — background, queued,
-   *     scheduled, or RPC-spawned (`undefined`). Keying off the `isBackground`
-   *     record flag rather than the UI-only `invocation` snapshot (which only the
-   *     Agent-tool path sets), and excluding rather than allow-listing, means
-   *     only proven-foreground runs drop out — nothing else silently vanishes.
    *   - `all`: every agent.
    */
   private widgetAgents() {
-    const all = this.manager.listAgents();
-    switch (this.mode()) {
-      case "off": return [];
-      case "background": return all.filter(a => a.isBackground !== false);
-      default: return all;
-    }
+    if (this.mode() === "off") return [];
+    return this.manager.listAgents();
   }
 
   /** Set the UI context (grabbed from first tool execution). */

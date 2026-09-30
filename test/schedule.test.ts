@@ -476,7 +476,6 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     const optsArg = manager.spawn.mock.calls[0][4];
     expect(optsArg.bypassQueue).toBe(true);
-    expect(optsArg.isBackground).toBe(true);
   });
 
   it("disabled jobs do not fire", () => {
@@ -575,7 +574,7 @@ describe("SubagentScheduler — fire path", () => {
     expect(vi.getTimerCount()).toBe(2);
     vi.advanceTimersByTime(1_000);
     expect(manager.spawn).toHaveBeenCalledWith(pi, ctx, "Explore", "promoted-prompt", expect.objectContaining({
-      isBackground: true, bypassQueue: true,
+      bypassQueue: true,
     }));
   });
 

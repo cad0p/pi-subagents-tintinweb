@@ -114,11 +114,14 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
-  it("round-trips widgetMode; keeps valid values, drops invalid", () => {
+  it("keeps valid widgetMode values; drops the removed 'background' and invalid values", () => {
     saveSettings({ widgetMode: "off" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
-    saveSettings({ widgetMode: "background" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "background" });
+    saveSettings({ widgetMode: "all" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ widgetMode: "all" });
+    // The retired "background" mode is dropped by the sanitizer; the code default (all) applies.
+    writeProject({ widgetMode: "background" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
     writeProject({ widgetMode: "sideways" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });

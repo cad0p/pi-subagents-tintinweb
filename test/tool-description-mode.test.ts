@@ -117,7 +117,7 @@ describe("toolDescriptionMode", () => {
     // One keyword per behavioral contract the orchestrator must know about.
     // If you change one of these behaviors, update BOTH descriptions.
     for (const contract of [
-      "run_in_background",
+      "subagent completion/failure",
       "resume",
       "steer_subagent",
       'isolation: "worktree"',
@@ -126,6 +126,14 @@ describe("toolDescriptionMode", () => {
     ]) {
       expect(desc).toContain(contract);
     }
+  });
+
+  it("get_subagent_result carries the approved status/result contract and no run_in_background reference", () => {
+    const tools = setup();
+    const tool = tools.get("get_subagent_result");
+    expect(tool.description).toBe("Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool.");
+    expect(tool.promptSnippet).toBe("Check a subagent's status and retrieve its result");
+    expect(tool.description).not.toContain("run_in_background");
   });
 
   it("custom mode renders the project template with placeholders substituted", () => {

@@ -44,7 +44,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it("spawns a FOREGROUND subagent and routes its real output back to the parent", async () => {
+  it("spawns a subagent and routes its real output back to the parent", async () => {
     run = await runPrintMode({
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
@@ -52,32 +52,21 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "general-purpose",
           description: "greet",
           prompt: "Say hello.",
-          run_in_background: false,
         }),
-        // NON-circular: the parent's final answer echoes whatever the child's
-        // result actually was in context. If the child output didn't reach the
-        // parent, this returns CHILD_MISSING and the responseText assertion fails.
-        parentFinal: (ctx: Context) => {
-          const childOut = [...ctx.messages]
-            .reverse()
-            .find((m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent");
-          const text = ((childOut?.content ?? []) as Array<{ text?: string }>)
-            .map((b) => b.text ?? "")
-            .join("");
-          return `Parent relays: ${text.includes("CHILD_GREETING_OK") ? "CHILD_GREETING_OK" : "CHILD_MISSING"}`;
-        },
+        parentFinal: "Parent relays.",
         subagent: "CHILD_GREETING_OK",
       }),
     });
 
-    // The child actually ran: its output reached the parent via the Agent tool
-    // result (real record.result), and the parent's final answer was derived
-    // from that result — not a value the test hard-coded into the parent.
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain("CHILD_GREETING_OK");
-    expect(run.responseText).toContain("CHILD_GREETING_OK");
-    expect(run.responseText).not.toContain("CHILD_MISSING");
+    // The spawn returns the background envelope; the child's real output lands
+    // as a held completion notification in the parent conversation.
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain("CHILD_GREETING_OK");
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).toContain("**✓ Subagent completed: greet**");
+    expect(run.responseText).toContain("Parent relays.");
     // Parent t1 (Agent call) + child t1 (reply) + parent t2 (final) = 3 calls.
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
@@ -102,7 +91,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       );
       return spawned
         ? "summarized"
-        : agentCall({ description: "bg work", prompt: "Do background work.", run_in_background: true });
+        : agentCall({ description: "bg work", prompt: "Do background work." });
     };
 
     // Control: no hold → the child hasn't run by the time the parent turn ends.
@@ -141,8 +130,8 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       );
       if (spawned) return "summarized";
       return [
-        agentCall({ description: "first bg", prompt: "Reply with ALPHA", run_in_background: true }, { id: "bg-1" }),
-        agentCall({ description: "second bg", prompt: "Reply with BETA", run_in_background: true }, { id: "bg-2" }),
+        agentCall({ description: "first bg", prompt: "Reply with ALPHA" }, { id: "bg-1" }),
+        agentCall({ description: "second bg", prompt: "Reply with BETA" }, { id: "bg-2" }),
       ];
     };
 
@@ -190,7 +179,6 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "echo-spy",
           description: "echo",
           prompt: "Report what you were told.",
-          run_in_background: false,
         }),
         parentFinal: "Reported.",
         // The child reflects whether the frontmatter body reached its own prompt.
@@ -199,12 +187,14 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       }),
     });
 
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain(MARKER);
-    expect(toolResults[0]).not.toContain("MISSING");
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(MARKER);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).not.toContain("MISSING");
     // The custom type resolved — it did NOT silently fall back to general-purpose.
-    expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
+    expect(transcript).not.toMatch(/Unknown agent type/i);
   });
 
   it("spawns a FRONTMATTER-defined (.agents/agents/*.md) agent and its prompt reaches the child", async () => {
@@ -225,7 +215,6 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "agents-spy",
           description: "echo workspace",
           prompt: "Report what you were told.",
-          run_in_background: false,
         }),
         parentFinal: "Reported.",
         subagent: (ctx: Context) =>
@@ -233,11 +222,13 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       }),
     });
 
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain(MARKER);
-    expect(toolResults[0]).not.toContain("MISSING");
-    expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(MARKER);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).not.toContain("MISSING");
+    expect(transcript).not.toMatch(/Unknown agent type/i);
   });
 
   it("errors clearly when faux mode is given no script", async () => {
