@@ -317,6 +317,35 @@ describe("background lifecycle — resume", () => {
     expect(record.abortController).toBe(before.abortController);
   });
 
+  it("a refused resume leaks no pool slot — a queued spawn still starts after the blocker settles", async () => {
+    let shouldThrow = false;
+    manager = new AgentManager(undefined, 1, () => {
+      if (shouldThrow) throw new Error("stale extension context");
+    });
+    const id = await spawnSettled();
+
+    // Occupy the only slot, then queue a spawn behind it.
+    let resolveBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "blocker" ? new Promise((r) => { resolveBlocker = r; }) : new Promise(() => {}),
+    );
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    // A throwing started listener refuses the resume; the counter must stay balanced.
+    shouldThrow = true;
+    expect(manager.resume(id, "more")).toBeUndefined();
+    shouldThrow = false;
+
+    // Free the slot: the queued spawn must start, proving the refused resume leaked nothing.
+    const blocker = manager.listAgents().find((r) => r.description === "blocker")!;
+    resolveBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await blocker.promise;
+    expect(manager.getRecord(queued)!.status).toBe("running");
+    manager.abort(queued);
+  });
+
   it("forwards activity callbacks and stamps the record", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
@@ -512,6 +541,39 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
     // The tool-level guard fires before the manager is ever touched.
     expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("running");
+  });
+
+  it("emits subagents:started with the record id when a resume starts", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await handle.getRecord(id).promise;
+
+    const startedBefore = pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:started").length;
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+    await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    const started = pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:started");
+    expect(started.length).toBe(startedBefore + 1);
+    const [event, payload] = started[started.length - 1];
+    expect(event).toBe("subagents:started");
+    expect(payload.id).toBe(id);
   });
 
   it("seeds the resumed activity state with the existing session", async () => {
