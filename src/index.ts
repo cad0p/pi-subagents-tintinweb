@@ -1113,6 +1113,9 @@ Terse command-style prompts produce shallow, generic work.
         // Only once the resume is accepted — a refused resume must not drop the
         // prior run's still-pending completion nudge.
         cancelNudge(params.resume);
+        // The session already exists, so onSessionCreated never fires for a resume;
+        // seed it here so the widget/viewer can render the context-fill (NN%).
+        resumeState.session = existing.session;
         agentActivity.set(record.id, resumeState);
         if (record.outputFile && record.session) {
           record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);

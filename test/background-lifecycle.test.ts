@@ -223,6 +223,28 @@ describe("background lifecycle — resume", () => {
     await rec.promise;
   });
 
+  it("resets turnCount to the fresh-spawn value when a resume starts", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    record.turnCount = 7; // the prior run's final count
+    let resolveResume!: (v: any) => void;
+    let resumeOpts: any;
+    vi.mocked(resumeAgent).mockImplementation((_s, _p, opts: any) => {
+      resumeOpts = opts;
+      return new Promise((r) => { resolveResume = r; });
+    });
+
+    const rec = manager.resume(id, "more")!;
+    // Run-local: the prior run's count is gone before the first resumed turn ends.
+    expect(record.turnCount).toBe(1);
+    // ...and the resumed run stamps its own count.
+    resumeOpts.onTurnEnd(3);
+    expect(record.turnCount).toBe(3);
+    resolveResume({ text: "resumed" });
+    await rec.promise;
+  });
+
   it("counts the resumed run while it runs and drains a queued spawn when it settles", async () => {
     manager = new AgentManager(undefined, 1);
     const id = await spawnSettled();
@@ -441,6 +463,41 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
     await record.promise;
     expect(record.result).toBe("second");
+  });
+
+  it("seeds the resumed activity state with the existing session", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await handle.getRecord(id).promise;
+
+    // The activity state lives in a closure-local map; the shared Map#set is the
+    // only readout, so capture the state the resume branch registers.
+    const setSpy = vi.spyOn(Map.prototype, "set");
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+    await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    const entry = setSpy.mock.calls.find(([key, value]) =>
+      key === id && value !== null && typeof value === "object" && "activeTools" in value,
+    );
+    expect(entry).toBeDefined();
+    expect((entry![1] as { session?: unknown }).session).toBe(handle.getRecord(id).session);
   });
 
   it("steers a queued agent through the steer_subagent tool", async () => {

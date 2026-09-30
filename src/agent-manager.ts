@@ -411,6 +411,7 @@ export class AgentManager {
       error: record.error,
       resultConsumed: record.resultConsumed,
       abortController: record.abortController,
+      turnCount: record.turnCount,
     };
     record.status = "running";
     record.startedAt = Date.now();
@@ -418,6 +419,8 @@ export class AgentManager {
     record.result = undefined;
     record.error = undefined;
     record.resultConsumed = undefined; // a prior pull must not swallow the resume report
+    // Run-local, mirroring a fresh spawn's initial turn count.
+    record.turnCount = 1;
     record.abortController = new AbortController();
     try {
       this.onStart?.(record);
