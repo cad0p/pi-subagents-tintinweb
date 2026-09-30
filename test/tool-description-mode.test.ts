@@ -148,6 +148,17 @@ describe("toolDescriptionMode", () => {
     expect(tool.description).not.toContain("run_in_background");
   });
 
+  it("steer_subagent carries the approved description, snippet, and agent_id contract", () => {
+    const tools = setup();
+    const tool = tools.get("steer_subagent");
+    expect(tool.description).toBe(
+      "Send a steering message to a subagent. The message will interrupt the agent after its current tool execution " +
+      "and be injected into its conversation, allowing you to redirect its work mid-run.",
+    );
+    expect(tool.promptSnippet).toBe("Send a steering message to redirect a subagent");
+    expect(tool.parameters.properties.agent_id.description).toBe("The agent ID to steer (must be running or queued).");
+  });
+
   it("custom mode renders the project template with placeholders substituted", () => {
     const tools = setup({ toolDescriptionMode: "custom" }, () => {
       writeFileSync(
