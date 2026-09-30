@@ -96,6 +96,12 @@ interface SpawnOptions {
   onCompaction?: (info: CompactionInfo) => void;
 }
 
+/** The five activity callbacks a resumed run forwards to its caller. */
+export type ResumeCallbacks = Pick<
+  SpawnOptions,
+  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+>;
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -384,48 +390,83 @@ export class AgentManager {
   }
 
   /**
-   * Resume an existing agent session with a new prompt.
+   * Kick off a resume of an existing agent session with a new prompt.
+   *
+   * Returns the record synchronously; the run settles through `record.promise`
+   * and the shared completion tail. Returns `undefined` when the record is
+   * unknown, has no session, is already active or winding down, or when the
+   * started listener throws.
    */
-  async resume(
-    id: string,
-    prompt: string,
-    signal?: AbortSignal,
-  ): Promise<AgentRecord | undefined> {
+  resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+    if (record.status === "running" || record.status === "queued") return undefined;
+    if (record.settled === false) return undefined; // prior run still winding down
 
+    const prior = {
+      status: record.status,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      result: record.result,
+      error: record.error,
+      resultConsumed: record.resultConsumed,
+    };
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
-
+    record.resultConsumed = undefined; // a prior pull must not swallow the resume report
+    record.abortController = new AbortController();
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
-        onToolActivity: (activity) => {
-          if (activity.type === "end") record.toolUses++;
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-        },
-        signal,
-      });
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
-      record.result = text;
-      record.completedAt = Date.now();
-    } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+      this.onStart?.(record);
+    } catch {
+      // A listener threw (stale extension context). Restore the pre-resume
+      // state and refuse: the tool reports failure and the counter is untouched.
+      Object.assign(record, prior);
+      return undefined;
     }
-
+    record.settled = false;
+    this.runningBackground++; // counted while running; a resume never queues
+    const promise = resumeAgent(record.session, prompt, {
+      onToolActivity: (activity) => {
+        if (activity.type === "end") record.toolUses++;
+        callbacks?.onToolActivity?.(activity);
+      },
+      onTextDelta: callbacks?.onTextDelta,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        callbacks?.onTurnEnd?.(turnCount);
+      },
+      onAssistantUsage: (usage) => {
+        addUsage(record.lifetimeUsage, usage);
+        callbacks?.onAssistantUsage?.(usage);
+      },
+      onCompaction: (info) => {
+        record.compactionCount++;
+        this.onCompact?.(record, info);
+        callbacks?.onCompaction?.(info);
+      },
+      signal: record.abortController.signal,
+    })
+      .then(({ text, failure }) => {
+        // Stop wins; a stopped resume is never overwritten with completed.
+        if (record.status !== "stopped") {
+          record.status = failure ? "error" : "completed";
+          if (failure) record.error = failure;
+        }
+        record.result = text;
+        record.completedAt = Date.now();
+        return text;
+      })
+      .catch((err) => {
+        if (record.status !== "stopped") record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+        record.completedAt = Date.now();
+        return "";
+      })
+      .finally(() => this.afterRun(record));
+    record.promise = promise;
     return record;
   }
 

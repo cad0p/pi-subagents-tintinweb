@@ -15,13 +15,18 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { AgentManager } from "../src/agent-manager.js";
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
-const mockSession = () => ({ dispose: vi.fn(), sessionId: "child-session-id" } as any);
+const mockSession = () => ({
+  dispose: vi.fn(),
+  sessionId: "child-session-id",
+  messages: [],
+  subscribe: () => () => {},
+} as any);
 
 function resolvedRun(responseText = "done") {
   return vi.mocked(runAgent).mockResolvedValue({
@@ -110,6 +115,170 @@ describe("background lifecycle — pooling and the completion tail", () => {
 
   it("has no spawnAndWait method left", () => {
     expect((AgentManager.prototype as unknown as { spawnAndWait?: unknown }).spawnAndWait).toBeUndefined();
+  });
+});
+
+describe("background lifecycle — resume", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  async function spawnSettled(description = "base"): Promise<string> {
+    resolvedRun("first");
+    const id = manager.spawn(mockPi, mockCtx, "X", "first", { description });
+    await manager.getRecord(id)!.promise;
+    return id;
+  }
+
+  it("kicks off a resume and replaces record.promise", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    const oldPromise = record.promise;
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+
+    const rec = manager.resume(id, "more");
+    expect(rec).toBe(record);
+    expect(record.status).toBe("running");
+    expect(record.promise).not.toBe(oldPromise);
+
+    resolveResume({ text: "second" });
+    await record.promise;
+    expect(record.status).toBe("completed");
+    expect(record.result).toBe("second");
+  });
+
+  it("refuses to resume a running agent", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    expect(manager.resume(id, "more")).toBeUndefined();
+    manager.abort(id);
+  });
+
+  it("refuses to resume a queued agent", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "X", "p1", { description: "block" });
+    const queued = manager.spawn(mockPi, mockCtx, "X", "p2", { description: "queued" });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+    expect(manager.resume(queued, "more")).toBeUndefined();
+  });
+
+  it("refuses to resume while the prior run is winding down, then allows it once settled", async () => {
+    manager = new AgentManager();
+    let resolveRun!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    record.session = mockSession();
+    manager.abort(id);
+    expect(record.status).toBe("stopped");
+    expect(record.settled).toBe(false);
+    expect(manager.resume(id, "more")).toBeUndefined();
+
+    resolveRun({ responseText: "partial", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+    expect(record.settled).toBe(true);
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed" });
+    expect(manager.resume(id, "more")).toBe(record);
+    await record.promise;
+  });
+
+  it("does not treat a never-started record (settled undefined) as winding down", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    record.settled = undefined;
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed" });
+    expect(manager.resume(id, "more")).toBe(record);
+    await record.promise;
+  });
+
+  it("keeps a stopped resume stopped instead of overwriting it", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+
+    manager.resume(id, "more");
+    manager.abort(id);
+    expect(record.status).toBe("stopped");
+    resolveResume({ text: "late" });
+    await record.promise;
+    expect(record.status).toBe("stopped");
+    expect(record.result).toBe("late");
+  });
+
+  it("clears resultConsumed so the resume report is not swallowed", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    record.resultConsumed = true;
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+
+    const rec = manager.resume(id, "more")!;
+    expect(record.resultConsumed).toBeUndefined();
+    await rec.promise;
+  });
+
+  it("counts the resumed run while it runs and drains a queued spawn when it settles", async () => {
+    manager = new AgentManager(undefined, 1);
+    const id = await spawnSettled();
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+
+    const rec = manager.resume(id, "more")!;
+    // The resume occupies the only slot — it never queues.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    resolveResume({ text: "resumed" });
+    await rec.promise;
+    // Slot released → the queued spawn starts.
+    expect(manager.getRecord(queued)!.status).toBe("running");
+    manager.abort(queued);
+  });
+
+  it("rolls the record back and refuses when the started listener throws", async () => {
+    let shouldThrow = false;
+    manager = new AgentManager(undefined, 4, () => {
+      if (shouldThrow) throw new Error("stale extension context");
+    });
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    const before = { status: record.status, result: record.result, completedAt: record.completedAt };
+
+    shouldThrow = true;
+    expect(manager.resume(id, "more")).toBeUndefined();
+    expect(record.status).toBe(before.status);
+    expect(record.result).toBe(before.result);
+    expect(record.completedAt).toBe(before.completedAt);
+  });
+
+  it("forwards activity callbacks and stamps the record", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    const turns: number[] = [];
+    const deltas: string[] = [];
+    vi.mocked(resumeAgent).mockImplementation(async (_s, _p, opts: any) => {
+      opts.onTurnEnd?.(3);
+      opts.onTextDelta?.("hi", "hi");
+      return { text: "resumed" };
+    });
+
+    const rec = manager.resume(id, "more", {
+      onTurnEnd: (n) => turns.push(n),
+      onTextDelta: (d) => deltas.push(d),
+    })!;
+    await rec.promise;
+
+    expect(record.turnCount).toBe(3);
+    expect(turns).toEqual([3]);
+    expect(deltas).toEqual(["hi"]);
   });
 });
 
@@ -222,5 +391,68 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(handle.getRecord(id1).status).toBe("running");
     expect(handle.getRecord(id2).status).toBe("queued");
     expect(handle.hasRunning()).toBe(true);
+  });
+
+  it("returns a background envelope from a resume and re-attaches the transcript", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await handle.getRecord(id).promise;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    expect(textOf(resume)).toContain("Agent resumed in background.");
+    expect((resume.details as { status: string }).status).toBe("background");
+    const record = handle.getRecord(id);
+    expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
+    await record.promise;
+    expect(record.result).toBe("second");
+  });
+
+  it("steers a queued agent through the steer_subagent tool", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const { pi, tools } = makeRpcPi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    await tools.get("Agent").execute(
+      "tc-block",
+      { prompt: "a", description: "a", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const second = await tools.get("Agent").execute(
+      "tc-queued",
+      { prompt: "b", description: "b", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(second);
+    expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("queued");
+
+    const steer = await tools.get("steer_subagent").execute(
+      "tc-steer", { agent_id: id, message: "go left" }, undefined, undefined, spawnCtx(tmpDir),
+    );
+    expect((steer.details as { steerOutcome: string }).steerOutcome).toBe("queued");
+    expect(textOf(steer)).toContain("Steering message queued");
   });
 });

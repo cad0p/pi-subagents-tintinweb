@@ -822,6 +822,8 @@ export async function resumeAgent(
   prompt: string,
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
+    onTextDelta?: (delta: string, fullText: string) => void;
+    onTurnEnd?: (turnCount: number) => void;
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
@@ -834,8 +836,24 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
+  // Per-message bookkeeping mirrors runAgent: reset the accumulated text on
+  // each new assistant message and count completed turns, so the resumed run's
+  // streaming/stat readouts are not stale.
+  let currentMessageText = "";
+  let turnCount = 0;
+  const unsubEvents = (options.onToolActivity || options.onTextDelta || options.onTurnEnd || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
+        if (event.type === "turn_end") {
+          turnCount++;
+          options.onTurnEnd?.(turnCount);
+        }
+        if (event.type === "message_start") {
+          currentMessageText = "";
+        }
+        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+          currentMessageText += event.assistantMessageEvent.delta;
+          options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+        }
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "message_end" && event.message.role === "assistant") {

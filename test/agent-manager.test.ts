@@ -499,7 +499,8 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       return { text: "second" };
     });
 
-    await manager.resume(id, "more");
+    const rec = manager.resume(id, "more");
+    await rec!.promise;
 
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
@@ -1017,7 +1018,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
       failure: "retries exhausted on resume",
     });
 
-    await manager.resume(id, "more");
+    const rec = manager.resume(id, "more");
+    await rec!.promise;
 
     expect(record.status).toBe("error");
     expect(record.error).toBe("retries exhausted on resume");
@@ -1037,7 +1039,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
       failure: "provider died mid-turn",
     });
 
-    await manager.resume(id, "more");
+    const rec = manager.resume(id, "more");
+    await rec!.promise;
 
     expect(record.status).toBe("error");
     expect(record.result).toBe("new partial progress"); // salvageable, this-run text

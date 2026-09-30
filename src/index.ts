@@ -297,27 +297,6 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   return [header, "", metadata.join("\n"), "", "Result:", "", body].join("\n");
 }
 
-/** Build AgentDetails from a base + record-specific fields. */
-function buildDetails(
-  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
-  activity?: AgentActivity,
-  overrides?: Partial<AgentDetails>,
-): AgentDetails {
-  return {
-    ...base,
-    toolUses: record.toolUses,
-    tokens: formatLifetimeTokens(record),
-    turnCount: activity?.turnCount,
-    maxTurns: activity?.maxTurns,
-    durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
-    status: record.status as AgentDetails["status"],
-    agentId: record.id,
-    error: record.error,
-    ...overrides,
-  };
-}
-
 export default function (pi: ExtensionAPI) {
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = () => {
@@ -1116,27 +1095,34 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // Resume existing agent
+      // Resume existing agent — kick off a background resume and return an envelope.
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) {
-          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        if (!existing) return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        // Running/queued, or a stopped run still unwinding — starting now would race
+        // the previous run's settle handler. A queued record has no session yet, so
+        // the active check precedes the session check.
+        if (existing.status === "running" || existing.status === "queued" || existing.settled === false) {
+          return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
-        if (!existing.session) {
-          return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        cancelNudge(params.resume);
+        const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(existing.effectiveMaxTurns);
+        const resumeStart = existing.session.messages.length;
+        const record = manager.resume(params.resume, params.prompt, resumeCallbacks);
+        if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
+        agentActivity.set(record.id, resumeState);
+        if (record.outputFile && record.session) {
+          record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);
         }
-        const record = await manager.resume(params.resume, params.prompt, _signal);
-        if (!record) {
-          return textResult(`Failed to resume agent "${params.resume}".`);
-        }
-        // A failed resume surfaces the error, plus any partial output THIS
-        // resume produced (never the previous turn's answer, #144).
-        if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
-        }
+        widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
         return textResult(
-          record.result?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${displayName}\nDescription: ${record.description}\n` +
+          (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+          `\nYou will be notified on subagent completion/failure.\n` +
+          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+          `Do not duplicate this agent's work.`,
+          { ...detailBase, toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: record.id },
         );
       }
 
@@ -1459,7 +1445,7 @@ Terse command-style prompts produce shallow, generic work.
       if (!record) {
         return steerResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`, "not-found");
       }
-      if (record.status !== "running") {
+      if (record.status !== "running" && record.status !== "queued") {
         return steerResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`, "not-running");
       }
       if (!record.session) {
