@@ -99,6 +99,11 @@ let capOverride: number | undefined;
 
 const textOf = (r: any): string => r.content[0].text;
 
+/** The generate wizard is the only caller that spawns with `maxTurns: 5`, so a
+ *  runner mock can tell its run apart from other subagents without matching the
+ *  prompt text (a reworded prompt would otherwise hang the wizard tests). */
+const isGeneratorRun = (opts: { maxTurns?: number } | undefined): boolean => opts?.maxTurns === 5;
+
 // Hermetic HOME + agent dir: without this the extension loads the developer's
 // real ~/.pi/agent/subagents.json, silently changing delivery behavior under test.
 let hermeticHome: string;
@@ -1153,8 +1158,8 @@ describe("agents command terminal surfaces", () => {
       const targetPath = join(cwd, ".pi", "agents", "gen-queued.md");
 
       let releaseFiller!: (v: any) => void;
-      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
-        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+        if (isGeneratorRun(opts)) {
           mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
           writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
           return Promise.resolve({ responseText: "created", session: { dispose: vi.fn() } as any, aborted: false, steered: false });
@@ -1299,8 +1304,8 @@ describe("agents command terminal surfaces", () => {
       writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
 
       let releaseFiller!: (v: any) => void;
-      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
-        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+        if (isGeneratorRun(opts)) {
           return Promise.reject(new Error("drain start failed"));
         }
         return new Promise((r) => { releaseFiller = r; });
@@ -1359,8 +1364,8 @@ describe("agents command terminal surfaces", () => {
       writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
 
       let releaseFiller!: (v: any) => void;
-      vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) => {
-        if (prompt.includes("Create a custom pi sub-agent definition file")) {
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+        if (isGeneratorRun(opts)) {
           throw new Error("drain start failed");
         }
         return new Promise((r) => { releaseFiller = r; });
