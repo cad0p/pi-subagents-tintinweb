@@ -1122,7 +1122,7 @@ Terse command-style prompts produce shallow, generic work.
         }
         widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
         return textResult(
-          `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${displayName}\nDescription: ${record.description}\n` +
+          `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${getDisplayName(existing.type)}\nDescription: ${record.description}\n` +
           (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           `\nYou will be notified on subagent completion/failure.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +

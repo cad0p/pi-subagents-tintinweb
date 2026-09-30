@@ -511,7 +511,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
-      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      { prompt: "first", description: "d", subagent_type: "Explore" },
       undefined, undefined, spawnCtx(tmpDir),
     );
     const id = agentIdOf(spawn);
@@ -526,6 +526,8 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
 
     expect(textOf(resume)).toContain("Agent resumed in background.");
+    // The run's type is the resumed record's, not the call's subagent_type.
+    expect(textOf(resume)).toContain("Type: Explore");
     expect((resume.details as { status: string }).status).toBe("background");
     const record = handle.getRecord(id);
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
