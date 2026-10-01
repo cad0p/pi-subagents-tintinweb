@@ -407,8 +407,9 @@ export class AgentManager {
   resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
-    if (record.status === "running" || record.status === "queued") return undefined;
-    if (record.settled === false) return undefined; // prior run still winding down
+    // A running record always has `settled === false`, so the settled gate covers
+    // it; a queued record has no session yet and is refused by the queued arm.
+    if (record.status === "queued" || record.settled === false) return undefined;
 
     const prior = {
       status: record.status,

@@ -224,19 +224,22 @@ describe("background lifecycle — resume", () => {
     expect(record.result).toBe("second");
   });
 
-  it("refuses to resume a running agent through the active-status guard", async () => {
+  it("refuses to resume a running agent through the settled gate", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     const record = manager.getRecord(id)!;
-    // Past the !session guard: a running agent with a live session must still be refused.
+    // Past the !session guard: a running agent with a live session is refused
+    // because its run is in flight (settled === false).
     record.session = mockSession();
-    expect(record.session).toBeDefined();
+    expect(record.settled).toBe(false);
+    vi.mocked(resumeAgent).mockClear();
     expect(manager.resume(id, "more")).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
     manager.abort(id);
   });
 
-  it("refuses to resume a queued agent through the active-status guard, not the session guard", async () => {
+  it("refuses to resume a queued agent through the queued arm, not the session guard", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     manager.spawn(mockPi, mockCtx, "X", "p1", { description: "block" });
@@ -244,9 +247,11 @@ describe("background lifecycle — resume", () => {
     const record = manager.getRecord(queued)!;
     expect(record.status).toBe("queued");
     // A queued record has settled === undefined, so with a session present the
-    // active-status guard is the only one that can refuse this resume.
+    // queued arm is the only one that can refuse this resume.
     record.session = mockSession();
+    vi.mocked(resumeAgent).mockClear();
     expect(manager.resume(queued, "more")).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
   });
 
   it("refuses a completed record whose session is gone (the session guard)", async () => {
@@ -271,7 +276,9 @@ describe("background lifecycle — resume", () => {
     manager.abort(id);
     expect(record.status).toBe("stopped");
     expect(record.settled).toBe(false);
+    vi.mocked(resumeAgent).mockClear();
     expect(manager.resume(id, "more")).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
 
     resolveRun({ responseText: "partial", session: mockSession(), aborted: false, steered: false });
     await record.promise;
@@ -703,7 +710,7 @@ describe("background lifecycle — model-visible surfaces", () => {
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    // The active-status guard does not claim a queued-then-stopped record; the
+    // The resume guard does not claim a queued-then-stopped record; the
     // session guard is what refuses it.
     expect(textOf(resume)).toBe(`Agent "${id}" has no active session to resume.`);
   });
