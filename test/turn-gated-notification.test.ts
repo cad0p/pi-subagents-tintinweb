@@ -780,6 +780,71 @@ describe("Agent result rendering", () => {
     }
   });
 
+  it("falls back to the call's resolved model fields for a record with no captured invocation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-resume-noinv-"));
+    const previousCwd = process.cwd();
+    try {
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "tagged.md"),
+        '---\ndescription: tagged agent\nmodel: "scope/tagged-model"\nmax_turns: 3\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "ok",
+        session: { dispose: vi.fn(), messages: [], subscribe: () => () => {} } as any,
+        aborted: false,
+        steered: false,
+      });
+      const { pi, tools } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "tagged-model"
+              ? { provider: "scope", id: "tagged-model", name: "Tagged Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "scope", id: "tagged-model", name: "Tagged Model" }]),
+        },
+      };
+
+      const spawn = await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description: "d", subagent_type: "tagged" },
+        undefined, undefined, c,
+      );
+      const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+      const record = handle.getRecord(id);
+      await record.promise;
+      // RPC- and scheduler-spawned records never capture an invocation snapshot.
+      record.invocation = undefined;
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+      const resume = await tools.get("Agent").execute(
+        "tc-resume",
+        { prompt: "more", description: "d2", subagent_type: "tagged", resume: id },
+        undefined, undefined, c,
+      );
+
+      // The row falls back to the resume call's resolved fields instead of blank.
+      expect(resume.details).toMatchObject({
+        modelName: "tagged model",
+        tags: ["max turns: 3"],
+      });
+      await record.promise;
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the error line collapses newlines so a record field cannot add a display line", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);

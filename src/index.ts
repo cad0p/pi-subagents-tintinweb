@@ -1046,6 +1046,15 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
+      // Display name for the resolved model, shared by the resume row's
+      // fallback and the fresh-spawn invocation snapshot. Undefined when the
+      // model matches the parent's — the stats line omits the default.
+      const parentModelId = ctx.model?.id;
+      const effectiveModelId = model?.id;
+      const modelName = effectiveModelId && effectiveModelId !== parentModelId
+        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
+        : undefined;
+
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
@@ -1112,10 +1121,20 @@ Terse command-style prompts produce shallow, generic work.
         widget.markRunning(record.id);
         widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
         // The row's model fields come from the resumed record's resolved
-        // invocation, not this call: a resume continues the session's own
-        // model, so re-deriving them from the call's subagent_type would mix
-        // identities (and warn about a model the run never uses).
-        const { modelName: resumeModelName, tags: resumeInvocationTags } = buildInvocationTags(existing.invocation);
+        // invocation: a resume continues the session's own model, so deriving
+        // them from the call's subagent_type would mix identities (and warn
+        // about a model the run never uses). Records spawned outside the Agent
+        // tool (RPC, scheduler) capture no invocation — fall back to this
+        // call's resolved fields so those rows still show a model and tags.
+        const displayInvocation: AgentInvocation = existing.invocation ?? {
+          modelName,
+          thinking,
+          maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
+          isolated,
+          inheritContext,
+          isolation,
+        };
+        const { modelName: resumeModelName, tags: resumeInvocationTags } = buildInvocationTags(displayInvocation);
         const resumeModeLabel = getPromptModeLabel(existing.type);
         const resumeTags = resumeModeLabel ? [resumeModeLabel, ...resumeInvocationTags] : resumeInvocationTags;
         return textResult(
@@ -1144,11 +1163,6 @@ Terse command-style prompts produce shallow, generic work.
       // Background execution
       {
         const displayName = getDisplayName(subagentType);
-        const parentModelId = ctx.model?.id;
-        const effectiveModelId = model?.id;
-        const modelName = effectiveModelId && effectiveModelId !== parentModelId
-          ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-          : undefined;
         const agentInvocation: AgentInvocation = {
           modelName,
           thinking,
