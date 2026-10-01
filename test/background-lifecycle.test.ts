@@ -1033,6 +1033,54 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.result).toBe("second");
   });
 
+  it("shows the resumed run's finished row after the prior run's latch aged out", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools, lifecycle } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "aged out", subagent_type: "general-purpose" },
+      undefined, undefined, { ...spawnCtx(tmpDir), ui },
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    await record.promise;
+
+    // The finished row is latched on completion and then aged out by the next
+    // main turn, so it disappears from the widget.
+    await lifecycle.get("tool_execution_start")({}, { ui });
+    const renderAgents = (): string => {
+      const factory = ui.setWidget.mock.calls.find(
+        ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+      )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
+      expect(factory).toBeTypeOf("function");
+      return factory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme).render().join("\n");
+    };
+    const rowOf = (rendered: string) => rendered.split("\n").find((line) => line.includes("aged out"));
+    expect(rowOf(renderAgents())).toBeUndefined();
+
+    // Starting the resume clears the stale latch, so the resumed run's own
+    // completion row is visible instead of inheriting the aged-out one.
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+    await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "aged out", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, { ...spawnCtx(tmpDir), ui },
+    );
+    await record.promise;
+
+    const row = rowOf(renderAgents());
+    expect(row).toBeDefined();
+    expect(row).toContain("✓");
+  });
+
   it("does not surface the prior run's latest checkpoint after a resume", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
