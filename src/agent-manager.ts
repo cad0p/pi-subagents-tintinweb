@@ -428,6 +428,9 @@ export class AgentManager {
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
+        // No turn ever executed — zero the run-local counter so the completion
+        // report cannot claim the presumed first turn.
+        record.turnCount = 0;
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
     }

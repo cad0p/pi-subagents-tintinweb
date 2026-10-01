@@ -1405,6 +1405,15 @@ describe("agents command terminal surfaces", () => {
       const messages = notifications.map(n => n.message);
       expect(messages.some(m => m.startsWith("Generation failed"))).toBe(true);
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
+
+      // The failed start never executed a turn: its completion report must not
+      // claim one.
+      const reportOf = () =>
+        pi.sendMessage.mock.calls
+          .map(([payload]: [any]) => String(payload.content))
+          .find((content: string) => content.includes("Generate gen-nopromise agent"));
+      await vi.waitFor(() => expect(reportOf()).toBeDefined());
+      expect(reportOf()).not.toContain("↻");
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
