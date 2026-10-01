@@ -227,6 +227,10 @@ export function effectiveFailurePreviewCap(value: number): number {
  *  sent, so a parent that pulls the result first can still cancel the nudge. */
 export const NUDGE_HOLD_MS = 200;
 
+/** Max turns for the AI-generation wizard run. Exported for the wizard tests,
+ *  which tell the generator run apart from other spawns by this value. */
+export const WIZARD_MAX_TURNS = 5;
+
 /** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
 function failurePreviewCap(settings: SubagentsSettings): number {
   const cap = settings.failurePreviewMaxChars;
@@ -2045,7 +2049,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     try {
       id = manager.spawn(pi, ctx, "general-purpose", generatePrompt, {
         description: `Generate ${name} agent`,
-        maxTurns: 5,
+        maxTurns: WIZARD_MAX_TURNS,
       });
     } catch (err) {
       ctx.ui.notify(`Generation failed: ${err instanceof Error ? err.message : String(err)}`, "warning");

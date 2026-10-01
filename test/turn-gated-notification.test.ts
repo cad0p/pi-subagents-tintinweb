@@ -54,7 +54,7 @@ import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
-import subagentsExtension from "../src/index.js";
+import subagentsExtension, { WIZARD_MAX_TURNS } from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
@@ -83,10 +83,11 @@ const renderCallContext = { args: {}, state: {}, expanded: false, isPartial: fal
  *  forwards it to the real loader's appliers. */
 let capOverride: number | undefined;
 
-/** The generate wizard is the only caller that spawns with `maxTurns: 5`, so a
- *  runner mock can tell its run apart from other subagents without matching the
- *  prompt text (a reworded prompt would otherwise hang the wizard tests). */
-const isGeneratorRun = (opts: { maxTurns?: number } | undefined): boolean => opts?.maxTurns === 5;
+/** The generate wizard is the only caller that spawns with the wizard max
+ *  turns, so a runner mock can tell its run apart from other subagents
+ *  without matching the prompt text (a reworded prompt would otherwise hang
+ *  the wizard tests). */
+const isGeneratorRun = (opts: { maxTurns?: number } | undefined): boolean => opts?.maxTurns === WIZARD_MAX_TURNS;
 
 // Hermetic HOME + agent dir: without this the extension loads the developer's
 // real ~/.pi/agent/subagents.json, silently changing delivery behavior under test.

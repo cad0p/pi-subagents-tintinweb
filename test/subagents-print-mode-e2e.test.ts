@@ -203,7 +203,10 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     run = undefined;
     releaseChild();
     await capturedPromise;
-    // Past the notification hold: any armed completion notification would have fired by now.
+    // Past the notification hold: any armed completion notification would have
+    // fired by now. Real timer by necessity — this runs after dispose's
+    // pi-mono teardown, which fake timers cannot drive — so the wait must stay
+    // ahead of the hold (NUDGE_HOLD_MS + 50 margin).
     await new Promise((r) => setTimeout(r, NUDGE_HOLD_MS + 50));
 
     expect(record!.status).toBe("stopped");

@@ -1031,9 +1031,16 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
     expect(failed).toHaveLength(1);
     expect(failed[0][1]).toMatchObject({ id, status: "stopped" });
-    // Shutdown clears the nudge queue, so the completion notification never fires.
-    await new Promise((r) => setTimeout(r, 250));
-    expect(pi.sendMessage).not.toHaveBeenCalled();
+    // Shutdown clears the nudge queue, so the completion notification never
+    // fires. Fake timers make the window exact: advancing past the hold can
+    // only deliver a nudge that was actually armed.
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(250);
+      expect(pi.sendMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
