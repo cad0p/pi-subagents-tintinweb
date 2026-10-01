@@ -44,9 +44,16 @@ function resolvedRun(responseText = "done") {
   });
 }
 
+/** Temp dirs created by the worktree tests — the repo fixture plus the
+ *  `pi-agent-*` copies recorded by the started listeners — removed by the
+ *  lifecycle afterEach so a failing assertion cannot leak them (or their git
+ *  registrations). */
+const fixtureDirs: string[] = [];
+
 /** Minimal git repo with one commit — hosts the worktree-isolated spawns. */
 function initGitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "pi-lifecycle-repo-"));
+  fixtureDirs.push(dir);
   execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: dir, stdio: "pipe" });
@@ -68,6 +75,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
   let manager: AgentManager;
   afterEach(() => {
     manager?.dispose();
+    for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
     // The factory defines these module mocks; reset (not restore) them so a
     // reordered test cannot inherit the previous test's pending-promise impl.
     vi.mocked(runAgent).mockReset();
@@ -307,7 +315,6 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(record.worktree).toBeUndefined();
     // Nothing was ever created: no copy on disk, no registration in the repo.
     expect(leftoverWorktrees(repo)).toEqual([]);
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a stop during the started event removes the worktree the prologue created", () => {
@@ -315,6 +322,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     let seenWorktree: string | undefined;
     manager = new AgentManager(undefined, 1, (record) => {
       seenWorktree = record.worktree?.path;
+      if (seenWorktree) fixtureDirs.push(seenWorktree);
       manager.abort(record.id);
     });
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -330,7 +338,6 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(seenWorktree).toBeDefined();
     expect(existsSync(seenWorktree!)).toBe(false);
     expect(leftoverWorktrees(repo)).toEqual([]);
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a direct worktree spawn whose started listener throws reclaims the worktree", () => {
@@ -338,6 +345,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     let seenWorktree: string | undefined;
     manager = new AgentManager(undefined, 1, (record) => {
       seenWorktree = record.worktree?.path;
+      if (seenWorktree) fixtureDirs.push(seenWorktree);
       throw new Error("stale extension context");
     });
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -359,7 +367,6 @@ describe("background lifecycle — pooling and the completion tail", () => {
     // dispose()'s prune cannot remove a registration whose directory survives;
     // the reclaim must have removed this one outright.
     expect(leftoverWorktrees(repo)).toEqual([]);
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a queued worktree start that fails in the started listener reclaims the worktree", async () => {
@@ -368,6 +375,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     manager = new AgentManager(undefined, 1, (record) => {
       if (record.description !== "failing") return;
       seenWorktree = record.worktree?.path;
+      if (seenWorktree) fixtureDirs.push(seenWorktree);
       throw new Error("stale extension context");
     });
     let resolveBlocker!: (v: any) => void;
@@ -392,7 +400,6 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(seenWorktree).toBeDefined();
     expect(existsSync(seenWorktree!)).toBe(false);
     expect(leftoverWorktrees(repo)).toEqual([]);
-    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a throwing outputCleanup still resolves the promise and settles", async () => {
