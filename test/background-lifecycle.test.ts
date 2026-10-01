@@ -617,6 +617,13 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(textOf(resume)).toContain("Agent resumed in background.");
     // The run's type is the resumed record's, not the call's subagent_type.
     expect(textOf(resume)).toContain("Type: Explore");
+    // The row's identity fields mirror the record (and the envelope text),
+    // not the resume call's subagent_type/description.
+    expect(resume.details).toMatchObject({
+      displayName: "Explore",
+      subagentType: "Explore",
+      description: "d",
+    });
     expect((resume.details as { status: string }).status).toBe("background");
     const record = handle.getRecord(id);
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached

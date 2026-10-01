@@ -1131,7 +1131,19 @@ Terse command-style prompts produce shallow, generic work.
           `\nYou will be notified on subagent completion/failure.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
-          { ...detailBase, toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: record.id },
+          {
+            ...detailBase,
+            // Row identity mirrors the envelope text above: the record's type
+            // and description, not the resume call's subagent_type/description.
+            displayName: getDisplayName(existing.type),
+            description: record.description,
+            subagentType: existing.type,
+            toolUses: record.toolUses,
+            tokens: "",
+            durationMs: 0,
+            status: "background" as const,
+            agentId: record.id,
+          },
         );
       }
 
