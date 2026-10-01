@@ -239,10 +239,19 @@ describe("background lifecycle — resume", () => {
     manager.resume(id, "more");
     manager.abort(id);
     expect(record.status).toBe("stopped");
+    const abortTime = record.completedAt;
+
+    // Advance the clock so a settlement that clobbered the abort timestamp
+    // would write a visibly later value.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(abortTime! + 5_000);
     resolveResume({ text: "late" });
     await record.promise;
+    nowSpy.mockRestore();
+
     expect(record.status).toBe("stopped");
     expect(record.result).toBe("late");
+    // The abort timestamp survives the settle, matching the spawn path.
+    expect(record.completedAt).toBe(abortTime);
   });
 
   it("clears resultConsumed so the resume report is not swallowed", async () => {

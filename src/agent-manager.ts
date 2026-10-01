@@ -460,13 +460,13 @@ export class AgentManager {
           if (failure) record.error = failure;
         }
         record.result = text;
-        record.completedAt = Date.now();
+        record.completedAt ??= Date.now();
         return text;
       })
       .catch((err) => {
         if (record.status !== "stopped") record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
-        record.completedAt = Date.now();
+        record.completedAt ??= Date.now();
         return "";
       })
       .finally(() => this.afterRun(record));
