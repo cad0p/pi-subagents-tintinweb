@@ -56,7 +56,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
-import { MANAGER_KEY, makePi } from "./helpers/subagents-harness.js";
+import { MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
 
 function ctx() {
   return {
@@ -81,8 +81,6 @@ const renderCallContext = { args: {}, state: {}, expanded: false, isPartial: fal
 /** Set by the out-of-contract cap test before extension init; the settings mock
  *  forwards it to the real loader's appliers. */
 let capOverride: number | undefined;
-
-const textOf = (r: any): string => r.content[0].text;
 
 /** The generate wizard is the only caller that spawns with `maxTurns: 5`, so a
  *  runner mock can tell its run apart from other subagents without matching the

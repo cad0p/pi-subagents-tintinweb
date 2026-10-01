@@ -13,7 +13,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { makePi } from "./helpers/subagents-harness.js";
+import { makePi, textOf } from "./helpers/subagents-harness.js";
 
 // The RPC channels are registered on the first bound session_start (#142), so a
 // test that drives them must fire it first — as a real session always does. A
@@ -35,8 +35,6 @@ function ctx() {
     getSystemPrompt: vi.fn(() => "parent"),
   } as any;
 }
-
-const textOf = (r: any): string => r.content[0].text;
 
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => vi.restoreAllMocks());
