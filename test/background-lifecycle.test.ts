@@ -106,6 +106,44 @@ describe("background lifecycle — pooling and the completion tail", () => {
     manager.abort(b);
   });
 
+  it("a queued start that fails before the runner chain is wired lands in error and the pool recovers", async () => {
+    // The completion listener throws for every record, so the drain's own
+    // completion call is the one under test.
+    manager = new AgentManager(() => { throw new Error("stale extension context"); }, 1);
+    let resolveBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "blocker"
+        ? new Promise((r) => { resolveBlocker = r; })
+        : Promise.resolve({ responseText: `${prompt} done`, session: mockSession(), aborted: false, steered: false }),
+    );
+
+    const removedCwd = mkdtempSync(join(tmpdir(), "pi-queue-fail-"));
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const failing = manager.spawn(mockPi, mockCtx, "X", "failing", { description: "failing", cwd: removedCwd });
+    const recovering = manager.spawn(mockPi, mockCtx, "X", "recovering", { description: "recovering" });
+    expect(manager.getRecord(failing)!.status).toBe("queued");
+    expect(manager.getRecord(recovering)!.status).toBe("queued");
+
+    // The working directory disappears while the failing spawn waits for a
+    // slot, so startAgent's re-validation throws before the runner chain — and
+    // the slot counter increment — are reached.
+    rmSync(removedCwd, { recursive: true, force: true });
+
+    // Admitting the queued records drives the drain directly (not through the
+    // guarded afterRun path): the start failure is parked on the record and the
+    // throwing completion listener must not escape the drain.
+    expect(() => manager.setMaxConcurrent(3)).not.toThrow();
+    expect(manager.getRecord(failing)!.status).toBe("error");
+    expect(manager.getRecord(failing)!.error).toContain("does not exist");
+    expect(manager.getRecord(recovering)!.status).toBe("running");
+
+    // waitForAll drains directly too; the same throwing listener must not
+    // reject it, and the recovered agent still completes.
+    resolveBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+    expect(manager.getRecord(recovering)!.status).toBe("completed");
+  });
+
   it("a throwing outputCleanup still resolves the promise, drains, and settles", async () => {
     manager = new AgentManager(undefined, 1);
     resolvedRun();
