@@ -1016,7 +1016,7 @@ Terse command-style prompts produce shallow, generic work.
       // scope check below covers both: a schedule registers a job here and the
       // pinned model resolves at fire time, but the warning still belongs to
       // registration. A resume continues the record's session and model, so it
-      // does not warn; the resume row falls back to the call-resolved fields.
+      // does not warn, and its row never uses the call-resolved model.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
@@ -1046,9 +1046,9 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // Display name for the resolved model, shared by the resume row's
-      // fallback and the fresh-spawn invocation snapshot. Undefined when the
-      // model matches the parent's — the stats line omits the default.
+      // Display name for the resolved model, captured in the fresh-spawn
+      // invocation snapshot. Undefined when the model matches the parent's —
+      // the stats line omits the default.
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
       const modelName = effectiveModelId && effectiveModelId !== parentModelId
@@ -1122,17 +1122,14 @@ Terse command-style prompts produce shallow, generic work.
         widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
         // The row's model fields come from the resumed record's resolved
         // invocation: a resume continues the session's own model, so deriving
-        // them from the call's subagent_type would mix identities (and warn
-        // about a model the run never uses). Records spawned outside the Agent
-        // tool (RPC, scheduler) capture no invocation — fall back to this
-        // call's resolved fields so those rows still show a model and tags.
+        // them from the call's subagent_type would mix identities. Records
+        // spawned outside the Agent tool (RPC, scheduler, wizard) capture no
+        // invocation — the row then carries only record-owned values (the
+        // effective max turns), never the call's model/strategy settings,
+        // which this resume does not apply. The viewer and widget read
+        // `record.invocation` directly and stay blank for those records.
         const displayInvocation: AgentInvocation = existing.invocation ?? {
-          modelName,
-          thinking,
-          maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
-          isolated,
-          inheritContext,
-          isolation,
+          maxTurns: existing.effectiveMaxTurns,
         };
         const { modelName: resumeModelName, tags: resumeInvocationTags } = buildInvocationTags(displayInvocation);
         const resumeModeLabel = getPromptModeLabel(existing.type);

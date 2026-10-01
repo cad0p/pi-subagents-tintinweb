@@ -780,7 +780,7 @@ describe("Agent result rendering", () => {
     }
   });
 
-  it("falls back to the call's resolved model fields for a record with no captured invocation", async () => {
+  it("resumes an invocation-less record with its own max turns, not the call's", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-resume-noinv-"));
     const previousCwd = process.cwd();
     try {
@@ -814,16 +814,20 @@ describe("Agent result rendering", () => {
         },
       };
 
+      // The record's cap comes from the spawn call; the resume call's type
+      // pins a different one in its frontmatter.
       const spawn = await tools.get("Agent").execute(
         "tc-spawn",
-        { prompt: "go", description: "d", subagent_type: "tagged" },
+        { prompt: "go", description: "d", subagent_type: "general-purpose", max_turns: 5 },
         undefined, undefined, c,
       );
       const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
       const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
       const record = handle.getRecord(id);
       await record.promise;
-      // RPC- and scheduler-spawned records never capture an invocation snapshot.
+      expect(record.effectiveMaxTurns).toBe(5);
+      // A record whose invocation snapshot was never captured
+      // (RPC/scheduler/wizard spawns) is resumed through a differing type.
       record.invocation = undefined;
 
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
@@ -833,11 +837,11 @@ describe("Agent result rendering", () => {
         undefined, undefined, c,
       );
 
-      // The row falls back to the resume call's resolved fields instead of blank.
-      expect(resume.details).toMatchObject({
-        modelName: "tagged model",
-        tags: ["max turns: 3"],
-      });
+      // The row keeps the record's own cap (and mode label) and does not
+      // advertise the resume call's model or strategy settings, none of which
+      // the resume applies.
+      expect(resume.details?.modelName).toBeUndefined();
+      expect(resume.details?.tags).toEqual(["twin", "max turns: 5"]);
       await record.promise;
     } finally {
       process.chdir(previousCwd);
