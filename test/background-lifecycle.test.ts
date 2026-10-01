@@ -100,7 +100,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(b)!.status).toBe("completed");
   });
 
-  it("settled is undefined while queued, false while running, true after the tail", async () => {
+  it("settled is undefined while queued, false while running, true after the completion surface", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
@@ -109,9 +109,11 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(a)!.settled).toBe(false); // run in flight
     expect(manager.getRecord(b)!.settled).toBeUndefined(); // never started
 
-    // An abort while queued keeps settled undefined (the run never began).
+    // A queued stop goes through the completion surface, so the record that
+    // never started settles with the stop.
     manager.abort(b);
-    expect(manager.getRecord(b)!.settled).toBeUndefined();
+    expect(manager.getRecord(b)!.status).toBe("stopped");
+    expect(manager.getRecord(b)!.settled).toBe(true);
     manager.abort(a);
   });
 
@@ -599,6 +601,70 @@ describe("background lifecycle — model-visible surfaces", () => {
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload.customType).toBe("subagent-notification");
     expect(payload.content).toContain(`Agent: ${id1}`);
+  });
+
+  it("routes a queued stop through the completion surface exactly once", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const { pi, tools, lifecycle, busHandlers } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const ui = { setStatus: vi.fn(), setWidget: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
+    const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined }, ui };
+    await lifecycle.get("session_start")({}, bindCtx);
+
+    await tools.get("Agent").execute(
+      "tc-block",
+      { prompt: "a", description: "blocker", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const queued = await tools.get("Agent").execute(
+      "tc-queued",
+      { prompt: "b", description: "pending task", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(queued);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    expect(handle.getRecord(id).status).toBe("queued");
+
+    // The real stop path stops the record that never started.
+    await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-queued", agentId: id });
+    const record = handle.getRecord(id);
+    expect(record.status).toBe("stopped");
+    expect(record.settled).toBe(true);
+
+    // Exactly one failed lifecycle event for that record.
+    const failed = pi.events.emit.mock.calls.filter(
+      ([event, payload]: [string, any]) => event === "subagents:failed" && payload.id === id,
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0][1]).toMatchObject({ id, status: "stopped" });
+
+    // ...and one completion notification, for a stopped record with no result.
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.customType).toBe("subagent-notification");
+    expect(payload.content).toContain("**✗ Subagent stopped: pending task**");
+    expect(payload.content).toContain("No output.");
+
+    // No live activity entry remains: the finished row's turn readout renders
+    // only from the activity tracker, so a leftover entry would add a `↻`.
+    await lifecycle.get("tool_execution_start")({}, { ui });
+    const widgetFactory = ui.setWidget.mock.calls.find(
+      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+    )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
+    expect(widgetFactory).toBeTypeOf("function");
+    const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)
+      .render()
+      .join("\n");
+    const stoppedRow = rendered.split("\n").find((line) => line.includes("pending task"));
+    expect(stoppedRow).toBeDefined();
+    expect(stoppedRow).toContain("stopped");
+    expect(stoppedRow).not.toContain("↻");
   });
 
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {

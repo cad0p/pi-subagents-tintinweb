@@ -528,6 +528,11 @@ export class AgentManager {
       this.queue = this.queue.filter(q => q.id !== id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      // A never-started record still goes through the completion surface: the
+      // stop is reported (notification, lifecycle event, activity cleanup) like
+      // any other stop. No counter change — it never held a slot.
+      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+      record.settled = true;
       return true;
     }
 
