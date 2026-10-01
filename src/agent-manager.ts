@@ -206,7 +206,7 @@ export class AgentManager {
     try {
       this.startAgent(id, record, args);
     } catch (err) {
-      this.reclaimWorktree(record, options.cwd ?? ctx.cwd, options.description);
+      this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
       this.agents.delete(id);
       throw err;
     }
@@ -265,7 +265,7 @@ export class AgentManager {
     // reacting to `subagents:started`). Settle it through the stopped tail
     // instead of starting — and counting — a run the user already stopped.
     if (this.stoppedInStartPrologue(record)) {
-      this.settleStoppedWithoutRun(record, baseCwd, options.description);
+      this.settleStoppedWithoutRun(record, baseCwd);
       return;
     }
 
@@ -410,8 +410,12 @@ export class AgentManager {
    * by a `subagents:started` listener before the runner was wired. Reports the
    * stop through the completion surface exactly once and marks the record fully
    * unwound. No counter change: a never-started record never held a slot.
+   *
+   * `baseCwd` is the repo a prologue-created worktree came from; omit it on
+   * paths where no worktree could have been created (a record stopped while
+   * queued, or an already-aborted parent signal).
    */
-  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string, description?: string): void {
+  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string): void {
     record.status = "stopped";
     record.completedAt ??= Date.now();
     // No turn ever executed — zero the run-local counter so the completion
@@ -423,7 +427,7 @@ export class AgentManager {
     // on the queued-abort and already-aborted-signal paths, where no worktree
     // was ever created.
     if (baseCwd) {
-      this.reclaimWorktree(record, baseCwd, description ?? record.description);
+      this.reclaimWorktree(record, baseCwd);
     }
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     record.settled = true;
@@ -437,10 +441,10 @@ export class AgentManager {
    * path retries it. Cleanup errors are ignored — the spawn/queue failure that
    * triggered the reclaim is the actionable signal.
    */
-  private reclaimWorktree(record: AgentRecord, baseCwd: string, description: string): void {
+  private reclaimWorktree(record: AgentRecord, baseCwd: string): void {
     if (!record.worktree) return;
     try {
-      record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, description);
+      record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, record.description);
     } catch { /* ignore cleanup errors */ }
     record.worktree = undefined;
   }
@@ -472,7 +476,7 @@ export class AgentManager {
         // A throwing onStart can follow worktree creation: reclaim the copy
         // and its registration (best-effort, like the run handlers' cleanup).
         if (record.worktree) {
-          this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd, next.args.options.description);
+          this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
         }
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
@@ -484,8 +488,9 @@ export class AgentManager {
    *
    * Returns the record synchronously; the run settles through `record.promise`
    * and the shared completion tail. Returns `undefined` when the record is
-   * unknown, has no session, is already active or winding down, or when the
-   * started listener throws.
+   * unknown, has no session, is already active or winding down, when the
+   * started listener throws, or when it stops the record during the
+   * `subagents:started` emit.
    *
    * Resumes bypass the maxConcurrent admission gate by design: a continuation
    * of a parent-visible run must start immediately rather than queue behind
