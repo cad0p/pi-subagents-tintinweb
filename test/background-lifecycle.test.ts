@@ -810,7 +810,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("tolerates a stale run_in_background argument and still backgrounds the spawn", async () => {
     resolvedRun();
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-stale",
@@ -825,7 +825,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("returns the approved fresh-spawn envelope with the completion delivery contract", async () => {
     resolvedRun();
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-envelope",
@@ -1057,7 +1057,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
+    const { tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1092,7 +1092,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("returns a background envelope from a resume and re-attaches the transcript", async () => {
     resolvedRun("first");
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1135,7 +1135,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("shows the resumed run's finished row after the prior run's latch aged out", async () => {
     resolvedRun("first");
-    const { pi, tools, lifecycle } = registerExtension();
+    const { tools, lifecycle } = registerExtension();
     const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
 
     const spawn = await tools.get("Agent").execute(
@@ -1178,7 +1178,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("does not surface the prior run's latest checkpoint after a resume", async () => {
     resolvedRun("first");
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1221,7 +1221,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("writes only the resumed turn to the transcript when the session already has messages", async () => {
     resolvedRun("first");
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1264,7 +1264,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("returns the still-active envelope when resuming a running agent", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = registerExtension();
+    const { tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
@@ -1333,7 +1333,7 @@ describe("background lifecycle — model-visible surfaces", () => {
   it("returns the still-active envelope while a stopped record is still winding down", async () => {
     let resolveRun!: (v: any) => void;
     vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
-    const { pi, tools, lifecycle, busHandlers } = registerExtension();
+    const { tools, lifecycle, busHandlers } = registerExtension();
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1394,7 +1394,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("seeds the resumed activity state so the widget renders the resumed context fill", async () => {
     resolvedRun("first");
-    const { pi, tools, lifecycle } = registerExtension();
+    const { tools, lifecycle } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1447,7 +1447,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("steers a queued agent through the steer_subagent tool", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = registerExtension({ maxConcurrent: 1 });
+    const { tools } = registerExtension({ maxConcurrent: 1 });
 
     await tools.get("Agent").execute(
       "tc-block",

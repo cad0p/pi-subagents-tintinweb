@@ -697,7 +697,7 @@ describe("Agent result rendering", () => {
         { prompt: "go", description: "d", subagent_type: "tagged" },
         undefined, undefined, c,
       );
-      const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1]!;
+      const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
       const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
       const record = handle.getRecord(id);
       await record.promise;
