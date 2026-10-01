@@ -1190,11 +1190,19 @@ Terse command-style prompts produce shallow, generic work.
         const record = manager.getRecord(id);
         if (record) attachTranscript(record, id);
 
-        agentActivity.set(id, bgState);
-        widget.ensureTimer();
-        widget.update();
-        fleet.ensureTimer();
-        fleet.update();
+        // A spawned record can settle before spawn returns: a `subagents:started`
+        // listener stopping it, or an already-aborted parent signal. The
+        // completion callback already removed its activity entry, so re-adding
+        // one would render a `↻1` finished row for a run that never executed a
+        // turn, and the widget timers have no live run to update. The stop
+        // notification remains the delivery for these runs.
+        if (record && record.settled !== true) {
+          agentActivity.set(id, bgState);
+          widget.ensureTimer();
+          widget.update();
+          fleet.ensureTimer();
+          fleet.update();
+        }
 
         // Emit created event
         pi.events.emit("subagents:created", {

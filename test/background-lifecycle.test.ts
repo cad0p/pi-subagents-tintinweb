@@ -987,6 +987,24 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(failed).toHaveLength(1);
     await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
 
+    // The completion callback already removed the activity tracker during the
+    // synchronous stop; the tool must not re-add it. The finished row's turn
+    // readout renders only from the tracker, so a stale entry would show `↻1`
+    // for this zero-turn run.
+    const ui = { setStatus: vi.fn(), setWidget: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
+    await lifecycle.get("tool_execution_start")({}, { ui });
+    const widgetFactory = ui.setWidget.mock.calls.find(
+      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+    )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
+    expect(widgetFactory).toBeTypeOf("function");
+    const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)
+      .render()
+      .join("\n");
+    const stoppedRow = rendered.split("\n").find((line) => line.includes("early stop"));
+    expect(stoppedRow).toBeDefined();
+    expect(stoppedRow).toContain("stopped");
+    expect(stoppedRow).not.toContain("↻");
+
     // The stopped record never held a slot: with maxConcurrent 1 the next spawn
     // starts immediately instead of queueing behind a leaked counter.
     const next = await tools.get("Agent").execute(
