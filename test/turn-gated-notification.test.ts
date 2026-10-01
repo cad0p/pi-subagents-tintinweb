@@ -56,22 +56,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
-import { MANAGER_KEY } from "./helpers/subagents-harness.js";
-
-function makePi() {
-  const tools = new Map<string, any>();
-  const lifecycle = new Map<string, any>();
-  const commands = new Map<string, any>();
-  const pi = {
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
-    appendEntry: vi.fn(),
-    sendMessage: vi.fn(),
-  } as any;
-  return { pi, tools, lifecycle, commands };
-}
+import { MANAGER_KEY, makePi } from "./helpers/subagents-harness.js";
 
 function ctx() {
   return {
@@ -760,30 +745,6 @@ describe("agents command terminal surfaces", () => {
     return { c, notifications, selects };
   }
 
-  /** pi mock that also captures the `pi.events.on` handlers, so a test can drive
-   *  the stop RPC (the real `manager.abort` path) against a running/queued record. */
-  function busPi() {
-    const tools = new Map<string, any>();
-    const lifecycle = new Map<string, any>();
-    const commands = new Map<string, any>();
-    const busHandlers = new Map<string, (raw: any) => unknown>();
-    const pi = {
-      registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-      registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
-      on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-      events: {
-        emit: vi.fn(),
-        on: vi.fn((event: string, handler: (raw: any) => unknown) => {
-          busHandlers.set(event, handler);
-          return vi.fn();
-        }),
-      },
-      appendEntry: vi.fn(),
-      sendMessage: vi.fn(),
-    } as any;
-    return { pi, tools, lifecycle, commands, busHandlers };
-  }
-
   /** The select answers that route the `/agents` command into the generate wizard. */
   function generateAnswers(title: string) {
     if (title === "Agents") return "Create new agent";
@@ -1167,7 +1128,7 @@ describe("agents command terminal surfaces", () => {
         return new Promise((r) => { releaseFiller = r; });
       });
 
-      const { pi, tools, lifecycle, commands } = busPi();
+      const { pi, tools, lifecycle, commands } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
       await lifecycle.get("session_start")({}, ctx());
@@ -1212,7 +1173,7 @@ describe("agents command terminal surfaces", () => {
       let releaseFiller!: (v: any) => void;
       vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { releaseFiller = r; }));
 
-      const { pi, tools, lifecycle, commands, busHandlers } = busPi();
+      const { pi, tools, lifecycle, commands, busHandlers } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
       await lifecycle.get("session_start")({}, ctx());
@@ -1266,7 +1227,7 @@ describe("agents command terminal surfaces", () => {
         }),
       );
 
-      const { pi, lifecycle, commands, busHandlers } = busPi();
+      const { pi, lifecycle, commands, busHandlers } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
       await lifecycle.get("session_start")({}, ctx());
@@ -1311,7 +1272,7 @@ describe("agents command terminal surfaces", () => {
         return new Promise((r) => { releaseFiller = r; });
       });
 
-      const { pi, tools, lifecycle, commands } = busPi();
+      const { pi, tools, lifecycle, commands } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
       await lifecycle.get("session_start")({}, ctx());
@@ -1371,7 +1332,7 @@ describe("agents command terminal surfaces", () => {
         return new Promise((r) => { releaseFiller = r; });
       });
 
-      const { pi, tools, lifecycle, commands } = busPi();
+      const { pi, tools, lifecycle, commands } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
       await lifecycle.get("session_start")({}, ctx());

@@ -20,20 +20,29 @@ import subagentsExtension from "../../src/index.js";
 export const MANAGER_KEY = Symbol.for("pi-subagents:manager");
 
 /** Build the mock `ExtensionAPI` (`pi`) the extension registers against.
- *  Returns the pi mock plus the `tools` and `lifecycle` maps the suites
- *  inspect after registration. */
+ *  Returns the pi mock plus the maps the suites inspect after registration:
+ *  `tools` (registerTool), `lifecycle` (on), `commands` (registerCommand), and
+ *  `busHandlers` (`pi.events.on` handlers, keyed by event name). */
 export function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const commands = new Map<string, any>();
+  const busHandlers = new Map<string, (raw: any) => unknown>();
   const pi = {
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
+    registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+    events: {
+      emit: vi.fn(),
+      on: vi.fn((event: string, handler: (raw: any) => unknown) => {
+        busHandlers.set(event, handler);
+        return vi.fn();
+      }),
+    },
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle };
+  return { pi, tools, lifecycle, commands, busHandlers };
 }
 
 /** Simulate the production two-activation topology: the root session's

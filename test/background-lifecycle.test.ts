@@ -459,21 +459,11 @@ describe("background lifecycle — model-visible surfaces", () => {
     vi.restoreAllMocks();
   });
 
-  function makeRpcPi() {
-    const busHandlers = new Map<string, (raw: any) => unknown>();
-    const { pi, tools, lifecycle } = makePi();
-    pi.events.on = vi.fn((event: string, handler: (raw: any) => unknown) => {
-      busHandlers.set(event, handler);
-      return vi.fn();
-    });
-    return { pi, tools, lifecycle, busHandlers };
-  }
-
   it("emits a subagents:created payload without isBackground", async () => {
     resolvedRun();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -493,7 +483,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     resolvedRun();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -515,7 +505,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    const { pi, lifecycle, busHandlers } = makeRpcPi();
+    const { pi, lifecycle, busHandlers } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -547,7 +537,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
     process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools, lifecycle, busHandlers } = makeRpcPi();
+    const { pi, tools, lifecycle, busHandlers } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -587,7 +577,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -622,7 +612,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -651,7 +641,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -684,7 +674,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools, lifecycle } = makeRpcPi();
+    const { pi, tools, lifecycle } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;
@@ -743,7 +733,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
     process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = makeRpcPi();
+    const { pi, tools } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     subagentsExtension(pi);
     managerKeyOwned = true;

@@ -13,27 +13,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-
-function makePi() {
-  const tools = new Map<string, any>();
-  const eventHandlers = new Map<string, any>();
-  const lifecycle = new Map<string, any>();
-  const pi = {
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: {
-      emit: vi.fn(),
-      on: vi.fn((event: string, handler: any) => {
-        eventHandlers.set(event, handler);
-        return vi.fn();
-      }),
-    },
-    appendEntry: vi.fn(),
-    sendMessage: vi.fn(),
-  } as any;
-  return { pi, tools, eventHandlers, lifecycle };
-}
+import { makePi } from "./helpers/subagents-harness.js";
 
 // The RPC channels are registered on the first bound session_start (#142), so a
 // test that drives them must fire it first — as a real session always does. A
@@ -94,7 +74,7 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {
     // A background agent that never settles on its own — only a stop ends it.
     vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
-    const { pi, tools, eventHandlers, lifecycle } = makePi();
+    const { pi, tools, busHandlers, lifecycle } = makePi();
     subagentsExtension(pi);
     await bind(lifecycle); // register RPC channels via session_start (#142)
 
@@ -107,7 +87,7 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(id, "background spawn should surface an agent id").toBeTruthy();
 
     // The user stops it — same path the viewer's stop key uses (manager.abort).
-    eventHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
+    busHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
 
     const res = await tools.get("get_subagent_result").execute(
       "tc3", { agent_id: id }, undefined, undefined, ctx(),
