@@ -868,6 +868,9 @@ describe("Agent result rendering", () => {
         undefined, undefined, c,
       );
       expect(textOf(scheduled)).toContain("Scheduled");
+      // The warning itself must still be attempted; a swallowed notify must not
+      // hide that the scope check ran.
+      expect(c.ui.notify).toHaveBeenCalledWith(expect.stringContaining("out-of-scope model"), "warning");
 
       // The job is registered, not merely reported as such: a retry hits the
       // duplicate-name guard.
@@ -930,6 +933,7 @@ describe("Agent result rendering", () => {
       );
       expect(textOf(spawn)).toContain("Agent ID:");
       expect(textOf(spawn)).toContain("started in background.");
+      expect(c.ui.notify).toHaveBeenCalledWith(expect.stringContaining("out-of-scope model"), "warning");
     } finally {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
