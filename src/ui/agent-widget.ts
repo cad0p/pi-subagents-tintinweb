@@ -291,6 +291,11 @@ export class AgentWidget {
     }
   }
 
+  /** Clear the finished-linger latch when a record starts a new run (resume). */
+  markRunning(agentId: string) {
+    this.finishedTurnAge.delete(agentId);
+  }
+
   /** Render a finished agent line. */
   private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
     const name = toSingleLine(getDisplayName(a.type));

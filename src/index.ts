@@ -1124,6 +1124,7 @@ Terse command-style prompts produce shallow, generic work.
         if (record.outputFile && record.session) {
           record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);
         }
+        widget.markRunning(record.id);
         widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
         return textResult(
           `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${getDisplayName(existing.type)}\nDescription: ${record.description}\n` +

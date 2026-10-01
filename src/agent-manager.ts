@@ -419,6 +419,7 @@ export class AgentManager {
       resultConsumed: record.resultConsumed,
       abortController: record.abortController,
       turnCount: record.turnCount,
+      lastCheckpoint: record.lastCheckpoint,
     };
     record.status = "running";
     record.startedAt = Date.now();
@@ -428,6 +429,9 @@ export class AgentManager {
     record.resultConsumed = undefined; // a prior pull must not swallow the resume report
     // Run-local, mirroring a fresh spawn's initial turn count.
     record.turnCount = 1;
+    // Run-local too: the prior run's latest checkpoint must not surface as the
+    // resumed run's state. The .checkpoints.md history stays cumulative.
+    record.lastCheckpoint = undefined;
     record.abortController = new AbortController();
     try {
       this.onStart?.(record);

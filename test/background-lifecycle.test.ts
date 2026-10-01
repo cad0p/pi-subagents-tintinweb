@@ -356,6 +356,25 @@ describe("background lifecycle — resume", () => {
     await rec.promise;
   });
 
+  it("clears the prior run's latest checkpoint when a resume starts", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled();
+    const record = manager.getRecord(id)!;
+    record.lastCheckpoint = { turn: 7, summary: "PRIOR-RUN-SUMMARY" };
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+
+    const rec = manager.resume(id, "more")!;
+    // Run-local: the prior run's latest checkpoint is gone before the resumed
+    // run can write its own, so a progress read cannot surface stale findings.
+    expect(record.lastCheckpoint).toBeUndefined();
+
+    record.lastCheckpoint = { turn: 2, summary: "resumed summary" };
+    resolveResume({ text: "resumed" });
+    await rec.promise;
+    expect(record.lastCheckpoint).toEqual({ turn: 2, summary: "resumed summary" });
+  });
+
   it("counts the resumed run while it runs and drains a queued spawn when it settles", async () => {
     manager = new AgentManager(undefined, 1);
     const id = await spawnSettled();
@@ -387,6 +406,7 @@ describe("background lifecycle — resume", () => {
     const record = manager.getRecord(id)!;
     record.resultConsumed = true; // a prior pull the resume must not lose on rollback
     record.turnCount = 7; // the prior run's final count
+    record.lastCheckpoint = { turn: 7, summary: "prior run summary" };
     const before = {
       status: record.status,
       result: record.result,
@@ -409,6 +429,7 @@ describe("background lifecycle — resume", () => {
     expect(record.resultConsumed).toBe(before.resultConsumed);
     expect(record.abortController).toBe(before.abortController);
     expect(record.turnCount).toBe(7);
+    expect(record.lastCheckpoint).toEqual({ turn: 7, summary: "prior run summary" });
   });
 
   it("a refused resume leaks no pool slot — a queued spawn still starts after the blocker settles", async () => {
@@ -661,6 +682,54 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
     await record.promise;
     expect(record.result).toBe("second");
+  });
+
+  it("does not surface the prior run's latest checkpoint after a resume", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    await record.promise;
+    record.lastCheckpoint = { turn: 7, summary: "PRIOR-RUN-SUMMARY" };
+
+    let resolveResume!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
+    await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    // A progress read while the resumed run is live reports the resumed run's
+    // own (empty) checkpoint state, not the prior run's summary.
+    const running = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    expect(running).toContain("still running");
+    expect(running).toContain("No checkpoint yet");
+    expect(running).not.toContain("PRIOR-RUN-SUMMARY");
+
+    resolveResume({ text: "second" });
+    await record.promise;
+
+    // The completed report does not resurrect it either.
+    const done = textOf(await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    ));
+    expect(done).not.toContain("PRIOR-RUN-SUMMARY");
+    expect(done).not.toContain("Latest checkpoint");
   });
 
   it("writes only the resumed turn to the transcript when the session already has messages", async () => {

@@ -104,6 +104,33 @@ describe("AgentWidget", () => {
     expect(renderLines(manager, "agent", () => "off")).toBe("");
   });
 
+  it("keeps showing a resumed run's completion after the finished latch was set", () => {
+    const manager = {
+      listAgents: () => [{ ...makeRecord("agent"), status: "completed", completedAt: Date.now() }],
+    };
+    const widget = new AgentWidget(manager as any, new Map());
+    let factory: any;
+    widget.setUICtx({
+      setStatus: () => {},
+      setWidget: (_key, content) => { if (typeof content === "function") factory = content; },
+    });
+    const render = () => factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+
+    widget.markFinished("agent");
+    widget.update();
+    expect(render()).toContain("agent description");
+
+    // A completed row ages out on the next turn, like every finished record.
+    widget.onTurnStart();
+    expect(render()).toBe("");
+
+    // A resume starts a new run: the stale finished latch must not hide its
+    // completion row the moment the resumed run finishes.
+    widget.markRunning("agent");
+    widget.markFinished("agent");
+    expect(render()).toContain("agent description");
+  });
+
   it("strips terminal controls from the live activity line", () => {
     // Direct call pins truncateLine's own stripControlChars, which every widget
     // call site would otherwise mask by piping the result through toSingleLine.
