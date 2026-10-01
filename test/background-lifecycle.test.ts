@@ -470,7 +470,10 @@ describe("background lifecycle — model-visible surfaces", () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
     process.chdir(tmpDir);
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    let resolveFirst!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "a" ? new Promise((r) => { resolveFirst = r; }) : new Promise(() => {}),
+    );
 
     const { pi, lifecycle, busHandlers } = makePi();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
@@ -497,6 +500,14 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(handle.getRecord(id1).status).toBe("running");
     expect(handle.getRecord(id2).status).toBe("queued");
     expect(handle.hasRunning()).toBe(true);
+
+    // An RPC spawn is not suppressed: resolving it notifies exactly once, for
+    // that record.
+    resolveFirst({ responseText: "a done", session: mockSession(), aborted: false, steered: false });
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.customType).toBe("subagent-notification");
+    expect(payload.content).toContain(`Agent: ${id1}`);
   });
 
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
