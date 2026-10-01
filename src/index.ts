@@ -955,7 +955,7 @@ Terse command-style prompts produce shallow, generic work.
 
       // ---- Error / Aborted (hard max_turns) ----
       // Legacy fallthrough: a replayed pre-change row carrying a retired inline
-      // status (running/completed/steered/stopped/queued) lands here.
+      // status (running/completed/steered/stopped) lands here.
       const s = stats(details);
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
