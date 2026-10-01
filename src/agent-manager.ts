@@ -369,7 +369,10 @@ export class AgentManager {
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-    this.drainQueue();
+    // A drain escape must not reject an already-fulfilled run promise or strand
+    // `settled` — a stuck `settled = false` would refuse every later resume and
+    // leave the queued records behind the freed slot unstarted.
+    try { this.drainQueue(); } catch { /* keep the completion tail failure-safe */ }
     record.settled = true;
   }
 
