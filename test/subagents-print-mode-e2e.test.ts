@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Context, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { NUDGE_HOLD_MS } from "../src/index.js";
 import {
   agentCall,
   agentToolCalls,
@@ -202,8 +203,8 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     run = undefined;
     releaseChild();
     await capturedPromise;
-    // Past NUDGE_HOLD_MS: any armed completion notification would have fired by now.
-    await new Promise((r) => setTimeout(r, 250));
+    // Past the notification hold: any armed completion notification would have fired by now.
+    await new Promise((r) => setTimeout(r, NUDGE_HOLD_MS + 50));
 
     expect(record!.status).toBe("stopped");
     const transcript = conversationText(parentSession);

@@ -176,7 +176,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(recovering)!.status).toBe("completed");
   });
 
-  it("a throwing outputCleanup still resolves the promise, drains, and settles", async () => {
+  it("a throwing outputCleanup still resolves the promise and settles", async () => {
     manager = new AgentManager(undefined, 1);
     resolvedRun();
 

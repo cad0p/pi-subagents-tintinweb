@@ -20,9 +20,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { textOf } from "./helpers/subagents-harness.js";
-
-const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+import { MANAGER_KEY, textOf } from "./helpers/subagents-harness.js";
 
 function makePi() {
   const tools = new Map<string, any>();

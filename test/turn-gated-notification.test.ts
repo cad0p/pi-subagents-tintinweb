@@ -948,8 +948,9 @@ describe("agents command terminal surfaces", () => {
     try {
       process.chdir(dir);
       mkdirSync(join(dir, ".pi"), { recursive: true });
-      // The retired "background" mode was dropped from the valid set long ago;
-      // the settings menu must still render the extension's "all" default.
+      // "background" was removed from the valid widget modes with the
+      // background-only migration; the settings menu must still render the
+      // extension's "all" default.
       writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ widgetMode: "background" }), "utf-8");
       const { pi, commands } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
@@ -1121,12 +1122,7 @@ describe("agents command terminal surfaces", () => {
       });
       const { pi, commands } = makePi();
       subagentsExtension(pi);
-      const { c, notifications } = commandCtx(title => {
-        if (title === "Agents") return "Create new agent";
-        if (title === "Choose location") return "Project (.pi/agents/)";
-        if (title === "Creation method") return "Generate with Claude (recommended)";
-        return undefined;
-      });
+      const { c, notifications } = commandCtx(generateAnswers);
       c.ui.input.mockResolvedValueOnce("a test agent").mockResolvedValueOnce("gen-ok");
 
       await commands.get("agents").handler("", c);

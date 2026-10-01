@@ -223,6 +223,10 @@ export function effectiveFailurePreviewCap(value: number): number {
   return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
 
+/** Grace window between an agent settling and its completion notification being
+ *  sent, so a parent that pulls the result first can still cancel the nudge. */
+export const NUDGE_HOLD_MS = 200;
+
 /** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
 function failurePreviewCap(settings: SubagentsSettings): number {
   const cap = settings.failurePreviewMaxChars;
@@ -327,7 +331,6 @@ export default function (pi: ExtensionAPI) {
   // firing; the send closures re-check it at fire time.
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const parkedNudges = new Map<string, () => void>();
-  const NUDGE_HOLD_MS = 200;
   /** Poll interval while the wizard waits for a queued generator to start. The
    *  wizard is interactive, so it re-checks the record until it leaves `queued`
    *  (or is stopped) instead of blocking on a promise that does not exist yet. */
