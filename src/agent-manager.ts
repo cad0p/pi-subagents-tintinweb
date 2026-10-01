@@ -431,7 +431,8 @@ export class AgentManager {
       return undefined;
     }
     record.settled = false;
-    this.runningBackground++; // counted while running; a resume never queues
+    // Occupies a slot but is never gated by maxConcurrent; a burst of resumes can exceed the cap by design.
+    this.runningBackground++;
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
