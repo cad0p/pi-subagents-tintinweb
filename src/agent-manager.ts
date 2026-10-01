@@ -590,6 +590,10 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        // A never-started record still goes through the completion surface,
+        // matching abort()'s queued branch. No counter change — it never held a slot.
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        record.settled = true;
         count++;
       }
     }

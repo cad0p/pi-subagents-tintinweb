@@ -701,6 +701,49 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(stoppedRow).not.toContain("↻");
   });
 
+  it("session_shutdown settles each queued record through the completion surface exactly once", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const { pi, tools, lifecycle } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
+    await lifecycle.get("session_start")({}, bindCtx);
+
+    await tools.get("Agent").execute(
+      "tc-block",
+      { prompt: "a", description: "blocker", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const queued = await tools.get("Agent").execute(
+      "tc-queued",
+      { prompt: "b", description: "queued task", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(queued);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    expect(record.status).toBe("queued");
+
+    await lifecycle.get("session_shutdown")({}, bindCtx);
+
+    // The shutdown abort settles the queued record through the completion tail.
+    expect(record.status).toBe("stopped");
+    expect(record.settled).toBe(true);
+    const failed = pi.events.emit.mock.calls.filter(
+      ([event, payload]: [string, any]) => event === "subagents:failed" && payload.id === id,
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0][1]).toMatchObject({ id, status: "stopped" });
+    // Shutdown clears the nudge queue, so the completion notification never fires.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));

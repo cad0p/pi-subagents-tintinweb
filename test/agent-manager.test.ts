@@ -881,6 +881,27 @@ describe("AgentManager — abortAll", () => {
     expect(manager.hasRunning()).toBe(false);
   });
 
+  it("settles queued records through the completion tail and leaves running ones to unwind", () => {
+    const completed: AgentRecord[] = [];
+    manager = new AgentManager((record) => completed.push(record), 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const running = manager.spawn(mockPi, mockCtx, "X", "r", { description: "r" });
+    const queued = manager.spawn(mockPi, mockCtx, "Y", "q", { description: "q" });
+
+    expect(manager.abortAll()).toBe(2);
+
+    const queuedRecord = manager.getRecord(queued)!;
+    expect(queuedRecord.status).toBe("stopped");
+    expect(queuedRecord.completedAt).toBeDefined();
+    expect(queuedRecord.settled).toBe(true);
+    // The queued record settles inline; the running record's promise unwinds
+    // through afterRun later.
+    expect(completed.map((r) => r.id)).toEqual([queued]);
+    expect(manager.getRecord(running)!.status).toBe("stopped");
+    expect(manager.getRecord(running)!.settled).toBe(false);
+  });
+
   it("returns 0 when there are no running or queued agents", () => {
     manager = new AgentManager();
     expect(manager.abortAll()).toBe(0);
