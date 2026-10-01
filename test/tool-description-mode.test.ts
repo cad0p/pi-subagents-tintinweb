@@ -142,6 +142,24 @@ describe("toolDescriptionMode", () => {
     );
   });
 
+  it("the full usage-notes block matches the approved text byte-for-byte", () => {
+    const desc: string = setup().get("Agent").description;
+    expect(desc).toContain(
+      [
+        "## Usage notes",
+        "",
+        "- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).",
+        "- When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.",
+        "- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.",
+        "- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.",
+        "- Use steer_subagent to send mid-run messages to a running subagent.",
+        "- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.",
+        "- Use inherit_context if the agent needs the parent conversation history.",
+        '- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.',
+      ].join("\n"),
+    );
+  });
+
   it("the full Agent description no longer advertises the removed execution knobs", () => {
     const desc: string = setup().get("Agent").description;
     expect(desc).not.toContain("run_in_background");
