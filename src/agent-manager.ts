@@ -413,7 +413,8 @@ export class AgentManager {
    *
    * `baseCwd` is the repo a prologue-created worktree came from; omit it on
    * paths where no worktree could have been created (a record stopped while
-   * queued, or an already-aborted parent signal).
+   * queued, an already-aborted parent signal, or a resume stopped during its
+   * start prologue).
    */
   private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string): void {
     record.status = "stopped";
@@ -424,8 +425,8 @@ export class AgentManager {
     // Reclaim a worktree created by the start prologue (a stop issued during
     // the `subagents:started` emit): the run never made changes, so this
     // removes the copy and its git registration outright. `baseCwd` is absent
-    // on the queued-abort and already-aborted-signal paths, where no worktree
-    // was ever created.
+    // on the queued-abort, already-aborted-signal, and resume start-prologue
+    // paths, where no worktree was ever created.
     if (baseCwd) {
       this.reclaimWorktree(record, baseCwd);
     }
@@ -434,12 +435,13 @@ export class AgentManager {
   }
 
   /**
-   * Best-effort reclamation of a worktree created by a run's start prologue
-   * when the run never executed (a throwing started listener, or a stop during
-   * the emit). Removes the copy and its git registration from `baseCwd`'s repo,
-   * records the cleanup outcome, and clears the record's reference so no later
-   * path retries it. Cleanup errors are ignored — the spawn/queue failure that
-   * triggered the reclaim is the actionable signal.
+   * Best-effort reclamation of a worktree the start prologue created when the
+   * run never executed: a throwing started listener on the spawn or queue
+   * path, or a stop issued during the `subagents:started` emit. Removes the
+   * copy and its git registration from `baseCwd`'s repo, records the cleanup
+   * outcome, and clears the record's reference so no later path retries it.
+   * Cleanup errors are ignored — the failure or stop that triggered the
+   * reclaim is the actionable signal.
    */
   private reclaimWorktree(record: AgentRecord, baseCwd: string): void {
     if (!record.worktree) return;
