@@ -437,9 +437,12 @@ export class AgentManager {
   resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
-    // A running record always has `settled === false`, so the settled gate covers
-    // it; a queued record has no session yet and is refused by the queued arm.
-    if (record.status === "queued" || record.settled === false) return undefined;
+    // A record in the start prologue is already `running` while `settled` may
+    // still hold the prior run's `true`, so the running arm is load-bearing.
+    // A queued record has no session yet and is refused by the queued arm.
+    if (record.status === "running" || record.status === "queued" || record.settled === false) {
+      return undefined;
+    }
 
     const prior = {
       status: record.status,

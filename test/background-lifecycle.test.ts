@@ -224,19 +224,41 @@ describe("background lifecycle — resume", () => {
     expect(record.result).toBe("second");
   });
 
-  it("refuses to resume a running agent through the settled gate", async () => {
+  it("refuses to resume a running agent", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     const record = manager.getRecord(id)!;
     // Past the !session guard: a running agent with a live session is refused
-    // because its run is in flight (settled === false).
+    // by the running arm (its settled flag is also false, but the running arm
+    // fires first).
     record.session = mockSession();
     expect(record.settled).toBe(false);
     vi.mocked(resumeAgent).mockClear();
     expect(manager.resume(id, "more")).toBeUndefined();
     expect(resumeAgent).not.toHaveBeenCalled();
     manager.abort(id);
+  });
+
+  it("refuses a re-entrant resume from a started listener during the start prologue", async () => {
+    let reentrant: ReturnType<AgentManager["resume"]>;
+    let armed = false;
+    manager = new AgentManager(undefined, 4, (record) => {
+      if (!armed) return;
+      // Disarm before the nested call so a leaked gate cannot recurse forever.
+      armed = false;
+      reentrant = manager.resume(record.id, "reentrant");
+    });
+    const id = await spawnSettled();
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockClear();
+
+    armed = true;
+    // The listener runs while the record is running but still settled from the
+    // prior run — only the running arm can refuse the nested resume.
+    expect(manager.resume(id, "more")).toBeDefined();
+    expect(reentrant!).toBeUndefined();
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
   });
 
   it("refuses and settles a resume stopped synchronously during the started emit", async () => {
@@ -1048,6 +1070,55 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
     // The tool-level guard fires before the manager is ever touched.
     expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("running");
+  });
+
+  it("refuses a re-entrant tool resume issued from the started event", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await handle.getRecord(id).promise;
+
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockClear();
+    // The started event fires inside the outer resume, before the manager has
+    // cleared `settled` — the record is running with the prior run's `true`, so
+    // only the running arm refuses the nested call.
+    let nested: Promise<unknown> | undefined;
+    let nestedCalled = false;
+    pi.events.emit.mockImplementation((event: string, payload: any) => {
+      if (event !== "subagents:started" || nestedCalled) return;
+      nestedCalled = true;
+      nested = tools.get("Agent").execute(
+        "tc-nested",
+        { prompt: "again", description: "d", subagent_type: "general-purpose", resume: payload.id },
+        undefined, undefined, spawnCtx(tmpDir),
+      );
+    });
+
+    const resumed = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    expect(textOf(resumed)).toContain("Agent resumed in background");
+    expect(nested).toBeDefined();
+    expect(textOf(await nested!)).toBe(
+      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
+    );
+    // Only the outer resume reached the runner.
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
   });
 
   it("returns the still-active envelope while a stopped record is still winding down", async () => {

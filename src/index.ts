@@ -1106,11 +1106,11 @@ Terse command-style prompts produce shallow, generic work.
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
         if (!existing) return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
-        // Queued, or a run still in flight/winding down — starting now would race
-        // the previous run's settle handler. A running record always has
-        // `settled === false`, so the settled gate covers it. A queued record has
-        // no session yet, so the active check precedes the session check.
-        if (existing.status === "queued" || existing.settled === false) {
+        // Running (including the start prologue, where `settled` may still hold
+        // the prior run's `true`), queued, or winding down — starting now would
+        // race the previous run's settle handler. A queued record has no session
+        // yet, so the active check precedes the session check.
+        if (existing.status === "running" || existing.status === "queued" || existing.settled === false) {
           return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
         if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
