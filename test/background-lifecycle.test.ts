@@ -66,7 +66,13 @@ function leftoverWorktrees(repo: string): string[] {
 
 describe("background lifecycle — pooling and the completion tail", () => {
   let manager: AgentManager;
-  afterEach(() => manager?.dispose());
+  afterEach(() => {
+    manager?.dispose();
+    // The factory defines these module mocks; reset (not restore) them so a
+    // reordered test cannot inherit the previous test's pending-promise impl.
+    vi.mocked(runAgent).mockReset();
+    vi.mocked(resumeAgent).mockReset();
+  });
 
   it("queues past maxConcurrent and drains when a slot frees", async () => {
     manager = new AgentManager(undefined, 1);
@@ -380,7 +386,13 @@ describe("background lifecycle — pooling and the completion tail", () => {
 
 describe("background lifecycle — resume", () => {
   let manager: AgentManager;
-  afterEach(() => manager?.dispose());
+  afterEach(() => {
+    manager?.dispose();
+    // Same rationale as the pooling describe: reset, don't restore, so a
+    // reordered test cannot inherit the previous test's pending-promise impl.
+    vi.mocked(runAgent).mockReset();
+    vi.mocked(resumeAgent).mockReset();
+  });
 
   async function spawnSettled(description = "base"): Promise<string> {
     resolvedRun("first");
