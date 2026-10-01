@@ -1352,6 +1352,67 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
+  it("reports Generation failed when a queued generator errors before its runner starts", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-nopromise-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+        if (isGeneratorRun(opts)) return Promise.reject(new Error("unexpected generator start"));
+        return new Promise((r) => { releaseFiller = r; });
+      });
+
+      const { pi, tools, lifecycle, commands } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      // The started listener throws while the drain admits the generator (a
+      // stale extension context), so startAgent fails before its runner chain
+      // is wired: the record parks in `error` with no promise.
+      pi.events.emit.mockImplementation((event: string, payload: any) => {
+        if (event === "subagents:started" && payload?.description?.startsWith("Generate ")) {
+          throw new Error("stale extension context");
+        }
+      });
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("an orphaned agent").mockResolvedValueOnce("gen-nopromise");
+
+      const handler = commands.get("agents").handler("", c);
+      const queuedId = await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-nopromise agent");
+        expect(rec?.status).toBe("queued");
+        return rec.id as string;
+      });
+
+      // Freeing the slot drains the queue; the generator fails to start.
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+      await handler;
+
+      const record = handle.getRecord(queuedId);
+      expect(record.status).toBe("error");
+      expect(record.promise).toBeUndefined();
+
+      const messages = notifications.map(n => n.message);
+      expect(messages.some(m => m.startsWith("Generation failed"))).toBe(true);
+      expect(messages.some(m => m.startsWith("Created "))).toBe(false);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   // Probe for a leak of the module-global the disable/override menu tests set:
   // with the cleanup reset removed this fails after the first disable test.
   it("sees the default-agent flag reset after the menu tests", () => {
