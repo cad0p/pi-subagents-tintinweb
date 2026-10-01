@@ -413,9 +413,11 @@ export class AgentManager {
    * unwound. No counter change: a never-started record never held a slot.
    *
    * `baseCwd` is the repo a prologue-created worktree came from; omit it on
-   * paths where no worktree could have been created (a record stopped while
+   * paths where this run's prologue created none (a record stopped while
    * queued, an already-aborted parent signal, or a resume stopped during its
-   * start prologue).
+   * start prologue). A resumed record can still carry the prior run's worktree
+   * reference — a resume never creates one, and reclaiming that stale path
+   * would clobber the prior run's `worktreeResult`.
    */
   private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string): void {
     record.status = "stopped";
@@ -427,7 +429,7 @@ export class AgentManager {
     // the `subagents:started` emit): the run never made changes, so this
     // removes the copy and its git registration outright. `baseCwd` is absent
     // on the queued-abort, already-aborted-signal, and resume start-prologue
-    // paths, where no worktree was ever created.
+    // paths, where this run's prologue created no worktree.
     if (baseCwd) {
       this.reclaimWorktree(record, baseCwd);
     }
