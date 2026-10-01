@@ -691,6 +691,42 @@ describe("background lifecycle — resume", () => {
     manager.abort(queued);
   });
 
+  it("starts two resumes at maxConcurrent 1 and drains the counter when both settle", async () => {
+    manager = new AgentManager(undefined, 1);
+    const first = await spawnSettled("first");
+    const second = await spawnSettled("second");
+    let resolveFirst!: (v: any) => void;
+    let resolveSecond!: (v: any) => void;
+    vi.mocked(resumeAgent).mockImplementation((_session: any, prompt: string) =>
+      prompt === "first-more"
+        ? new Promise((r) => { resolveFirst = r; })
+        : new Promise((r) => { resolveSecond = r; }));
+
+    const firstRecord = manager.getRecord(first)!;
+    const secondRecord = manager.getRecord(second)!;
+    // Both resumes start: the admission gate never defers a continuation.
+    expect(manager.resume(first, "first-more")).toBe(firstRecord);
+    expect(manager.resume(second, "second-more")).toBe(secondRecord);
+    expect(firstRecord.status).toBe("running");
+    expect(secondRecord.status).toBe("running");
+
+    // Both count against the cap: a fresh spawn waits until both are done.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    resolveFirst({ text: "first resumed" });
+    await firstRecord.promise;
+    // One resume still holds a slot — the queued spawn stays parked.
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    resolveSecond({ text: "second resumed" });
+    await secondRecord.promise;
+    // Counter back to zero: the queued spawn starts.
+    expect(manager.getRecord(queued)!.status).toBe("running");
+    manager.abort(queued);
+  });
+
   it("rolls the record back and refuses when the started listener throws", async () => {
     let shouldThrow = false;
     let seenController: AbortController | undefined;
