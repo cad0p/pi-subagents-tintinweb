@@ -729,6 +729,57 @@ describe("Agent result rendering", () => {
     }
   });
 
+  it("warns for an out-of-scope pinned model when the call registers a schedule", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-schedule-scope-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["allowed/only-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "pinned.md"),
+        '---\ndescription: pinned agent\nmodel: "scope/pinned-model"\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      const { pi, tools, lifecycle } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "pinned-model"
+              ? { provider: "scope", id: "pinned-model", name: "Pinned Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "allowed", id: "only-model", name: "Only Model" }]),
+        },
+      };
+      // The schedule branch only registers while the scheduler is active.
+      await lifecycle.get("session_start")({}, c);
+
+      const scheduled = await tools.get("Agent").execute(
+        "tc-schedule",
+        { prompt: "go", description: "later", subagent_type: "pinned", schedule: "1h" },
+        undefined, undefined, c,
+      );
+      expect(textOf(scheduled)).toContain("Scheduled");
+
+      // The out-of-scope warning fires at registration, not only for a fresh run.
+      const warnings = c.ui.notify.mock.calls
+        .map(([msg]: [string]) => msg)
+        .filter((msg: string) => msg.includes("out-of-scope"));
+      expect(warnings).toEqual(['Agent "pinned" using out-of-scope model "scope/pinned-model"']);
+      lifecycle.get("session_before_switch")();
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the error line collapses newlines so a record field cannot add a display line", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);

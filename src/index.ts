@@ -1011,6 +1011,41 @@ Terse command-style prompts produce shallow, generic work.
 
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
 
+      // Resolve the call's model from agent frontmatter only (no LLM-authored
+      // override). Shared by fresh spawns and scheduled registrations so the
+      // scope check below covers both: a schedule registers a job here and the
+      // pinned model resolves at fire time, but the warning still belongs to
+      // registration. A resume continues the record's session and model, so it
+      // does not warn; the resume row falls back to the call-resolved fields.
+      let model = ctx.model;
+      if (resolvedConfig.modelInput) {
+        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
+        if (typeof resolved !== "string") {
+          model = resolved;
+        }
+        // config-specified but unresolvable: silent fallback to parent (existing behavior)
+      }
+
+      // Scope validation: the effective resolved model is checked against the
+      // user's enabledModels list (read in `enabled-models.ts`).
+      //
+      // Design: scopeModels guards against frontmatter-pinned or parent-inherited
+      // models drifting out of the user's allowlist. Both warn and proceed —
+      // frontmatter is authoritative (the agent's author/installer chose it),
+      // and the parent's model was chosen by the user when starting the session.
+      // See SubagentsSettings.scopeModels docstring for the full policy.
+      if (!params.resume && isScopeModelsEnabled() && model) {
+        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
+        if (allowed && !isModelInScope(model, allowed)) {
+          const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
+          const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
+          ctx.ui.notify(
+            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+            "warning",
+          );
+        }
+      }
+
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
@@ -1108,39 +1143,6 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background execution
       {
-        // Resolve model from agent frontmatter only (no LLM-authored override).
-        // Fresh spawns only — a resume continues the record's session and
-        // model, so resolving (and scope-checking) the call's type there would
-        // validate a model the run never uses.
-        let model = ctx.model;
-        if (resolvedConfig.modelInput) {
-          const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-          if (typeof resolved !== "string") {
-            model = resolved;
-          }
-          // config-specified but unresolvable: silent fallback to parent (existing behavior)
-        }
-
-        // Scope validation: the effective resolved model is checked against the
-        // user's enabledModels list (read in `enabled-models.ts`).
-        //
-        // Design: scopeModels guards against frontmatter-pinned or parent-inherited
-        // models drifting out of the user's allowlist. Both warn and proceed —
-        // frontmatter is authoritative (the agent's author/installer chose it),
-        // and the parent's model was chosen by the user when starting the session.
-        // See SubagentsSettings.scopeModels docstring for the full policy.
-        if (isScopeModelsEnabled() && model) {
-          const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
-          if (allowed && !isModelInScope(model, allowed)) {
-            const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
-            const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
-            ctx.ui.notify(
-              `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-              "warning",
-            );
-          }
-        }
-
         const displayName = getDisplayName(subagentType);
         const parentModelId = ctx.model?.id;
         const effectiveModelId = model?.id;
