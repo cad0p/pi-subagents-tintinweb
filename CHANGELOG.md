@@ -21,6 +21,10 @@ All notable changes to this project will be documented in this file.
 - Drop upstream tintinweb media URLs from pi manifest (fork) ([#23](https://github.com/cad0p/pi-subagents-tintinweb/pull/23))
 - Declare @sinclair/typebox as a peer dependency (closes #33)
 
+### 🚜 Refactor
+
+- Background-only Agent spawns — remove foreground mode (closes #30) ([#37](https://github.com/cad0p/pi-subagents-tintinweb/pull/37))
+
 ### ⚙️ Miscellaneous Tasks
 
 - Add workflow_dispatch trigger to Auto Release ([#19](https://github.com/cad0p/pi-subagents-tintinweb/pull/19))
