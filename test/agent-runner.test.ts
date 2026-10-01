@@ -284,6 +284,30 @@ describe("agent-runner final output capture", () => {
   });
 });
 
+describe("agent-runner abort-signal forwarding", () => {
+  it("aborts a fresh session immediately when handed an already-aborted signal", async () => {
+    const { session } = createSession("STOPPED");
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+
+    await runAgent(ctx, "Explore", "go", { pi, signal: controller.signal });
+
+    // The "abort" event already fired, so subscribing would never deliver it.
+    expect(session.abort).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a resumed session immediately when handed an already-aborted signal", async () => {
+    const { session } = createSession("STOPPED");
+    const controller = new AbortController();
+    controller.abort();
+
+    await resumeAgent(session as any, "Continue", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+  });
+});
+
 // #144 — a failed FINAL assistant turn (stopReason "error") must surface as
 // `failure`; how the turn STOPPED decides, never whether it produced text.
 describe("agent-runner failed-final-turn detection (#144)", () => {

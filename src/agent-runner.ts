@@ -401,6 +401,12 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
   const onAbort = () => session.abort();
+  // An already-aborted signal never fires its event, so abort now instead of
+  // letting the child run on with a signal its owner believes is dead.
+  if (signal.aborted) {
+    onAbort();
+    return () => {};
+  }
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }

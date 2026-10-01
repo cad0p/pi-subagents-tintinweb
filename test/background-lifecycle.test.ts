@@ -239,6 +239,38 @@ describe("background lifecycle — resume", () => {
     manager.abort(id);
   });
 
+  it("refuses and settles a resume stopped synchronously during the started emit", async () => {
+    let stopOnStart = false;
+    const stoppedCompletions: string[] = [];
+    manager = new AgentManager((record) => {
+      if (record.status === "stopped") stoppedCompletions.push(record.id);
+    }, 1, (record) => {
+      if (stopOnStart) manager.abort(record.id);
+    });
+    const id = await spawnSettled();
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockClear();
+
+    stopOnStart = true;
+    expect(manager.resume(id, "more")).toBeUndefined();
+
+    const record = manager.getRecord(id)!;
+    expect(resumeAgent).not.toHaveBeenCalled();
+    expect(record.status).toBe("stopped");
+    expect(record.settled).toBe(true);
+    // Exactly one stop report for the run that never started.
+    expect(stoppedCompletions).toEqual([id]);
+
+    // No slot was taken: a fresh spawn starts immediately at maxConcurrent 1.
+    stopOnStart = false;
+    let resolveNext!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveNext = r; }));
+    const next = manager.spawn(mockPi, mockCtx, "X", "next", { description: "next" });
+    expect(manager.getRecord(next)!.status).toBe("running");
+    resolveNext({ responseText: "next", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(next)!.promise;
+  });
+
   it("refuses to resume a queued agent through the queued arm, not the session guard", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -699,6 +731,62 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(stoppedRow).toBeDefined();
     expect(stoppedRow).toContain("stopped");
     expect(stoppedRow).not.toContain("↻");
+  });
+
+  it("honors a stop issued synchronously during the started event", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    process.chdir(tmpDir);
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const { pi, tools, lifecycle, busHandlers } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
+    await lifecycle.get("session_start")({}, bindCtx);
+
+    // An external extension reacts to the started event by stopping that
+    // agent; the RPC handler runs synchronously up to its first await, so the
+    // abort lands inside the emit.
+    let stoppedEarly = false;
+    pi.events.emit.mockImplementation((event: string, payload: any) => {
+      if (event === "subagents:started" && !stoppedEarly) {
+        stoppedEarly = true;
+        void busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-early", agentId: payload.id });
+      }
+    });
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "early stop", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const record = handle.getRecord(id);
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(record.status).toBe("stopped");
+    expect(record.settled).toBe(true);
+
+    // The stop is reported exactly once.
+    const failed = pi.events.emit.mock.calls.filter(
+      ([event, payload]: [string, any]) => event === "subagents:failed" && payload.id === id,
+    );
+    expect(failed).toHaveLength(1);
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
+
+    // The stopped record never held a slot: with maxConcurrent 1 the next spawn
+    // starts immediately instead of queueing behind a leaked counter.
+    const next = await tools.get("Agent").execute(
+      "tc-next",
+      { prompt: "next", description: "next", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const nextRecord = handle.getRecord(agentIdOf(next));
+    expect(nextRecord.status).toBe("running");
+    nextRecord.abortController.abort();
   });
 
   it("session_shutdown settles each queued record through the completion surface exactly once", async () => {

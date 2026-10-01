@@ -240,6 +240,14 @@ export class AgentManager {
     record.startedAt = Date.now();
     this.onStart?.(record);
 
+    // A started listener can stop the record synchronously (an extension
+    // reacting to `subagents:started`). Settle it through the stopped tail
+    // instead of starting — and counting — a run the user already stopped.
+    if (this.stoppedInStartPrologue(record)) {
+      this.settleStoppedWithoutRun(record);
+      return;
+    }
+
     // Wire parent abort signal to stop the subagent when the parent is interrupted
     let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
@@ -376,6 +384,25 @@ export class AgentManager {
     record.settled = true;
   }
 
+  /**
+   * Settle a record whose run never started — stopped while queued, or stopped
+   * by a `subagents:started` listener before the runner was wired. Reports the
+   * stop through the completion surface exactly once and marks the record fully
+   * unwound. No counter change: a never-started record never held a slot.
+   */
+  private settleStoppedWithoutRun(record: AgentRecord): void {
+    record.status = "stopped";
+    record.completedAt ??= Date.now();
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    record.settled = true;
+  }
+
+  /** True when a started listener stopped the record or aborted its controller
+   *  during the synchronous `onStart` emit. */
+  private stoppedInStartPrologue(record: AgentRecord): boolean {
+    return record.status === "stopped" || record.abortController?.signal.aborted === true;
+  }
+
   /** Start queued agents up to the concurrency limit. */
   private drainQueue() {
     while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
@@ -440,6 +467,13 @@ export class AgentManager {
       // A listener threw (stale extension context). Restore the pre-resume
       // state and refuse: the tool reports failure and the counter is untouched.
       Object.assign(record, prior);
+      return undefined;
+    }
+    // A started listener can stop the record synchronously; settle it through
+    // the stopped tail instead of starting — and counting — a run that was
+    // already stopped.
+    if (this.stoppedInStartPrologue(record)) {
+      this.settleStoppedWithoutRun(record);
       return undefined;
     }
     record.settled = false;
@@ -527,13 +561,7 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      // A never-started record still goes through the completion surface: the
-      // stop is reported (notification, lifecycle event, activity cleanup) like
-      // any other stop. No counter change — it never held a slot.
-      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-      record.settled = true;
+      this.settleStoppedWithoutRun(record);
       return true;
     }
 
@@ -588,12 +616,7 @@ export class AgentManager {
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
       if (record) {
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        // A never-started record still goes through the completion surface,
-        // matching abort()'s queued branch. No counter change — it never held a slot.
-        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-        record.settled = true;
+        this.settleStoppedWithoutRun(record);
         count++;
       }
     }
