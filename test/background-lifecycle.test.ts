@@ -130,6 +130,38 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(b)!.status).toBe("completed");
   });
 
+  it("settles a spawn with an already-aborted parent signal without starting it", async () => {
+    const completions: string[] = [];
+    manager = new AgentManager((record) => completions.push(record.id), 1);
+    let resolveBlocker!: (v: any) => void;
+    const runnerCalls: string[] = [];
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) => {
+      runnerCalls.push(prompt);
+      return prompt === "blocker" ? new Promise((r) => { resolveBlocker = r; }) : new Promise(() => {});
+    });
+
+    const parent = new AbortController();
+    parent.abort();
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const dead = manager.spawn(mockPi, mockCtx, "X", "dead", { description: "dead", signal: parent.signal });
+    const next = manager.spawn(mockPi, mockCtx, "X", "next", { description: "next" });
+    expect(manager.getRecord(dead)!.status).toBe("queued");
+    expect(manager.getRecord(next)!.status).toBe("queued");
+
+    resolveBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+
+    const deadRecord = manager.getRecord(dead)!;
+    expect(deadRecord.status).toBe("stopped");
+    expect(deadRecord.settled).toBe(true);
+    // The dead run never reached the runner and never took the slot it was admitted to.
+    expect(runnerCalls).toEqual(["blocker", "next"]);
+    expect(manager.getRecord(next)!.status).toBe("running");
+    // Exactly one completion report for the record that never ran.
+    expect(completions.filter(id => id === dead)).toEqual([dead]);
+    manager.abort(next);
+  });
+
   it("settled is undefined while queued, false while running, true after the completion surface", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));

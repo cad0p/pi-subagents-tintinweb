@@ -251,6 +251,13 @@ export class AgentManager {
     // Wire parent abort signal to stop the subagent when the parent is interrupted
     let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
+      // An already-aborted signal never fires "abort" again, so wiring alone
+      // would start a run under a signal its owner considers dead. Settle it
+      // through the stopped tail instead: no runner call, no slot, one report.
+      if (options.signal.aborted) {
+        this.settleStoppedWithoutRun(record);
+        return;
+      }
       const onParentAbort = () => this.abort(id);
       options.signal.addEventListener("abort", onParentAbort, { once: true });
       detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
