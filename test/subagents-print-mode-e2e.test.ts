@@ -27,6 +27,7 @@ import {
   routeBySession,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
 // Real pi-mono (loader + dynamic extension import + two live sessions) — a cold
 // run under full-suite CPU contention can exceed vitest's 5s default.
@@ -222,7 +223,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
           .join("\n");
         if (prompt.includes("Reply with ALPHA")) return "ALPHA-OUTPUT";
-        const manager = (globalThis as Record<symbol, any>)[Symbol.for("pi-subagents:manager")];
+        const manager = (globalThis as Record<symbol, any>)[MANAGER_KEY];
         const first = manager?.listAgents?.().find((r: { description?: string }) => r.description === "first bg");
         if (!first?.promise) throw new Error("first child not started");
         await first.promise;
@@ -347,7 +348,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     // The failure path ran dispose(): cwd and global isolation were restored even
     // though the caller never received a dispose handle.
     expect(process.cwd()).toBe(prevCwd);
-    expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")]).toBeUndefined();
+    expect((globalThis as Record<symbol, unknown>)[MANAGER_KEY]).toBeUndefined();
   });
 });
 

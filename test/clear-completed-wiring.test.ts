@@ -24,6 +24,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { textOf } from "./helpers/subagents-harness.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -58,7 +59,6 @@ function ctx() {
   } as any;
 }
 
-const textOf = (r: any): string => r.content[0].text;
 // Let runAgent's resolved .then() chain settle so the record reaches "completed".
 const flush = async () => {
   await new Promise((r) => setImmediate(r));
