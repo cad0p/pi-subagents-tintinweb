@@ -363,10 +363,10 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.listAgents()).toEqual([]);
     expect(seenWorktree).toBeDefined();
     expect(existsSync(seenWorktree!)).toBe(false);
-    manager.dispose();
-    // dispose()'s prune cannot remove a registration whose directory survives;
-    // the reclaim must have removed this one outright.
+    // Asserted before dispose(): teardown prunes stale registrations, so only
+    // the live repo state pins that the reclaim removed this one outright.
     expect(leftoverWorktrees(repo)).toEqual([]);
+    manager.dispose();
   });
 
   it("a queued worktree start that fails in the started listener reclaims the worktree", async () => {
