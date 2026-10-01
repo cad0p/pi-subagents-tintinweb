@@ -70,6 +70,36 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(b)!.status).toBe("completed");
   });
 
+  it("flushes a steer parked while queued to the session when the run starts", async () => {
+    manager = new AgentManager(undefined, 1);
+    let resolveBlocker!: (v: any) => void;
+    let queuedOpts: any;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt, opts: any) => {
+      if (prompt === "blocker") return new Promise((r) => { resolveBlocker = r; });
+      queuedOpts = opts;
+      return new Promise(() => {});
+    });
+    const session = { ...mockSession(), steer: vi.fn(async () => {}) };
+
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
+    const record = manager.getRecord(queued)!;
+    expect(record.status).toBe("queued");
+    expect(manager.steer(queued, "go left")).toBe(true);
+    // The session does not exist yet — the message parks until the run starts.
+    expect(record.pendingSteers).toEqual(["go left"]);
+
+    resolveBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+    expect(record.status).toBe("running");
+
+    // Session creation is where the parked steer is delivered.
+    queuedOpts.onSessionCreated(session);
+    expect(session.steer).toHaveBeenCalledWith("go left");
+    expect(record.pendingSteers).toBeUndefined();
+    expect(record.session).toBe(session);
+  });
+
   it("a stop while a run unwinds keeps waitForAll pending until the queued successor settles", async () => {
     manager = new AgentManager(undefined, 1);
     let resolveA!: (v: any) => void;
