@@ -87,9 +87,9 @@ interface SpawnOptions {
   /**
    * Parent abort signal — when aborted, the subagent is also stopped.
    * In-process callers only (extension code holding the manager, e.g. through
-   * the manager registry): an `AbortSignal` cannot cross the serialized
-   * cross-extension RPC boundary, and the `Agent` tool no longer forwards its
-   * tool-call signal to child runs.
+   * the manager registry): RPC options are documented as serializable values,
+   * so `signal` is not part of that surface. The `Agent` tool no longer
+   * forwards its tool-call signal to child runs.
    */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */

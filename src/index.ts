@@ -2078,9 +2078,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
     while (manager.getRecord(id) === record && record.status === "queued") {
       await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));
     }
-    // The record left the manager (a session shutdown cleared the map while
-    // the generation was queued): the run never started, so report the
-    // cancellation instead of toasting a completed-then-missing file.
+    // The record left the manager without settling (a dispose() that clears
+    // the map without aborting first): the run never started, so report the
+    // cancellation instead of toasting a completed-then-missing file. Real
+    // teardown aborts before it disposes — this keeps a dispose-without-abort
+    // eviction from falling through to the created/not-created toast.
     if (manager.getRecord(id) !== record) {
       ctx.ui.notify("Generation cancelled.", "info");
       return;
