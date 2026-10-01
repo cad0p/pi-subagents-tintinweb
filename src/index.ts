@@ -2016,7 +2016,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
       return;
     }
     const record = manager.getRecord(id)!;
-    while (record.status === "queued") await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));  // exit on stopped too
+    // Stop polling when the record settles (stopped/error) or leaves the
+    // manager entirely — dispose() clears the map without touching the
+    // status, so the identity check keeps this from spinning forever.
+    while (manager.getRecord(id) === record && record.status === "queued") {
+      await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));
+    }
     await record.promise;                       // undefined when stopped-while-queued → resolves
     if (record.status === "error") { ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning"); return; }
     if (record.status === "stopped") { ctx.ui.notify("Generation cancelled.", "info"); return; }
