@@ -393,6 +393,9 @@ export class AgentManager {
   private settleStoppedWithoutRun(record: AgentRecord): void {
     record.status = "stopped";
     record.completedAt ??= Date.now();
+    // No turn ever executed — zero the run-local counter so the completion
+    // report cannot claim the presumed first turn.
+    record.turnCount = 0;
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     record.settled = true;
   }

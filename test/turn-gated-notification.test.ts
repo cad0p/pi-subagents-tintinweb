@@ -157,6 +157,8 @@ describe("turn-gated completion notifications", () => {
     expect(payload.details).toBeUndefined();
     expect(payload.content).not.toContain("<task-notification>");
     expect(payload.content).toContain("**✓ Subagent completed: research thing**");
+    // A completed run still reports its turn count.
+    expect(payload.content).toContain("↻1");
     expect(payload.content).toContain("Result:\n\n");
     // Body last: the report text follows the Result: label.
     expect(payload.content.indexOf("Result:")).toBeLessThan(payload.content.indexOf("THE-RESULT-PAYLOAD"));

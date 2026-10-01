@@ -258,6 +258,8 @@ describe("background lifecycle — resume", () => {
     expect(resumeAgent).not.toHaveBeenCalled();
     expect(record.status).toBe("stopped");
     expect(record.settled).toBe(true);
+    // No turn executed — the report carries no turn.
+    expect(record.turnCount).toBe(0);
     // Exactly one stop report for the run that never started.
     expect(stoppedCompletions).toEqual([id]);
 
@@ -716,6 +718,8 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(payload.customType).toBe("subagent-notification");
     expect(payload.content).toContain("**✗ Subagent stopped: pending task**");
     expect(payload.content).toContain("No output.");
+    // Never ran a turn: the report must not claim the presumed first one.
+    expect(payload.content).not.toContain("↻");
 
     // No live activity entry remains: the finished row's turn readout renders
     // only from the activity tracker, so a leftover entry would add a `↻`.

@@ -115,12 +115,14 @@ export interface AgentRecord {
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Run-local agentic turn count, stamped via the `onTurnEnd` callback.
-   *  Initialized to 1 at spawn and reset to 1 when a resume starts, so it always
-   *  describes the current run; the record's `toolUses` stays cumulative across
-   *  resumes. A second source exists in the `Agent` tool's execute closure (the
-   *  closure-local `AgentActivity.turnCount` used for the live widget), which is
-   *  unreachable from `get_subagent_result`'s separate execute — hence the record
-   *  needs its own field. `get_subagent_result` surfaces it in its running header;
+   *  Initialized to 1 at spawn and reset to 1 when a resume starts, and zeroed
+   *  when a record is stopped before its run starts (a never-started report
+   *  carries no turn), so it describes the current run; the record's `toolUses`
+   *  stays cumulative across resumes. A second source exists in the `Agent`
+   *  tool's execute closure (the closure-local `AgentActivity.turnCount` used
+   *  for the live widget), which is unreachable from `get_subagent_result`'s
+   *  separate execute — hence the record needs its own field.
+   *  `get_subagent_result` surfaces it in its running header;
    *  the `checkpoint` tool reads it as the turn label. */
   turnCount?: number;
   /** Latest checkpoint written by the subagent's `checkpoint` tool call.
