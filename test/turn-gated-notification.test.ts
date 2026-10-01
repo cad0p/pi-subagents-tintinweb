@@ -288,6 +288,7 @@ describe("turn-gated completion notifications", () => {
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
     await vi.advanceTimersByTimeAsync(100); // halfway through the hold
     expect(pi.sendMessage).not.toHaveBeenCalled();
+    vi.mocked(resumeAgent).mockClear(); // prior tests' resume calls are still in the history
 
     // A throwing started listener (stale extension context) refuses the resume.
     pi.events.emit.mockImplementation((event: string) => {
