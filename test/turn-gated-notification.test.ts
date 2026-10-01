@@ -650,6 +650,84 @@ describe("Agent result rendering", () => {
     }
   });
 
+  it("resolves and scope-checks the model only for fresh spawns — a resume mirrors the record", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-resume-scope-"));
+    const previousCwd = process.cwd();
+    try {
+      // The custom type's model is in scope, so the spawn warns about nothing.
+      // The resume call uses general-purpose (parent model, out of scope): the
+      // resume must neither warn nor mirror the call's model fields.
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["scope/tagged-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "tagged.md"),
+        '---\ndescription: tagged agent\nmodel: "scope/tagged-model"\nmax_turns: 3\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "ok",
+        session: { dispose: vi.fn(), messages: [], subscribe: () => () => {} } as any,
+        aborted: false,
+        steered: false,
+      });
+      const { pi, tools } = makePi();
+      // Claim the manager registry for this extension instance so the
+      // spawned record is the one this test can look up.
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "tagged-model"
+              ? { provider: "scope", id: "tagged-model", name: "Tagged Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "scope", id: "tagged-model", name: "Tagged Model" }]),
+        },
+      };
+
+      const spawn = await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description: "d", subagent_type: "tagged" },
+        undefined, undefined, c,
+      );
+      const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1]!;
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+      const record = handle.getRecord(id);
+      await record.promise;
+      expect(record.invocation?.modelName).toBe("tagged model");
+      expect(record.invocation?.maxTurns).toBe(3);
+
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
+      const resume = await tools.get("Agent").execute(
+        "tc-resume",
+        { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+        undefined, undefined, c,
+      );
+
+      // The resume re-resolves nothing: no out-of-scope warning for the
+      // parent-inherited model the call's type would have used.
+      const warnings = c.ui.notify.mock.calls
+        .map(([msg]: [string]) => msg)
+        .filter((msg: string) => msg.includes("out-of-scope"));
+      expect(warnings).toHaveLength(0);
+      // ...and the row mirrors the resumed record's resolved invocation.
+      expect(resume.details).toMatchObject({
+        modelName: "tagged model",
+        tags: ["max turns: 3"],
+      });
+      await record.promise;
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the error line collapses newlines so a record field cannot add a display line", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);

@@ -984,42 +984,10 @@ Terse command-style prompts produce shallow, generic work.
       const resolved = resolveType(rawType);
       const subagentType = resolved ?? "general-purpose";
 
-      const displayName = getDisplayName(subagentType);
-
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
-
-      // Resolve model from agent frontmatter only (no LLM-authored override).
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-        if (typeof resolved !== "string") {
-          model = resolved;
-        }
-        // config-specified but unresolvable: silent fallback to parent (existing behavior)
-      }
-
-      // Scope validation: the effective resolved model is checked against the
-      // user's enabledModels list (read in `enabled-models.ts`).
-      //
-      // Design: scopeModels guards against frontmatter-pinned or parent-inherited
-      // models drifting out of the user's allowlist. Both warn and proceed —
-      // frontmatter is authoritative (the agent's author/installer chose it),
-      // and the parent's model was chosen by the user when starting the session.
-      // See SubagentsSettings.scopeModels docstring for the full policy.
-      if (isScopeModelsEnabled() && model) {
-        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
-        if (allowed && !isModelInScope(model, allowed)) {
-          const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
-          const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
-          ctx.ui.notify(
-            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-            "warning",
-          );
-        }
-      }
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
@@ -1037,33 +1005,7 @@ Terse command-style prompts produce shallow, generic work.
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-        : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
-      const agentInvocation: AgentInvocation = {
-        modelName,
-        thinking,
-        // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
-        maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
-        isolated,
-        inheritContext,
-        isolation,
-      };
-      // Tool-result render shows the mode label too; viewer's header already does.
-      const modeLabel = getPromptModeLabel(subagentType);
-      const { tags: invocationTags } = buildInvocationTags(agentInvocation);
-      const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
-      const detailBase = {
-        displayName,
-        description: params.description,
-        subagentType,
-        modelName,
-        tags: agentTags.length > 0 ? agentTags : undefined,
-      };
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -1130,6 +1072,13 @@ Terse command-style prompts produce shallow, generic work.
         }
         widget.markRunning(record.id);
         widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
+        // The row's model fields come from the resumed record's resolved
+        // invocation, not this call: a resume continues the session's own
+        // model, so re-deriving them from the call's subagent_type would mix
+        // identities (and warn about a model the run never uses).
+        const { modelName: resumeModelName, tags: resumeInvocationTags } = buildInvocationTags(existing.invocation);
+        const resumeModeLabel = getPromptModeLabel(existing.type);
+        const resumeTags = resumeModeLabel ? [resumeModeLabel, ...resumeInvocationTags] : resumeInvocationTags;
         return textResult(
           `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${getDisplayName(existing.type)}\nDescription: ${record.description}\n` +
           (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
@@ -1137,12 +1086,13 @@ Terse command-style prompts produce shallow, generic work.
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
           {
-            ...detailBase,
             // Row identity mirrors the envelope text above: the record's type
             // and description, not the resume call's subagent_type/description.
             displayName: getDisplayName(existing.type),
             description: record.description,
             subagentType: existing.type,
+            modelName: resumeModelName,
+            tags: resumeTags.length > 0 ? resumeTags : undefined,
             toolUses: record.toolUses,
             tokens: "",
             durationMs: 0,
@@ -1154,6 +1104,67 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background execution
       {
+        // Resolve model from agent frontmatter only (no LLM-authored override).
+        // Fresh spawns only — a resume continues the record's session and
+        // model, so resolving (and scope-checking) the call's type there would
+        // validate a model the run never uses.
+        let model = ctx.model;
+        if (resolvedConfig.modelInput) {
+          const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
+          if (typeof resolved !== "string") {
+            model = resolved;
+          }
+          // config-specified but unresolvable: silent fallback to parent (existing behavior)
+        }
+
+        // Scope validation: the effective resolved model is checked against the
+        // user's enabledModels list (read in `enabled-models.ts`).
+        //
+        // Design: scopeModels guards against frontmatter-pinned or parent-inherited
+        // models drifting out of the user's allowlist. Both warn and proceed —
+        // frontmatter is authoritative (the agent's author/installer chose it),
+        // and the parent's model was chosen by the user when starting the session.
+        // See SubagentsSettings.scopeModels docstring for the full policy.
+        if (isScopeModelsEnabled() && model) {
+          const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
+          if (allowed && !isModelInScope(model, allowed)) {
+            const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
+            const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
+            ctx.ui.notify(
+              `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+              "warning",
+            );
+          }
+        }
+
+        const displayName = getDisplayName(subagentType);
+        const parentModelId = ctx.model?.id;
+        const effectiveModelId = model?.id;
+        const modelName = effectiveModelId && effectiveModelId !== parentModelId
+          ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
+          : undefined;
+        const agentInvocation: AgentInvocation = {
+          modelName,
+          thinking,
+          // Explicit value only — the default fallback would just add noise.
+          // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
+          maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
+          isolated,
+          inheritContext,
+          isolation,
+        };
+        // Tool-result render shows the mode label too; viewer's header already does.
+        const modeLabel = getPromptModeLabel(subagentType);
+        const { tags: invocationTags } = buildInvocationTags(agentInvocation);
+        const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
+        const detailBase = {
+          displayName,
+          description: params.description,
+          subagentType,
+          modelName,
+          tags: agentTags.length > 0 ? agentTags : undefined,
+        };
+
         const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
 
         // Wrap onSessionCreated to wire output file streaming.
