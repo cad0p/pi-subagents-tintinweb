@@ -206,6 +206,30 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(recovering)!.status).toBe("completed");
   });
 
+  it("keeps the pool counter balanced when a queued start throws synchronously", async () => {
+    manager = new AgentManager(undefined, 1);
+    let resolveBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "blocker" ? new Promise((r) => { resolveBlocker = r; }) : new Promise(() => {}),
+    );
+
+    const removedCwd = mkdtempSync(join(tmpdir(), "pi-sync-start-fail-"));
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const failing = manager.spawn(mockPi, mockCtx, "X", "failing", { description: "failing", cwd: removedCwd });
+    expect(manager.getRecord(failing)!.status).toBe("queued");
+    rmSync(removedCwd, { recursive: true, force: true });
+
+    resolveBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+    expect(manager.getRecord(failing)!.status).toBe("error");
+
+    // The throw preceded the counter increment, so the only slot is free again:
+    // a fresh spawn must start rather than queue behind a leaked slot.
+    const third = manager.spawn(mockPi, mockCtx, "X", "third", { description: "third" });
+    expect(manager.getRecord(third)!.status).toBe("running");
+    manager.abort(third);
+  });
+
   it("a throwing outputCleanup still resolves the promise and settles", async () => {
     manager = new AgentManager(undefined, 1);
     resolvedRun();
