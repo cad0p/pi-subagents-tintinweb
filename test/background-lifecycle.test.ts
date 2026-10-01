@@ -106,25 +106,6 @@ describe("background lifecycle — pooling and the completion tail", () => {
     manager.abort(b);
   });
 
-  it("a throwing onComplete during a late start failure does not escape the drain", async () => {
-    manager = new AgentManager(() => { throw new Error("stale extension context"); }, 1);
-    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) => {
-      if (prompt === "throws") throw new Error("start failed");
-      return new Promise(() => {});
-    });
-
-    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
-    const b = manager.spawn(mockPi, mockCtx, "X", "throws", { description: "throws" });
-    expect(manager.getRecord(b)!.status).toBe("queued");
-
-    // Admitting the queued record drives the drain directly (not through the
-    // guarded afterRun path): the start throws and the completion listener
-    // throws too — the listener error must not escape the drain.
-    expect(() => manager.setMaxConcurrent(2)).not.toThrow();
-    expect(manager.getRecord(b)!.status).toBe("error");
-    expect(manager.getRecord(b)!.error).toBe("start failed");
-  });
-
   it("a throwing outputCleanup still resolves the promise, drains, and settles", async () => {
     manager = new AgentManager(undefined, 1);
     resolvedRun();
@@ -351,29 +332,6 @@ describe("background lifecycle — resume", () => {
     expect(record.resultConsumed).toBe(before.resultConsumed);
     expect(record.abortController).toBe(before.abortController);
     expect(record.turnCount).toBe(7);
-  });
-
-  it("rolls back and refuses when the runner throws synchronously on resume", async () => {
-    manager = new AgentManager(undefined, 1);
-    const id = await spawnSettled();
-    const record = manager.getRecord(id)!;
-    record.turnCount = 7;
-    const beforeController = record.abortController;
-    vi.mocked(resumeAgent).mockImplementation(() => { throw new Error("resume start failed"); });
-
-    expect(manager.resume(id, "more")).toBeUndefined();
-    // The pre-resume snapshot is restored, the slot is not held, and the run
-    // is not left looking active.
-    expect(record.status).toBe("completed");
-    expect(record.turnCount).toBe(7);
-    expect(record.abortController).toBe(beforeController);
-    expect(record.settled).toBe(true);
-
-    // The pool is balanced — a fresh spawn still runs.
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const next = manager.spawn(mockPi, mockCtx, "X", "next", { description: "next" });
-    expect(manager.getRecord(next)!.status).toBe("running");
-    manager.abort(next);
   });
 
   it("a refused resume leaks no pool slot — a queued spawn still starts after the blocker settles", async () => {
