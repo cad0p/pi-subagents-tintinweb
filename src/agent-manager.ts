@@ -199,11 +199,14 @@ export class AgentManager {
       return id;
     }
 
-    // startAgent can throw (e.g. strict worktree-isolation failure) — clean
-    // up the record so callers don't see an orphan in `listAgents()`.
+    // startAgent can throw (strict worktree-isolation failure, or a throwing
+    // `subagents:started` listener after the worktree was created) — reclaim
+    // any prologue worktree and drop the record so callers don't see an
+    // orphan in `listAgents()`.
     try {
       this.startAgent(id, record, args);
     } catch (err) {
+      this.reclaimWorktree(record, options.cwd ?? ctx.cwd, options.description);
       this.agents.delete(id);
       throw err;
     }
@@ -416,17 +419,30 @@ export class AgentManager {
     record.turnCount = 0;
     // Reclaim a worktree created by the start prologue (a stop issued during
     // the `subagents:started` emit): the run never made changes, so this
-    // removes the copy and its git registration outright. Best-effort, like
-    // the run handlers' cleanup. `baseCwd` is absent on the queued-abort and
-    // already-aborted-signal paths, where no worktree was ever created.
-    if (record.worktree && baseCwd) {
-      try {
-        record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, description ?? record.description);
-      } catch { /* ignore cleanup errors */ }
-      record.worktree = undefined;
+    // removes the copy and its git registration outright. `baseCwd` is absent
+    // on the queued-abort and already-aborted-signal paths, where no worktree
+    // was ever created.
+    if (baseCwd) {
+      this.reclaimWorktree(record, baseCwd, description ?? record.description);
     }
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     record.settled = true;
+  }
+
+  /**
+   * Best-effort reclamation of a worktree created by a run's start prologue
+   * when the run never executed (a throwing started listener, or a stop during
+   * the emit). Removes the copy and its git registration from `baseCwd`'s repo,
+   * records the cleanup outcome, and clears the record's reference so no later
+   * path retries it. Cleanup errors are ignored — the spawn/queue failure that
+   * triggered the reclaim is the actionable signal.
+   */
+  private reclaimWorktree(record: AgentRecord, baseCwd: string, description: string): void {
+    if (!record.worktree) return;
+    try {
+      record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, description);
+    } catch { /* ignore cleanup errors */ }
+    record.worktree = undefined;
   }
 
   /** True when a started listener stopped the record or aborted its controller
@@ -456,11 +472,7 @@ export class AgentManager {
         // A throwing onStart can follow worktree creation: reclaim the copy
         // and its registration (best-effort, like the run handlers' cleanup).
         if (record.worktree) {
-          const baseCwd = next.args.options.cwd ?? next.args.ctx.cwd;
-          try {
-            record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, next.args.options.description);
-          } catch { /* ignore cleanup errors */ }
-          record.worktree = undefined;
+          this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd, next.args.options.description);
         }
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }

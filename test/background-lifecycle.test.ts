@@ -333,6 +333,35 @@ describe("background lifecycle — pooling and the completion tail", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
+  it("a direct worktree spawn whose started listener throws reclaims the worktree", () => {
+    const repo = initGitRepo();
+    let seenWorktree: string | undefined;
+    manager = new AgentManager(undefined, 1, (record) => {
+      seenWorktree = record.worktree?.path;
+      throw new Error("stale extension context");
+    });
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    // The pool is free, so the spawn starts directly instead of queueing.
+    expect(() =>
+      manager.spawn(mockPi, mockCtx, "X", "p", {
+        description: "throwing",
+        isolation: "worktree",
+        cwd: repo,
+      }),
+    ).toThrow("stale extension context");
+
+    // The record is dropped, but the worktree it created is gone with it.
+    expect(manager.listAgents()).toEqual([]);
+    expect(seenWorktree).toBeDefined();
+    expect(existsSync(seenWorktree!)).toBe(false);
+    manager.dispose();
+    // dispose()'s prune cannot remove a registration whose directory survives;
+    // the reclaim must have removed this one outright.
+    expect(leftoverWorktrees(repo)).toEqual([]);
+    rmSync(repo, { recursive: true, force: true });
+  });
+
   it("a queued worktree start that fails in the started listener reclaims the worktree", async () => {
     const repo = initGitRepo();
     let seenWorktree: string | undefined;
