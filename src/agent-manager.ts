@@ -84,7 +84,13 @@ interface SpawnOptions {
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
-  /** Parent abort signal — when aborted, the subagent is also stopped. */
+  /**
+   * Parent abort signal — when aborted, the subagent is also stopped.
+   * In-process callers only (extension code holding the manager, e.g. through
+   * the manager registry): an `AbortSignal` cannot cross the serialized
+   * cross-extension RPC boundary, and the `Agent` tool no longer forwards its
+   * tool-call signal to child runs.
+   */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
