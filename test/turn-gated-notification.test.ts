@@ -828,6 +828,114 @@ describe("Agent result rendering", () => {
     }
   });
 
+  it("swallows a throwing notify so a registered schedule still succeeds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-schedule-notify-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["allowed/only-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "pinned.md"),
+        '---\ndescription: pinned agent\nmodel: "scope/pinned-model"\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      const { pi, tools, lifecycle } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "pinned-model"
+              ? { provider: "scope", id: "pinned-model", name: "Pinned Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "allowed", id: "only-model", name: "Only Model" }]),
+        },
+      };
+      await lifecycle.get("session_start")({}, c);
+      // The warning is advisory: the registered job must survive a UI that
+      // cannot accept the notification.
+      c.ui.notify.mockImplementation(() => { throw new Error("stale ui context"); });
+
+      const scheduled = await tools.get("Agent").execute(
+        "tc-schedule",
+        { prompt: "go", description: "later", subagent_type: "pinned", schedule: "1h" },
+        undefined, undefined, c,
+      );
+      expect(textOf(scheduled)).toContain("Scheduled");
+
+      // The job is registered, not merely reported as such: a retry hits the
+      // duplicate-name guard.
+      const duplicate = await tools.get("Agent").execute(
+        "tc-schedule-dup",
+        { prompt: "go", description: "later", subagent_type: "pinned", schedule: "1h" },
+        undefined, undefined, c,
+      );
+      expect(textOf(duplicate)).toContain("already exists");
+      lifecycle.get("session_before_switch")();
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("swallows a throwing notify so an admitted spawn still succeeds", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-spawn-notify-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["allowed/only-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "pinned.md"),
+        '---\ndescription: pinned agent\nmodel: "scope/pinned-model"\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      vi.mocked(runAgent).mockResolvedValue({
+        responseText: "ok",
+        session: { dispose: vi.fn() } as any,
+        aborted: false,
+        steered: false,
+      });
+      const { pi, tools } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "pinned-model"
+              ? { provider: "scope", id: "pinned-model", name: "Pinned Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "allowed", id: "only-model", name: "Only Model" }]),
+        },
+      };
+      // The warning is advisory: the admitted run must survive a UI that
+      // cannot accept the notification.
+      c.ui.notify.mockImplementation(() => { throw new Error("stale ui context"); });
+
+      const spawn = await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description: "d", subagent_type: "pinned" },
+        undefined, undefined, c,
+      );
+      expect(textOf(spawn)).toContain("Agent ID:");
+      expect(textOf(spawn)).toContain("started in background.");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resumes an invocation-less record with its own max turns, not the call's", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-resume-noinv-"));
     const previousCwd = process.cwd();

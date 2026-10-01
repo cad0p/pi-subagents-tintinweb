@@ -1038,16 +1038,20 @@ Terse command-style prompts produce shallow, generic work.
       // Call this only where the model is accepted for use — after a schedule
       // job is registered, or once a spawn is admitted — so a refused call
       // never warns for work that never happens. The resume path never calls it.
+      // A throwing notify is swallowed: the warning is advisory and cannot
+      // fail the accepted call.
       const warnOnOutOfScopeModel = (): void => {
         if (!isScopeModelsEnabled() || !model) return;
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
           const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
           const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
-          ctx.ui.notify(
-            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-            "warning",
-          );
+          try {
+            ctx.ui.notify(
+              `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+              "warning",
+            );
+          } catch { /* ignore notification errors */ }
         }
       };
 
