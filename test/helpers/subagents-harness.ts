@@ -1,15 +1,21 @@
 /**
- * subagents-harness.ts — shared test helpers for the checkpoint/get_subagent_result
- * test suites. The three suites (checkpoint-tool, get-subagent-result,
- * checkpoint-e2e) all build the same `makePi` mock, extract agent IDs from
- * spawn results the same way, and drive the child's `checkpoint` tool with
- * the same `childCtx`. Extracted here so a change to the mock shape or the
- * agent-id parsing lands in one place.
+ * subagents-harness.ts — shared test helpers for the subagents suites:
+ * checkpoint-tool, get-subagent-result, checkpoint-e2e, background-lifecycle,
+ * turn-gated-notification, status-note-wiring, and instruction-rendering.
+ *
+ * `makePi` builds the mock `ExtensionAPI` each suite registers the extension
+ * against and captures what registration produced: `tools` (registerTool),
+ * `lifecycle` (on), `commands` (registerCommand), and `busHandlers` (the
+ * `pi.events.on` subscriptions, keyed by event name). Suites inspect those
+ * maps to invoke handlers and commands directly and to assert what the
+ * extension registered; the tool-only suites read `tools` alone.
+ * `makeRootAndChild`, `textOf`, `agentIdOf`, `childCtx`, and `spawnCtx` are the
+ * remaining shared shapes, so a change to the mock or the agent-id parsing
+ * lands in one place.
  *
  * Per-suite `beforeEach`/`afterEach` stay in the suites themselves — the
- * temp-dir prefixes differ (`pi-checkpoint-*`, `pi-gsr-*`, `pi-ckpt-e2e-*`)
- * and the `setupAgent` helpers diverge on spawn semantics, so they are not
- * extracted.
+ * temp-dir prefixes differ and the `setupAgent` helpers diverge on spawn
+ * semantics, so they are not extracted.
  */
 import { vi } from "vitest";
 import subagentsExtension from "../../src/index.js";
