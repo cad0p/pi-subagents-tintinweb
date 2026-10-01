@@ -254,53 +254,53 @@ export class AgentManager {
     record.settled = false;
     try {
       const promise = runAgent(ctx, type, prompt, {
-      pi,
-      agentId: id,
-      model: options.model,
-      maxTurns: options.maxTurns,
-      isolated: options.isolated,
-      inheritContext: options.inheritContext,
-      thinkingLevel: options.thinkingLevel,
-      // Worktree wins for the working dir (the agent must run in the copy —
-      // which, with a custom cwd, was created from that target). Config stays
-      // with the parent project when a caller-supplied cwd is in play; it must
-      // stay undefined otherwise so plain worktree runs keep resolving config
-      // (incl. relative extension paths and memory) inside the worktree copy.
-      cwd: worktreeCwd ?? customCwd,
-      worktree: worktreePromptInfo,
-      configCwd: customCwd !== undefined ? ctx.cwd : undefined,
-      signal: record.abortController!.signal,
-      onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
-        options.onToolActivity?.(activity);
-      },
-      onTurnEnd: (turnCount) => {
-        record.turnCount = turnCount;
-        options.onTurnEnd?.(turnCount);
-      },
-      onTextDelta: options.onTextDelta,
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        options.onAssistantUsage?.(usage);
-      },
-      onCompaction: (info) => {
-        record.compactionCount++;
-        this.onCompact?.(record, info);
-        options.onCompaction?.(info);
-      },
-      onSessionCreated: (session) => {
-        record.session = session;
-        record.sessionId = session.sessionId;
-        // Flush any steers that arrived before the session was ready
-        if (record.pendingSteers?.length) {
-          for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
+        pi,
+        agentId: id,
+        model: options.model,
+        maxTurns: options.maxTurns,
+        isolated: options.isolated,
+        inheritContext: options.inheritContext,
+        thinkingLevel: options.thinkingLevel,
+        // Worktree wins for the working dir (the agent must run in the copy —
+        // which, with a custom cwd, was created from that target). Config stays
+        // with the parent project when a caller-supplied cwd is in play; it must
+        // stay undefined otherwise so plain worktree runs keep resolving config
+        // (incl. relative extension paths and memory) inside the worktree copy.
+        cwd: worktreeCwd ?? customCwd,
+        worktree: worktreePromptInfo,
+        configCwd: customCwd !== undefined ? ctx.cwd : undefined,
+        signal: record.abortController!.signal,
+        onToolActivity: (activity) => {
+          if (activity.type === "end") record.toolUses++;
+          options.onToolActivity?.(activity);
+        },
+        onTurnEnd: (turnCount) => {
+          record.turnCount = turnCount;
+          options.onTurnEnd?.(turnCount);
+        },
+        onTextDelta: options.onTextDelta,
+        onAssistantUsage: (usage) => {
+          addUsage(record.lifetimeUsage, usage);
+          options.onAssistantUsage?.(usage);
+        },
+        onCompaction: (info) => {
+          record.compactionCount++;
+          this.onCompact?.(record, info);
+          options.onCompaction?.(info);
+        },
+        onSessionCreated: (session) => {
+          record.session = session;
+          record.sessionId = session.sessionId;
+          // Flush any steers that arrived before the session was ready
+          if (record.pendingSteers?.length) {
+            for (const msg of record.pendingSteers) {
+              session.steer(msg).catch(() => {});
+            }
+            record.pendingSteers = undefined;
           }
-          record.pendingSteers = undefined;
-        }
-        options.onSessionCreated?.(session);
-      },
-    })
+          options.onSessionCreated?.(session);
+        },
+      })
       .then(({ responseText, session, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
@@ -445,26 +445,26 @@ export class AgentManager {
     this.runningBackground++; // counted while running; a resume never queues
     try {
       const promise = resumeAgent(record.session, prompt, {
-      onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
-        callbacks?.onToolActivity?.(activity);
-      },
-      onTextDelta: callbacks?.onTextDelta,
-      onTurnEnd: (turnCount) => {
-        record.turnCount = turnCount;
-        callbacks?.onTurnEnd?.(turnCount);
-      },
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        callbacks?.onAssistantUsage?.(usage);
-      },
-      onCompaction: (info) => {
-        record.compactionCount++;
-        this.onCompact?.(record, info);
-        callbacks?.onCompaction?.(info);
-      },
-      signal: record.abortController.signal,
-    })
+        onToolActivity: (activity) => {
+          if (activity.type === "end") record.toolUses++;
+          callbacks?.onToolActivity?.(activity);
+        },
+        onTextDelta: callbacks?.onTextDelta,
+        onTurnEnd: (turnCount) => {
+          record.turnCount = turnCount;
+          callbacks?.onTurnEnd?.(turnCount);
+        },
+        onAssistantUsage: (usage) => {
+          addUsage(record.lifetimeUsage, usage);
+          callbacks?.onAssistantUsage?.(usage);
+        },
+        onCompaction: (info) => {
+          record.compactionCount++;
+          this.onCompact?.(record, info);
+          callbacks?.onCompaction?.(info);
+        },
+        signal: record.abortController.signal,
+      })
       .then(({ text, failure }) => {
         // Stop wins; a stopped resume is never overwritten with completed.
         if (record.status !== "stopped") {
