@@ -2047,6 +2047,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
     while (manager.getRecord(id) === record && record.status === "queued") {
       await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));
     }
+    // The record left the manager (a session shutdown cleared the map while
+    // the generation was queued): the run never started, so report the
+    // cancellation instead of toasting a completed-then-missing file.
+    if (manager.getRecord(id) !== record) {
+      ctx.ui.notify("Generation cancelled.", "info");
+      return;
+    }
     await record.promise;                       // undefined when stopped-while-queued → resolves
     if (record.status === "error") { ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning"); return; }
     if (record.status === "stopped") { ctx.ui.notify("Generation cancelled.", "info"); return; }

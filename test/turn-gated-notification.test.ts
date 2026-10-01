@@ -50,6 +50,7 @@ vi.mock("../src/settings.js", async (importOriginal) => {
   };
 });
 
+import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -1273,6 +1274,60 @@ describe("agents command terminal surfaces", () => {
 
       // The real stop path removes the queued record and marks it stopped.
       await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-q", agentId: queuedId });
+      await handler;
+
+      const messages = notifications.map(n => n.message);
+      expect(messages).toContain("Generation cancelled.");
+      expect(messages.some(m => m.startsWith("Created "))).toBe(false);
+      expect(messages.some(m => m.includes("file was not created"))).toBe(false);
+
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false });
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a queued generator when the manager evicts its record mid-wait", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-evict-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1, schedulingEnabled: false }), "utf-8");
+
+      let releaseFiller!: (v: any) => void;
+      vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { releaseFiller = r; }));
+
+      const { pi, tools, lifecycle, commands } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      // The factory's manager is closure-local; a pass-through spawn spy
+      // captures the instance so the test can evict a record the way
+      // dispose() does — map cleared, status untouched.
+      const spawnSpy = vi.spyOn(AgentManager.prototype, "spawn");
+      subagentsExtension(pi);
+      await lifecycle.get("session_start")({}, ctx());
+      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+
+      await tools.get("Agent").execute(
+        "tc-fill",
+        { prompt: "blocker", description: "blocker", subagent_type: "general-purpose" },
+        undefined, undefined, ctx(),
+      );
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("an evicted agent").mockResolvedValueOnce("gen-evict");
+
+      const handler = commands.get("agents").handler("", c);
+      await vi.waitFor(() => {
+        const rec = handle.listAgents().find((r: any) => r.description === "Generate gen-evict agent");
+        expect(rec?.status).toBe("queued");
+      });
+
+      // Evict the queued record without stopping it (the dispose() shape a
+      // teardown produces): the wizard must treat the eviction as a
+      // cancellation, not a completed generation that left no file.
+      (spawnSpy.mock.instances[0] as AgentManager).dispose();
       await handler;
 
       const messages = notifications.map(n => n.message);
