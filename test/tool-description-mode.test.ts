@@ -128,6 +128,20 @@ describe("toolDescriptionMode", () => {
     }
   });
 
+  it("the compact notes block matches the approved text byte-for-byte", () => {
+    const desc: string = setup({ toolDescriptionMode: "compact" }).get("Agent").description;
+    expect(desc).toContain(
+      [
+        "Notes:",
+        "- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.",
+        "- You will be notified on subagent completion/failure — never poll or sleep.",
+        "- Verify an agent's claimed code changes before reporting work done.",
+        "- resume continues a previous agent by ID; steer_subagent messages a running one.",
+        '- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.',
+      ].join("\n"),
+    );
+  });
+
   it("the full Agent description no longer advertises the removed execution knobs", () => {
     const desc: string = setup().get("Agent").description;
     expect(desc).not.toContain("run_in_background");
@@ -157,6 +171,23 @@ describe("toolDescriptionMode", () => {
     );
     expect(tool.promptSnippet).toBe("Send a steering message to redirect a subagent");
     expect(tool.parameters.properties.agent_id.description).toBe("The agent ID to steer (must be running or queued).");
+  });
+
+  it("the Agent tool carries the approved completion notification guideline", () => {
+    const tool = setup().get("Agent");
+    expect(tool.promptGuidelines[2]).toBe(
+      "You will be notified on subagent completion/failure — do not poll or sleep waiting for it. Continue with other work instead.",
+    );
+  });
+
+  it("the schedule parameter carries the approved description", () => {
+    const tool = setup().get("Agent");
+    expect(tool.parameters.properties.schedule.description).toBe(
+      "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). " +
+        'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+        "Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. " +
+        "Incompatible with inherit_context and resume. Returns job ID.",
+    );
   });
 
   it("custom mode renders the project template with placeholders substituted", () => {

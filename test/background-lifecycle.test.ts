@@ -566,6 +566,33 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect((spawn.details as { status: string }).status).toBe("background");
   });
 
+  it("returns the approved fresh-spawn envelope with the completion delivery contract", async () => {
+    resolvedRun();
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    const { pi, tools } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-envelope",
+      { prompt: "go", description: "d", subagent_type: "Explore" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const record = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+    expect(record.outputFile).toBeTruthy();
+    expect(textOf(spawn)).toBe(
+      `Agent started in background.\nAgent ID: ${id}\nType: Explore\nDescription: d\n` +
+        `Output file: ${record.outputFile}\n` +
+        `\nYou will be notified on subagent completion/failure.\n` +
+        `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+        `Do not duplicate this agent's work.`,
+    );
+    expect(textOf(spawn)).not.toContain("when this agent completes");
+  });
+
   it("routes an RPC spawn through the real manager: pools behind maxConcurrent", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
@@ -731,7 +758,9 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
     const id = agentIdOf(spawn);
     const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
-    await handle.getRecord(id).promise;
+    const record = handle.getRecord(id);
+    await record.promise;
+    expect(record.outputFile).toBeTruthy();
 
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
     const resume = await tools.get("Agent").execute(
@@ -740,9 +769,14 @@ describe("background lifecycle — model-visible surfaces", () => {
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    expect(textOf(resume)).toContain("Agent resumed in background.");
-    // The run's type is the resumed record's, not the call's subagent_type.
-    expect(textOf(resume)).toContain("Type: Explore");
+    expect(textOf(resume)).toBe(
+      `Agent resumed in background.\nAgent ID: ${id}\nType: Explore\nDescription: d\n` +
+        `Output file: ${record.outputFile}\n` +
+        `\nYou will be notified on subagent completion/failure.\n` +
+        `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+        `Do not duplicate this agent's work.`,
+    );
+    expect(textOf(resume)).not.toContain("when this agent completes");
     // The row's identity fields mirror the record (and the envelope text),
     // not the resume call's subagent_type/description.
     expect(resume.details).toMatchObject({
@@ -751,7 +785,6 @@ describe("background lifecycle — model-visible surfaces", () => {
       description: "d",
     });
     expect((resume.details as { status: string }).status).toBe("background");
-    const record = handle.getRecord(id);
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
     await record.promise;
     expect(record.result).toBe("second");
