@@ -1136,8 +1136,10 @@ Terse command-style prompts produce shallow, generic work.
         // spawned outside the Agent tool (RPC, scheduler, wizard) capture no
         // invocation — the row then carries only record-owned values (the
         // effective max turns), never the call's model/strategy settings,
-        // which this resume does not apply. The viewer and widget read
-        // `record.invocation` directly and stay blank for those records.
+        // which this resume does not apply. The conversation viewer reads
+        // `record.invocation` directly and renders nothing for those records;
+        // the widget renders from the activity tracker and the record's
+        // type/description.
         const displayInvocation: AgentInvocation = existing.invocation ?? {
           maxTurns: existing.effectiveMaxTurns,
         };
