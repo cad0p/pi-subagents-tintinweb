@@ -3,6 +3,10 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
+ * Resumes are exempt from the admission gate: they start immediately and are
+ * counted while they run, so a parent-visible continuation is never silently
+ * deferred behind fresh spawns — a burst of resumes can therefore exceed the
+ * limit by design.
  */
 
 import { randomUUID } from "node:crypto";
@@ -464,6 +468,11 @@ export class AgentManager {
    * and the shared completion tail. Returns `undefined` when the record is
    * unknown, has no session, is already active or winding down, or when the
    * started listener throws.
+   *
+   * Resumes bypass the maxConcurrent admission gate by design: a continuation
+   * of a parent-visible run must start immediately rather than queue behind
+   * fresh spawns. It still occupies a pool slot while running, so a burst of
+   * resumes can push the actual concurrency above the limit.
    */
   resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
