@@ -1332,7 +1332,7 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
-  it("reports Generation failed when a queued generator fails to start", async () => {
+  it("reports Generation failed when a queued generator's runner rejects", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-gen-drainfail-"));
     const previousCwd = process.cwd();
     try {

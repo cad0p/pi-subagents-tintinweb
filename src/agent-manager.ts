@@ -423,8 +423,8 @@ export class AgentManager {
         this.startAgent(next.id, record, next.args);
       } catch (err) {
         // Only pre-increment throws reach here (cwd re-validation, worktree
-        // creation) — the counter needs no rollback. Surface the failure on
-        // the record so the user/agent can see it via /agents, then keep draining.
+        // creation, onStart) — the counter needs no rollback. Surface the failure
+        // on the record so the user/agent can see it via /agents, then keep draining.
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();

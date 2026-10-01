@@ -812,9 +812,10 @@ describe("AgentManager — steer()", () => {
   });
 });
 
-// Regression for #44: ESC during a parent turn delivers a parent AbortSignal;
-// the manager wires the signal's "abort" event to this.abort(id), stopping the
-// child.
+// Regression for #44: the manager wires a caller-supplied parent AbortSignal's
+// "abort" event to this.abort(id), stopping the child. Covers the manager in
+// isolation — the Agent tool no longer forwards the parent ESC/abort signal to
+// child runs, so no production spawn caller passes one today.
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
