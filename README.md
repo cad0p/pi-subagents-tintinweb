@@ -365,6 +365,8 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
+Resumed runs (`resume`) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
+
 ## Model Scope
 
 **Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.
@@ -502,6 +504,8 @@ pi.events.emit("subagents:rpc:spawn", {
   options: { description: "My task" },
 });
 ```
+
+RPC spawns share the same pool as `Agent`-tool spawns: they count toward `maxConcurrent`, queue behind a full pool, and deliver the standard completion notification to the session (unless the result was consumed via `get_subagent_result` first).
 
 `options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context.
 
