@@ -1062,21 +1062,22 @@ describe("background lifecycle — model-visible surfaces", () => {
     const record = handle.getRecord(id);
     expect(record.status).toBe("queued");
 
-    await lifecycle.get("session_shutdown")({}, bindCtx);
-
-    // The shutdown abort settles the queued record through the completion tail.
-    expect(record.status).toBe("stopped");
-    expect(record.settled).toBe(true);
-    const failed = pi.events.emit.mock.calls.filter(
-      ([event, payload]: [string, any]) => event === "subagents:failed" && payload.id === id,
-    );
-    expect(failed).toHaveLength(1);
-    expect(failed[0][1]).toMatchObject({ id, status: "stopped" });
-    // Shutdown clears the nudge queue, so the completion notification never
-    // fires. Fake timers make the window exact: advancing past the hold can
-    // only deliver a nudge that was actually armed.
+    // Run the handler on the fake clock: the shutdown's abort settles the
+    // queued record, which arms its completion nudge here. The shutdown must
+    // clear that timer, so advancing past the hold delivers nothing.
     vi.useFakeTimers();
     try {
+      await lifecycle.get("session_shutdown")({}, bindCtx);
+
+      // The shutdown abort settles the queued record through the completion tail.
+      expect(record.status).toBe("stopped");
+      expect(record.settled).toBe(true);
+      const failed = pi.events.emit.mock.calls.filter(
+        ([event, payload]: [string, any]) => event === "subagents:failed" && payload.id === id,
+      );
+      expect(failed).toHaveLength(1);
+      expect(failed[0][1]).toMatchObject({ id, status: "stopped" });
+
       await vi.advanceTimersByTimeAsync(250);
       expect(pi.sendMessage).not.toHaveBeenCalled();
     } finally {
