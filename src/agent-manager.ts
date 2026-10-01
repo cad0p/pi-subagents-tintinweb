@@ -475,9 +475,7 @@ export class AgentManager {
         record.turnCount = 0;
         // A throwing onStart can follow worktree creation: reclaim the copy
         // and its registration (best-effort, like the run handlers' cleanup).
-        if (record.worktree) {
-          this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
-        }
+        this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
     }
