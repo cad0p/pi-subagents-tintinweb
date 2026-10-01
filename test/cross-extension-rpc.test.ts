@@ -99,7 +99,7 @@ describe("cross-extension RPC", () => {
       );
     });
 
-    it("forwards a caller-supplied isBackground unchanged and still spawns it", async () => {
+    it("forwards caller-supplied options verbatim, including unknown fields", async () => {
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:spawn:reply:req-s2b", reply);

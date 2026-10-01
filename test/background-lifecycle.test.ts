@@ -137,8 +137,8 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(failing)!.error).toContain("does not exist");
     expect(manager.getRecord(recovering)!.status).toBe("running");
 
-    // waitForAll drains directly too; the same throwing listener must not
-    // reject it, and the recovered agent still completes.
+    // The throwing listener was swallowed by afterRun; waitForAll must still
+    // settle the recovered run.
     resolveBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
     await expect(manager.waitForAll()).resolves.toBeUndefined();
     expect(manager.getRecord(recovering)!.status).toBe("completed");

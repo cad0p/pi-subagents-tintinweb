@@ -837,7 +837,7 @@ export async function resumeAgent(
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
   // Per-message bookkeeping mirrors runAgent: reset the accumulated text on
-  // each new assistant message and count completed turns, so the resumed run's
+  // each new message_start and count completed turns, so the resumed run's
   // streaming/stat readouts are not stale.
   let currentMessageText = "";
   let turnCount = 0;
