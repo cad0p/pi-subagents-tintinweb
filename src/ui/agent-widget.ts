@@ -72,7 +72,7 @@ export interface AgentDetails {
   toolUses: number;
   tokens: string;
   durationMs: number;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
+  status: "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
   /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
