@@ -114,11 +114,14 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
-  it("round-trips widgetMode; keeps valid values, drops invalid", () => {
+  it("keeps valid widgetMode values; drops the removed 'background' and invalid values", () => {
     saveSettings({ widgetMode: "off" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
-    saveSettings({ widgetMode: "background" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "background" });
+    saveSettings({ widgetMode: "all" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ widgetMode: "all" });
+    // The retired "background" mode is dropped by the sanitizer; the code default (all) applies.
+    writeProject({ widgetMode: "background" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
     writeProject({ widgetMode: "sideways" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
@@ -599,6 +602,24 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
+    });
+
+    it("keeps the runtime widget default when a stored 'background' is dropped", () => {
+      writeProject({ widgetMode: "background" } as any);
+      // Mirrors the extension's runtime state (`let widgetMode = "all"`): a
+      // dropped/absent widgetMode must leave the current mode untouched.
+      let runtimeMode = "all";
+      const runtimeAppliers: SettingsAppliers = {
+        ...appliers,
+        setWidgetMode: (m) => { runtimeMode = m; appliers.setWidgetMode(m); },
+      };
+      const emit = vi.fn();
+
+      const result = applyAndEmitLoaded(runtimeAppliers, emit, projectDir);
+
+      expect(result).toEqual({}); // retired value dropped by the sanitizer
+      expect(appliers.setWidgetMode).not.toHaveBeenCalled();
+      expect(runtimeMode).toBe("all");
     });
   });
 

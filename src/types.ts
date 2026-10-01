@@ -51,8 +51,6 @@ export interface AgentConfig {
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
   inheritContext?: boolean;
-  /** Default for spawn: run in background. undefined = caller decides. */
-  runInBackground?: boolean;
   /** Default for spawn: no extension tools. undefined = caller decides. */
   isolated?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
@@ -69,12 +67,10 @@ export interface AgentConfig {
 
 /**
  * Display mode for the persistent above-editor agent widget.
- * - `all`: show every agent (foreground + background).
- * - `background`: hide foreground agents (they already render inline as the
- *   Agent tool result, #118); show background/queued/scheduled/RPC.
+ * - `all`: show every agent.
  * - `off`: hide the widget entirely.
  */
-export type WidgetMode = 'all' | 'background' | 'off';
+export type WidgetMode = 'all' | 'off';
 
 export interface AgentRecord {
   id: string;
@@ -89,6 +85,15 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
+  /** Whether the run promise has fully unwound. Tri-state: `undefined` = no run
+   *  began — a fresh queued record, or a start that failed in `drainQueue`
+   *  before the counter/`settled` write; `false` = a run is in flight or a
+   *  `stopped` run's promise is still settling; `true` = the completion tail
+   *  finished, or a queued record was stopped before it ever started.
+   *  `startAgent` and `resume` set `false`; `afterRun` and a queued stop set
+   *  `true`. Resuming keys on `=== false` so a record that never ran is not
+   *  blocked. */
+  settled?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
@@ -109,14 +114,16 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
-  /** Cumulative agentic turn count, incremented via the `onTurnEnd` callback.
-   *  Initialized to 1 at spawn (record construction) to match the activity
-   *  tracker's `turnCount: 1`, then stamped with the completed-turn count as
-   *  each turn ends. A second source exists in the `Agent` tool's execute
-   *  closure (the closure-local `AgentActivity.turnCount` used for the live
-   *  widget), which is unreachable from `get_subagent_result`'s separate execute
-   *  — hence the record needs its own field. `get_subagent_result` surfaces it
-   *  in its running header; the `checkpoint` tool reads it as the turn label. */
+  /** Run-local agentic turn count, stamped via the `onTurnEnd` callback.
+   *  Initialized to 1 at spawn and reset to 1 when a resume starts, and zeroed
+   *  when a record is stopped before its run starts (a never-started report
+   *  carries no turn), so it describes the current run; the record's `toolUses`
+   *  stays cumulative across resumes. A second source exists in the `Agent`
+   *  tool's execute closure (the closure-local `AgentActivity.turnCount` used
+   *  for the live widget), which is unreachable from `get_subagent_result`'s
+   *  separate execute — hence the record needs its own field.
+   *  `get_subagent_result` surfaces it in its running header;
+   *  the `checkpoint` tool reads it as the turn label. */
   turnCount?: number;
   /** Latest checkpoint written by the subagent's `checkpoint` tool call.
    *  Undefined until the subagent calls the tool. The full history lives in
@@ -138,17 +145,6 @@ export interface AgentRecord {
   /** The child session's ID, set at spawn. The `checkpoint` tool reads
    *  ctx.sessionManager.getSessionId() to find its own record. */
   sessionId?: string;
-  /**
-   * Whether this agent was spawned to run in the background. Tri-state, set at
-   * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
-   * foreground (has an inline Agent tool-result surface), `undefined` = the
-   * caller never declared it (e.g. a cross-extension RPC spawn, which is detached
-   * and has no inline surface). The widget's background-only filter keys off this
-   * — and excludes only explicit `false`, so `undefined` agents stay visible.
-   * Reliable across ALL spawn paths, unlike the UI-only `invocation` snapshot,
-   * which only the Agent-tool path populates.
-   */
-  isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
   /** Effective max turns applied to the agent's run — caller-supplied value,
@@ -168,7 +164,6 @@ export interface AgentInvocation {
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
-  runInBackground?: boolean;
   isolation?: IsolationMode;
 }
 

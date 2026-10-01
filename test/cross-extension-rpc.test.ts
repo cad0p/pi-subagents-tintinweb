@@ -89,13 +89,35 @@ describe("cross-extension RPC", () => {
       events.on("subagents:rpc:spawn:reply:req-s2", reply);
       events.emit("subagents:rpc:spawn", {
         requestId: "req-s2", type: "Explore", prompt: "find it",
-        options: { description: "search", isBackground: true },
+        options: { description: "search" },
       });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "Explore", "find it",
-        { description: "search", isBackground: true },
+        { description: "search" },
+      );
+    });
+
+    it("forwards caller-supplied options verbatim, including unknown fields", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s2b", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s2b", type: "general-purpose", prompt: "do stuff",
+        options: { isBackground: false },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      // The flag is neither declared nor interpreted here: this only pins that
+      // the RPC layer forwards the caller's options verbatim. Real pooling and
+      // its completion notification are pinned against the real manager in
+      // background-lifecycle.test.ts ("routes an RPC spawn through the real
+      // manager: pools behind maxConcurrent").
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "do stuff",
+        { isBackground: false },
       );
     });
 

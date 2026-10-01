@@ -83,7 +83,7 @@ describe("get_subagent_result output shapes", () => {
     subagentsExtension(pi);
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);
@@ -161,7 +161,7 @@ describe("get_subagent_result output shapes", () => {
     for (const status of ["queued", "running", "completed", "error"]) {
       const spawn = await tools.get("Agent").execute(
         "spawn-tc",
-        { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+        { prompt: "go", description: "d", subagent_type: "general-purpose" },
         undefined, undefined, spawnCtx(cwd),
       );
       const id = agentIdOf(spawn);
@@ -618,7 +618,7 @@ describe("get_subagent_result output shapes", () => {
     subagentsExtension(pi);
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);

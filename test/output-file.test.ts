@@ -264,4 +264,34 @@ describe("streamToOutputFile", () => {
     session.fire({ type: "turn_end" });
     expect(readEntries()).toHaveLength(2);
   });
+
+  it("startIndex writes only messages past the pre-existing prefix (resume)", () => {
+    const session = makeFakeSession([
+      { role: "user", content: "turn 1" },
+      { role: "assistant", content: [{ type: "text", text: "answer 1" }] },
+      { role: "user", content: "turn 2" },
+    ]);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work", 3);
+
+    session.push({ role: "assistant", content: [{ type: "text", text: "resumed answer" }] });
+    session.fire({ type: "turn_end" });
+
+    const entries = readEntries();
+    expect(entries).toHaveLength(2); // initial + only the resumed turn
+    expect(JSON.stringify(entries.at(-1))).toContain("resumed answer");
+  });
+
+  it("defaults to writing from index 1 (fresh spawn)", () => {
+    const session = makeFakeSession([
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "text", text: "fresh answer" }] },
+    ]);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work");
+
+    session.fire({ type: "turn_end" });
+
+    const entries = readEntries();
+    expect(entries).toHaveLength(2); // initial + the assistant at index 1 (index 0 is the initial user entry)
+    expect(JSON.stringify(entries.at(-1))).toContain("fresh answer");
+  });
 });

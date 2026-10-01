@@ -63,8 +63,11 @@ export function streamToOutputFile(
   path: string,
   agentId: string,
   cwd: string,
+  startIndex = 1,
 ): () => void {
-  let writtenCount = 1; // initial user prompt already written
+  // Messages before `startIndex` are already on disk (the initial user prompt
+  // for a fresh spawn; the prior run's transcript for a resume).
+  let writtenCount = startIndex;
 
   const flush = () => {
     const messages = session.messages;

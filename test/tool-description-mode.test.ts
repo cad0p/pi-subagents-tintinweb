@@ -117,7 +117,7 @@ describe("toolDescriptionMode", () => {
     // One keyword per behavioral contract the orchestrator must know about.
     // If you change one of these behaviors, update BOTH descriptions.
     for (const contract of [
-      "run_in_background",
+      "subagent completion/failure",
       "resume",
       "steer_subagent",
       'isolation: "worktree"',
@@ -126,6 +126,86 @@ describe("toolDescriptionMode", () => {
     ]) {
       expect(desc).toContain(contract);
     }
+  });
+
+  it("the compact notes block matches the approved text byte-for-byte", () => {
+    const desc: string = setup({ toolDescriptionMode: "compact" }).get("Agent").description;
+    expect(desc).toContain(
+      [
+        "Notes:",
+        "- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.",
+        "- You will be notified on subagent completion/failure — never poll or sleep.",
+        "- Verify an agent's claimed code changes before reporting work done.",
+        "- resume continues a previous agent by ID; steer_subagent messages a running one.",
+        '- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.',
+      ].join("\n"),
+    );
+  });
+
+  it("the full usage-notes block matches the approved text byte-for-byte", () => {
+    const desc: string = setup().get("Agent").description;
+    expect(desc).toContain(
+      [
+        "## Usage notes",
+        "",
+        "- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).",
+        "- When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.",
+        "- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.",
+        "- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.",
+        "- Use steer_subagent to send mid-run messages to a running subagent.",
+        "- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.",
+        "- Use inherit_context if the agent needs the parent conversation history.",
+        '- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.',
+      ].join("\n"),
+    );
+  });
+
+  it("the full Agent description no longer advertises the removed execution knobs", () => {
+    const desc: string = setup().get("Agent").description;
+    expect(desc).not.toContain("run_in_background");
+    expect(desc).not.toContain("sequentially");
+  });
+
+  it("the compact Agent description no longer advertises the removed execution knobs", () => {
+    const desc: string = setup({ toolDescriptionMode: "compact" }).get("Agent").description;
+    expect(desc).not.toContain("run_in_background");
+    expect(desc).not.toContain("sequentially");
+  });
+
+  it("get_subagent_result carries the approved status/result contract and no run_in_background reference", () => {
+    const tools = setup();
+    const tool = tools.get("get_subagent_result");
+    expect(tool.description).toBe("Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool.");
+    expect(tool.promptSnippet).toBe("Check a subagent's status and retrieve its result");
+    expect(tool.description).not.toContain("run_in_background");
+  });
+
+  it("steer_subagent carries the approved description, snippet, and agent_id contract", () => {
+    const tools = setup();
+    const tool = tools.get("steer_subagent");
+    expect(tool.description).toBe(
+      "Send a steering message to a subagent. The message will interrupt the agent after its current tool execution " +
+      "and be injected into its conversation, allowing you to redirect its work mid-run.",
+    );
+    expect(tool.promptSnippet).toBe("Send a steering message to redirect a subagent");
+    expect(tool.parameters.properties.agent_id.description).toBe("The agent ID to steer (must be running or queued).");
+  });
+
+  it("the Agent tool carries the approved completion notification guideline", () => {
+    const tool = setup().get("Agent");
+    expect(tool.promptGuidelines[2]).toBe(
+      "You will be notified on subagent completion/failure — do not poll or sleep waiting for it. Continue with other work instead.",
+    );
+  });
+
+  it("the schedule parameter carries the approved description", () => {
+    const tool = setup().get("Agent");
+    expect(tool.parameters.properties.schedule.description).toBe(
+      "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). " +
+        'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+        "Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. " +
+        "Incompatible with inherit_context and resume. Returns job ID.",
+    );
   });
 
   it("custom mode renders the project template with placeholders substituted", () => {

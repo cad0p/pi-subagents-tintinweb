@@ -13,27 +13,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-
-function makePi() {
-  const tools = new Map<string, any>();
-  const eventHandlers = new Map<string, any>();
-  const lifecycle = new Map<string, any>();
-  const pi = {
-    registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
-    on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
-    events: {
-      emit: vi.fn(),
-      on: vi.fn((event: string, handler: any) => {
-        eventHandlers.set(event, handler);
-        return vi.fn();
-      }),
-    },
-    appendEntry: vi.fn(),
-    sendMessage: vi.fn(),
-  } as any;
-  return { pi, tools, eventHandlers, lifecycle };
-}
+import { makePi, textOf } from "./helpers/subagents-harness.js";
 
 // The RPC channels are registered on the first bound session_start (#142), so a
 // test that drives them must fire it first — as a real session always does. A
@@ -56,12 +36,10 @@ function ctx() {
   } as any;
 }
 
-const textOf = (r: any): string => r.content[0].text;
-
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("foreground turn-limit abort → the Agent result flags an incomplete outcome", async () => {
+  it("background turn-limit abort → get_subagent_result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "partial work so far",
       session: { dispose: vi.fn() } as any,
@@ -71,10 +49,18 @@ describe("status note reaches the parent through the real handlers", () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
 
-    const res = await tools.get("Agent").execute(
+    const spawn = await tools.get("Agent").execute(
       "tc1",
       { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
+    expect(id, "spawn should surface an agent id").toBeTruthy();
+    // Let the mocked run settle so the record reaches its terminal status.
+    await new Promise((r) => setTimeout(r, 0));
+
+    const res = await tools.get("get_subagent_result").execute(
+      "tc2", { agent_id: id }, undefined, undefined, ctx(),
     );
 
     const out = textOf(res);
@@ -86,20 +72,20 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {
     // A background agent that never settles on its own — only a stop ends it.
     vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
-    const { pi, tools, eventHandlers, lifecycle } = makePi();
+    const { pi, tools, busHandlers, lifecycle } = makePi();
     subagentsExtension(pi);
     await bind(lifecycle); // register RPC channels via session_start (#142)
 
     const spawn = await tools.get("Agent").execute(
       "tc2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, ctx(),
     );
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
     expect(id, "background spawn should surface an agent id").toBeTruthy();
 
     // The user stops it — same path the viewer's stop key uses (manager.abort).
-    eventHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
+    busHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
 
     const res = await tools.get("get_subagent_result").execute(
       "tc3", { agent_id: id }, undefined, undefined, ctx(),

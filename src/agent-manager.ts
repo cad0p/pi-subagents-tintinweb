@@ -3,7 +3,10 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
- * Foreground agents bypass the queue (they block the parent anyway).
+ * Resumes are exempt from the admission gate: they start immediately and are
+ * counted while they run, so a parent-visible continuation is never silently
+ * deferred behind fresh spawns — a burst of resumes can therefore exceed the
+ * limit by design.
  */
 
 import { randomUUID } from "node:crypto";
@@ -62,7 +65,6 @@ interface SpawnOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
-  isBackground?: boolean;
   /**
    * Skip the maxConcurrent queue check for this spawn — start immediately even
    * if the configured concurrency limit would otherwise queue it. Used by the
@@ -82,7 +84,14 @@ interface SpawnOptions {
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
-  /** Parent abort signal — when aborted, the subagent is also stopped. */
+  /**
+   * Parent abort signal — when aborted, the subagent is also stopped.
+   * Intended for in-process callers holding the manager directly (e.g. through
+   * the manager registry). Cross-extension RPC callers should pass serializable
+   * option values: `signal` is not part of the documented RPC surface and may
+   * not survive a serialized boundary. The `Agent` tool no longer forwards its
+   * tool-call signal to child runs.
+   */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
@@ -97,6 +106,12 @@ interface SpawnOptions {
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
 }
+
+/** The five activity callbacks a resumed run forwards to its caller. */
+type ResumeCallbacks = Pick<
+  SpawnOptions,
+  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+>;
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
@@ -162,7 +177,7 @@ export class AgentManager {
       id,
       type,
       description: options.description,
-      status: options.isBackground ? "queued" : "running",
+      status: "queued",
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
@@ -173,29 +188,26 @@ export class AgentManager {
       // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
       // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
       effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
-      // Raw tri-state (not coerced to a boolean): true = background, false =
-      // foreground (has an inline tool-result surface), undefined = caller never
-      // declared it (e.g. a cross-extension RPC spawn). The widget's background-
-      // only filter excludes only explicit `false`, so undefined agents — which
-      // have no inline surface — stay visible instead of vanishing.
-      isBackground: options.isBackground,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (!options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
     }
 
-    // startAgent can throw (e.g. strict worktree-isolation failure) — clean
-    // up the record so callers don't see an orphan in `listAgents()`.
+    // startAgent can throw (strict worktree-isolation failure, or a throwing
+    // `subagents:started` listener after the worktree was created) — reclaim
+    // any prologue worktree and drop the record so callers don't see an
+    // orphan in `listAgents()`.
     try {
       this.startAgent(id, record, args);
     } catch (err) {
+      this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
       this.agents.delete(id);
       throw err;
     }
@@ -204,6 +216,14 @@ export class AgentManager {
 
   /** Actually start an agent (called immediately or from queue drain). */
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
+    // An already-aborted parent signal never fires "abort" again — wiring it
+    // alone would start a run under a signal its owner considers dead. Settle
+    // through the stopped tail before anything is created: no cwd/worktree
+    // validation, no started event, no runner call, no slot, one report.
+    if (options.signal?.aborted) {
+      this.settleStoppedWithoutRun(record);
+      return;
+    }
     // Re-validate a caller-supplied cwd: queued spawns can start minutes after
     // spawn()'s check, and the directory may be gone by then (TOCTOU). Same
     // curated errors; drainQueue parks a throw on the record as an error.
@@ -240,8 +260,15 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
+
+    // A started listener can stop the record synchronously (an extension
+    // reacting to `subagents:started`). Settle it through the stopped tail
+    // instead of starting — and counting — a run the user already stopped.
+    if (this.stoppedInStartPrologue(record)) {
+      this.settleStoppedWithoutRun(record, baseCwd);
+      return;
+    }
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
     let detachParentSignal: (() => void) | undefined;
@@ -252,6 +279,11 @@ export class AgentManager {
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
+    // Increment only after every synchronous throw site (cwd/worktree
+    // validation, onStart) — the runner calls are async, so any later throw
+    // arrives as a rejection through .catch/.finally and cannot leak the slot.
+    this.runningBackground++;
+    record.settled = false;
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
@@ -321,12 +353,6 @@ export class AgentManager {
 
         detach();
 
-        // Final flush of streaming output file
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
-
         // Clean up worktree if used
         if (record.worktree) {
           const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
@@ -340,16 +366,6 @@ export class AgentManager {
           }
         }
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-        } else {
-          this.runningBackground--;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-          this.drainQueue();
-        }
         return responseText;
       })
       .catch((err) => {
@@ -362,12 +378,6 @@ export class AgentManager {
 
         detach();
 
-        // Final flush of streaming output file on error
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
-
         // Best-effort worktree cleanup on error
         if (record.worktree) {
           try {
@@ -376,25 +386,78 @@ export class AgentManager {
           } catch { /* ignore cleanup errors */ }
         }
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          this.onComplete?.(record);
-        } else {
-          this.runningBackground--;
-          this.onComplete?.(record);
-          this.drainQueue();
-        }
         return "";
-      });
+      })
+      .finally(() => this.afterRun(record));
 
     record.promise = promise;
+  }
 
-    // Notify caller that spawn is complete (record is in the map, promise is set).
-    // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
-    // Used by spawnAndWait to let the caller set up output files before streaming starts.
-    this.onSpawned?.(id);
+  /** Shared completion tail: release the slot, flush the transcript, notify, drain. */
+  private afterRun(record: AgentRecord): void {
+    this.runningBackground--;
+    try { record.outputCleanup?.(); } catch { /* ignore */ }
+    record.outputCleanup = undefined;
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    // A drain escape must not reject an already-fulfilled run promise or strand
+    // `settled` — a stuck `settled = false` would refuse every later resume and
+    // leave the queued records behind the freed slot unstarted.
+    try { this.drainQueue(); } catch { /* keep the completion tail failure-safe */ }
+    record.settled = true;
+  }
+
+  /**
+   * Settle a record whose run never started — stopped while queued, or stopped
+   * by a `subagents:started` listener before the runner was wired. Reports the
+   * stop through the completion surface exactly once and marks the record fully
+   * unwound. No counter change: a never-started record never held a slot.
+   *
+   * `baseCwd` is the repo a prologue-created worktree came from; omit it on
+   * paths where this run's prologue created none (a record stopped while
+   * queued, an already-aborted parent signal, or a resume stopped during its
+   * start prologue). A resumed record can still carry the prior run's worktree
+   * reference — a resume never creates one, and reclaiming that stale path
+   * would clobber the prior run's `worktreeResult`.
+   */
+  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string): void {
+    record.status = "stopped";
+    record.completedAt ??= Date.now();
+    // No turn ever executed — zero the run-local counter so the completion
+    // report cannot claim the presumed first turn.
+    record.turnCount = 0;
+    // Reclaim a worktree created by the start prologue (a stop issued during
+    // the `subagents:started` emit): the run never made changes, so this
+    // removes the copy and its git registration outright. `baseCwd` is absent
+    // on the queued-abort, already-aborted-signal, and resume start-prologue
+    // paths, where this run's prologue created no worktree.
+    if (baseCwd) {
+      this.reclaimWorktree(record, baseCwd);
+    }
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    record.settled = true;
+  }
+
+  /**
+   * Best-effort reclamation of a worktree the start prologue created when the
+   * run never executed: a throwing started listener on the spawn or queue
+   * path, or a stop issued during the `subagents:started` emit. Removes the
+   * copy and its git registration from `baseCwd`'s repo, records the cleanup
+   * outcome, and clears the record's reference so no later path retries it.
+   * Cleanup errors are ignored — the failure or stop that triggered the
+   * reclaim is the actionable signal.
+   */
+  private reclaimWorktree(record: AgentRecord, baseCwd: string): void {
+    if (!record.worktree) return;
+    try {
+      record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, record.description);
+    } catch { /* ignore cleanup errors */ }
+    record.worktree = undefined;
+  }
+
+  /** True when a started listener stopped the record or aborted its controller
+   *  during the synchronous `onStart` emit. */
+  private stoppedInStartPrologue(record: AgentRecord): boolean {
+    return record.status === "stopped" || record.abortController?.signal.aborted === true;
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -402,99 +465,133 @@ export class AgentManager {
     while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
       const next = this.queue.shift()!;
       const record = this.agents.get(next.id);
-      if (!record || record.status !== "queued") continue;
+      if (record?.status !== "queued") continue;
       try {
         this.startAgent(next.id, record, next.args);
       } catch (err) {
-        // Late failure (e.g. strict worktree-isolation) — surface on the record
-        // so the user/agent can see it via /agents, then keep draining.
+        // Only pre-increment throws reach here (cwd re-validation, worktree
+        // creation, onStart) — the counter needs no rollback. Surface the failure
+        // on the record so the user/agent can see it via /agents, then keep draining.
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
-        this.onComplete?.(record);
+        // No turn ever executed — zero the run-local counter so the completion
+        // report cannot claim the presumed first turn.
+        record.turnCount = 0;
+        // A throwing onStart can follow worktree creation: reclaim the copy
+        // and its registration (best-effort, like the run handlers' cleanup).
+        this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
     }
   }
 
   /**
-   * Called synchronously right after spawn, before onSessionCreated fires.
-   * Lets the caller set up the output file path on the record.
-   * The record is guaranteed to be in this.agents at this point.
-   */
-  private onSpawned?: (id: string) => void;
-
-  /**
-   * Spawn an agent and wait for completion (foreground use).
-   * Foreground agents bypass the concurrency queue.
-   * Returns { id, record } so callers can access the agent ID.
+   * Kick off a resume of an existing agent session with a new prompt.
    *
-   * @param onSpawned - Called synchronously after spawn(), before onSessionCreated fires.
-   *   Use this to set record.outputFile so streamToOutputFile can pick it up.
+   * Returns the record synchronously; the run settles through `record.promise`
+   * and the shared completion tail. Returns `undefined` when the record is
+   * unknown, has no session, is already active or winding down, when the
+   * started listener throws, or when it stops the record during the
+   * `subagents:started` emit.
+   *
+   * Resumes bypass the maxConcurrent admission gate by design: a continuation
+   * of a parent-visible run must start immediately rather than queue behind
+   * fresh spawns. It still occupies a pool slot while running, so a burst of
+   * resumes can push the actual concurrency above the limit.
    */
-  async spawnAndWait(
-    pi: ExtensionAPI,
-    ctx: ExtensionContext,
-    type: SubagentType,
-    prompt: string,
-    options: Omit<SpawnOptions, "isBackground">,
-    onSpawned?: (id: string) => void,
-  ): Promise<{ id: string; record: AgentRecord }> {
-    // Temporarily register the onSpawned hook so startAgent can call it.
-    const prevOnSpawned = this.onSpawned;
-    this.onSpawned = onSpawned;
-    try {
-      const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
-      const record = this.agents.get(id)!;
-      await record.promise;
-      return { id, record };
-    } finally {
-      this.onSpawned = prevOnSpawned;
-    }
-  }
-
-  /**
-   * Resume an existing agent session with a new prompt.
-   */
-  async resume(
-    id: string,
-    prompt: string,
-    signal?: AbortSignal,
-  ): Promise<AgentRecord | undefined> {
+  resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+    // A record in the start prologue is already `running` while `settled` may
+    // still hold the prior run's `true`, so the running arm is load-bearing.
+    // A queued record has no session yet and is refused by the queued arm.
+    if (record.status === "running" || record.status === "queued" || record.settled === false) {
+      return undefined;
+    }
 
+    const prior = {
+      status: record.status,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      result: record.result,
+      error: record.error,
+      resultConsumed: record.resultConsumed,
+      abortController: record.abortController,
+      turnCount: record.turnCount,
+      lastCheckpoint: record.lastCheckpoint,
+    };
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
-
+    record.resultConsumed = undefined; // a prior pull must not swallow the resume report
+    // Run-local, mirroring a fresh spawn's initial turn count.
+    record.turnCount = 1;
+    // Run-local too: the prior run's latest checkpoint must not surface as the
+    // resumed run's state. The .checkpoints.md history stays cumulative.
+    record.lastCheckpoint = undefined;
+    record.abortController = new AbortController();
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
-        onToolActivity: (activity) => {
-          if (activity.type === "end") record.toolUses++;
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-        },
-        signal,
-      });
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
-      record.result = text;
-      record.completedAt = Date.now();
-    } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+      this.onStart?.(record);
+    } catch {
+      // A listener threw (stale extension context). Restore the pre-resume
+      // state and refuse: the tool reports failure and the counter is untouched.
+      Object.assign(record, prior);
+      return undefined;
     }
-
+    // A started listener can stop the record synchronously; settle it through
+    // the stopped tail instead of starting — and counting — a run that was
+    // already stopped.
+    if (this.stoppedInStartPrologue(record)) {
+      this.settleStoppedWithoutRun(record);
+      return undefined;
+    }
+    record.settled = false;
+    // Occupies a slot but is never gated by maxConcurrent — a burst of resumes
+    // can exceed the cap by design. They share the pool counter, so queued
+    // fresh spawns wait for these resumes to settle before drainQueue admits them.
+    this.runningBackground++;
+    const promise = resumeAgent(record.session, prompt, {
+      onToolActivity: (activity) => {
+        if (activity.type === "end") record.toolUses++;
+        callbacks?.onToolActivity?.(activity);
+      },
+      onTextDelta: callbacks?.onTextDelta,
+      onTurnEnd: (turnCount) => {
+        record.turnCount = turnCount;
+        callbacks?.onTurnEnd?.(turnCount);
+      },
+      onAssistantUsage: (usage) => {
+        addUsage(record.lifetimeUsage, usage);
+        callbacks?.onAssistantUsage?.(usage);
+      },
+      onCompaction: (info) => {
+        record.compactionCount++;
+        this.onCompact?.(record, info);
+        callbacks?.onCompaction?.(info);
+      },
+      signal: record.abortController.signal,
+    })
+      .then(({ text, failure }) => {
+        // Stop wins; a stopped resume is never overwritten with completed.
+        if (record.status !== "stopped") {
+          record.status = failure ? "error" : "completed";
+          if (failure) record.error = failure;
+        }
+        record.result = text;
+        record.completedAt ??= Date.now();
+        return text;
+      })
+      .catch((err) => {
+        if (record.status !== "stopped") record.status = "error";
+        record.error = err instanceof Error ? err.message : String(err);
+        record.completedAt ??= Date.now();
+        return "";
+      })
+      .finally(() => this.afterRun(record));
+    record.promise = promise;
     return record;
   }
 
@@ -536,8 +633,7 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
-      record.status = "stopped";
-      record.completedAt = Date.now();
+      this.settleStoppedWithoutRun(record);
       return true;
     }
 
@@ -592,8 +688,7 @@ export class AgentManager {
     for (const queued of this.queue) {
       const record = this.agents.get(queued.id);
       if (record) {
-        record.status = "stopped";
-        record.completedAt = Date.now();
+        this.settleStoppedWithoutRun(record);
         count++;
       }
     }
@@ -610,14 +705,21 @@ export class AgentManager {
     return count;
   }
 
-  /** Wait for all running and queued agents to complete (including queued ones). */
+  /**
+   * Wait for all running and queued agents to complete (including queued ones).
+   *
+   * A stopped run is still unwinding when its `settled` flag is `false`: it no
+   * longer counts as `running` but still holds its slot, so its promise is part
+   * of the pending set — the queued records behind it start only once it
+   * settles.
+   */
   async waitForAll(): Promise<void> {
     // Loop because drainQueue respects the concurrency limit — as running
     // agents finish they start queued ones, which need awaiting too.
     while (true) {
       this.drainQueue();
       const pending = [...this.agents.values()]
-        .filter(r => r.status === "running" || r.status === "queued")
+        .filter(r => r.status === "running" || r.status === "queued" || r.settled === false)
         .map(r => r.promise)
         .filter(Boolean);
       if (pending.length === 0) break;

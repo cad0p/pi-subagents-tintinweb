@@ -12,7 +12,6 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     systemPrompt: "Test agent",
     promptMode: "replace",
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
     ...overrides,
   };
@@ -26,7 +25,6 @@ describe("resolveAgentInvocationConfig", () => {
         thinking: "high",
         maxTurns: 42,
         inheritContext: false,
-        runInBackground: false,
         isolated: false,
         isolation: "worktree",
       }),
@@ -34,7 +32,6 @@ describe("resolveAgentInvocationConfig", () => {
         thinking: "minimal",
         max_turns: 1,
         inherit_context: true,
-        run_in_background: true,
         isolated: true,
         isolation: "worktree",
       },
@@ -44,7 +41,6 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.thinking).toBe("high");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
-    expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
     expect(resolved.isolation).toBe("worktree");
   });
@@ -54,7 +50,6 @@ describe("resolveAgentInvocationConfig", () => {
       thinking: "minimal",
       max_turns: 3,
       inherit_context: true,
-      run_in_background: true,
       isolated: true,
       isolation: "worktree",
     });
@@ -63,7 +58,6 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.thinking).toBe("minimal");
     expect(resolved.maxTurns).toBe(3);
     expect(resolved.inheritContext).toBe(true);
-    expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
   });
@@ -72,18 +66,15 @@ describe("resolveAgentInvocationConfig", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         inheritContext: undefined,
-        runInBackground: undefined,
         isolated: undefined,
       }),
       {
         inherit_context: true,
-        run_in_background: true,
         isolated: true,
       },
     );
 
     expect(resolved.inheritContext).toBe(true);
-    expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
   });
 
@@ -91,14 +82,12 @@ describe("resolveAgentInvocationConfig", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         inheritContext: undefined,
-        runInBackground: undefined,
         isolated: undefined,
       }),
       {},
     );
 
     expect(resolved.inheritContext).toBe(false);
-    expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
   });
 });

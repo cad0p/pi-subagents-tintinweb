@@ -20,8 +20,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-
-const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+import { MANAGER_KEY, textOf } from "./helpers/subagents-harness.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -52,13 +51,11 @@ function ctx() {
   } as any;
 }
 
-const textOf = (r: any): string => r.content[0].text;
-
 async function spawnBackground(tools: Map<string, any>): Promise<string> {
   vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "registry test agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "registry test agent", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

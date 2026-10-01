@@ -82,7 +82,6 @@ vi.mock("../src/agent-types.js", () => ({
     systemPrompt: "You are Explore.",
     promptMode: "replace",
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
   })),
   getMemoryToolNames: vi.fn(() => []),
@@ -282,6 +281,30 @@ describe("agent-runner final output capture", () => {
     await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
 
     expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+  });
+});
+
+describe("agent-runner abort-signal forwarding", () => {
+  it("aborts a fresh session immediately when handed an already-aborted signal", async () => {
+    const { session } = createSession("STOPPED");
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+
+    await runAgent(ctx, "Explore", "go", { pi, signal: controller.signal });
+
+    // The "abort" event already fired, so subscribing would never deliver it.
+    expect(session.abort).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a resumed session immediately when handed an already-aborted signal", async () => {
+    const { session } = createSession("STOPPED");
+    const controller = new AbortController();
+    controller.abort();
+
+    await resumeAgent(session as any, "Continue", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -531,6 +554,33 @@ describe("agent-runner usage callback wiring", () => {
     expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
   });
 
+  it("resumeAgent resets per-message text and counts turns like runAgent", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    const turns: number[] = [];
+    const deltas: string[] = [];
+
+    session.prompt = vi.fn(async () => {
+      const emit = (event: any) => { for (const l of listeners) l(event); };
+      emit({ type: "message_start", message: { role: "assistant" } });
+      emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hel" } });
+      emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "lo" } });
+      emit({ type: "turn_end" });
+      // A new message must reset the accumulated text (no concatenation).
+      emit({ type: "message_start", message: { role: "assistant" } });
+      emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "world" } });
+      emit({ type: "turn_end" });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
+    });
+
+    await resumeAgent(session as any, "continue", {
+      onTurnEnd: (n) => turns.push(n),
+      onTextDelta: (_d, full) => deltas.push(full),
+    });
+
+    expect(turns).toEqual([1, 2]);
+    expect(deltas).toEqual(["hel", "hello", "world"]);
+  });
+
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -587,7 +637,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     systemPrompt: "Test.",
     promptMode: "replace" as const,
     inheritContext: false,
-    runInBackground: false,
     isolated: false,
     ...overrides,
   };

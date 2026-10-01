@@ -35,7 +35,6 @@ import {
   type AgentDetails,
   AgentWidget,
   buildInvocationTags,
-  describeActivity,
   fgPreservingNestedStyles,
   formatDuration,
   formatMs,
@@ -43,7 +42,6 @@ import {
   formatTurns,
   getDisplayName,
   getPromptModeLabel,
-  SPINNER,
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
@@ -67,18 +65,6 @@ function checkpointsFilePath(outputFile: string | undefined): string | undefined
   return `${outputFile}.checkpoints.md`;
 }
 
-export function renderRunningAgentStatus(
-  frame: string,
-  statsText: string,
-  activity: string,
-  theme: Pick<Theme, "fg">,
-): Container {
-  const container = new Container();
-  container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-  container.addChild(new Text(theme.fg("dim", `  ⎿  ${activity}`), 0, 0));
-  return container;
-}
-
 /** Format an agent's lifetime token total, or "" when zero. */
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
   const t = getLifetimeTotal(o.lifetimeUsage);
@@ -87,9 +73,9 @@ function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
 
 /**
  * Create an AgentActivity state and spawn callbacks for tracking tool usage.
- * Used by both foreground and background paths to avoid duplication.
+ * Used by the background spawn and resume paths to avoid duplication.
  */
-function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
+function createActivityTracker(maxTurns?: number) {
   const state: AgentActivity = {
     activeTools: new Map(),
     toolUses: 0,
@@ -110,22 +96,18 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
         }
         state.toolUses++;
       }
-      onStreamUpdate?.();
     },
     onTextDelta: (_delta: string, fullText: string) => {
       state.responseText = fullText;
-      onStreamUpdate?.();
     },
     onTurnEnd: (turnCount: number) => {
       state.turnCount = turnCount;
-      onStreamUpdate?.();
     },
     onSessionCreated: (session: any) => {
       state.session = session;
     },
     onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
       addUsage(state.lifetimeUsage, usage);
-      onStreamUpdate?.();
     },
   };
 
@@ -192,19 +174,19 @@ function headerPreview(s: string): string {
 }
 
 const INSTRUCTION_PREVIEW_SCAN_CHARS = 512;   // per-render sanitizer window for the steer preview
-const INSTRUCTION_PREVIEW_COLS = 80;          // column budget for the steer preview (Call 5a-i)
+const INSTRUCTION_PREVIEW_COLS = 80;          // column budget for the steer preview
 
-/** Expanded body copy of a parent→child instruction — full text, no caps (Call 6). */
+/** Expanded body copy of a parent→child instruction — full text, no caps. */
 function instructionBody(raw: string, theme: Pick<Theme, "fg">): string {
   const text = stripControlChars(raw).trimEnd();
-  if (!text.trim()) return "";   // whitespace-only → no stray blank line (adv F9)
+  if (!text.trim()) return "";   // whitespace-only → no stray blank line
   return text
     .split("\n")
     .map((l) => theme.fg("dim", `  ${l}`))
     .join("\n");
 }
 
-/** Pure hint formatter — no global keybinding dependency, exported for tests (F2). */
+/** Pure hint formatter — no global keybinding dependency, exported for tests. */
 export function formatInstructionHint(key: string, theme: Pick<Theme, "fg">): string {
   return key ? theme.fg("dim", ` (${key} to expand)`) : "";
 }
@@ -240,6 +222,14 @@ export function effectiveFailurePreviewCap(value: number): number {
   }
   return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
+
+/** Grace window between an agent settling and its completion notification being
+ *  sent, so a parent that pulls the result first can still cancel the nudge. */
+export const NUDGE_HOLD_MS = 200;
+
+/** Max turns for the AI-generation wizard run. Exported for the wizard tests,
+ *  which tell the generator run apart from other spawns by this value. */
+export const WIZARD_MAX_TURNS = 5;
 
 /** Validate and return `failurePreviewMaxChars` — user-set input, untrusted until checked. */
 function failurePreviewCap(settings: SubagentsSettings): number {
@@ -315,27 +305,6 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   return [header, "", metadata.join("\n"), "", "Result:", "", body].join("\n");
 }
 
-/** Build AgentDetails from a base + record-specific fields. */
-function buildDetails(
-  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
-  activity?: AgentActivity,
-  overrides?: Partial<AgentDetails>,
-): AgentDetails {
-  return {
-    ...base,
-    toolUses: record.toolUses,
-    tokens: formatLifetimeTokens(record),
-    turnCount: activity?.turnCount,
-    maxTurns: activity?.maxTurns,
-    durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
-    status: record.status as AgentDetails["status"],
-    agentId: record.id,
-    error: record.error,
-    ...overrides,
-  };
-}
-
 export default function (pi: ExtensionAPI) {
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = () => {
@@ -366,7 +335,10 @@ export default function (pi: ExtensionAPI) {
   // firing; the send closures re-check it at fire time.
   const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
   const parkedNudges = new Map<string, () => void>();
-  const NUDGE_HOLD_MS = 200;
+  /** Poll interval while the wizard waits for a queued generator to start. The
+   *  wizard is interactive, so it re-checks the record until it leaves `queued`
+   *  (or is stopped) instead of blocking on a promise that does not exist yet. */
+  const WIZARD_QUEUE_POLL_MS = 100;
   let mainTurnActive = false;
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
@@ -628,11 +600,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Live widget: show running agents above editor.
-  // widgetMode (default "background") selects what the widget shows: "all" =
-  // every agent; "background" = hide foreground (they already render inline as
-  // the Agent tool result, so showing them here too is a duplicate, #118), keep
-  // everything else; "off" = hide the widget entirely. Read live at render time.
-  let widgetMode: WidgetMode = "background";
+  // widgetMode (default "all") selects what the widget shows: "all" = every
+  // agent; "off" = hide the widget entirely. Read live at render time.
+  let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
@@ -779,7 +749,7 @@ export default function (pi: ExtensionAPI) {
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
           'Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. ' +
-          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+          'Incompatible with inherit_context and resume. Returns job ID.',
       }),
     ),
   };
@@ -800,8 +770,8 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
-- Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
-- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- You will be notified on subagent completion/failure — never poll or sleep.
+- Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
 - isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
 
@@ -821,18 +791,13 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 ## Usage notes
 
 - Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses, with run_in_background: true on each, so they run concurrently. If the user specifies that they want agents run "in parallel", you MUST send a single message with multiple tool calls. Foreground calls run sequentially — only one executes at a time.
-- When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
+- When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.
-- Use run_in_background for work you don't need immediately. You will be notified when it completes — do NOT poll or sleep waiting for it. Continue with other work or respond to the user instead.
-- Foreground vs background: use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
+- Use steer_subagent to send mid-run messages to a running subagent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -902,7 +867,7 @@ Terse command-style prompts produce shallow, generic work.
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
       "For broad codebase exploration or research, spawn Agent with an appropriate subagent_type (e.g. Explore). Otherwise use direct tools (read, grep, find) when the target is already known.",
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
+      "You will be notified on subagent completion/failure — do not poll or sleep waiting for it. Continue with other work instead.",
       "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
     ],
     parameters: Type.Object({
@@ -924,11 +889,6 @@ Terse command-style prompts produce shallow, generic work.
         Type.Number({
           description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
           minimum: 1,
-        }),
-      ),
-      run_in_background: Type.Optional(
-        Type.Boolean({
-          description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
         }),
       ),
       resume: Type.Optional(
@@ -971,7 +931,7 @@ Terse command-style prompts produce shallow, generic work.
       return new Text(head, 0, 0);
     },
 
-    renderResult(result, { expanded, isPartial }, theme, context) {
+    renderResult(result, { expanded }, theme, context) {
       const details = result.details as AgentDetails | undefined;
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
@@ -992,13 +952,6 @@ Terse command-style prompts produce shallow, generic work.
         return parts.map(p => fgPreservingNestedStyles(theme, "dim", p)).join(" " + theme.fg("dim", "·") + " ");
       };
 
-      // ---- While running (streaming) ----
-      if (isPartial || details.status === "running") {
-        const frame = SPINNER[details.spinnerFrame ?? 0];
-        const s = stats(details);
-        return renderRunningAgentStatus(frame, s, typeof details.activity === "string" ? toSingleLine(details.activity) : "thinking…", theme);
-      }
-
       // ---- Background agent launched ----
       if (details.status === "background") {
         const hint = !expanded && typeof (context.args as { prompt?: unknown })?.prompt === "string"
@@ -1007,43 +960,9 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})${hint}`), 0, 0);
       }
 
-      // ---- Completed / Steered ----
-      if (details.status === "completed" || details.status === "steered") {
-        const duration = formatMs(details.durationMs);
-        const isSteered = details.status === "steered";
-        const icon = isSteered ? theme.fg("warning", "✓") : theme.fg("success", "✓");
-        const s = stats(details);
-        let line = icon + (s ? " " + s : "");
-        line += " " + theme.fg("dim", "·") + " " + theme.fg("dim", duration);
-
-        if (expanded) {
-          const rawText = result.content[0]?.type === "text" ? result.content[0].text : "";
-          const resultText = typeof rawText === "string" ? stripControlChars(rawText) : "";
-          if (resultText) {
-            const lines = resultText.split("\n").slice(0, 50);
-            for (const l of lines) {
-              line += "\n" + theme.fg("dim", `  ${l}`);
-            }
-            if (resultText.split("\n").length > 50) {
-              line += "\n" + theme.fg("muted", "  ... (read the .output transcript file for full detail)");
-            }
-          }
-        } else {
-          const doneText = isSteered ? "Wrapped up (turn limit)" : "Done";
-          line += "\n" + theme.fg("dim", `  ⎿  ${doneText}`);
-        }
-        return new Text(line, 0, 0);
-      }
-
-      // ---- Stopped (user-initiated abort) ----
-      if (details.status === "stopped") {
-        const s = stats(details);
-        let line = theme.fg("dim", "■") + (s ? " " + s : "");
-        line += "\n" + theme.fg("dim", "  ⎿  Stopped");
-        return new Text(line, 0, 0);
-      }
-
       // ---- Error / Aborted (hard max_turns) ----
+      // Legacy fallthrough: a replayed pre-change row carrying a retired inline
+      // status (running/completed/steered/stopped) lands here.
       const s = stats(details);
       let line = theme.fg("error", "✗") + (s ? " " + s : "");
 
@@ -1058,7 +977,7 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Execute ----
 
-    execute: async (_toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
@@ -1068,16 +987,36 @@ Terse command-style prompts produce shallow, generic work.
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
       const subagentType = resolved ?? "general-purpose";
-      const fellBack = resolved === undefined;
-
-      const displayName = getDisplayName(subagentType);
 
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
 
-      // Resolve model from agent frontmatter only (no LLM-authored override).
+      const thinking = resolvedConfig.thinking;
+      const inheritContext = resolvedConfig.inheritContext;
+      const isolated = resolvedConfig.isolated;
+      const isolation = resolvedConfig.isolation;
+      // Whether this spawn writes its .output transcript. Per-agent
+      // frontmatter (`output_transcript`) wins; otherwise the project/global
+      // default applies. `attachTranscript` below is the SOLE gate — every
+      // downstream consumer keys off record.outputFile being set, so no spawn
+      // path can re-enable the transcript by accident.
+      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
+      const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
+        if (!rec || !outputTranscript) return;
+        rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
+        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
+      };
+
+      const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
+
+      // Resolve the call's model from agent frontmatter only (no LLM-authored
+      // override). Shared by fresh spawns and scheduled registrations: a
+      // schedule registers a job here and the pinned model resolves at fire
+      // time, but the scope warning still belongs to registration. A resume
+      // continues the record's session and model, so it does not warn, and its
+      // row never uses the call-resolved model.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
@@ -1095,63 +1034,35 @@ Terse command-style prompts produce shallow, generic work.
       // frontmatter is authoritative (the agent's author/installer chose it),
       // and the parent's model was chosen by the user when starting the session.
       // See SubagentsSettings.scopeModels docstring for the full policy.
-      if (isScopeModelsEnabled() && model) {
+      //
+      // Call this only where the model is accepted for use — after a schedule
+      // job is registered, or once a spawn is admitted — so a refused call
+      // never warns for work that never happens. The resume path never calls it.
+      // A throwing notify is swallowed: the warning is advisory and cannot
+      // fail the accepted call.
+      const warnOnOutOfScopeModel = (): void => {
+        if (!isScopeModelsEnabled() || !model) return;
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
           const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
           const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
-          ctx.ui.notify(
-            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-            "warning",
-          );
+          try {
+            ctx.ui.notify(
+              `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+              "warning",
+            );
+          } catch { /* ignore notification errors */ }
         }
-      }
-
-      const thinking = resolvedConfig.thinking;
-      const inheritContext = resolvedConfig.inheritContext;
-      const runInBackground = resolvedConfig.runInBackground;
-      const isolated = resolvedConfig.isolated;
-      const isolation = resolvedConfig.isolation;
-      // Whether this spawn writes its .output transcript. Per-agent
-      // frontmatter (`output_transcript`) wins; otherwise the project/global
-      // default applies. `attachTranscript` below is the SOLE gate — every
-      // downstream consumer keys off record.outputFile being set, so no spawn
-      // path can re-enable the transcript by accident.
-      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
-      const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
-        if (!rec || !outputTranscript) return;
-        rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
+      // Display name for the resolved model, captured in the fresh-spawn
+      // invocation snapshot. Undefined when the model matches the parent's —
+      // the stats line omits the default.
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
       const modelName = effectiveModelId && effectiveModelId !== parentModelId
         ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
         : undefined;
-      const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
-      const agentInvocation: AgentInvocation = {
-        modelName,
-        thinking,
-        // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
-        maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
-        isolated,
-        inheritContext,
-        runInBackground,
-        isolation,
-      };
-      // Tool-result render shows the mode label too; viewer's header already does.
-      const modeLabel = getPromptModeLabel(subagentType);
-      const { tags: invocationTags } = buildInvocationTags(agentInvocation);
-      const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
-      const detailBase = {
-        displayName,
-        description: params.description,
-        subagentType,
-        modelName,
-        tags: agentTags.length > 0 ? agentTags : undefined,
-      };
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -1163,9 +1074,6 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (params.inherit_context) {
           return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
-        }
-        if (params.run_in_background === false) {
-          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
         if (!scheduler.isActive()) {
           return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
@@ -1182,6 +1090,7 @@ Terse command-style prompts produce shallow, generic work.
             isolated: isolated,
             isolation: isolation,
           });
+          warnOnOutOfScopeModel();
           const next = scheduler.getNextRun(job.id);
           return textResult(
             `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
@@ -1193,32 +1102,98 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // Resume existing agent
+      // Resume existing agent — kick off a background resume and return an envelope.
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) {
-          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        if (!existing) return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        // Running (including the start prologue, where `settled` may still hold
+        // the prior run's `true`), queued, or winding down — starting now would
+        // race the previous run's settle handler. A queued record has no session
+        // yet, so the active check precedes the session check.
+        if (existing.status === "running" || existing.status === "queued" || existing.settled === false) {
+          return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
-        if (!existing.session) {
-          return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(existing.effectiveMaxTurns);
+        const resumeStart = existing.session.messages.length;
+        const record = manager.resume(params.resume, params.prompt, resumeCallbacks);
+        if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
+        // Only once the resume is accepted — a refused resume must not drop the
+        // prior run's still-pending completion nudge.
+        cancelNudge(params.resume);
+        // The session already exists, so onSessionCreated never fires for a resume;
+        // seed it here so the widget/viewer can render the context-fill (NN%).
+        resumeState.session = existing.session;
+        agentActivity.set(record.id, resumeState);
+        if (record.outputFile && record.session) {
+          record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);
         }
-        const record = await manager.resume(params.resume, params.prompt, signal);
-        if (!record) {
-          return textResult(`Failed to resume agent "${params.resume}".`);
-        }
-        // A failed resume surfaces the error, plus any partial output THIS
-        // resume produced (never the previous turn's answer, #144).
-        if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
-        }
+        widget.markRunning(record.id);
+        widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
+        // The row's model fields come from the resumed record's resolved
+        // invocation: a resume continues the session's own model, so deriving
+        // them from the call's subagent_type would mix identities. Records
+        // spawned outside the Agent tool (RPC, scheduler, wizard) capture no
+        // invocation — the row then carries only record-owned values (the
+        // effective max turns), never the call's model/strategy settings,
+        // which this resume does not apply. The conversation viewer reads
+        // `record.invocation` directly and renders nothing for those records;
+        // the widget renders from the activity tracker and the record's
+        // type/description.
+        const displayInvocation: AgentInvocation = existing.invocation ?? {
+          maxTurns: existing.effectiveMaxTurns,
+        };
+        const { modelName: resumeModelName, tags: resumeInvocationTags } = buildInvocationTags(displayInvocation);
+        const resumeModeLabel = getPromptModeLabel(existing.type);
+        const resumeTags = resumeModeLabel ? [resumeModeLabel, ...resumeInvocationTags] : resumeInvocationTags;
         return textResult(
-          record.result?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          `Agent resumed in background.\nAgent ID: ${record.id}\nType: ${getDisplayName(existing.type)}\nDescription: ${record.description}\n` +
+          (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+          `\nYou will be notified on subagent completion/failure.\n` +
+          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+          `Do not duplicate this agent's work.`,
+          {
+            // Row identity mirrors the envelope text above: the record's type
+            // and description, not the resume call's subagent_type/description.
+            displayName: getDisplayName(existing.type),
+            description: record.description,
+            subagentType: existing.type,
+            modelName: resumeModelName,
+            tags: resumeTags.length > 0 ? resumeTags : undefined,
+            toolUses: record.toolUses,
+            tokens: "",
+            durationMs: 0,
+            status: "background" as const,
+            agentId: record.id,
+          },
         );
       }
 
       // Background execution
-      if (runInBackground) {
+      {
+        const displayName = getDisplayName(subagentType);
+        const agentInvocation: AgentInvocation = {
+          modelName,
+          thinking,
+          // Explicit value only — the default fallback would just add noise.
+          // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
+          maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
+          isolated,
+          inheritContext,
+          isolation,
+        };
+        // Tool-result render shows the mode label too; viewer's header already does.
+        const modeLabel = getPromptModeLabel(subagentType);
+        const { tags: invocationTags } = buildInvocationTags(agentInvocation);
+        const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
+        const detailBase = {
+          displayName,
+          description: params.description,
+          subagentType,
+          modelName,
+          tags: agentTags.length > 0 ? agentTags : undefined,
+        };
+
         const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
 
         // Wrap onSessionCreated to wire output file streaming.
@@ -1242,7 +1217,6 @@ Terse command-style prompts produce shallow, generic work.
             isolated,
             inheritContext,
             thinkingLevel: thinking,
-            isBackground: true,
             isolation,
             invocation: agentInvocation,
             ...bgCallbacks,
@@ -1250,24 +1224,32 @@ Terse command-style prompts produce shallow, generic work.
         } catch (err) {
           return textResult(err instanceof Error ? err.message : String(err));
         }
+        warnOnOutOfScopeModel();
 
         // Set the output file synchronously after spawn, before the event loop
         // yields — onSessionCreated is async so this is safe.
         const record = manager.getRecord(id);
         if (record) attachTranscript(record, id);
 
-        agentActivity.set(id, bgState);
-        widget.ensureTimer();
-        widget.update();
-        fleet.ensureTimer();
-        fleet.update();
+        // A spawned record can settle before spawn returns: a `subagents:started`
+        // listener stopping it, or an already-aborted parent signal. The
+        // completion callback already removed its activity entry, so re-adding
+        // one would render a `↻1` finished row for a run that never executed a
+        // turn, and the widget timers have no live run to update. The stop
+        // notification remains the delivery for these runs.
+        if (record && record.settled !== true) {
+          agentActivity.set(id, bgState);
+          widget.ensureTimer();
+          widget.update();
+          fleet.ensureTimer();
+          fleet.update();
+        }
 
         // Emit created event
         pi.events.emit("subagents:created", {
           id,
           type: subagentType,
           description: params.description,
-          isBackground: true,
         });
 
         const isQueued = record?.status === "queued";
@@ -1278,129 +1260,13 @@ Terse command-style prompts produce shallow, generic work.
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
-          `\nYou will be notified when this agent completes.\n` +
+          `\nYou will be notified on subagent completion/failure.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
           { ...detailBase, toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
       }
 
-      // Foreground (synchronous) execution — stream progress via onUpdate
-      let spinnerFrame = 0;
-      const startedAt = Date.now();
-      let fgId: string | undefined;
-
-      const streamUpdate = () => {
-        const details: AgentDetails = {
-          ...detailBase,
-          toolUses: fgState.toolUses,
-          tokens: formatLifetimeTokens(fgState),
-          turnCount: fgState.turnCount,
-          maxTurns: fgState.maxTurns,
-          durationMs: Date.now() - startedAt,
-          status: "running",
-          activity: describeActivity(fgState.activeTools, fgState.responseText),
-          spinnerFrame: spinnerFrame % SPINNER.length,
-        };
-        onUpdate?.({
-          content: [{ type: "text", text: `${fgState.toolUses} tool uses...` }],
-          details: details as any,
-        });
-      };
-
-      const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
-
-      // Wire session creation: register in widget + stream to output file.
-      // The output file path is set synchronously after spawn (below),
-      // before onSessionCreated fires — same pattern as background agents.
-      const origOnSession = fgCallbacks.onSessionCreated;
-      fgCallbacks.onSessionCreated = (session: any) => {
-        origOnSession(session);
-        for (const a of manager.listAgents()) {
-          if (a.session === session) {
-            fgId = a.id;
-            agentActivity.set(a.id, fgState);
-            widget.ensureTimer();
-            fleet.ensureTimer();
-            fleet.update();
-            break;
-          }
-        }
-        // Stream conversation to output file (foreground agent logging)
-        if (fgId) {
-          const rec = manager.getRecord(fgId);
-          if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
-          }
-        }
-      };
-
-      // Animate spinner at ~80ms (smooth rotation through 10 braille frames)
-      const spinnerInterval = setInterval(() => {
-        spinnerFrame++;
-        streamUpdate();
-      }, 80);
-
-      streamUpdate();
-
-      let record: AgentRecord;
-      try {
-        const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
-          description: params.description,
-          model,
-          maxTurns: effectiveMaxTurns,
-          isolated,
-          inheritContext,
-          thinkingLevel: thinking,
-          isolation,
-          invocation: agentInvocation,
-          signal,
-          ...fgCallbacks,
-        }, (fgAgentId) => {
-          // onSpawned: called synchronously after spawn, before onSessionCreated fires.
-          // Set up the output file so streamToOutputFile can pick it up.
-          const fgRec = manager.getRecord(fgAgentId);
-          attachTranscript(fgRec, fgAgentId);
-        });
-        record = fgResult.record;
-      } catch (err) {
-        clearInterval(spinnerInterval);
-        return textResult(err instanceof Error ? err.message : String(err));
-      }
-
-      clearInterval(spinnerInterval);
-
-      // Clean up foreground agent from widget
-      if (fgId) {
-        agentActivity.delete(fgId);
-        widget.markFinished(fgId);
-        fleet.onAgentFinished(fgId);
-      }
-
-      // Get final token count
-      const tokenText = formatLifetimeTokens(fgState);
-
-      const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
-
-      // "general-purpose" may itself be unregistered (defaults disabled, no
-      // user override) — getConfig then uses the hardcoded fallback config.
-      const fallbackNote = fellBack
-        ? `Note: Unknown agent type "${rawType}" — using ${resolveType("general-purpose") ? "general-purpose" : "the fallback agent config"}.\n\n`
-        : "";
-
-      if (record.status === "error") {
-        // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
-      }
-
-      const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
-      const statsParts = [`${record.toolUses} tool uses`];
-      if (tokenText) statsParts.push(tokenText);
-      return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
-        details,
-      );
     },
   }));
 
@@ -1410,8 +1276,8 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
-      "Check status and retrieve results from a background agent. Use the agent ID returned by Agent with run_in_background.",
-    promptSnippet: "Check status and retrieve results from a background agent",
+      "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool.",
+    promptSnippet: "Check a subagent's status and retrieve its result",
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to check.",
@@ -1581,12 +1447,12 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
-    promptSnippet: "Send a steering message to redirect a running background agent",
+      "Send a steering message to a subagent. The message will interrupt the agent after its current tool execution " +
+      "and be injected into its conversation, allowing you to redirect its work mid-run.",
+    promptSnippet: "Send a steering message to redirect a subagent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running).",
+        description: "The agent ID to steer (must be running or queued).",
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
@@ -1604,7 +1470,7 @@ Terse command-style prompts produce shallow, generic work.
         const desc = toSingleLine(manager.getRecord(agentId)?.description);
         if (desc) state.steerDesc = desc;
       }
-      // Both header parts are display copies: sanitize + cap (adv F3).
+      // Both header parts are display copies: sanitize + cap.
       const target = headerPreview(state.steerDesc ?? "") || headerPreview(toSingleLine(agentId));
 
       const marker = context.expanded ? "▾" : "▸";
@@ -1613,7 +1479,7 @@ Terse command-style prompts produce shallow, generic work.
 
       // Expanded: the result renderer owns the body once a result exists; while the
       // call is still pending (no result applied, e.g. replay after an abort) the
-      // call shows it so the instruction is never invisible (adv F6). The body is
+      // call shows it so the instruction is never invisible. The body is
       // built only when it can be shown, so collapsed renders stay O(preview window).
       if (context.expanded) {
         const body = context.isPartial ? instructionBody(raw, theme) : "";
@@ -1622,7 +1488,7 @@ Terse command-style prompts produce shallow, generic work.
 
       const plain = toSingleLine(safeTruncate(raw, INSTRUCTION_PREVIEW_SCAN_CHARS));
       const shown = truncateToWidth(plain, INSTRUCTION_PREVIEW_COLS, "…");
-      // A blind 512-unit cut hides content without changing `plain` (adv F4).
+      // A blind 512-unit cut hides content without changing `plain`.
       const hidden = shown !== plain || raw.length > INSTRUCTION_PREVIEW_SCAN_CHARS || /[\n\r\t]/.test(raw);
       if (!shown) return new Text(head + (hidden ? instructionHint(theme) : ""), 0, 0);
       const hint = hidden ? instructionHint(theme) : "";
@@ -1632,7 +1498,7 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, { expanded }, theme, context) {
       const outcome = (result.details as { steerOutcome?: SteerOutcome } | undefined)?.steerOutcome;
       const failure = outcome === "not-found" || outcome === "not-running" || outcome === "failed";
-      // A synthetic abort/error result carries no details (adv F8).
+      // A synthetic abort/error result carries no details.
       const color = context.isError || failure ? "error" : "dim";
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
       const cleaned = typeof text === "string" ? stripControlChars(text).trimEnd() : "";
@@ -1654,7 +1520,7 @@ Terse command-style prompts produce shallow, generic work.
       if (!record) {
         return steerResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`, "not-found");
       }
-      if (record.status !== "running") {
+      if (record.status !== "running" && record.status !== "queued") {
         return steerResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`, "not-running");
       }
       if (!record.session) {
@@ -2058,7 +1924,6 @@ Terse command-style prompts produce shallow, generic work.
     else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
-    if (cfg.runInBackground) fmFields.push("run_in_background: true");
     if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
     if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
@@ -2185,7 +2050,6 @@ extensions: <true (inherit all MCP/extension tools), false (none), or comma-sepa
 skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
-run_in_background: <true to run in background by default. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
@@ -2207,15 +2071,35 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
-      description: `Generate ${name} agent`,
-      maxTurns: 5,
-    });
-
-    if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning");
+    let id: string;
+    try {
+      id = manager.spawn(pi, ctx, "general-purpose", generatePrompt, {
+        description: `Generate ${name} agent`,
+        maxTurns: WIZARD_MAX_TURNS,
+      });
+    } catch (err) {
+      ctx.ui.notify(`Generation failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
       return;
     }
+    const record = manager.getRecord(id)!;
+    // Stop polling when the record settles (stopped/error) or leaves the
+    // manager entirely — dispose() clears the map without touching the
+    // status, so the identity check keeps this from spinning forever.
+    while (manager.getRecord(id) === record && record.status === "queued") {
+      await new Promise((r) => setTimeout(r, WIZARD_QUEUE_POLL_MS));
+    }
+    // The record left the manager without settling (a dispose() that clears
+    // the map without aborting first): the run never started, so report the
+    // cancellation instead of toasting a completed-then-missing file. Real
+    // teardown aborts before it disposes — this keeps a dispose-without-abort
+    // eviction from falling through to the created/not-created toast.
+    if (manager.getRecord(id) !== record) {
+      ctx.ui.notify("Generation cancelled.", "info");
+      return;
+    }
+    await record.promise;                       // undefined when stopped-while-queued → resolves
+    if (record.status === "error") { ctx.ui.notify(`Generation failed: ${toSingleLine(record.error)}`, "warning"); return; }
+    if (record.status === "stopped") { ctx.ui.notify("Generation cancelled.", "info"); return; }
 
     reloadCustomAgents();
 
@@ -2400,9 +2284,9 @@ ${systemPrompt}
         {
           id: "widgetMode",
           label: "Widget",
-          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          description: "Above-editor agent widget: all = every agent; off = hide the widget.",
           currentValue: getWidgetMode(),
-          values: ["all", "background", "off"],
+          values: ["all", "off"],
         },
         {
           id: "toolDescriptionMode",

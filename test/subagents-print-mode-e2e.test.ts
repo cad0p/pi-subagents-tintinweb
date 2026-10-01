@@ -15,8 +15,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { NUDGE_HOLD_MS } from "../src/index.js";
 import {
   agentCall,
   agentToolCalls,
@@ -27,6 +28,7 @@ import {
   routeBySession,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
+import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
 // Real pi-mono (loader + dynamic extension import + two live sessions) — a cold
 // run under full-suite CPU contention can exceed vitest's 5s default.
@@ -44,7 +46,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
-  it("spawns a FOREGROUND subagent and routes its real output back to the parent", async () => {
+  it("spawns a subagent and routes its real output back to the parent", async () => {
     run = await runPrintMode({
       prompt: "Delegate the greeting to a subagent.",
       respond: routeBySession({
@@ -52,34 +54,50 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "general-purpose",
           description: "greet",
           prompt: "Say hello.",
-          run_in_background: false,
         }),
-        // NON-circular: the parent's final answer echoes whatever the child's
-        // result actually was in context. If the child output didn't reach the
-        // parent, this returns CHILD_MISSING and the responseText assertion fails.
-        parentFinal: (ctx: Context) => {
-          const childOut = [...ctx.messages]
-            .reverse()
-            .find((m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent");
-          const text = ((childOut?.content ?? []) as Array<{ text?: string }>)
-            .map((b) => b.text ?? "")
-            .join("");
-          return `Parent relays: ${text.includes("CHILD_GREETING_OK") ? "CHILD_GREETING_OK" : "CHILD_MISSING"}`;
-        },
+        parentFinal: "Parent relays.",
         subagent: "CHILD_GREETING_OK",
       }),
     });
 
-    // The child actually ran: its output reached the parent via the Agent tool
-    // result (real record.result), and the parent's final answer was derived
-    // from that result — not a value the test hard-coded into the parent.
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain("CHILD_GREETING_OK");
-    expect(run.responseText).toContain("CHILD_GREETING_OK");
-    expect(run.responseText).not.toContain("CHILD_MISSING");
+    // The spawn returns the background envelope; the child's real output lands
+    // as a held completion notification in the parent conversation.
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain("CHILD_GREETING_OK");
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).toContain("**✓ Subagent completed: greet**");
+    expect(run.responseText).toContain("Parent relays.");
     // Parent t1 (Agent call) + child t1 (reply) + parent t2 (final) = 3 calls.
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it("accepts a stale run_in_background argument through real tool-call validation", async () => {
+    run = await runPrintMode({
+      prompt: "Delegate despite the stale execution flag.",
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "general-purpose",
+          description: "stale flag",
+          prompt: "Reply with STALE_ARG_OK.",
+          run_in_background: true,
+        }),
+        parentFinal: "Relayed.",
+        subagent: "STALE_ARG_OK",
+      }),
+    });
+
+    // The model actually emitted the undeclared key — so the assertions below
+    // exercise real pi-ai validation, not a fixture that dropped it.
+    expect(agentToolCalls(run.parentSession)[0].run_in_background).toBe(true);
+    // Real pi-ai validation accepted the undeclared key (Type.Object emits no
+    // additionalProperties:false), so the spawn still backgrounded and the child's
+    // output arrived through the held completion notification.
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain("STALE_ARG_OK");
+    });
   });
 
   it("the hold condition is load-bearing: it keeps a BACKGROUND child alive (vs abandoned without it)", async () => {
@@ -102,7 +120,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       );
       return spawned
         ? "summarized"
-        : agentCall({ description: "bg work", prompt: "Do background work.", run_in_background: true });
+        : agentCall({ description: "bg work", prompt: "Do background work." });
     };
 
     // Control: no hold → the child hasn't run by the time the parent turn ends.
@@ -124,25 +142,104 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
 
+  // The headless contract after removing foreground mode: `pi -p` returns at the
+  // parent settle and aborts running children at shutdown; the post-dispose
+  // completion send is discarded by the torn-down sender, so no report reaches
+  // the conversation. The hold design that would keep them alive lives in #35.
+  it("headless print mode exits at the parent settle — the child is aborted and its report is not delivered (#35)", async () => {
+    // The child produces a marker in a first turn, then latches on its next
+    // model call. The marker is therefore part of the child's accumulated
+    // output before dispose, so a report delivered before shutdown would be
+    // observable — unlike a token that only exists after the post-dispose release.
+    const CHILD_MARKER = "CHILD_PRE_MARKER_SHOULD_NOT_APPEAR";
+    let releaseChild!: () => void;
+    const childGate = new Promise<void>((resolve) => { releaseChild = resolve; });
+    let signalChildLatched!: () => void;
+    const childLatched = new Promise<void>((resolve) => { signalChildLatched = resolve; });
+
+    run = await runPrintMode({
+      prompt: "Spawn a background agent and do not wait for it.",
+      hold: false,
+      respond: async (ctx: Context) => {
+        const isParent = (ctx.tools ?? []).some((t) => t.name === "Agent");
+        if (isParent) {
+          const spawned = ctx.messages.some(
+            (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
+          );
+          if (!spawned) return agentCall({ description: "latched", prompt: "Wait for the gate." });
+          // Settle only after the child has produced its marker and latched, so
+          // a genuinely running child is in flight at the parent settle.
+          await childLatched;
+          return "parent done";
+        }
+        const producedMarker = ctx.messages.some(
+          (m) => m.role === "assistant" && JSON.stringify(m.content).includes(CHILD_MARKER),
+        );
+        if (!producedMarker) {
+          return [fauxText(CHILD_MARKER), fauxToolCall("bash", { command: "true" })];
+        }
+        signalChildLatched();
+        await childGate; // latch deterministically until the test releases it
+        return "CHILD_TOKEN_SHOULD_NOT_APPEAR";
+      },
+    });
+
+    // The parent settled after the child marker was produced, so its live record
+    // is the one captured here — no wall-clock wait on async startup.
+    const records = run.manager?.listAgents() ?? run.subagents;
+    const record = records.find((r) => r.description === "latched") as Record<string, unknown> | undefined;
+    expect(record).toBeDefined();
+    expect(record!.status).toBe("running");
+    // The marker is in the child's transcript before dispose, so the parent
+    // assertion below cannot pass vacuously.
+    const childSession = record!.session as { messages: unknown[] };
+    expect(JSON.stringify(childSession.messages)).toContain(CHILD_MARKER);
+    const capturedPromise = record!.promise as Promise<unknown>;
+    const parentSession = run.parentSession;
+
+    // Dispose FIRST: session_shutdown aborts running children and clears the
+    // agents map, so a post-dispose waitForAll() cannot await the child.
+    await run.dispose();
+    run = undefined;
+    releaseChild();
+    await capturedPromise;
+    // Past the notification hold: any armed completion notification would have
+    // fired by now. Real timer by necessity — this runs after dispose's
+    // pi-mono teardown, which fake timers cannot drive — so the wait must stay
+    // ahead of the hold (NUDGE_HOLD_MS + 50 margin).
+    await new Promise((r) => setTimeout(r, NUDGE_HOLD_MS + 50));
+
+    expect(record!.status).toBe("stopped");
+    const transcript = conversationText(parentSession);
+    expect(transcript).not.toContain(CHILD_MARKER);
+    expect(transcript).not.toContain("CHILD_TOKEN_SHOULD_NOT_APPEAR");
+    expect(transcript).not.toMatch(/Subagent (completed|error|stopped)/);
+  });
+
   it("delivers one markdown notification per background agent, in completion order", async () => {
-    // The first child finishes first (the second one sleeps), so the two
-    // notifications fire in a deterministic order: first bg, then second bg.
+    // Deterministic ordering: the second child's turn does not return until the
+    // first child's run has fully unwound (its completion notification
+    // enqueued), so both run concurrently but completion order is fixed.
     const respond = async (ctx: Context) => {
       const isParent = (ctx.tools ?? []).some((t) => t.name === "Agent");
       if (!isParent) {
         const prompt = ctx.messages
           .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
           .join("\n");
-        if (prompt.includes("Reply with BETA")) await new Promise((r) => setTimeout(r, 80));
-        return prompt.includes("Reply with ALPHA") ? "ALPHA-OUTPUT" : "BETA-OUTPUT";
+        if (prompt.includes("Reply with ALPHA")) return "ALPHA-OUTPUT";
+        const manager = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+        const first = manager?.listAgents?.().find((r: { description?: string }) => r.description === "first bg");
+        if (!first?.promise) throw new Error("first child not started");
+        await first.promise;
+        return "BETA-OUTPUT";
       }
       const spawned = ctx.messages.some(
         (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
       );
       if (spawned) return "summarized";
       return [
-        agentCall({ description: "first bg", prompt: "Reply with ALPHA", run_in_background: true }, { id: "bg-1" }),
-        agentCall({ description: "second bg", prompt: "Reply with BETA", run_in_background: true }, { id: "bg-2" }),
+        agentCall({ description: "first bg", prompt: "Reply with ALPHA" }, { id: "bg-1" }),
+        agentCall({ description: "second bg", prompt: "Reply with BETA" }, { id: "bg-2" }),
       ];
     };
 
@@ -190,7 +287,6 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "echo-spy",
           description: "echo",
           prompt: "Report what you were told.",
-          run_in_background: false,
         }),
         parentFinal: "Reported.",
         // The child reflects whether the frontmatter body reached its own prompt.
@@ -199,12 +295,14 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       }),
     });
 
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain(MARKER);
-    expect(toolResults[0]).not.toContain("MISSING");
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(MARKER);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).not.toContain("MISSING");
     // The custom type resolved — it did NOT silently fall back to general-purpose.
-    expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
+    expect(transcript).not.toMatch(/Unknown agent type/i);
   });
 
   it("spawns a FRONTMATTER-defined (.agents/agents/*.md) agent and its prompt reaches the child", async () => {
@@ -225,7 +323,6 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
           subagent_type: "agents-spy",
           description: "echo workspace",
           prompt: "Report what you were told.",
-          run_in_background: false,
         }),
         parentFinal: "Reported.",
         subagent: (ctx: Context) =>
@@ -233,11 +330,13 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       }),
     });
 
-    const toolResults = agentToolResults(run.parentSession);
-    expect(toolResults.length).toBe(1);
-    expect(toolResults[0]).toContain(MARKER);
-    expect(toolResults[0]).not.toContain("MISSING");
-    expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
+    expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(MARKER);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).not.toContain("MISSING");
+    expect(transcript).not.toMatch(/Unknown agent type/i);
   });
 
   it("errors clearly when faux mode is given no script", async () => {
@@ -253,7 +352,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     // The failure path ran dispose(): cwd and global isolation were restored even
     // though the caller never received a dispose handle.
     expect(process.cwd()).toBe(prevCwd);
-    expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")]).toBeUndefined();
+    expect((globalThis as Record<symbol, unknown>)[MANAGER_KEY]).toBeUndefined();
   });
 });
 
@@ -262,9 +361,9 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 //
 // These are SMOKE tests, not strict assertions: a live model decides whether and
 // how to call the tool, so we cover the subset it can be reliably steered into
-// (foreground spawn, background spawn + get_subagent_result, an Explore spawn)
-// and assert robust invariants (a real spawn happened and produced output).
-// Per-feature determinism lives in the faux suite above, which scripts exact calls.
+// (a spawn + get_subagent_result, an Explore spawn) and assert robust invariants
+// (a real spawn happened and produced output). Per-feature determinism lives in
+// the faux suite above, which scripts exact calls.
 const LIVE_TIMEOUT = 150_000;
 // SELF-SMOKE chains three live spawns in one session; passing runs land ~145s,
 // but live variance (slow turns, provider retries, extra polling) has blown past
@@ -286,40 +385,42 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   });
 
   it(
-    "FOREGROUND spawn — real model spawns a subagent and reports its output",
+    "subagent spawn — real model spawns a subagent and reports its output",
     async () => {
       run = await runPrintMode({
         prompt:
-          "Use the Agent tool to spawn a general-purpose subagent (run_in_background: false) " +
-          "whose only task is to reply with the exact word PONG, then tell me what it replied.",
+          "Use the Agent tool to spawn a general-purpose subagent whose only task is to " +
+          "reply with the exact word PONG, then tell me what it replied.",
         timeoutMs: LIVE_TIMEOUT,
       });
       expect(run.modelCalls).toBe(0); // live mode doesn't use the faux counter
       expect(invokedToolNames(run.parentSession)).toContain("Agent");
-      // The child actually ran and its output came back through the tool result.
-      expect(agentToolResults(run.parentSession).join("\n")).toMatch(/PONG/i);
+      // The spawn returns the background envelope and the child's output arrives
+      // through the held completion notification.
+      expect(agentToolResults(run.parentSession).join("\n")).toMatch(/background/i);
+      expect(conversationText(run.parentSession)).toMatch(/PONG/i);
       expect(run.responseText).toMatch(/PONG/i);
     },
     LIVE_VITEST_TIMEOUT,
   );
 
   it(
-    "BACKGROUND spawn + get_subagent_result — model backgrounds work then retrieves it",
+    "spawn + get_subagent_result — model dispatches work then retrieves it",
     async () => {
       run = await runPrintMode({
         prompt:
-          "Spawn a general-purpose subagent IN THE BACKGROUND (run_in_background: true) whose " +
-          "only task is to reply with the exact word BGPONG. After it finishes, use the " +
-          "get_subagent_result tool to fetch its result, then tell me exactly what it said.",
+          "Spawn a general-purpose subagent whose only task is to reply with the exact " +
+          "word BGPONG. After it finishes, use the get_subagent_result tool to fetch its " +
+          "result, then tell me exactly what it said.",
         timeoutMs: LIVE_TIMEOUT,
       });
       const calls = agentToolCalls(run.parentSession);
-      // The model used the background feature…
-      expect(calls.some((c) => c.run_in_background === true)).toBe(true);
-      // …and the spawn returned the "started in background" envelope…
+      // A real spawn happened…
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      // …the spawn returned the "started in background" envelope…
       expect(agentToolResults(run.parentSession).join("\n")).toMatch(/background/i);
-      // …and the background child genuinely ran (its result surfaced somewhere:
-      // via get_subagent_result and/or the held final answer).
+      // …and the child's result surfaced somewhere (get_subagent_result and/or
+      // the held final answer).
       expect(run.responseText).toMatch(/BGPONG/i);
     },
     LIVE_VITEST_TIMEOUT,
@@ -354,11 +455,11 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
         prompt: [
           "You are smoke-testing your own Agent toolset. Do these steps IN ORDER, then print a",
           "final report with one PASS/FAIL line per step:",
-          "1) FOREGROUND: spawn a general-purpose subagent (run_in_background: false) whose only",
-          "   task is to reply with the exact token FG_OK. Confirm you got FG_OK back.",
-          "2) BACKGROUND: spawn a general-purpose subagent with run_in_background: true whose only",
-          "   task is to reply with the exact token BG_OK. After it finishes, call get_subagent_result",
-          "   to retrieve its output. Confirm you got BG_OK.",
+          "1) RETRIEVE: spawn a general-purpose subagent whose only task is to reply with the exact",
+          "   token FIRST_OK. After it finishes, call get_subagent_result to retrieve its output.",
+          "   Confirm you got FIRST_OK.",
+          "2) SPAWN: spawn a general-purpose subagent whose only task is to reply with the exact",
+          "   token SECOND_OK. Confirm you got SECOND_OK.",
           "3) EXPLORE: spawn a subagent with subagent_type 'Explore' to summarize the current",
           "   working directory in one line.",
           "Finish with: 'SELF-SMOKE COMPLETE' followed by the PASS/FAIL lines.",
@@ -370,21 +471,19 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       const tools = invokedToolNames(run.parentSession);
 
       // Each capability was actually exercised at the tool layer (not just narrated):
-      // — a foreground spawn (run_in_background not true on at least one Agent call)
-      expect(calls.some((c) => c.run_in_background !== true)).toBe(true);
-      // — a background spawn
-      expect(calls.some((c) => c.run_in_background === true)).toBe(true);
+      // — three spawns happened
+      expect(calls.length).toBeGreaterThanOrEqual(3);
       // — the result-retrieval tool was called
       expect(tools).toContain("get_subagent_result");
       // — the Explore type was dispatched
       expect(calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore")).toBe(true);
       // — and the real child outputs materialized in the conversation (the
-      //   foreground tool result + the get_subagent_result result). We check the
-      //   whole transcript, not the final message: the agent's closing report
-      //   tends to summarize ("Step 1 PASS") rather than re-echo the raw tokens.
+      //   get_subagent_result result + the held completion notifications). We
+      //   check the whole transcript, not the final message: the agent's closing
+      //   report tends to summarize ("Step 1 PASS") rather than re-echo the tokens.
       const transcript = conversationText(run.parentSession);
-      expect(transcript).toMatch(/FG_OK/i);
-      expect(transcript).toMatch(/BG_OK/i);
+      expect(transcript).toMatch(/FIRST_OK/i);
+      expect(transcript).toMatch(/SECOND_OK/i);
       // The agent ran the whole script to completion and self-reported.
       expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
     },

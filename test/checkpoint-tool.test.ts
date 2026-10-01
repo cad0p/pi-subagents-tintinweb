@@ -85,7 +85,7 @@ describe("checkpoint tool", () => {
     const { root, child } = makeRootAndChild();
     const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);
@@ -188,7 +188,7 @@ describe("checkpoint tool", () => {
     const { root, child } = makeRootAndChild();
     const spawn = await root.tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
     const id = agentIdOf(spawn);
@@ -220,12 +220,12 @@ describe("checkpoint tool", () => {
 
     const ctx = spawnCtx(cwd);
     const spawnA = await root.tools.get("Agent").execute(
-      "spawn-a", { prompt: "go", description: "a", subagent_type: "general-purpose", run_in_background: true },
+      "spawn-a", { prompt: "go", description: "a", subagent_type: "general-purpose" },
       undefined, undefined, ctx,
     );
     const idA = agentIdOf(spawnA);
     const spawnB = await root.tools.get("Agent").execute(
-      "spawn-b", { prompt: "go", description: "b", subagent_type: "general-purpose", run_in_background: true },
+      "spawn-b", { prompt: "go", description: "b", subagent_type: "general-purpose" },
       undefined, undefined, ctx,
     );
     const idB = agentIdOf(spawnB);

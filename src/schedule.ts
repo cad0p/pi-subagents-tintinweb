@@ -353,7 +353,6 @@ export class SubagentScheduler {
 
       const agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
         description: job.description,
-        isBackground: true,
         bypassQueue: true,
         model: resolvedModel,
         maxTurns: job.max_turns,

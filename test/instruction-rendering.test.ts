@@ -143,7 +143,7 @@ describe("instruction rendering", () => {
   async function spawnBackground(tools: Map<string, any>, description = "Find auth files") {
     const spawn = await tools.get("Agent").execute(
       "spawn-tc",
-      { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
+      { prompt: "go", description, subagent_type: "general-purpose" },
       undefined,
       undefined,
       spawnCtx(cwd),
@@ -383,7 +383,7 @@ describe("instruction rendering", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Group 1b — preview scan-window boundaries (adv F4)
+  // Group 1b — preview scan-window boundaries
   // -------------------------------------------------------------------------
 
   describe("steer preview window boundaries", () => {
@@ -391,7 +391,7 @@ describe("instruction rendering", () => {
       { name: "exactly 512 ASCII chars", message: "a".repeat(512), expected: `▸ Steer  ${"a".repeat(79)}…`, hinted: true },
       { name: "513 ASCII chars", message: "a".repeat(513), expected: `▸ Steer  ${"a".repeat(79)}…`, hinted: true },
       // The scan window cuts before the text; the row keeps the header and the
-      // hint instead of silently hiding the message (adv F4).
+      // hint instead of silently hiding the message.
       { name: "512 spaces then text", message: " ".repeat(512) + "tail", expected: "▸ Steer", hinted: true },
       { name: "512 invisible chars then text", message: "\u200b".repeat(512) + "tail", expected: "▸ Steer", hinted: true },
       { name: "500 spaces then text", message: " ".repeat(500) + "tail", expected: "▸ Steer  tail", hinted: false },
@@ -412,7 +412,7 @@ describe("instruction rendering", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Group 1c — the pure hint formatter (F2)
+  // Group 1c — the pure hint formatter
   // -------------------------------------------------------------------------
 
   describe("formatInstructionHint", () => {
@@ -482,7 +482,7 @@ describe("instruction rendering", () => {
       expect(theme.calls).toContainEqual(["dim", "  ⎿  legacy"]);
     });
 
-    it("tints a synthetic error result with no details as error (adv F8)", () => {
+    it("tints a synthetic error result with no details as error", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(tools.get("steer_subagent"), { content: [{ type: "text", text: "aborted" }], details: undefined }, theme, {
@@ -567,7 +567,7 @@ describe("instruction rendering", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Group 2b — execute-level outcome wiring (F3)
+  // Group 2b — execute-level outcome wiring
   // -------------------------------------------------------------------------
 
   describe("steer_subagent execute outcome wiring", () => {
@@ -806,7 +806,7 @@ describe("instruction rendering", () => {
       const component = new ToolExecutionComponent(
         "Agent",
         "tc-agent-1",
-        { subagent_type: "general-purpose", description: "Find auth files", prompt, run_in_background: true },
+        { subagent_type: "general-purpose", description: "Find auth files", prompt },
         {},
         tools.get("Agent"),
         { requestRender: () => {} } as any,

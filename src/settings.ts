@@ -71,13 +71,9 @@ export interface SubagentsSettings {
   fleetView?: boolean;
   /**
    * Display mode for the persistent above-editor agent widget:
-   *   - `all`: show every agent (foreground + background).
-   *   - `background`: hide foreground agents — they already render inline as the
-   *     Agent tool result, so the widget would otherwise double-render them
-   *     (#118); everything else (background, queued, scheduled, RPC) stays.
+   *   - `all`: show every agent.
    *   - `off`: hide the widget entirely.
-   * Defaults to `background`. Pure-UI and applied live (toggling refreshes the
-   * widget).
+   * Defaults to `all`. Pure-UI and applied live (toggling refreshes the widget).
    */
   widgetMode?: WidgetMode;
   /**
@@ -114,7 +110,7 @@ export interface SettingsAppliers {
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
-const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
+const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "off"]);
 
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that

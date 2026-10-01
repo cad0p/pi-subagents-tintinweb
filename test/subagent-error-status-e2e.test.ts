@@ -4,25 +4,18 @@
  * failure, not as "completed" with an empty (or stale) result.
  *
  * Full-stack: real pi loader + real extension + real runAgent + real child
- * sessions on a faux model.
+ * sessions on a faux model. With every spawn a pooled background run, the
+ * failure surfaces through the record and the held completion notification.
  */
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentCall,
+  conversationText,
   type PrintModeRun,
   routeBySession,
   runPrintMode,
 } from "./helpers/print-mode-runner.js";
-
-/** Text of the parent's Agent tool result — what the orchestrator LLM sees. */
-function agentToolResult(session: AgentSession): string {
-  const msg = [...session.messages].reverse().find(
-    (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
-  );
-  return ((msg?.content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join("");
-}
 
 vi.setConfig({ testTimeout: 30_000 });
 
@@ -47,11 +40,19 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
       }),
     });
 
-    // DESIRED: the orchestrator sees a failure naming the provider error —
-    // not a clean success reading "No output.".
-    const toolResult = agentToolResult(run.parentSession);
-    expect(toolResult).toContain(FATAL);
-    expect(toolResult).not.toContain("No output.");
+    // The record is an error naming the provider error — not a clean success.
+    const record = run.subagents.find((r) => r.description === "doomed");
+    expect(record?.status).toBe("error");
+    expect(String(record?.error)).toContain(FATAL);
+
+    // The completion report the parent sees is an error report carrying the
+    // provider error, never a completion.
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(FATAL);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).toMatch(/\*\*✗ Subagent error: doomed\*\*/);
+    expect(transcript).not.toMatch(/\*\*✓ Subagent completed: doomed\*\*/);
   });
 
   it("an earlier turn's text must not mask a failed final turn as a fresh success", async () => {
@@ -74,18 +75,23 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
       }),
     });
 
-    // The orchestrator sees the failure (not the earlier text as a clean
-    // answer), AND the partial output is salvaged, clearly labeled as
-    // pre-failure so it can't be mistaken for the final answer.
-    const toolResult = agentToolResult(run.parentSession);
-    expect(toolResult).toContain(FATAL);
-    expect(toolResult).toContain("Partial output before the failure:");
-    expect(toolResult).toContain("EARLIER-PARTIAL-TEXT");
+    const record = run.subagents.find((r) => r.description === "masked");
+    expect(record?.status).toBe("error");
+    expect(String(record?.error)).toContain(FATAL);
+    // The partial output is salvaged on the record, clearly under the error
+    // header so it can't be mistaken for the final answer.
+    expect(String(record?.result)).toContain("EARLIER-PARTIAL-TEXT");
+
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(FATAL);
+    });
+    const transcript = conversationText(run.parentSession);
+    expect(transcript).toContain("EARLIER-PARTIAL-TEXT");
     // The failure headline comes before the salvaged partial output.
-    expect(toolResult.indexOf(FATAL)).toBeLessThan(toolResult.indexOf("EARLIER-PARTIAL-TEXT"));
+    expect(transcript.indexOf(FATAL)).toBeLessThan(transcript.indexOf("EARLIER-PARTIAL-TEXT"));
   });
 
-  it("a pure empty-error run shows no 'partial output' section", async () => {
+  it("a pure empty-error run reports no partial output on the record", async () => {
     run = await runPrintMode({
       prompt: "Delegate.",
       respond: routeBySession({
@@ -95,8 +101,13 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
       }),
     });
 
-    const toolResult = agentToolResult(run.parentSession);
-    expect(toolResult).toContain(FATAL);
-    expect(toolResult).not.toContain("Partial output before the failure:");
+    const record = run.subagents.find((r) => r.description === "empty");
+    expect(record?.status).toBe("error");
+    expect(String(record?.error)).toContain(FATAL);
+    expect(String(record?.result ?? "")).not.toContain("EARLIER-PARTIAL-TEXT");
+
+    await vi.waitFor(() => {
+      expect(conversationText(run!.parentSession)).toContain(FATAL);
+    });
   });
 });

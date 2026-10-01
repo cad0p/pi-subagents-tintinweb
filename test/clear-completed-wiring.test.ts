@@ -24,6 +24,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { textOf } from "./helpers/subagents-harness.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -58,7 +59,6 @@ function ctx() {
   } as any;
 }
 
-const textOf = (r: any): string => r.content[0].text;
 // Let runAgent's resolved .then() chain settle so the record reaches "completed".
 const flush = async () => {
   await new Promise((r) => setImmediate(r));
@@ -76,7 +76,7 @@ async function spawnCompletedBackgroundAgent(tools: Map<string, any>): Promise<s
   });
   const spawn = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description: "Review monero_en.rs in depth", subagent_type: "general-purpose" },
     undefined,
     undefined,
     ctx(),

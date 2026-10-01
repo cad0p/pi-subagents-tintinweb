@@ -132,7 +132,9 @@ You are a security auditor.`);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
-    expect(agent.runInBackground).toBe(true);
+    // `run_in_background` is no longer a recognized key — the parser reads
+    // frontmatter field-by-field and ignores it.
+    expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
     expect(agent.isolated).toBe(true);
     expect(agent.systemPrompt).toBe("You are a security auditor.");
   });
@@ -159,7 +161,7 @@ Just a prompt.`);
     expect(agent.sessionDir).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
-    expect(agent.runInBackground).toBeUndefined();
+    expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
     expect(agent.isolated).toBeUndefined();
     expect(agent.systemPrompt).toBe("Just a prompt.");
   });
