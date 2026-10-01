@@ -764,14 +764,24 @@ describe("background lifecycle — model-visible surfaces", () => {
     vi.restoreAllMocks();
   });
 
+  /** Register the extension in the test project under tmpDir: create the
+   *  .pi dir (optionally with a subagents.json), chdir into the project, and
+   *  claim the manager registry for this extension instance. The afterEach
+   *  hook chdirs back and deletes the registry key once managerKeyOwned. */
+  function registerExtension(settings?: Record<string, unknown>) {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    if (settings) writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify(settings), "utf-8");
+    process.chdir(tmpDir);
+    const made = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(made.pi);
+    managerKeyOwned = true;
+    return made;
+  }
+
   it("emits a subagents:created payload carrying the spawned agent's identity", async () => {
     resolvedRun();
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-created",
@@ -788,12 +798,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("tolerates a stale run_in_background argument and still backgrounds the spawn", async () => {
     resolvedRun();
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-stale",
@@ -808,12 +813,7 @@ describe("background lifecycle — model-visible surfaces", () => {
 
   it("returns the approved fresh-spawn envelope with the completion delivery contract", async () => {
     resolvedRun();
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-envelope",
@@ -834,18 +834,12 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("routes an RPC spawn through the real manager: pools behind maxConcurrent", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     let resolveFirst!: (v: any) => void;
     vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
       prompt === "a" ? new Promise((r) => { resolveFirst = r; }) : new Promise(() => {}),
     );
 
-    const { pi, lifecycle, busHandlers } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     // A sessionId-less ctx short-circuits the scheduler (no filesystem touch)
     // while still binding the RPC handlers.
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
@@ -878,15 +872,9 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("routes a queued stop through the completion surface exactly once", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    const { pi, tools, lifecycle, busHandlers } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     const ui = { setStatus: vi.fn(), setWidget: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined }, ui };
     await lifecycle.get("session_start")({}, bindCtx);
@@ -944,16 +932,10 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("honors a stop issued synchronously during the started event", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockClear();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    const { pi, tools, lifecycle, busHandlers } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1018,15 +1000,9 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("session_shutdown settles each queued record through the completion surface exactly once", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
 
-    const { pi, tools, lifecycle } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle } = registerExtension({ maxConcurrent: 1 });
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1061,14 +1037,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools, lifecycle, busHandlers } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1102,13 +1072,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("returns a background envelope from a resume and re-attaches the transcript", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1150,13 +1115,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("shows the resumed run's finished row after the prior run's latch aged out", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools, lifecycle } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle } = registerExtension();
     const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
 
     const spawn = await tools.get("Agent").execute(
@@ -1198,13 +1158,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("does not surface the prior run's latest checkpoint after a resume", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1246,13 +1201,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("writes only the resumed turn to the transcript when the session already has messages", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1294,13 +1244,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("returns the still-active envelope when resuming a running agent", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
@@ -1323,13 +1268,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("refuses a re-entrant tool resume issued from the started event", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1372,14 +1312,9 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("returns the still-active envelope while a stopped record is still winding down", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     let resolveRun!: (v: any) => void;
     vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
-    const { pi, tools, lifecycle, busHandlers } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle, busHandlers } = registerExtension();
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
     await lifecycle.get("session_start")({}, bindCtx);
 
@@ -1411,13 +1346,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("emits subagents:started with the record id when a resume starts", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1444,13 +1374,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("seeds the resumed activity state so the widget renders the resumed context fill", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    process.chdir(tmpDir);
     resolvedRun("first");
-    const { pi, tools, lifecycle } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools, lifecycle } = registerExtension();
 
     const spawn = await tools.get("Agent").execute(
       "tc-first",
@@ -1502,14 +1427,8 @@ describe("background lifecycle — model-visible surfaces", () => {
   });
 
   it("steers a queued agent through the steer_subagent tool", async () => {
-    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
-    process.chdir(tmpDir);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
-    const { pi, tools } = makePi();
-    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-    subagentsExtension(pi);
-    managerKeyOwned = true;
+    const { pi, tools } = registerExtension({ maxConcurrent: 1 });
 
     await tools.get("Agent").execute(
       "tc-block",
