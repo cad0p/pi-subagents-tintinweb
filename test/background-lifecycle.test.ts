@@ -4,7 +4,8 @@
  * tail that releases the slot and drains the queue, and the model-visible
  * surfaces that changed when foreground mode was removed.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,6 +42,26 @@ function resolvedRun(responseText = "done") {
     aborted: false,
     steered: false,
   });
+}
+
+/** Minimal git repo with one commit — hosts the worktree-isolated spawns. */
+function initGitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-lifecycle-repo-"));
+  execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: dir, stdio: "pipe" });
+  writeFileSync(join(dir, "README.md"), "# fixture");
+  execFileSync("git", ["add", "README.md"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: dir, stdio: "pipe" });
+  return dir;
+}
+
+/** `git worktree list` entries pointing at pi-agent copies (excludes the main repo). */
+function leftoverWorktrees(repo: string): string[] {
+  return execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repo, stdio: "pipe" })
+    .toString()
+    .split("\n")
+    .filter((line) => line.startsWith("worktree ") && line.includes("pi-agent-"));
 }
 
 describe("background lifecycle — pooling and the completion tail", () => {
@@ -260,6 +281,83 @@ describe("background lifecycle — pooling and the completion tail", () => {
     const third = manager.spawn(mockPi, mockCtx, "X", "third", { description: "third" });
     expect(manager.getRecord(third)!.status).toBe("running");
     manager.abort(third);
+  });
+
+  it("an already-aborted parent signal never creates the isolated worktree", () => {
+    const repo = initGitRepo();
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const parent = new AbortController();
+    parent.abort();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "dead",
+      isolation: "worktree",
+      cwd: repo,
+      signal: parent.signal,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+    expect(record.worktree).toBeUndefined();
+    // Nothing was ever created: no copy on disk, no registration in the repo.
+    expect(leftoverWorktrees(repo)).toEqual([]);
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("a stop during the started event removes the worktree the prologue created", () => {
+    const repo = initGitRepo();
+    let seenWorktree: string | undefined;
+    manager = new AgentManager(undefined, 1, (record) => {
+      seenWorktree = record.worktree?.path;
+      manager.abort(record.id);
+    });
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "stopped",
+      isolation: "worktree",
+      cwd: repo,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+    expect(record.worktree).toBeUndefined();
+    expect(seenWorktree).toBeDefined();
+    expect(existsSync(seenWorktree!)).toBe(false);
+    expect(leftoverWorktrees(repo)).toEqual([]);
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("a queued worktree start that fails in the started listener reclaims the worktree", async () => {
+    const repo = initGitRepo();
+    let seenWorktree: string | undefined;
+    manager = new AgentManager(undefined, 1, (record) => {
+      if (record.description !== "failing") return;
+      seenWorktree = record.worktree?.path;
+      throw new Error("stale extension context");
+    });
+    let resolveBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "blocker" ? new Promise((r) => { resolveBlocker = r; }) : new Promise(() => {}),
+    );
+
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const failing = manager.spawn(mockPi, mockCtx, "X", "failing", {
+      description: "failing",
+      isolation: "worktree",
+      cwd: repo,
+    });
+    expect(manager.getRecord(failing)!.status).toBe("queued");
+
+    resolveBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blocker)!.promise;
+
+    const record = manager.getRecord(failing)!;
+    expect(record.status).toBe("error");
+    expect(record.worktree).toBeUndefined();
+    expect(seenWorktree).toBeDefined();
+    expect(existsSync(seenWorktree!)).toBe(false);
+    expect(leftoverWorktrees(repo)).toEqual([]);
+    rmSync(repo, { recursive: true, force: true });
   });
 
   it("a throwing outputCleanup still resolves the promise and settles", async () => {

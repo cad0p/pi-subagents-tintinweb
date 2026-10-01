@@ -202,6 +202,14 @@ export class AgentManager {
 
   /** Actually start an agent (called immediately or from queue drain). */
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
+    // An already-aborted parent signal never fires "abort" again — wiring it
+    // alone would start a run under a signal its owner considers dead. Settle
+    // through the stopped tail before anything is created: no cwd/worktree
+    // validation, no started event, no runner call, no slot, one report.
+    if (options.signal?.aborted) {
+      this.settleStoppedWithoutRun(record);
+      return;
+    }
     // Re-validate a caller-supplied cwd: queued spawns can start minutes after
     // spawn()'s check, and the directory may be gone by then (TOCTOU). Same
     // curated errors; drainQueue parks a throw on the record as an error.
@@ -244,20 +252,13 @@ export class AgentManager {
     // reacting to `subagents:started`). Settle it through the stopped tail
     // instead of starting — and counting — a run the user already stopped.
     if (this.stoppedInStartPrologue(record)) {
-      this.settleStoppedWithoutRun(record);
+      this.settleStoppedWithoutRun(record, baseCwd, options.description);
       return;
     }
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
     let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
-      // An already-aborted signal never fires "abort" again, so wiring alone
-      // would start a run under a signal its owner considers dead. Settle it
-      // through the stopped tail instead: no runner call, no slot, one report.
-      if (options.signal.aborted) {
-        this.settleStoppedWithoutRun(record);
-        return;
-      }
       const onParentAbort = () => this.abort(id);
       options.signal.addEventListener("abort", onParentAbort, { once: true });
       detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
@@ -397,12 +398,23 @@ export class AgentManager {
    * stop through the completion surface exactly once and marks the record fully
    * unwound. No counter change: a never-started record never held a slot.
    */
-  private settleStoppedWithoutRun(record: AgentRecord): void {
+  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string, description?: string): void {
     record.status = "stopped";
     record.completedAt ??= Date.now();
     // No turn ever executed — zero the run-local counter so the completion
     // report cannot claim the presumed first turn.
     record.turnCount = 0;
+    // Reclaim a worktree created by the start prologue (a stop issued during
+    // the `subagents:started` emit): the run never made changes, so this
+    // removes the copy and its git registration outright. Best-effort, like
+    // the run handlers' cleanup. `baseCwd` is absent on the queued-abort and
+    // already-aborted-signal paths, where no worktree was ever created.
+    if (record.worktree && baseCwd) {
+      try {
+        record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, description ?? record.description);
+      } catch { /* ignore cleanup errors */ }
+      record.worktree = undefined;
+    }
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     record.settled = true;
   }
@@ -431,6 +443,15 @@ export class AgentManager {
         // No turn ever executed — zero the run-local counter so the completion
         // report cannot claim the presumed first turn.
         record.turnCount = 0;
+        // A throwing onStart can follow worktree creation: reclaim the copy
+        // and its registration (best-effort, like the run handlers' cleanup).
+        if (record.worktree) {
+          const baseCwd = next.args.options.cwd ?? next.args.ctx.cwd;
+          try {
+            record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, next.args.options.description);
+          } catch { /* ignore cleanup errors */ }
+          record.worktree = undefined;
+        }
         try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       }
     }
