@@ -593,14 +593,21 @@ export class AgentManager {
     return count;
   }
 
-  /** Wait for all running and queued agents to complete (including queued ones). */
+  /**
+   * Wait for all running and queued agents to complete (including queued ones).
+   *
+   * A stopped run is still unwinding when its `settled` flag is `false`: it no
+   * longer counts as `running` but still holds its slot, so its promise is part
+   * of the pending set — the queued records behind it start only once it
+   * settles.
+   */
   async waitForAll(): Promise<void> {
     // Loop because drainQueue respects the concurrency limit — as running
     // agents finish they start queued ones, which need awaiting too.
     while (true) {
       this.drainQueue();
       const pending = [...this.agents.values()]
-        .filter(r => r.status === "running" || r.status === "queued")
+        .filter(r => r.status === "running" || r.status === "queued" || r.settled === false)
         .map(r => r.promise)
         .filter(Boolean);
       if (pending.length === 0) break;

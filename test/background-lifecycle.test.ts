@@ -70,6 +70,36 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(manager.getRecord(b)!.status).toBe("completed");
   });
 
+  it("a stop while a run unwinds keeps waitForAll pending until the queued successor settles", async () => {
+    manager = new AgentManager(undefined, 1);
+    let resolveA!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_c, _t, prompt) =>
+      prompt === "a"
+        ? new Promise((r) => { resolveA = r; })
+        : Promise.resolve({ responseText: "b done", session: mockSession(), aborted: false, steered: false }),
+    );
+
+    const a = manager.spawn(mockPi, mockCtx, "X", "a", { description: "a" });
+    const b = manager.spawn(mockPi, mockCtx, "X", "b", { description: "b" });
+    manager.abort(a);
+    // A is stopped but still holds its slot until the run promise unwinds.
+    expect(manager.getRecord(a)!.settled).toBe(false);
+    expect(manager.getRecord(b)!.status).toBe("queued");
+
+    let resolved = false;
+    const wait = manager.waitForAll().then(() => { resolved = true; });
+    // The wait must not resolve while A unwinds — resolving here would let a
+    // caller treat the pool as drained with B still queued behind the slot.
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    expect(manager.getRecord(b)!.status).toBe("queued");
+
+    resolveA({ responseText: "a stopped", session: mockSession(), aborted: true, steered: false });
+    await wait;
+    expect(resolved).toBe(true);
+    expect(manager.getRecord(b)!.status).toBe("completed");
+  });
+
   it("settled is undefined while queued, false while running, true after the tail", async () => {
     manager = new AgentManager(undefined, 1);
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
