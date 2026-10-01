@@ -73,10 +73,6 @@ export interface AgentDetails {
   tokens: string;
   durationMs: number;
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
-  /** Retained for legacy replay payloads only; no producer or renderer remains. */
-  activity?: string;
-  /** Retained for legacy replay payloads only; no producer or renderer remains. */
-  spinnerFrame?: number;
   /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
