@@ -663,6 +663,45 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("running");
   });
 
+  it("returns the still-active envelope while a stopped record is still winding down", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    let resolveRun!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
+    const { pi, tools, lifecycle, busHandlers } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+    const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
+    await lifecycle.get("session_start")({}, bindCtx);
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-unwind", agentId: id });
+    // The abort marks the record stopped, but the run has not settled yet — the
+    // guard's winding-down clause is what must refuse the resume.
+    expect(handle.getRecord(id).status).toBe("stopped");
+    expect(handle.getRecord(id).settled).toBe(false);
+
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    expect(textOf(resume)).toBe(
+      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
+    );
+
+    // Settle the aborted run so the lifecycle completes.
+    resolveRun({ responseText: "", session: mockSession(), aborted: true, steered: false });
+    await handle.getRecord(id).promise;
+  });
+
   it("emits subagents:started with the record id when a resume starts", async () => {
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
