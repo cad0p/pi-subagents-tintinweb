@@ -464,7 +464,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     vi.restoreAllMocks();
   });
 
-  it("emits a subagents:created payload without isBackground", async () => {
+  it("emits a subagents:created payload carrying the spawned agent's identity", async () => {
     resolvedRun();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
     process.chdir(tmpDir);
@@ -473,15 +473,17 @@ describe("background lifecycle — model-visible surfaces", () => {
     subagentsExtension(pi);
     managerKeyOwned = true;
 
-    await tools.get("Agent").execute(
+    const spawn = await tools.get("Agent").execute(
       "tc-created",
       { prompt: "go", description: "d", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(tmpDir),
     );
+    const id = agentIdOf(spawn);
 
-    const created = pi.events.emit.mock.calls.find(([e]: [string]) => e === "subagents:created")?.[1];
-    expect(created).toBeDefined();
-    expect(created).not.toHaveProperty("isBackground");
+    const created = pi.events.emit.mock.calls
+      .map(([event, payload]: [string, any]) => (event === "subagents:created" ? payload : undefined))
+      .find(payload => payload?.id === id);
+    expect(created).toEqual({ id, type: "general-purpose", description: "d" });
   });
 
   it("tolerates a stale run_in_background argument and still backgrounds the spawn", async () => {

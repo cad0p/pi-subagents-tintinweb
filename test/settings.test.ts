@@ -603,6 +603,24 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
     });
+
+    it("keeps the runtime widget default when a stored 'background' is dropped", () => {
+      writeProject({ widgetMode: "background" } as any);
+      // Mirrors the extension's runtime state (`let widgetMode = "all"`): a
+      // dropped/absent widgetMode must leave the current mode untouched.
+      let runtimeMode = "all";
+      const runtimeAppliers: SettingsAppliers = {
+        ...appliers,
+        setWidgetMode: (m) => { runtimeMode = m; appliers.setWidgetMode(m); },
+      };
+      const emit = vi.fn();
+
+      const result = applyAndEmitLoaded(runtimeAppliers, emit, projectDir);
+
+      expect(result).toEqual({}); // retired value dropped by the sanitizer
+      expect(appliers.setWidgetMode).not.toHaveBeenCalled();
+      expect(runtimeMode).toBe("all");
+    });
   });
 
   describe("saveAndEmitChanged", () => {

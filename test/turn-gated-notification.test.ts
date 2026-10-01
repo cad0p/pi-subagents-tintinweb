@@ -941,6 +941,44 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
+  it("shows the widget default 'all' after a stored 'background' is dropped", async () => {
+    initTheme("dark");
+    const dir = mkdtempSync(join(tmpdir(), "pi-widget-default-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(dir);
+      mkdirSync(join(dir, ".pi"), { recursive: true });
+      // The retired "background" mode was dropped from the valid set long ago;
+      // the settings menu must still render the extension's "all" default.
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ widgetMode: "background" }), "utf-8");
+      const { pi, commands } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+
+      const { c, selects } = commandCtx((title) => {
+        if (title !== "Agents") return undefined;
+        return selects.filter(s => s.title === "Agents").length <= 1 ? "Settings" : undefined;
+      });
+
+      let settingsScreen = "";
+      c.ui.custom.mockImplementation((factory: any) => {
+        const view = factory({ terminal: { rows: 40, columns: 100 } }, mockTheme, undefined, () => {});
+        settingsScreen = view.render(100).join("\n");
+        return undefined;
+      });
+
+      await commands.get("agents").handler("", c);
+
+      const widgetRow = settingsScreen.split("\n").find(line => line.includes("Widget"));
+      expect(widgetRow).toBeDefined();
+      expect(widgetRow).toContain("all");
+      expect(widgetRow).not.toContain("background");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("collapses filename and description payloads in the agent-types menu", async () => {
     initTheme("dark");
     const control = "\u001b]52;c;cGF3bmVk\u0007";
