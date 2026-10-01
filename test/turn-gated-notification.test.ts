@@ -266,6 +266,47 @@ describe("turn-gated completion notifications", () => {
     expect(payload.content).not.toContain("FIRST-RESULT");
   });
 
+  it("a refused resume leaves the prior run's armed nudge intact", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    // The prior run completes while the main session is idle, so its nudge is
+    // armed as a real 200ms timer (not parked).
+    const childSession = { dispose: vi.fn(), sessionId: "child-session", messages: [], subscribe: () => () => {} };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "FIRST-RESULT",
+      session: childSession as any,
+      aborted: false,
+      steered: false,
+    });
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "first task", subagent_type: "general-purpose" },
+      undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    await vi.advanceTimersByTimeAsync(100); // halfway through the hold
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    // A throwing started listener (stale extension context) refuses the resume.
+    pi.events.emit.mockImplementation((event: string) => {
+      if (event === "subagents:started") throw new Error("stale extension context");
+    });
+    const resume = await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "first task", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, ctx(),
+    );
+    expect(textOf(resume)).toBe(`Failed to resume agent "${id}".`);
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    // The refusal must not cancel the prior run's still-armed nudge.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    expect(pi.sendMessage.mock.calls[0][0].content).toContain("FIRST-RESULT");
+  });
+
   it("warns with the agent id instead of dropping silently when the send throws", async () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);
