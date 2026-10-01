@@ -97,7 +97,7 @@ interface SpawnOptions {
 }
 
 /** The five activity callbacks a resumed run forwards to its caller. */
-export type ResumeCallbacks = Pick<
+type ResumeCallbacks = Pick<
   SpawnOptions,
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
@@ -249,6 +249,9 @@ export class AgentManager {
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
+    // Increment only after every synchronous throw site (cwd/worktree
+    // validation, onStart) — the runner calls are async, so any later throw
+    // arrives as a rejection through .catch/.finally and cannot leak the slot.
     this.runningBackground++;
     record.settled = false;
     const promise = runAgent(ctx, type, prompt, {
@@ -366,7 +369,7 @@ export class AgentManager {
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-    try { this.drainQueue(); } catch { /* a throwing drain must not reject the run promise */ }
+    this.drainQueue();
     record.settled = true;
   }
 
@@ -379,8 +382,9 @@ export class AgentManager {
       try {
         this.startAgent(next.id, record, next.args);
       } catch (err) {
-        // Late failure (e.g. strict worktree-isolation) — surface on the record
-        // so the user/agent can see it via /agents, then keep draining.
+        // Only pre-increment throws reach here (cwd re-validation, worktree
+        // creation) — the counter needs no rollback. Surface the failure on
+        // the record so the user/agent can see it via /agents, then keep draining.
         record.status = "error";
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt = Date.now();
@@ -431,7 +435,9 @@ export class AgentManager {
       return undefined;
     }
     record.settled = false;
-    // Occupies a slot but is never gated by maxConcurrent; a burst of resumes can exceed the cap by design.
+    // Occupies a slot but is never gated by maxConcurrent — a burst of resumes
+    // can exceed the cap by design. They share the pool counter, so queued
+    // fresh spawns wait for these resumes to settle before drainQueue admits them.
     this.runningBackground++;
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
