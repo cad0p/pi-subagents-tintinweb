@@ -1012,11 +1012,11 @@ Terse command-style prompts produce shallow, generic work.
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
 
       // Resolve the call's model from agent frontmatter only (no LLM-authored
-      // override). Shared by fresh spawns and scheduled registrations so the
-      // scope check below covers both: a schedule registers a job here and the
-      // pinned model resolves at fire time, but the warning still belongs to
-      // registration. A resume continues the record's session and model, so it
-      // does not warn, and its row never uses the call-resolved model.
+      // override). Shared by fresh spawns and scheduled registrations: a
+      // schedule registers a job here and the pinned model resolves at fire
+      // time, but the scope warning still belongs to registration. A resume
+      // continues the record's session and model, so it does not warn, and its
+      // row never uses the call-resolved model.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
@@ -1034,7 +1034,12 @@ Terse command-style prompts produce shallow, generic work.
       // frontmatter is authoritative (the agent's author/installer chose it),
       // and the parent's model was chosen by the user when starting the session.
       // See SubagentsSettings.scopeModels docstring for the full policy.
-      if (!params.resume && isScopeModelsEnabled() && model) {
+      //
+      // Call this only where the model is accepted for use — after a schedule
+      // job is registered, or once a spawn is admitted — so a refused call
+      // never warns for work that never happens. The resume path never calls it.
+      const warnOnOutOfScopeModel = (): void => {
+        if (!isScopeModelsEnabled() || !model) return;
         const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
         if (allowed && !isModelInScope(model, allowed)) {
           const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
@@ -1044,7 +1049,7 @@ Terse command-style prompts produce shallow, generic work.
             "warning",
           );
         }
-      }
+      };
 
       // Display name for the resolved model, captured in the fresh-spawn
       // invocation snapshot. Undefined when the model matches the parent's —
@@ -1081,6 +1086,7 @@ Terse command-style prompts produce shallow, generic work.
             isolated: isolated,
             isolation: isolation,
           });
+          warnOnOutOfScopeModel();
           const next = scheduler.getNextRun(job.id);
           return textResult(
             `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
@@ -1212,6 +1218,7 @@ Terse command-style prompts produce shallow, generic work.
         } catch (err) {
           return textResult(err instanceof Error ? err.message : String(err));
         }
+        warnOnOutOfScopeModel();
 
         // Set the output file synchronously after spawn, before the event loop
         // yields — onSessionCreated is async so this is safe.

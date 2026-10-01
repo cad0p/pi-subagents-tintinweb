@@ -780,6 +780,54 @@ describe("Agent result rendering", () => {
     }
   });
 
+  it("does not warn when the schedule call is rejected before registration", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-schedule-scope-rejected-"));
+    const previousCwd = process.cwd();
+    try {
+      writeFileSync(join(hermeticHome, "subagents.json"), JSON.stringify({ scopeModels: true }), "utf-8");
+      writeFileSync(join(hermeticHome, "settings.json"), JSON.stringify({ enabledModels: ["allowed/only-model"] }), "utf-8");
+      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+      writeFileSync(
+        join(dir, ".pi", "agents", "pinned.md"),
+        '---\ndescription: pinned agent\nmodel: "scope/pinned-model"\n---\n\nbody\n',
+        "utf-8",
+      );
+      process.chdir(dir);
+
+      const { pi, tools } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+      const c = {
+        ...ctx(),
+        cwd: dir,
+        model: { provider: "parent", id: "parent-model", name: "Parent" },
+        modelRegistry: {
+          find: vi.fn((provider: string, modelId: string) =>
+            provider === "scope" && modelId === "pinned-model"
+              ? { provider: "scope", id: "pinned-model", name: "Pinned Model" }
+              : undefined),
+          getAvailable: vi.fn(() => [{ provider: "allowed", id: "only-model", name: "Only Model" }]),
+        },
+      };
+
+      const rejected = await tools.get("Agent").execute(
+        "tc-schedule-rejected",
+        { prompt: "go", description: "later", subagent_type: "pinned", schedule: "1h", inherit_context: true },
+        undefined, undefined, c,
+      );
+
+      // The call registers nothing, so the out-of-scope job never warns.
+      expect(textOf(rejected)).toContain("Cannot combine `schedule` with `inherit_context`");
+      const warnings = c.ui.notify.mock.calls
+        .map(([msg]: [string]) => msg)
+        .filter((msg: string) => msg.includes("out-of-scope"));
+      expect(warnings).toHaveLength(0);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("resumes an invocation-less record with its own max turns, not the call's", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-resume-noinv-"));
     const previousCwd = process.cwd();
