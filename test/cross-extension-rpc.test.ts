@@ -109,8 +109,11 @@ describe("cross-extension RPC", () => {
       });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
-      // The flag is neither declared nor interpreted any more: the record is
-      // created through the same pooled manager.spawn path as any other spawn.
+      // The flag is neither declared nor interpreted here: this only pins that
+      // the RPC layer forwards the caller's options verbatim. Real pooling and
+      // its completion notification are pinned against the real manager in
+      // background-lifecycle.test.ts ("routes an RPC spawn through the real
+      // manager: pools behind maxConcurrent").
       expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "general-purpose", "do stuff",
