@@ -4,7 +4,7 @@
  * tail that releases the slot and drains the queue, and the model-visible
  * surfaces that changed when foreground mode was removed.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -573,6 +573,54 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
     await record.promise;
     expect(record.result).toBe("second");
+  });
+
+  it("writes only the resumed turn to the transcript when the session already has messages", async () => {
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    process.chdir(tmpDir);
+    resolvedRun("first");
+    const { pi, tools } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+    managerKeyOwned = true;
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    await handle.getRecord(id).promise;
+
+    // The resumed session already carries the prior run's transcript: the
+    // start index must be its length, so the streamer writes only the new turn.
+    const record = handle.getRecord(id);
+    record.session = {
+      dispose: vi.fn(),
+      sessionId: "child-session-id",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "PRIOR-USER" }] },
+        { role: "assistant", content: [{ type: "text", text: "PRIOR-ANSWER" }] },
+      ],
+      subscribe: () => () => {},
+    };
+
+    vi.mocked(resumeAgent).mockImplementation(async (session: any) => {
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED-ANSWER" }] });
+      return { text: "second" };
+    });
+    await tools.get("Agent").execute(
+      "tc-resume",
+      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    await record.promise;
+
+    const transcript = readFileSync(record.outputFile, "utf-8");
+    expect(transcript).toContain("RESUMED-ANSWER");
+    expect(transcript).not.toContain("PRIOR-USER");
+    expect(transcript).not.toContain("PRIOR-ANSWER");
   });
 
   it("returns the still-active envelope when resuming a running agent", async () => {
