@@ -53,8 +53,12 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  type Message,
   type Model,
+  type SystemMessage,
+  type Tool,
   type ToolCall,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -189,6 +193,58 @@ function resolveReply(
 }
 
 /**
+ * pi 1.0 moved provider tools out of the request context and into the
+ * transcript's system messages (`toolsAdded`/`toolsRemoved` deltas). Responders
+ * here are written against the pre-1.0 `Context` shape (`{ messages, tools }`),
+ * which is what `routeBySession` branches on. This adapter replays those deltas
+ * and drops the system messages, so the same responder works on both API
+ * shapes: a context that already carries `tools` passes through unchanged.
+ */
+export function normalizeLegacyContext(context: TranscriptContext): Context {
+  const direct = context as TranscriptContext & { tools?: Tool[]; systemPrompt?: string };
+  // Pre-1.0 contexts carry the prompt/tools as sibling fields; 1.0 transcript
+  // contexts carry them in system messages and expose neither field.
+  if ("tools" in direct || "systemPrompt" in direct) return direct as Context;
+  let tools: Tool[] | undefined;
+  for (const message of context.messages) {
+    if (message.role !== "system") continue;
+    const system = message as SystemMessage;
+    if (system.toolsAdded?.length) tools = [...(tools ?? []), ...system.toolsAdded];
+    if (system.toolsRemoved?.length) {
+      const removed = new Set(system.toolsRemoved.map((t) => t.name));
+      tools = tools?.filter((tool) => !removed.has(tool.name));
+    }
+  }
+  const messages = context.messages.filter((m) => m.role !== "system") as Message[];
+  return { systemPrompt: replaySystemPrompt(context.messages), messages, tools };
+}
+
+/**
+ * Rebuild the pre-1.0 `Context.systemPrompt` string from the transcript's
+ * system messages: the leading `content` is the base prompt, later `content`
+ * adds instructions, and `sections` replace or (`null`) remove named sections.
+ */
+function replaySystemPrompt(messages: readonly Message[]): string | undefined {
+  let prompt: string | undefined;
+  const sections = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "system") continue;
+    const system = message as SystemMessage;
+    const text = typeof system.content === "string"
+      ? system.content
+      : system.content.map((block) => (block.type === "text" ? block.text : "")).join("");
+    if (text) prompt = prompt === undefined ? text : `${prompt}\n${text}`;
+    for (const [name, value] of Object.entries(system.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else sections.set(name, value);
+    }
+  }
+  const rendered = [...sections.values()].join("\n");
+  if (prompt === undefined && !rendered) return undefined;
+  return [prompt ?? "", rendered].filter(Boolean).join("\n");
+}
+
+/**
  * The common single-spawn flow as a responder. Routes by inspecting the calling
  * session's own context:
  *   - PARENT  (its tool set includes `Agent`):
@@ -316,7 +372,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
       }
       const max = options.maxModelCalls ?? 16;
       const factory: FauxResponseStep = async (context, _opts, state) =>
-        toAssistantMessage(await respond(context, state));
+        toAssistantMessage(await respond(normalizeLegacyContext(context), state));
       faux.setResponses(Array.from({ length: max }, () => factory));
     }
   }
