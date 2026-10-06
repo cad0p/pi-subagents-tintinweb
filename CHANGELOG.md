@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - Drop upstream tintinweb media URLs from pi manifest (fork) ([#23](https://github.com/cad0p/pi-subagents-tintinweb/pull/23))
 - Declare @sinclair/typebox as a peer dependency (closes #33)
 - *(tests)* Adapt the print-mode faux harness to pi 1.0 transcript context (closes #44)
+- *(tests)* Resolve live pins through the session runtime (closes #45)
 
 ### 🚜 Refactor
 
