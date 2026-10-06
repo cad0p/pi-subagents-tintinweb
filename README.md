@@ -223,6 +223,7 @@ All fields are optional — sensible defaults for everything.
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
+| `scoped_models` | inherit parent's scope | Child session's model scope: `inherit` (or omit; must stand alone) uses the parent session's `/scoped-models` scope, `none` gives the child no scope, or a comma-separated list of `provider/modelId` entries replaces it with an explicit chain. Feeds `ctx.scopedModels` for in-session extensions — e.g. `pi-fallback-provider`'s automatic fallback after exhausted retries. Alias: `inherit_scoped_models`. See [Model Scope](#model-scope) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
 | `persist_session` | `false` | Persist this subagent as a normal pi session instead of keeping the session in memory only. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
@@ -385,6 +386,8 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 **Pattern format:** only exact `provider/modelId` entries are honored (e.g. `anthropic/claude-haiku-4-5-20251001`). Glob patterns (`*sonnet*`), bare model IDs, and `:thinking` suffixes — which pi itself supports — are silently dropped here. pi's `/scoped-models` picker writes exact entries, so the limitation is invisible if you configure scope through the UI. Hand-edited globs produce an empty allowed set (scope check becomes a no-op).
 
 **No-op safety:** if `enabledModels` is missing or empty in pi's settings, scope check skips entirely — no false positives, no spurious errors.
+
+**Child-session scope.** Subagents inherit the parent session's resolved scope by default, so in-session extensions that read `ctx.scopedModels` — notably [`pi-fallback-provider`](https://github.com/cad0p/pi-fallback-provider)'s automatic fallback after exhausted retries — work inside subagent sessions too. A custom agent's `scoped_models:` frontmatter overrides this per agent: `none` opts out (empty scope, no in-session cycling or fallback) and a comma-separated `provider/modelId` list replaces the inherited scope with an explicit chain (entries resolve like `model:`; unresolved entries are skipped with a warning). Isolated agents load no extensions, so their scope stays empty. This is independent of the `scopeModels` setting above: `scopeModels` only *warns* when a spawn's model falls outside the user's allowlist; `scoped_models` decides what the child session itself carries.
 
 ## Persistent Settings
 

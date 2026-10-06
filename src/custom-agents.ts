@@ -67,6 +67,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       excludeExtensions: csvListOptional(fm.exclude_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
+      scopedModels: scopedModelsField(fm.scoped_models ?? fm.inherit_scoped_models),
       model: str(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
       maxTurns: nonNegativeInt(fm.max_turns),
@@ -163,4 +164,18 @@ function inheritField(val: unknown): true | string[] | false {
   if (val === false || val === "none") return false;
   const items = csvList(val, []);
   return items.length > 0 ? items : false;
+}
+
+/**
+ * Parse scoped_models (alias inherit_scoped_models), the child session's
+ * model scope. omitted/true/"inherit" → true (inherit the parent session's
+ * scope); false/"none"/empty → false; csv → explicit provider/modelId list.
+ * Unlike inheritField, the literal "inherit" is accepted as a readable alias,
+ * but only as the sole value — mixed `inherit, foo` stays an explicit list.
+ */
+function scopedModelsField(val: unknown): true | string[] | false {
+  // `inherit` must be the sole value: a scalar or a single-item YAML list.
+  const sole = Array.isArray(val) ? (val.length === 1 ? val[0] : undefined) : val;
+  if (typeof sole === "string" && sole.trim().toLowerCase() === "inherit") return true;
+  return inheritField(val);
 }

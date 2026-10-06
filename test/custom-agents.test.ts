@@ -514,6 +514,92 @@ All.`);
     expect(agent.skills).toBe(true);
   });
 
+  it("scoped_models omitted → true (inherit parent scope)", () => {
+    writeAgent("scope-default", `---
+description: Default scope
+---
+
+Inherits.`);
+
+    expect(loadCustomAgents(tmpDir).get("scope-default")!.scopedModels).toBe(true);
+  });
+
+  it("scoped_models: none / false → false", () => {
+    writeAgent("scope-none", `---
+scoped_models: none
+---
+`);
+    writeAgent("scope-false", `---
+scoped_models: false
+---
+`);
+
+    const agents = loadCustomAgents(tmpDir);
+    expect(agents.get("scope-none")!.scopedModels).toBe(false);
+    expect(agents.get("scope-false")!.scopedModels).toBe(false);
+  });
+
+  it("scoped_models: inherit / true → true", () => {
+    writeAgent("scope-inherit", `---
+scoped_models: inherit
+---
+`);
+    writeAgent("scope-true", `---
+scoped_models: true
+---
+`);
+    writeAgent("scope-inherit-list", `---
+scoped_models: [inherit]
+---
+`);
+
+    const agents = loadCustomAgents(tmpDir);
+    expect(agents.get("scope-inherit")!.scopedModels).toBe(true);
+    expect(agents.get("scope-true")!.scopedModels).toBe(true);
+    expect(agents.get("scope-inherit-list")!.scopedModels).toBe(true);
+  });
+
+  it("scoped_models csv → explicit list", () => {
+    writeAgent("scope-list", `---
+scoped_models: opencode-go-2/deepseek-v4.1-flash, opencode-go-3/deepseek-v4.1-flash
+---
+`);
+
+    expect(loadCustomAgents(tmpDir).get("scope-list")!.scopedModels).toEqual([
+      "opencode-go-2/deepseek-v4.1-flash",
+      "opencode-go-3/deepseek-v4.1-flash",
+    ]);
+  });
+
+  it("scoped_models YAML list → explicit list", () => {
+    writeAgent("scope-yaml", `---
+scoped_models:
+  - acme/m1
+  - acme/m2
+---
+`);
+
+    expect(loadCustomAgents(tmpDir).get("scope-yaml")!.scopedModels).toEqual(["acme/m1", "acme/m2"]);
+  });
+
+  it("scoped_models mixed with inherit stays an explicit list (inherit must be sole)", () => {
+    writeAgent("scope-mixed", `---
+scoped_models: inherit, acme/m1
+---
+`);
+
+    expect(loadCustomAgents(tmpDir).get("scope-mixed")!.scopedModels).toEqual(["inherit", "acme/m1"]);
+  });
+
+  it("supports inherit_scoped_models as alternative to scoped_models", () => {
+    writeAgent("scope-altkey", `---
+inherit_scoped_models: none
+---
+`);
+
+    expect(loadCustomAgents(tmpDir).get("scope-altkey")!.scopedModels).toBe(false);
+  });
+
   it("handles enabled: false frontmatter", () => {
     writeAgent("disabled", `---
 enabled: false
