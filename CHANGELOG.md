@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Declare engines node >=22.19.0 (pi's minimum) ([#22](https://github.com/cad0p/pi-subagents-tintinweb/pull/22))
 - *(notifications)* Render completion reports as markdown and drop the custom renderer (closes #27)
 - *(ui)* Render parent-to-child instructions in tool rows (closes #29)
+- Inherit parent model scope in subagent sessions (closes #36)
 
 ### 🐛 Bug Fixes
 
