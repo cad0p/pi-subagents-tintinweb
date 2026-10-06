@@ -30,9 +30,10 @@
  *     does the parent/child branching for the common single-spawn case.
  *   - Live (opt-in): set `PI_E2E_LIVE=1` or pass `live: {provider, model}`. A real
  *     model drives the turn; `respond`/`steps` are ignored. Non-deterministic,
- *     needs creds. With no explicit model pin, it resolves the model from your
- *     local `pi` config (settings default → first authed model), so a logged-in
- *     `pi` is picked up automatically — no PI_PROVIDER/PI_MODEL needed.
+ *     needs creds. Pins and settings defaults resolve through the session
+ *     `ModelRuntime` (extension-registered providers such as alias slots
+ *     included), so a logged-in `pi` is picked up automatically — no
+ *     PI_PROVIDER/PI_MODEL needed.
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
@@ -66,11 +67,12 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { createFauxModelRuntime } from "./faux-runtime.js";
-import { getModel, registerFauxProvider } from "./pi-ai.js";
+import { registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
 const EXTENSION_PATH = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
@@ -127,6 +129,12 @@ export interface RunPrintModeOptions {
    * `registerAgents(loadCustomAgents(cwd))` to install frontmatter agents.
    */
   beforeRun?: () => void | Promise<void>;
+  /**
+   * Extra extension entrypoints loaded alongside the pi-subagents extension —
+   * for tests that need an extension-registered provider (e.g. the live-pin
+   * resolution test). Paths are passed to the loader as-is.
+   */
+  additionalExtensionPaths?: string[];
   /**
    * Isolate global discovery (PI_CODING_AGENT_DIR + HOME → temp) so the dev's
    * real agents/extensions can't bleed into the run. Default true in faux mode,
@@ -295,6 +303,36 @@ function isLive(options: RunPrintModeOptions): boolean {
   return Boolean(options.live) || /^(1|true|yes)$/i.test(process.env.PI_E2E_LIVE ?? "");
 }
 
+/**
+ * Resolve a live `provider/model` pin through the session runtime. Unlike
+ * pi-ai's static `getModel` builtin catalog, the runtime sees
+ * extension-registered providers (notably alias slots), so pins like
+ * `opencode-go-2/deepseek-v4.1-flash` resolve. Throws with this provider's
+ * known models (or the registered provider ids) when the pin is absent, so a
+ * typo fails fast instead of letting `createAgentSession` substitute another
+ * model.
+ */
+export function resolveLivePin(
+  runtime: Pick<ModelRuntime, "getModel" | "getModels" | "getProviders">,
+  provider: string,
+  modelId: string,
+): Model<string> {
+  const model = runtime.getModel(provider, modelId);
+  if (model) return model as Model<string>;
+  const models = runtime.getModels().map((m) => `${m.provider}/${m.id}`);
+  const sameProvider = models.filter((m) => m.startsWith(`${provider}/`));
+  const choices = (sameProvider.length > 0
+    ? sameProvider
+    : runtime.getProviders().map((p) => p.id)
+  )
+    .sort()
+    .slice(0, 20);
+  throw new Error(
+    `runPrintMode (live mode): model "${provider}/${modelId}" not found in the runtime catalog` +
+      (choices.length > 0 ? ` (known: ${choices.join(", ")})` : ""),
+  );
+}
+
 export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintModeRun> {
   const live = isLive(options);
   const isolateGlobals = options.isolateGlobals ?? !live;
@@ -324,30 +362,59 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   // Resolved after globals are isolated, so it honors the hermetic dir.
   const agentDir = getAgentDir();
 
+  // --- build the parent host session with the extension loaded ---
+  // The loader runs first: extension factories queue provider registrations
+  // during reload(), and the live branch below flushes them into the model
+  // runtime before resolving a pin — the same order createAgentSessionServices
+  // uses. This is what makes runtime-registered providers (e.g. the
+  // opencode-go-N sibling aliases from @cad0p/pi-fallback-provider) resolvable.
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    additionalExtensionPaths: [EXTENSION_PATH, ...(options.additionalExtensionPaths ?? [])],
+    systemPromptOverride: () => options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    appendSystemPromptOverride: () => [],
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  await loader.reload();
+
   // --- model backend ---
   let faux: ReturnType<typeof registerFauxProvider> | undefined;
   let model: Model<string> | undefined;
-  let modelRuntime: Awaited<ReturnType<typeof createFauxModelRuntime>> | undefined;
+  let modelRuntime: ModelRuntime | undefined;
   if (live) {
+    // Build the real, auth-backed runtime here (rather than letting
+    // createAgentSession build one) so the loader's queued extension provider
+    // registrations are applied before model resolution. pi-ai's static getModel
+    // catalog cannot see runtime-registered providers, so a pin like
+    // opencode-go-2/deepseek-v4.1-flash fails there.
+    modelRuntime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+      allowModelNetwork: false,
+    });
+    const extensionRuntime = loader.getExtensions().runtime;
+    for (const { name, config } of extensionRuntime.pendingProviderRegistrations) {
+      modelRuntime.registerProvider(name, config);
+    }
+    extensionRuntime.pendingProviderRegistrations = [];
+    for (const { provider } of extensionRuntime.pendingNativeProviderRegistrations) {
+      modelRuntime.registerNativeProvider(provider);
+    }
+    extensionRuntime.pendingNativeProviderRegistrations = [];
+    await modelRuntime.refresh({ allowNetwork: false });
+
     // Explicit pin wins (options.live or PI_PROVIDER + PI_MODEL). Otherwise leave
-    // `model` undefined: createAgentSession then calls findInitialModel() against
-    // the real, auth-backed registry + your local settings default — i.e. it
-    // picks up whatever your `pi` install is logged into, no env needed.
+    // `model` undefined: createAgentSession resolves the settings default
+    // against this aliased runtime — i.e. it picks up whatever your `pi` install
+    // is logged into, no env needed.
     const provider = options.live?.provider ?? process.env.PI_PROVIDER;
     const modelId = options.live?.model ?? process.env.PI_MODEL;
     if (provider && modelId) {
-      // getModel's overloads need the concrete provider literal; cast through.
-      // Since pi-ai 0.80 it is a static builtin-catalog lookup that returns
-      // undefined for unknown models — fail fast instead of letting
-      // createAgentSession silently substitute another model.
-      model = (getModel as (p: string, m: string) => Model<string> | undefined)(provider, modelId);
-      if (!model) {
-        throw new Error(
-          `runPrintMode (live mode): model "${provider}/${modelId}" not found in the builtin catalog`,
-        );
-      }
+      model = resolveLivePin(modelRuntime, provider, modelId);
     }
-    modelRuntime = undefined; // let createAgentSession build the real, auth-backed runtime
   } else {
     if (!options.steps && !options.respond) {
       throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
@@ -377,19 +444,6 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     }
   }
 
-  // --- build the parent host session with the extension loaded ---
-  const loader = new DefaultResourceLoader({
-    cwd,
-    agentDir,
-    additionalExtensionPaths: [EXTENSION_PATH],
-    systemPromptOverride: () => options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
-    appendSystemPromptOverride: () => [],
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-  });
-  await loader.reload();
-
   // Run any test-supplied registration (e.g. loadCustomAgents) now that globals
   // are isolated but before the parent turn spawns anything.
   await options.beforeRun?.();
@@ -398,7 +452,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     cwd,
     agentDir,
     model,
-    // Real faux runtime in faux mode; undefined in live mode (defaults).
+    // Live: the runtime built above, extension provider registrations applied.
+    // Faux: the faux runtime.
     modelRuntime,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
