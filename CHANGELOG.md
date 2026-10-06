@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Add workflow_dispatch trigger to Auto Release ([#19](https://github.com/cad0p/pi-subagents-tintinweb/pull/19))
+- Raise the pi peer floor to >=0.83.0 and migrate the test harness (closes #41)
 
 
 ## [Unreleased]
