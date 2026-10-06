@@ -26,8 +26,8 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run test
 
-  # The dev dependency is pinned at the supported floor (exact dev pin 0.83.0;
-  # peer range >=0.83.0), where the isolated-provider regression can occur, so
+  # The dev dependency is pinned at the supported floor (exact dev pin 1.0.4;
+  # peer range >=1.0.4), where the isolated-provider regression can occur, so
   # the build job's test run already exercises the guard. This job additionally
   # runs it against current Pi so a future facade change surfaces without blocking.
   # See test/e2e/isolated-provider.e2e.test.ts.
