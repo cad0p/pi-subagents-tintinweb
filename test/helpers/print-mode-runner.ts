@@ -33,7 +33,8 @@
  *     needs creds. Pins and settings defaults resolve through the session
  *     `ModelRuntime` (extension-registered providers such as alias slots
  *     included), so a logged-in `pi` is picked up automatically — no
- *     PI_PROVIDER/PI_MODEL needed.
+ *     PI_PROVIDER/PI_MODEL needed. Live runs also use the developer's real
+ *     agent dir even though the scripted suite is hermetic.
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
@@ -72,6 +73,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { createFauxModelRuntime } from "./faux-runtime.js";
+import { resolveRunAgentDir } from "./hermetic-agent-dir.js";
 import { registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
@@ -359,8 +361,18 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     process.env.HOME = hermeticDir;
   }
 
-  // Resolved after globals are isolated, so it honors the hermetic dir.
-  const agentDir = getAgentDir();
+  // Live runs need the developer's real agent dir — auth, settings defaults, and
+  // extension-registered providers. setup-hermetic.ts redirects
+  // PI_CODING_AGENT_DIR to an empty temp dir for the scripted suite, so restore
+  // the real dir it recorded; fixtures and isolateGlobals' own temp dir win.
+  const agentDir = resolveRunAgentDir(process.env, live, getAgentDir());
+  // Extensions call `getAgentDir()` themselves during load (the fallback
+  // provider reads its alias cache from it), so the resolved dir has to be
+  // reflected in the env, not only passed to the loader. Restored on dispose.
+  const redirectedAgentDir = process.env.PI_CODING_AGENT_DIR !== agentDir;
+  if (redirectedAgentDir) {
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+  }
 
   // --- build the parent host session with the extension loaded ---
   // The loader runs first: extension factories queue provider registrations
@@ -535,6 +547,10 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
       process.chdir(prevCwd);
     } catch {
       /* ignore */
+    }
+    if (redirectedAgentDir) {
+      if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
     }
     if (isolateGlobals) {
       if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
