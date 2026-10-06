@@ -112,10 +112,13 @@ import {
   extensionCanonicalNames,
   parseExtensionsSpec,
   parseExtSelectors,
+  resolveScopedModels,
   resumeAgent,
   runAgent,
+  type ScopedModelEntry,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
+import type { AgentConfig } from "../src/types.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -147,6 +150,7 @@ const ctx = {
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
   sessionManager: { getBranch: vi.fn(() => []) },
+  scopedModels: [],
 } as any;
 
 const pi = {} as any;
@@ -1593,5 +1597,179 @@ describe("agent-runner ext: tool selectors", () => {
     expect(tools).toContain("read");
     expect(tools).toContain("foo_other");
     expect(tools).not.toContain("foo_tool"); // denylisted even though ext:foo selects it
+  });
+});
+
+describe("resolveScopedModels", () => {
+  function makeRegistry(models: Array<{ provider: string; id: string }>) {
+    return {
+      find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+      getAll: () => models,
+      getAvailable: () => models,
+    };
+  }
+
+  const parent: ScopedModelEntry[] = [
+    { model: { provider: "acme", id: "m1" } as any },
+    { model: { provider: "acme", id: "m2" } as any },
+  ];
+
+  it("undefined/true inherit the parent scope as a copy", () => {
+    const viaUndefined = resolveScopedModels(undefined, parent, makeRegistry([]));
+    const viaTrue = resolveScopedModels(true, parent, makeRegistry([]));
+
+    expect(viaUndefined).toEqual(parent);
+    expect(viaTrue).toEqual(parent);
+    expect(viaUndefined).not.toBe(parent);
+    expect(viaTrue).not.toBe(parent);
+  });
+
+  it("treats a missing parent scope as empty", () => {
+    expect(resolveScopedModels(undefined, undefined, makeRegistry([]))).toEqual([]);
+  });
+
+  it("false gives an empty scope even when the parent has one", () => {
+    expect(resolveScopedModels(false, parent, makeRegistry([]))).toEqual([]);
+  });
+
+  it("resolves an explicit list in order, deduplicating, and warns on unresolved entries", () => {
+    const models = [{ provider: "acme", id: "m1", name: "m1" }, { provider: "acme", id: "m2", name: "m2" }];
+    const warn = vi.fn();
+
+    const resolved = resolveScopedModels(
+      ["acme/m2", "acme/m1", "acme/m2", "missing/model"],
+      parent,
+      makeRegistry(models),
+      warn,
+    );
+
+    expect(resolved.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["acme/m2", "acme/m1"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("missing/model");
+  });
+
+  it("resolves an explicit entry under another provider like model: does", () => {
+    const models = [{ provider: "acme", id: "m1", name: "m1" }];
+
+    const resolved = resolveScopedModels(["other/m1"], [], makeRegistry(models));
+
+    expect(resolved.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["acme/m1"]);
+  });
+});
+
+describe("agent-runner model scope", () => {
+  function configWithScopedModels(scopedModels: true | string[] | false): AgentConfig {
+    return {
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      isolated: false,
+      scopedModels,
+    };
+  }
+
+  const parentScoped: ScopedModelEntry[] = [
+    { model: { provider: "acme", id: "m1" } as any, thinkingLevel: "high" },
+    { model: { provider: "acme", id: "m2" } as any },
+  ];
+
+  it("inherits the parent session's scoped models by default", async () => {
+    const { session } = createSession("SCOPED");
+    createAgentSession.mockResolvedValue({ session });
+    const context = { ...ctx, scopedModels: parentScoped };
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    const passed = createAgentSession.mock.calls[0][0].scopedModels;
+    expect(passed).toEqual(parentScoped);
+    expect(passed).not.toBe(parentScoped); // a copy, not the parent's array
+  });
+
+  it("passes an explicit scoped_models list instead of the parent scope", async () => {
+    const { session } = createSession("EXPLICIT");
+    createAgentSession.mockResolvedValue({ session });
+    const models = [{ provider: "acme", id: "m1", name: "m1" }, { provider: "acme", id: "m2", name: "m2" }];
+    const context = {
+      ...ctx,
+      scopedModels: parentScoped,
+      modelRegistry: {
+        find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+        getAll: () => models,
+        getAvailable: () => models,
+      },
+    };
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(["acme/m2", "acme/m1"]));
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    const passed = createAgentSession.mock.calls[0][0].scopedModels as ScopedModelEntry[];
+    expect(passed.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["acme/m2", "acme/m1"]);
+  });
+
+  it("scoped_models: none gives the child an empty scope", async () => {
+    const { session } = createSession("NONE");
+    createAgentSession.mockResolvedValue({ session });
+    const context = { ...ctx, scopedModels: parentScoped };
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(false));
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
+  });
+
+  it("isolated agents never inherit a scope", async () => {
+    const { session } = createSession("ISOLATED");
+    createAgentSession.mockResolvedValue({ session });
+    const context = { ...ctx, scopedModels: parentScoped };
+
+    await runAgent(context, "Explore", "go", { pi, isolated: true });
+
+    expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
+  });
+
+  it("warns when isolation discards an explicit scoped_models list", async () => {
+    const { session } = createSession("ISOLATED-LIST");
+    createAgentSession.mockResolvedValue({ session });
+    const context = { ...ctx, scopedModels: parentScoped };
+    const onToolActivity = vi.fn();
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(["acme/m1"]));
+
+    await runAgent(context, "Explore", "go", { pi, isolated: true, onToolActivity });
+
+    expect(onToolActivity).toHaveBeenCalledWith(expect.objectContaining({
+      type: "end",
+      toolName: expect.stringContaining("scoped-models-error:"),
+    }));
+    expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
+  });
+
+  it("warns about unresolved scoped_models entries without failing the spawn", async () => {
+    const { session } = createSession("WARN");
+    createAgentSession.mockResolvedValue({ session });
+    const models = [{ provider: "acme", id: "m1", name: "m1" }];
+    const context = {
+      ...ctx,
+      scopedModels: [],
+      modelRegistry: {
+        find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+        getAll: () => models,
+        getAvailable: () => models,
+      },
+    };
+    const onToolActivity = vi.fn();
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(["acme/m1", "nope/nothing"]));
+
+    await runAgent(context, "Explore", "go", { pi, onToolActivity });
+
+    expect(onToolActivity).toHaveBeenCalledWith(expect.objectContaining({
+      type: "end",
+      toolName: expect.stringContaining("scoped-models-error:"),
+    }));
+    expect(createAgentSession.mock.calls[0][0].scopedModels).toHaveLength(1);
   });
 });

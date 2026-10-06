@@ -22,6 +22,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -248,6 +249,53 @@ function resolveDefaultModel(
   }
 
   return parentModel;
+}
+
+/**
+ * One scoped-model entry as pi's `AgentSession` stores it. pi's own
+ * `ScopedModel` type is not exported on the oldest supported pi versions
+ * (0.80.x), so the shape is modeled structurally.
+ */
+export interface ScopedModelEntry {
+  model: Model<any>;
+  thinkingLevel?: ThinkingLevel;
+}
+
+/**
+ * Resolve the child session's model scope from `scoped_models` frontmatter.
+ *
+ * undefined/true → inherit the parent session's resolved scope, so in-session
+ * extensions that read `ctx.scopedModels` — notably pi-fallback-provider's
+ * settle-boundary fallback — work inside subagents too. false → no scope;
+ * string[] → an explicit replacement list resolved like `model:` (exact, then
+ * fuzzy, then the same model under another provider). Unresolved entries are
+ * skipped with a warning; they never fail the spawn.
+ */
+export function resolveScopedModels(
+  configured: true | string[] | false | undefined,
+  parentScoped: readonly ScopedModelEntry[] | undefined,
+  registry: ModelLookupRegistry,
+  warn: (message: string) => void = () => {},
+): ScopedModelEntry[] {
+  if (configured === undefined || configured === true) {
+    return parentScoped ? [...parentScoped] : [];
+  }
+  if (configured === false) return [];
+
+  const resolved: ScopedModelEntry[] = [];
+  const seen = new Set<string>();
+  for (const entry of configured) {
+    const model = resolveModel(entry, registry);
+    if (typeof model === "string") {
+      warn(`scoped_models: "${entry}" did not resolve — skipping`);
+      continue;
+    }
+    const key = `${model.provider}/${model.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    resolved.push({ model });
+  }
+  return resolved;
 }
 
 /** Info about a tool event in the subagent. */
@@ -645,6 +693,24 @@ export async function runAgent(
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
 
+  // Child-session model scope: agent frontmatter override, else inherit the
+  // parent's resolved scope. Isolated agents load no extensions, so the
+  // fallback consumer can never bind — an empty scope is the honest value.
+  const scopedModels = resolveScopedModels(
+    options.isolated ? false : agentConfig?.scopedModels,
+    (ctx as { scopedModels?: readonly ScopedModelEntry[] }).scopedModels,
+    ctx.modelRegistry,
+    (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
+  );
+  // An explicit list under isolation is silently unreachable — flag it the
+  // same way the loader flags contradictory extensions:/exclude_extensions:.
+  if (options.isolated && Array.isArray(agentConfig?.scopedModels)) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `scoped-models-error:scoped_models has no effect for agent "${type}" — isolated agents load no extensions`,
+    });
+  }
+
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
     : undefined;
@@ -717,6 +783,7 @@ export async function runAgent(
     modelRegistry: ctx.modelRegistry,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
+    scopedModels,
     tools: allowedTools,
     resourceLoader: loader,
   };
