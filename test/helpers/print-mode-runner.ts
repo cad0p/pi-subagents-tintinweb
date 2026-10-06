@@ -33,8 +33,9 @@
  *     needs creds. Pins and settings defaults resolve through the session
  *     `ModelRuntime` (extension-registered providers such as alias slots
  *     included), so a logged-in `pi` is picked up automatically — no
- *     PI_PROVIDER/PI_MODEL needed. Live runs also use the developer's real
- *     agent dir even though the scripted suite is hermetic.
+ *     PI_PROVIDER/PI_MODEL needed. Live runs seed an isolated copy of the
+ *     developer's real agent dir so the scripted suite stays hermetic while the
+ *     live session reads the real setup and writes only into the copy.
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
@@ -74,6 +75,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createFauxModelRuntime } from "./faux-runtime.js";
 import { resolveRunAgentDir } from "./hermetic-agent-dir.js";
+import { createIsolatedAgentDir } from "./isolated-agent-dir.js";
 import { registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
@@ -361,14 +363,20 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     process.env.HOME = hermeticDir;
   }
 
-  // Live runs need the developer's real agent dir — auth, settings defaults, and
-  // extension-registered providers. setup-hermetic.ts redirects
-  // PI_CODING_AGENT_DIR to an empty temp dir for the scripted suite, so restore
-  // the real dir it recorded; fixtures and isolateGlobals' own temp dir win.
-  const agentDir = resolveRunAgentDir(process.env, live, getAgentDir());
+  // Live runs need the developer's real setup — auth, settings, and
+  // extension-registered providers (alias slots) — but must not write into the
+  // real agent dir: binding extensions fires session_start, where e.g. the
+  // fallback provider rewrites its alias cache. Seed an isolated copy instead
+  // (files copied, dirs and credential stores symlinked). setup-hermetic.ts
+  // recorded the real dir; fixtures and isolateGlobals' own temp dir win.
+  const sourceAgentDir = resolveRunAgentDir(process.env, live, getAgentDir());
+  const isolatedAgentDir = live && !isolateGlobals
+    ? createIsolatedAgentDir(sourceAgentDir)
+    : undefined;
+  const agentDir = isolatedAgentDir ?? sourceAgentDir;
   // Extensions call `getAgentDir()` themselves during load (the fallback
-  // provider reads its alias cache from it), so the resolved dir has to be
-  // reflected in the env, not only passed to the loader. Restored on dispose.
+  // provider reads its alias cache from it), so the effective dir has to be in
+  // the env, not only in the loader. Restored on dispose.
   const redirectedAgentDir = process.env.PI_CODING_AGENT_DIR !== agentDir;
   if (redirectedAgentDir) {
     process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -559,6 +567,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
       else process.env.HOME = prevHome;
       if (hermeticDir) rmSync(hermeticDir, { recursive: true, force: true });
     }
+    if (isolatedAgentDir) rmSync(isolatedAgentDir, { recursive: true, force: true });
     if (ownsCwd) rmSync(cwd, { recursive: true, force: true });
   };
 
