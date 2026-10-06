@@ -5,7 +5,7 @@
  * Pi 0.80.8 replaced `createAgentSession`'s `modelRegistry` option with
  * `modelRuntime`, and the coding agent now resolves request auth through the
  * runtime. A structural faux registry is therefore silently ignored on the
- * repo's supported floor (>=0.83.0), and every real-session e2e dies with
+ * repo's supported floor (>=1.0.4), and every real-session e2e dies with
  * "No API key found for faux". This helper registers the faux provider into a
  * real runtime (catalog + `apiKey` auth); the api implementation itself is the
  * globally registered faux api from `registerFauxProvider`.
