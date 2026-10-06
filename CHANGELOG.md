@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - Declare @sinclair/typebox as a peer dependency (closes #33)
 - *(tests)* Adapt the print-mode faux harness to pi 1.0 transcript context (closes #44)
 - *(tests)* Resolve live pins through the session runtime (closes #45)
+- *(tests)* Isolate live e2e with a per-run copy of the real agent dir (closes #49)
 
 ### 🚜 Refactor
 
