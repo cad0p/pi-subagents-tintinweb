@@ -26,9 +26,10 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run test
 
-  # The dev dependency is pinned pre-migration (0.80.6), where the isolated-provider
-  # regression can't occur. This job installs the current Pi so that guard actually
-  # runs against a version where the bug WOULD manifest without PR #152's fix.
+  # The dev dependency is pinned at the supported floor (exact dev pin 0.83.0;
+  # peer range >=0.83.0), where the isolated-provider regression can occur, so
+  # the build job's test run already exercises the guard. This job additionally
+  # runs it against current Pi so a future facade change surfaces without blocking.
   # See test/e2e/isolated-provider.e2e.test.ts.
   compat-latest-pi:
     runs-on: ubuntu-latest

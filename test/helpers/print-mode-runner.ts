@@ -65,6 +65,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { createFauxModelRuntime } from "./faux-runtime.js";
 import { getModel, registerFauxProvider } from "./pi-ai.js";
 
 /** Path to the pi-subagents extension entrypoint (repo `src/index.ts`). */
@@ -264,10 +265,13 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     process.env.HOME = hermeticDir;
   }
 
+  // Resolved after globals are isolated, so it honors the hermetic dir.
+  const agentDir = getAgentDir();
+
   // --- model backend ---
   let faux: ReturnType<typeof registerFauxProvider> | undefined;
   let model: Model<string> | undefined;
-  let modelRegistry: unknown;
+  let modelRuntime: Awaited<ReturnType<typeof createFauxModelRuntime>> | undefined;
   if (live) {
     // Explicit pin wins (options.live or PI_PROVIDER + PI_MODEL). Otherwise leave
     // `model` undefined: createAgentSession then calls findInitialModel() against
@@ -287,29 +291,17 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
         );
       }
     }
-    modelRegistry = undefined; // let createAgentSession build the real, auth-backed registry
+    modelRuntime = undefined; // let createAgentSession build the real, auth-backed runtime
   } else {
     if (!options.steps && !options.respond) {
       throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
     }
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
     model = faux.getModel();
-    // Structural faux registry (matches the existing e2e suites): the parent
-    // session uses `model` directly; subagents inherit it via ctx.model since
-    // resolveDefaultModel falls back to the parent model when no model is pinned.
-    modelRegistry = {
-      find: () => model,
-      getAll: () => [model],
-      getAvailable: () => [model],
-      hasConfiguredAuth: () => true,
-      isUsingOAuth: () => false,
-      // createAgentSession's injected streamFn checks `auth.ok` and throws
-      // Error(auth.error) otherwise — so the `ok: true` flag is mandatory, not
-      // cosmetic. Without it the turn dies before streaming (empty error message).
-      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
-      registerProvider: () => {},
-      unregisterProvider: () => {},
-    };
+    // Pi >=0.80.8 resolves auth through the session's ModelRuntime, so a
+    // structural faux registry is ignored. Build a real runtime with the faux
+    // provider registered and keyed; the faux api impl is registered globally.
+    modelRuntime = await createFauxModelRuntime(faux, join(agentDir, "auth.json"));
 
     // Pad the response queue: one context-branching responder per expected model
     // call. The queue is a single FIFO shared by parent + child, but every entry
@@ -330,8 +322,6 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   }
 
   // --- build the parent host session with the extension loaded ---
-  // Resolved after globals are isolated, so it honors the hermetic dir.
-  const agentDir = getAgentDir();
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -352,8 +342,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     cwd,
     agentDir,
     model,
-    // Structural faux registry in faux mode; undefined in live mode (defaults).
-    modelRegistry: modelRegistry as any,
+    // Real faux runtime in faux mode; undefined in live mode (defaults).
+    modelRuntime,
     resourceLoader: loader,
     sessionManager: SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
