@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ScopedModel } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -115,7 +116,6 @@ import {
   resolveScopedModels,
   resumeAgent,
   runAgent,
-  type ScopedModelEntry,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
 import type { AgentConfig } from "../src/types.js";
@@ -212,7 +212,7 @@ describe("agent-runner final output capture", () => {
     }));
   });
 
-  it("passes the parent model runtime while retaining the legacy model registry", async () => {
+  it("passes the parent model runtime", async () => {
     const { session } = createSession("AUTHENTICATED");
     createAgentSession.mockResolvedValue({ session });
     const modelRuntime = { getAuth: vi.fn(), hasConfiguredAuth: vi.fn() };
@@ -223,13 +223,12 @@ describe("agent-runner final output capture", () => {
 
     await runAgent(context, "Explore", "Say AUTHENTICATED", { pi });
 
-    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      modelRegistry: context.modelRegistry,
-      modelRuntime,
-    }));
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ modelRuntime }));
+    // The legacy modelRegistry option was dropped at the 0.83 floor.
+    expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRegistry");
   });
 
-  it("omits modelRuntime when the legacy registry does not expose one", async () => {
+  it("omits modelRuntime when the registry does not expose a runtime", async () => {
     const { session } = createSession("LEGACY");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1609,7 +1608,7 @@ describe("resolveScopedModels", () => {
     };
   }
 
-  const parent: ScopedModelEntry[] = [
+  const parent: ScopedModel[] = [
     { model: { provider: "acme", id: "m1" } as any },
     { model: { provider: "acme", id: "m2" } as any },
   ];
@@ -1673,7 +1672,7 @@ describe("agent-runner model scope", () => {
     };
   }
 
-  const parentScoped: ScopedModelEntry[] = [
+  const parentScoped: ScopedModel[] = [
     { model: { provider: "acme", id: "m1" } as any, thinkingLevel: "high" },
     { model: { provider: "acme", id: "m2" } as any },
   ];
@@ -1707,7 +1706,7 @@ describe("agent-runner model scope", () => {
 
     await runAgent(context, "Explore", "go", { pi });
 
-    const passed = createAgentSession.mock.calls[0][0].scopedModels as ScopedModelEntry[];
+    const passed = createAgentSession.mock.calls[0][0].scopedModels as ScopedModel[];
     expect(passed.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["acme/m2", "acme/m1"]);
   });
 

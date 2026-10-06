@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, LoadExtensionsResult, ScopedModel } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -252,16 +252,6 @@ function resolveDefaultModel(
 }
 
 /**
- * One scoped-model entry as pi's `AgentSession` stores it. pi's own
- * `ScopedModel` type is not exported on the oldest supported pi versions
- * (0.80.x), so the shape is modeled structurally.
- */
-export interface ScopedModelEntry {
-  model: Model<any>;
-  thinkingLevel?: ThinkingLevel;
-}
-
-/**
  * Resolve the child session's model scope from `scoped_models` frontmatter.
  *
  * undefined/true → inherit the parent session's resolved scope, so in-session
@@ -273,16 +263,16 @@ export interface ScopedModelEntry {
  */
 export function resolveScopedModels(
   configured: true | string[] | false | undefined,
-  parentScoped: readonly ScopedModelEntry[] | undefined,
+  parentScoped: readonly ScopedModel[] | undefined,
   registry: ModelLookupRegistry,
   warn: (message: string) => void = () => {},
-): ScopedModelEntry[] {
+): ScopedModel[] {
   if (configured === undefined || configured === true) {
     return parentScoped ? [...parentScoped] : [];
   }
   if (configured === false) return [];
 
-  const resolved: ScopedModelEntry[] = [];
+  const resolved: ScopedModel[] = [];
   const seen = new Set<string>();
   for (const entry of configured) {
     const model = resolveModel(entry, registry);
@@ -698,7 +688,7 @@ export async function runAgent(
   // fallback consumer can never bind — an empty scope is the honest value.
   const scopedModels = resolveScopedModels(
     options.isolated ? false : agentConfig?.scopedModels,
-    (ctx as { scopedModels?: readonly ScopedModelEntry[] }).scopedModels,
+    ctx.scopedModels,
     ctx.modelRegistry,
     (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
   );
@@ -761,26 +751,17 @@ export async function runAgent(
     : SessionManager.inMemory(effectiveCwd);
 
   type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
-  // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
-  // modelRuntime, but ExtensionContext still exposes only the registry facade.
-  // Pass both so the full supported Pi range retains the parent's providers.
-  // The runtime's type is inferred from the installed pi-coding-agent
-  // (pre-0.80.8: no modelRuntime option -> never; current: ModelRuntime) so the
-  // object literal stays assignable when tsc runs against current types.
+  // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
+  // is what createAgentSession needs to keep extension-registered providers
+  // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
   const parentModelRuntime = (
-    ctx.modelRegistry as unknown as {
-      runtime?: AgentSessionOptions extends { modelRuntime?: infer TModelRuntime } ? TModelRuntime : never;
-    }
+    ctx.modelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
   ).runtime;
-  const sessionOpts: AgentSessionOptions & {
-    modelRegistry: ExtensionContext["modelRegistry"];
-    modelRuntime?: unknown;
-  } = {
+  const sessionOpts: AgentSessionOptions = {
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
     settingsManager,
-    modelRegistry: ctx.modelRegistry,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
     scopedModels,
