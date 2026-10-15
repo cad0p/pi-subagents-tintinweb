@@ -34,6 +34,16 @@ Run these in a live pi session with the extension installed from the branch, and
 note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
+Maintainer reference setup: `claude-bridge/claude-haiku-5-5` at thinking
+`xhigh`; fall back to `opencode-go/deepseek-v4.1-flash` at `max` when the bridge
+is unavailable. Load the branch build instead of the installed package so the two
+don't collide:
+
+```bash
+pi --no-extensions -e <pi-claude-bridge>/src/index.ts -e <repo>/src/index.ts \
+  --provider claude-bridge --model claude-haiku-5-5 --thinking xhigh
+```
+
 - Exercise the changed surface end to end in a real session — spawn, steer,
   render, resume, or whatever the PR touches.
 - Toggle collapsed/expanded states with ctrl+o and, on pi 0.87.1+, per-row
