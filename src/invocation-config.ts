@@ -1,7 +1,6 @@
 import type { AgentConfig, IsolationMode, ThinkingLevel } from "./types.js";
 
 interface AgentInvocationParams {
-  thinking?: string;
   max_turns?: number;
   inherit_context?: boolean;
   isolated?: boolean;
@@ -21,7 +20,7 @@ export function resolveAgentInvocationConfig(
 } {
   return {
     modelInput: agentConfig?.model,
-    thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
+    thinking: agentConfig?.thinking,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
