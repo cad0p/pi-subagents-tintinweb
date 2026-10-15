@@ -592,7 +592,13 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
             // prompt() resolves (not rejects) on abort, so after a timeout this
             // orphaned race arm keeps running — never re-prompt a torn-down session.
             if (failed) break;
-            await session.prompt("Background agents have completed. Process their results.");
+            // The completion notification can start its own turn before this
+            // re-prompt lands; queue behind it instead of colliding, then let
+            // the session settle before the caller reads the response.
+            await session.prompt("Background agents have completed. Process their results.", {
+              streamingBehavior: "followUp",
+            });
+            await session.waitForIdle();
           }
         }
       })(),
@@ -678,6 +684,22 @@ export function conversationText(session: AgentSession): string {
     }
     if (!Array.isArray(content)) continue;
     for (const block of content as Array<{ type?: string; text?: string }>) {
+      if (block.type === "text" && block.text) parts.push(block.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Text of every assistant turn, joined. Use this when the model may report in one
+ * turn and then take further turns (completion notifications, timers), so the
+ * report is not the final message — and the prompt must not satisfy the match.
+ */
+export function assistantText(session: AgentSession): string {
+  const parts: string[] = [];
+  for (const msg of session.messages) {
+    if (msg.role !== "assistant") continue;
+    for (const block of msg.content as Array<{ type?: string; text?: string }>) {
       if (block.type === "text" && block.text) parts.push(block.text);
     }
   }

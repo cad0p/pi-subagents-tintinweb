@@ -22,6 +22,7 @@ import {
   agentCall,
   agentToolCalls,
   agentToolResults,
+  assistantText,
   conversationText,
   invokedToolNames,
   type PrintModeRun,
@@ -379,10 +380,23 @@ const SELF_SMOKE_VITEST_TIMEOUT = SELF_SMOKE_TIMEOUT + VITEST_SLACK;
 
 describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   let run: PrintModeRun | undefined;
+  const tmpDirs: string[] = [];
   afterEach(async () => {
     await run?.dispose();
     run = undefined;
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
+
+  // Live runs read the developer's real agent dir, whose subagents.json may set
+  // disableDefaultAgents. Tests that dispatch a built-in type run in a project
+  // that re-enables them (project settings override global).
+  const cwdWithDefaultAgents = (): string => {
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-live-defaults-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ disableDefaultAgents: false }));
+    return cwd;
+  };
 
   it(
     "subagent spawn — real model spawns a subagent and reports its output",
@@ -433,6 +447,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
         prompt:
           "Use the Agent tool with subagent_type 'Explore' to look at the current working " +
           "directory and report a one-line summary of what's there.",
+        cwd: cwdWithDefaultAgents(),
         timeoutMs: LIVE_TIMEOUT,
       });
       const calls = agentToolCalls(run.parentSession);
@@ -464,6 +479,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
           "   working directory in one line.",
           "Finish with: 'SELF-SMOKE COMPLETE' followed by the PASS/FAIL lines.",
         ].join("\n"),
+        cwd: cwdWithDefaultAgents(),
         timeoutMs: SELF_SMOKE_TIMEOUT,
       });
 
@@ -484,8 +500,9 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       const transcript = conversationText(run.parentSession);
       expect(transcript).toMatch(/FIRST_OK/i);
       expect(transcript).toMatch(/SECOND_OK/i);
-      // The agent ran the whole script to completion and self-reported.
-      expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
+      // The agent ran the whole script to completion and self-reported — in any
+      // assistant turn: later notification/timer turns can follow the report.
+      expect(assistantText(run.parentSession)).toMatch(/SELF-SMOKE COMPLETE/i);
     },
     SELF_SMOKE_VITEST_TIMEOUT,
   );
