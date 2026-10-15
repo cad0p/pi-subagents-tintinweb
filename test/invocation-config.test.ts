@@ -29,7 +29,6 @@ describe("resolveAgentInvocationConfig", () => {
         isolation: "worktree",
       }),
       {
-        thinking: "minimal",
         max_turns: 1,
         inherit_context: true,
         isolated: true,
@@ -47,7 +46,6 @@ describe("resolveAgentInvocationConfig", () => {
 
   it("uses tool-call params when no agent config is available", () => {
     const resolved = resolveAgentInvocationConfig(undefined, {
-      thinking: "minimal",
       max_turns: 3,
       inherit_context: true,
       isolated: true,
@@ -55,7 +53,7 @@ describe("resolveAgentInvocationConfig", () => {
     });
 
     expect(resolved.modelInput).toBeUndefined();
-    expect(resolved.thinking).toBe("minimal");
+    expect(resolved.thinking).toBeUndefined();
     expect(resolved.maxTurns).toBe(3);
     expect(resolved.inheritContext).toBe(true);
     expect(resolved.isolated).toBe(true);

@@ -5,6 +5,13 @@ author runs before requesting review. Record the evidence in the PR body so a
 reviewer can see what was verified, on which setup. Skip a section only when it
 does not apply, and say so explicitly.
 
+## Workspace
+
+Keep the main checkout on `main`. Do the branch work in an isolated git worktree
+in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
+dependencies there, and run every gate and live check from it. Remove the
+worktree after merge.
+
 ## Automated gates
 
 Run all four from the repository root; all must pass (mirrors `CONTRIBUTING.md`'s
@@ -33,6 +40,16 @@ and exercises a real model through your local `pi` login (`PI_PROVIDER` /
 Run these in a live pi session with the extension installed from the branch, and
 note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
+
+Maintainer reference setup: `claude-bridge/claude-haiku-5-5` at thinking
+`xhigh`; fall back to `opencode-go/deepseek-v4.1-flash` at `max` when the bridge
+is unavailable. Load the branch build instead of the installed package so the two
+don't collide:
+
+```bash
+pi --no-extensions -e <pi-claude-bridge>/src/index.ts -e <repo>/src/index.ts \
+  --provider claude-bridge --model claude-haiku-5-5 --thinking xhigh
+```
 
 - Exercise the changed surface end to end in a real session — spawn, steer,
   render, resume, or whatever the PR touches.
