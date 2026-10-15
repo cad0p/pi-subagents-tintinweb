@@ -77,29 +77,33 @@ Run these when the change touches session data, rendering, or persistence:
 
 ## Independent agent review
 
-Before merging, one fresh read-only review agent per PR must verify the pushed
-head. The author's own checks don't count as review.
+Every PR, docs included, needs one fresh read-only review agent to verify the
+pushed head before merge. This section has no skip; the author's own checks
+don't count as review.
 
 - Spawn a new `general-purpose` agent with `max_turns` set. Don't use `resume`,
-  `inherit_context`, or `isolation` (a worktree would copy the caller's
-  checkout, not the PR head).
+  `inherit_context`, `isolation` (a worktree branches from the caller's
+  committed `HEAD`, not the PR head), or `steer_subagent`.
 - Brief it with the linked issue (the guarantees), the head SHA and the
   worktree path holding it, the diff range `origin/main...<head-sha>`, and this
-  checklist. Leave out the PR body's verification notes and earlier verdicts.
-  Ask which inputs, callers, settings, or runtime versions would break the
-  guarantees while the gates stay green.
+  checklist. Leave out your own conclusions, test results, the PR body's
+  verification notes, and earlier verdicts. Ask which inputs, callers,
+  settings, or runtime versions would break the guarantees while the gates stay
+  green.
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers,
   and requires the reviewer to confirm `HEAD` equals the head SHA and the diff
   is non-empty before giving a verdict.
-- The first line of the reply is `CLEAN` or `FINDINGS(n)`. A reviewer that
-  can't finish replies `NO VERDICT` with what it tested. A run that was steered
-  to wrap up, aborted, or lacks a first-line verdict counts as `NO VERDICT`.
+- The first line of the final message is `CLEAN`, `FINDINGS(n)`, or
+  `NO VERDICT`; then what it checked, and each finding tagged must-fix,
+  should-fix, or nit. A run that was steered to wrap up, aborted, or ends
+  without a first-line verdict counts as `NO VERDICT`.
 - Escalate to a stronger custom agent (e.g. a user-defined `smart`) only after
-  a `NO VERDICT` or a demonstrably wrong review; an unknown `subagent_type`
-  silently runs `general-purpose`.
-- Fold must-fix findings, push, and rerun a new reviewer on the new head. Merge
-  only when the latest verdict is on the current head and has no open must-fix
-  findings.
+  a `NO VERDICT` or a demonstrably wrong review. Escalation never overrides a
+  `FINDINGS` verdict, and an unknown `subagent_type` silently runs
+  `general-purpose`.
+- Fold must-fix findings into a new head, then review that head with a new
+  agent. Merge only when the latest verdict is on the current head and has no
+  must-fix findings.
 
 ## Fork release rules
 
