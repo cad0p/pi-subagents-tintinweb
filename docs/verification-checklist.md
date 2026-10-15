@@ -77,25 +77,24 @@ Run these when the change touches session data, rendering, or persistence:
 
 ## Independent agent review
 
-Before merging, have fresh review agents verify the work. The author's own
+Before merging, have one fresh review agent verify the work. The author's own
 checks don't count as review.
 
-- Spawn each reviewer without the authoring conversation (no inherited context),
-  read-only, on the pushed head. Give it a self-contained brief: the issue, the
-  PR body, the diff range, this checklist, and what the change must guarantee.
-- Use at least two lenses: **functional** (does the diff do what the PR claims;
-  do tests pin it; are docs and the model-visible text accurate) and
-  **adversarial** (which inputs, stale callers, settings, or runtime versions
-  keep the gates green yet break the claim). Add a **trust/evidence** lens when
-  the PR body cites live runs: re-derive each claim from the recorded output.
-- Phrase briefs as completeness questions about this repo's own change ("is
-  there a case that passes the tests but breaks X?"), give a tool-call budget,
-  and an explicit way out ("say so plainly with what you tested").
-- Each verdict starts with `CLEAN` or `FINDINGS(n)`, and only a lens that
+- Use a single lens per PR: spawn it without the authoring conversation (no
+  inherited context), read-only, on the pushed head, with a self-contained
+  brief — the issue, the PR body, the diff range, this checklist, and what the
+  change must guarantee. Ask it to check both that the diff does what the PR
+  claims and which inputs, stale callers, or settings would break the claim
+  while the gates stay green.
+- Start with the `general-purpose` agent; escalate to `smart` only when its
+  review is shallow or wrong.
+- Phrase the brief as a completeness question about this repo's own change,
+  give it a tool-call budget, and an explicit way out ("say so plainly with
+  what you tested").
+- The verdict starts with `CLEAN` or `FINDINGS(n)`, and only a lens that
   actually reviewed the head may issue one; a stopped or partial instance is
-  recorded as "no verdict". Fold findings, push, and rerun fresh lenses on the
-  new head until a round returns no new must-fix findings.
-- Record each lens, the head it reviewed, and its verdict in the PR body.
+  "no verdict". Fold must-fix findings, push, and rerun the lens on the new head.
+- Record the head it reviewed and its verdict in the PR body.
 
 ## Fork release rules
 
