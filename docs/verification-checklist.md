@@ -99,12 +99,13 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   `NO VERDICT`; then what it checked, and each finding tagged must-fix,
   should-fix, or nit. A run that hit its turn limit, was aborted, or ends
   without a first-line verdict counts as `NO VERDICT`.
-- Escalate to the user-defined `smart` agent after a `NO VERDICT`, or when the
-  review makes claims that are easily shown wrong by facts (a misread API, code
-  that doesn't exist, behaviour the source contradicts). Don't escalate over
-  opinionated findings you disagree with. Confirm the result reports the
-  escalated type: an unknown `subagent_type` silently runs `general-purpose`,
-  which is not an escalation.
+- After a `NO VERDICT`, retry `general-purpose` once with a narrower brief,
+  or a higher `max_turns` if the task needs it.
+- Escalate to the user-defined `smart` agent only when the review makes claims
+  that are easily shown wrong by facts (a misread API, code that doesn't exist,
+  behaviour the source contradicts). Don't escalate over opinionated findings
+  you disagree with. Confirm the result reports the escalated type: an unknown
+  `subagent_type` silently runs `general-purpose`, which is not an escalation.
 - A must-fix finding blocks its head until it is folded into a new head
   (reviewed by a new `general-purpose` agent) or dismissed with the
   maintainer's reason recorded in the PR body, citing the facts for a wrong
