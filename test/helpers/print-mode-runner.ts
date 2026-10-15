@@ -708,29 +708,6 @@ export function assistantText(session: AgentSession): string {
   return parts.join("\n");
 }
 
-/**
- * Text the parent *received* — tool results and custom messages (completion
- * notifications) only. Unlike `conversationText`, neither the prompt nor the
- * model's own narration can satisfy a match, so a hit proves child output
- * actually arrived.
- */
-export function deliveredText(session: AgentSession): string {
-  const parts: string[] = [];
-  for (const msg of session.messages) {
-    if (msg.role === "user" || msg.role === "assistant") continue;
-    const content = (msg as { content?: unknown }).content;
-    if (typeof content === "string") {
-      if (content) parts.push(content);
-      continue;
-    }
-    if (!Array.isArray(content)) continue;
-    for (const block of content as Array<{ type?: string; text?: string }>) {
-      if (block.type === "text" && block.text) parts.push(block.text);
-    }
-  }
-  return parts.join("\n");
-}
-
 /** Names of every tool the assistant actually invoked (in order). */
 export function invokedToolNames(session: AgentSession): string[] {
   const out: string[] = [];
