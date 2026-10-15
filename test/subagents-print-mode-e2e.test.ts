@@ -24,6 +24,7 @@ import {
   agentToolResults,
   assistantText,
   conversationText,
+  deliveredText,
   invokedToolNames,
   type PrintModeRun,
   routeBySession,
@@ -412,7 +413,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // The spawn returns the background envelope and the child's output arrives
       // through the held completion notification.
       expect(agentToolResults(run.parentSession).join("\n")).toMatch(/background/i);
-      expect(conversationText(run.parentSession)).toMatch(/PONG/i);
+      expect(deliveredText(run.parentSession)).toMatch(/PONG/i);
       expect(run.responseText).toMatch(/PONG/i);
     },
     LIVE_VITEST_TIMEOUT,
@@ -451,10 +452,12 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
         timeoutMs: LIVE_TIMEOUT,
       });
       const calls = agentToolCalls(run.parentSession);
-      // The non-default type was actually selected (case-insensitive per README).
+      // The non-default type was actually selected (case-insensitive per README)
+      // and actually ran — an unknown type silently falls back to general-purpose.
       expect(
         calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore"),
       ).toBe(true);
+      expect(run.subagents.some((r) => String(r.type).toLowerCase() === "explore")).toBe(true);
       expect(run.responseText.length).toBeGreaterThan(0);
     },
     LIVE_VITEST_TIMEOUT,
@@ -491,18 +494,20 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       expect(calls.length).toBeGreaterThanOrEqual(3);
       // — the result-retrieval tool was called
       expect(tools).toContain("get_subagent_result");
-      // — the Explore type was dispatched
+      // — the Explore type was dispatched and actually ran (an unknown type
+      //   silently falls back to general-purpose)
       expect(calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore")).toBe(true);
-      // — and the real child outputs materialized in the conversation (the
-      //   get_subagent_result result + the held completion notifications). We
-      //   check the whole transcript, not the final message: the agent's closing
-      //   report tends to summarize ("Step 1 PASS") rather than re-echo the tokens.
-      const transcript = conversationText(run.parentSession);
-      expect(transcript).toMatch(/FIRST_OK/i);
-      expect(transcript).toMatch(/SECOND_OK/i);
+      expect(run.subagents.some((r) => String(r.type).toLowerCase() === "explore")).toBe(true);
+      // — and the real child outputs reached the parent (the get_subagent_result
+      //   result + the held completion notifications). The prompt names both
+      //   tokens, so only delivered text counts — not the prompt or narration.
+      const delivered = deliveredText(run.parentSession);
+      expect(delivered).toMatch(/FIRST_OK/i);
+      expect(delivered).toMatch(/SECOND_OK/i);
       // The agent ran the whole script to completion and self-reported — in any
-      // assistant turn: later notification/timer turns can follow the report.
-      expect(assistantText(run.parentSession)).toMatch(/SELF-SMOKE COMPLETE/i);
+      // assistant turn (later notification/timer turns can follow the report),
+      // with the report itself, not just a plan to write it.
+      expect(assistantText(run.parentSession)).toMatch(/SELF-SMOKE COMPLETE[\s\S]*\b(PASS|FAIL)\b/i);
     },
     SELF_SMOKE_VITEST_TIMEOUT,
   );

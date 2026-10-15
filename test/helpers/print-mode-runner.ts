@@ -593,8 +593,10 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
             // orphaned race arm keeps running — never re-prompt a torn-down session.
             if (failed) break;
             // The completion notification can start its own turn before this
-            // re-prompt lands; queue behind it instead of colliding, then let
-            // the session settle before the caller reads the response.
+            // re-prompt lands; queue behind it instead of colliding, then wait
+            // for idle. Known gap: a prompt issued while the session is emitting
+            // agent_settled is deferred past waitForIdle(), so its turn can
+            // still be pending when the caller reads the response.
             await session.prompt("Background agents have completed. Process their results.", {
               streamingBehavior: "followUp",
             });
@@ -700,6 +702,29 @@ export function assistantText(session: AgentSession): string {
   for (const msg of session.messages) {
     if (msg.role !== "assistant") continue;
     for (const block of msg.content as Array<{ type?: string; text?: string }>) {
+      if (block.type === "text" && block.text) parts.push(block.text);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
+ * Text the parent *received* — tool results and custom messages (completion
+ * notifications) only. Unlike `conversationText`, neither the prompt nor the
+ * model's own narration can satisfy a match, so a hit proves child output
+ * actually arrived.
+ */
+export function deliveredText(session: AgentSession): string {
+  const parts: string[] = [];
+  for (const msg of session.messages) {
+    if (msg.role === "user" || msg.role === "assistant") continue;
+    const content = (msg as { content?: unknown }).content;
+    if (typeof content === "string") {
+      if (content) parts.push(content);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Array<{ type?: string; text?: string }>) {
       if (block.type === "text" && block.text) parts.push(block.text);
     }
   }
