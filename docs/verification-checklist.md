@@ -75,6 +75,45 @@ Run these when the change touches session data, rendering, or persistence:
 - If the change touches cross-extension RPC or events, verify the RPC surface
   still answers.
 
+## Independent agent review
+
+Every PR, docs included, needs a fresh read-only review agent on each pushed
+head before merge (plus any escalation). This section has no skip; the
+author's own checks don't count as review. Record every round in the PR body,
+under Evidence. A verdict counts only for the SHA it reviewed.
+
+- Spawn a new `general-purpose` agent with `max_turns: 20`. Don't
+  use `resume`, `inherit_context`, `isolation` (a worktree branches from the
+  caller's committed `HEAD`, not the PR head), or `steer_subagent`.
+- Brief it with the linked issue (the guarantees), the head SHA and the
+  worktree path holding it, the diff range `origin/main...<head-sha>`, and this
+  checklist. Leave out your own conclusions, test results, the PR body's
+  verification notes, and earlier verdicts. Frame it as a completeness
+  question: which inputs, callers, settings, or runtime versions would break
+  the guarantees while the gates stay green?
+- The brief forbids edits, commits, pushes, branch switches, and auto-fixers
+  (`npm run lint:fix`). It states the turn budget and the way out: reply
+  `NO VERDICT` with what was tested if the budget runs out, `HEAD` differs from
+  the head SHA, or the diff is empty.
+- The first line of the final message is `CLEAN`, `FINDINGS(n)`, or
+  `NO VERDICT`; then what it checked, and each finding tagged must-fix,
+  should-fix, or nit. A run that hit its turn limit, was aborted, or ends
+  without a first-line verdict counts as `NO VERDICT`.
+- After a `NO VERDICT`, retry `general-purpose` once with a narrower brief,
+  or a higher `max_turns` if the task needs it.
+- Escalate to the user-defined `smart` agent only when the review makes claims
+  that are easily shown wrong by facts (a misread API, code that doesn't exist,
+  behaviour the source contradicts). Don't escalate over opinionated findings
+  you disagree with. Confirm the result reports the escalated type: an unknown
+  `subagent_type` silently runs `general-purpose`, which is not an escalation.
+- A must-fix finding blocks its head until it is folded into a new head
+  (reviewed by a new `general-purpose` agent) or dismissed with the
+  maintainer's reason recorded in the PR body, citing the facts for a wrong
+  finding. A later verdict on the same head does not clear it by itself.
+  Should-fix and nit findings may stay open if recorded.
+- Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
+  no undismissed must-fix findings.
+
 ## Fork release rules
 
 - Do not edit `CHANGELOG.md` on non-release branches; the fork's
@@ -89,4 +128,5 @@ In the PR body, record:
 - the pi version and platform used for the live checks;
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
+- every review round: the head it reviewed, the agent type, and the verdict;
 - any check that does not apply, and why.
