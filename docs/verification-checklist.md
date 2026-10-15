@@ -77,24 +77,29 @@ Run these when the change touches session data, rendering, or persistence:
 
 ## Independent agent review
 
-Before merging, have one fresh review agent verify the work. The author's own
-checks don't count as review.
+Before merging, one fresh read-only review agent per PR must verify the pushed
+head. The author's own checks don't count as review.
 
-- Use a single lens per PR: spawn it without the authoring conversation (no
-  inherited context), read-only, on the pushed head, with a self-contained
-  brief — the issue, the PR body, the diff range, this checklist, and what the
-  change must guarantee. Ask it to check both that the diff does what the PR
-  claims and which inputs, stale callers, or settings would break the claim
-  while the gates stay green.
-- Start with the `general-purpose` agent; escalate to `smart` only when its
-  review is shallow or wrong.
-- Phrase the brief as a completeness question about this repo's own change,
-  give it a tool-call budget, and an explicit way out ("say so plainly with
-  what you tested").
-- The verdict starts with `CLEAN` or `FINDINGS(n)`, and only a lens that
-  actually reviewed the head may issue one; a stopped or partial instance is
-  "no verdict". Fold must-fix findings, push, and rerun the lens on the new head.
-- Record the head it reviewed and its verdict in the PR body.
+- Spawn a new `general-purpose` agent with `max_turns` set. Don't use `resume`,
+  `inherit_context`, or `isolation` (a worktree would copy the caller's
+  checkout, not the PR head).
+- Brief it with the linked issue (the guarantees), the head SHA and the
+  worktree path holding it, the diff range `origin/main...<head-sha>`, and this
+  checklist. Leave out the PR body's verification notes and earlier verdicts.
+  Ask which inputs, callers, settings, or runtime versions would break the
+  guarantees while the gates stay green.
+- The brief forbids edits, commits, pushes, branch switches, and auto-fixers,
+  and requires the reviewer to confirm `HEAD` equals the head SHA and the diff
+  is non-empty before giving a verdict.
+- The first line of the reply is `CLEAN` or `FINDINGS(n)`. A reviewer that
+  can't finish replies `NO VERDICT` with what it tested. A run that was steered
+  to wrap up, aborted, or lacks a first-line verdict counts as `NO VERDICT`.
+- Escalate to a stronger custom agent (e.g. a user-defined `smart`) only after
+  a `NO VERDICT` or a demonstrably wrong review; an unknown `subagent_type`
+  silently runs `general-purpose`.
+- Fold must-fix findings, push, and rerun a new reviewer on the new head. Merge
+  only when the latest verdict is on the current head and has no open must-fix
+  findings.
 
 ## Fork release rules
 
@@ -110,5 +115,5 @@ In the PR body, record:
 - the pi version and platform used for the live checks;
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
-- the independent review rounds and their verdicts;
+- every review round: the head it reviewed, the agent type, and the verdict;
 - any check that does not apply, and why.
