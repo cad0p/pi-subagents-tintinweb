@@ -79,9 +79,10 @@ Run these when the change touches session data, rendering, or persistence:
 
 Every PR, docs included, needs a fresh read-only review agent on each pushed
 head before merge (plus any escalation). This section has no skip; the
-author's own checks don't count as review. Record every round under Evidence.
+author's own checks don't count as review. Record every round in the PR body,
+under Evidence. A verdict counts only for the SHA it reviewed.
 
-- Spawn a new `general-purpose` agent with `max_turns` set (about 15-20). Don't
+- Spawn a new `general-purpose` agent with `max_turns: 20`. Don't
   use `resume`, `inherit_context`, `isolation` (a worktree branches from the
   caller's committed `HEAD`, not the PR head), or `steer_subagent`.
 - Brief it with the linked issue (the guarantees), the head SHA and the
@@ -98,14 +99,15 @@ author's own checks don't count as review. Record every round under Evidence.
   `NO VERDICT`; then what it checked, and each finding tagged must-fix,
   should-fix, or nit. A run that hit its turn limit, was aborted, or ends
   without a first-line verdict counts as `NO VERDICT`.
-- Escalate to the user-defined `smart` agent only after a `NO VERDICT` or a
-  review the maintainer judges wrong. Confirm the result reports the escalated
-  type: an unknown `subagent_type` silently runs `general-purpose`, which is not
-  an escalation.
+- Escalate to the user-defined `smart` agent only after a `NO VERDICT`.
+  Confirm the result reports the escalated type: an unknown `subagent_type`
+  silently runs `general-purpose`, which is not an escalation.
 - A must-fix finding blocks its head regardless of any later verdict on the
-  same head. Fold it into a new head and review that head with a new agent.
-  Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
-  no must-fix findings.
+  same head. Fold it into a new head and review that head with a new
+  `general-purpose` agent, or dismiss it with the maintainer's reason recorded
+  in the PR body. Should-fix and nit findings may stay open if recorded.
+- Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
+  no undismissed must-fix findings.
 
 ## Fork release rules
 
