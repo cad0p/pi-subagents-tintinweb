@@ -22,6 +22,7 @@ import {
   agentCall,
   agentToolCalls,
   agentToolResults,
+  assistantText,
   conversationText,
   invokedToolNames,
   type PrintModeRun,
@@ -379,10 +380,31 @@ const SELF_SMOKE_VITEST_TIMEOUT = SELF_SMOKE_TIMEOUT + VITEST_SLACK;
 
 describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   let run: PrintModeRun | undefined;
+  const tmpDirs: string[] = [];
   afterEach(async () => {
     await run?.dispose();
     run = undefined;
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
+
+  // Live runs read the developer's real agent dir, whose subagents.json may set
+  // disableDefaultAgents. Tests that dispatch a built-in type run in a project
+  // that re-enables them (project settings override global).
+  const cwdWithDefaultAgents = (): string => {
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-live-defaults-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ disableDefaultAgents: false }));
+    return cwd;
+  };
+  // A built-in Explore run that finished — the requested type alone proves
+  // nothing, since an unknown type silently falls back to general-purpose.
+  const exploreCompleted = (r: PrintModeRun): boolean =>
+    r.subagents.some((a) => String(a.type).toLowerCase() === "explore" && a.status === "completed");
+  // The children's own results. Prompts, narration, and model-chosen spawn
+  // descriptions can all name the expected token; only a child result proves
+  // the child produced it.
+  const childResults = (r: PrintModeRun): string => r.subagents.map((a) => String(a.result ?? "")).join("\n");
 
   it(
     "subagent spawn — real model spawns a subagent and reports its output",
@@ -398,7 +420,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // The spawn returns the background envelope and the child's output arrives
       // through the held completion notification.
       expect(agentToolResults(run.parentSession).join("\n")).toMatch(/background/i);
-      expect(conversationText(run.parentSession)).toMatch(/PONG/i);
+      expect(childResults(run)).toMatch(/PONG/i);
       expect(run.responseText).toMatch(/PONG/i);
     },
     LIVE_VITEST_TIMEOUT,
@@ -433,13 +455,16 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
         prompt:
           "Use the Agent tool with subagent_type 'Explore' to look at the current working " +
           "directory and report a one-line summary of what's there.",
+        cwd: cwdWithDefaultAgents(),
         timeoutMs: LIVE_TIMEOUT,
       });
       const calls = agentToolCalls(run.parentSession);
-      // The non-default type was actually selected (case-insensitive per README).
+      // The non-default type was actually selected (case-insensitive per README)
+      // and actually ran to completion.
       expect(
         calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore"),
       ).toBe(true);
+      expect(exploreCompleted(run)).toBe(true);
       expect(run.responseText.length).toBeGreaterThan(0);
     },
     LIVE_VITEST_TIMEOUT,
@@ -464,6 +489,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
           "   working directory in one line.",
           "Finish with: 'SELF-SMOKE COMPLETE' followed by the PASS/FAIL lines.",
         ].join("\n"),
+        cwd: cwdWithDefaultAgents(),
         timeoutMs: SELF_SMOKE_TIMEOUT,
       });
 
@@ -475,17 +501,17 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       expect(calls.length).toBeGreaterThanOrEqual(3);
       // — the result-retrieval tool was called
       expect(tools).toContain("get_subagent_result");
-      // — the Explore type was dispatched
+      // — the Explore type was dispatched and actually ran to completion
       expect(calls.some((c) => String(c.subagent_type ?? "").toLowerCase() === "explore")).toBe(true);
-      // — and the real child outputs materialized in the conversation (the
-      //   get_subagent_result result + the held completion notifications). We
-      //   check the whole transcript, not the final message: the agent's closing
-      //   report tends to summarize ("Step 1 PASS") rather than re-echo the tokens.
-      const transcript = conversationText(run.parentSession);
-      expect(transcript).toMatch(/FIRST_OK/i);
-      expect(transcript).toMatch(/SECOND_OK/i);
-      // The agent ran the whole script to completion and self-reported.
-      expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
+      expect(exploreCompleted(run)).toBe(true);
+      // — and the children really produced their tokens
+      const results = childResults(run);
+      expect(results).toMatch(/FIRST_OK/i);
+      expect(results).toMatch(/SECOND_OK/i);
+      // The agent ran the whole script to completion and self-reported — in any
+      // assistant turn (later notification/timer turns can follow the report),
+      // with the report line itself, not narration about writing it.
+      expect(assistantText(run.parentSession)).toMatch(/^\W*SELF-SMOKE COMPLETE\b[\s\S]*\b(PASS|FAIL)\b/im);
     },
     SELF_SMOKE_VITEST_TIMEOUT,
   );
