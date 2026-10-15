@@ -5,6 +5,13 @@ author runs before requesting review. Record the evidence in the PR body so a
 reviewer can see what was verified, on which setup. Skip a section only when it
 does not apply, and say so explicitly.
 
+## Workspace
+
+Keep the main checkout on `main`. Do the branch work in an isolated git worktree
+in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
+dependencies there, and run every gate and live check from it. Remove the
+worktree after merge.
+
 ## Automated gates
 
 Run all four from the repository root; all must pass (mirrors `CONTRIBUTING.md`'s
