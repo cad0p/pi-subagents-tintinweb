@@ -99,13 +99,17 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   `NO VERDICT`; then what it checked, and each finding tagged must-fix,
   should-fix, or nit. A run that hit its turn limit, was aborted, or ends
   without a first-line verdict counts as `NO VERDICT`.
-- Escalate to the user-defined `smart` agent only after a `NO VERDICT`.
-  Confirm the result reports the escalated type: an unknown `subagent_type`
-  silently runs `general-purpose`, which is not an escalation.
-- A must-fix finding blocks its head regardless of any later verdict on the
-  same head. Fold it into a new head and review that head with a new
-  `general-purpose` agent, or dismiss it with the maintainer's reason recorded
-  in the PR body. Should-fix and nit findings may stay open if recorded.
+- Escalate to the user-defined `smart` agent after a `NO VERDICT`, or when the
+  review makes claims that are easily shown wrong by facts (a misread API, code
+  that doesn't exist, behaviour the source contradicts). Don't escalate over
+  opinionated findings you disagree with. Confirm the result reports the
+  escalated type: an unknown `subagent_type` silently runs `general-purpose`,
+  which is not an escalation.
+- A must-fix finding blocks its head until it is folded into a new head
+  (reviewed by a new `general-purpose` agent) or dismissed with the
+  maintainer's reason recorded in the PR body, citing the facts for a wrong
+  finding. A later verdict on the same head does not clear it by itself.
+  Should-fix and nit findings may stay open if recorded.
 - Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
   no undismissed must-fix findings.
 
