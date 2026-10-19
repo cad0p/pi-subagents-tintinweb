@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult, ScopedModel } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
@@ -367,11 +367,13 @@ export interface RunResult {
 }
 
 /**
- * Subscribe to a session and collect the last assistant message text.
- * Returns an object with a `getText()` getter and an `unsubscribe` function.
+ * Subscribe to a session and collect the last assistant message text, plus the
+ * last assistant message itself as reported by its `message_end` event.
+ * Returns `getText()` and `getLastAssistant()` getters and an `unsubscribe` function.
  */
 function collectResponseText(session: AgentSession) {
   let text = "";
+  let lastAssistant: AssistantMessage | undefined;
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     // message_start also fires for user and toolResult messages — resetting on
     // those would wipe assistant text already collected. Reset only when a new
@@ -382,8 +384,11 @@ function collectResponseText(session: AgentSession) {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       text += event.assistantMessageEvent.delta;
     }
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      lastAssistant = event.message;
+    }
   });
-  return { getText: () => text, unsubscribe };
+  return { getText: () => text, getLastAssistant: () => lastAssistant, unsubscribe };
 }
 
 /**
@@ -414,20 +419,31 @@ function getLastAssistantText(session: AgentSession, startIndex = 0): string {
  * Everything else completes: a clean "stop"/"toolUse" final, and — crucially — a
  * "length" stop that DID produce text (a legitimate truncated-but-useful answer).
  * "aborted" is handled by the manager's abort flag / "stopped" guard, not here.
- * Bounded by `startIndex` (like the text fallback) so a resume that produced no
- * assistant message of its own never inherits a PRIOR turn's stop reason.
+ * `observed` is the final assistant message seen via `message_end` during this
+ * invocation, and it is authoritative: a context_edit can hide the failed turn
+ * from session.messages, and a walk-back would then report an older turn's
+ * success. The session.messages walk is only a fallback for runs that emitted no
+ * assistant message_end. Bounded by `startIndex` (like the text fallback) so a
+ * resume with no assistant message of its own never inherits a PRIOR turn's stop
+ * reason.
  */
-function finalTurnError(session: AgentSession, startIndex = 0): string | undefined {
-  for (let i = session.messages.length - 1; i >= startIndex; i--) {
-    const msg = session.messages[i];
-    if (msg.role !== "assistant") continue;
-    if (msg.stopReason === "error") {
-      return (msg as { errorMessage?: string }).errorMessage?.trim() || "provider error with no output";
+function finalTurnError(session: AgentSession, startIndex = 0, observed?: AssistantMessage): string | undefined {
+  let final = observed;
+  if (!final) {
+    for (let i = session.messages.length - 1; i >= startIndex; i--) {
+      const msg = session.messages[i];
+      if (msg.role === "assistant") {
+        final = msg;
+        break;
+      }
     }
-    if (msg.stopReason === "length" && !extractText(msg.content).trim()) {
-      return "run hit the output token limit before producing any text";
-    }
-    return undefined;
+  }
+  if (!final) return undefined;
+  if (final.stopReason === "error") {
+    return final.errorMessage?.trim() || "provider error with no output";
+  }
+  if (final.stopReason === "length" && !extractText(final.content).trim()) {
+    return "run hit the output token limit before producing any text";
   }
   return undefined;
 }
@@ -841,9 +857,6 @@ export async function runAgent(
     }
   });
 
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
-
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
   if (options.inheritContext) {
@@ -856,6 +869,9 @@ export async function runAgent(
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
+  // Subscribed after the parent-context build so a throw there cannot leak them.
+  const collector = collectResponseText(session);
+  const cleanupAbort = forwardAbortSignal(session, options.signal);
   try {
     await session.prompt(effectivePrompt);
   } finally {
@@ -865,7 +881,13 @@ export async function runAgent(
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
-  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
+  return {
+    responseText,
+    session,
+    aborted,
+    steered: softLimitReached,
+    failure: finalTurnError(session, startLen, collector.getLastAssistant()),
+  };
 }
 
 /**
@@ -934,7 +956,7 @@ export async function resumeAgent(
 
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
-    failure: finalTurnError(session, startLen),
+    failure: finalTurnError(session, startLen, collector.getLastAssistant()),
   };
 }
 
