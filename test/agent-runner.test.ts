@@ -456,6 +456,45 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     expect(result.text).toBe("new partial"); // this resume's progress, not the prior answer
   });
 
+  it("runAgent reads the failed final turn from its message_end, not the editable history (#144)", async () => {
+    // A context_edit can hide the failed final turn from session.messages. The
+    // failure must come from the run's own message_end, not the projection.
+    const { session, listeners } = createSession("");
+    const earlier = { role: "assistant", content: [{ type: "text", text: "PREVIOUS OK" }], stopReason: "stop" };
+    session.prompt = vi.fn(async () => {
+      session.messages.push(earlier);
+      for (const l of listeners) l({ type: "message_end", message: earlier });
+      session.messages.push(errorFinal);
+      for (const l of listeners) l({ type: "message_end", message: errorFinal });
+      // Projection refresh: the extension hid the failed attempt from the context view.
+      session.messages = [earlier];
+    }) as any;
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+  });
+
+  it("resumeAgent reads the failed final turn from its message_end when the history view hides it (#144)", async () => {
+    const { session, listeners } = createSession("");
+    const history = [
+      { role: "user", content: "first question" },
+      { role: "assistant", content: [{ type: "text", text: "PREVIOUS ANSWER" }], stopReason: "stop" },
+    ];
+    session.messages.push(...history);
+    session.prompt = vi.fn(async () => {
+      session.messages.push({ role: "user", content: "follow-up" }, errorFinal);
+      for (const l of listeners) l({ type: "message_end", message: errorFinal });
+      // Projection refresh: the failed attempt is hidden, leaving only the prior history.
+      session.messages = [...history];
+    }) as any;
+
+    const result = await resumeAgent(session as any, "follow-up");
+
+    expect(result.failure).toBe("retries exhausted: 529 overloaded");
+  });
+
   it("collector: a toolResult/user message_start no longer wipes collected assistant text", async () => {
     const { session, listeners } = createSession("");
     createAgentSession.mockResolvedValue({ session });
