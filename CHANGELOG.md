@@ -26,10 +26,15 @@ All notable changes to this project will be documented in this file.
 - *(tests)* Isolate live e2e with a per-run copy of the real agent dir (closes #49)
 - Remove thinking param from Agent tool (closes #51) ([#52](https://github.com/cad0p/pi-subagents-tintinweb/pull/52))
 - *(tests)* Stabilize live Explore and SELF-SMOKE e2e against a real agent dir (closes #53) ([#55](https://github.com/cad0p/pi-subagents-tintinweb/pull/55))
+- Read the final turn's failure from its run events (closes #58)
 
 ### 🚜 Refactor
 
 - Background-only Agent spawns — remove foreground mode (closes #30) ([#37](https://github.com/cad0p/pi-subagents-tintinweb/pull/37))
+
+### 📚 Documentation
+
+- Require independent agent review in the verification checklist (closes #54) ([#56](https://github.com/cad0p/pi-subagents-tintinweb/pull/56))
 
 ### ⚙️ Miscellaneous Tasks
 
