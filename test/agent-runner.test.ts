@@ -495,6 +495,23 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
   });
 
+  it("runAgent reports the last message_end, so a recovered earlier error is not latched (#144)", async () => {
+    const { session, listeners } = createSession("");
+    const recovered = { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop" };
+    session.prompt = vi.fn(async () => {
+      session.messages.push(errorFinal);
+      for (const l of listeners) l({ type: "message_end", message: errorFinal });
+      session.messages.push(recovered);
+      for (const l of listeners) l({ type: "message_end", message: recovered });
+    }) as any;
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe("recovered");
+  });
+
   it("collector: a toolResult/user message_start no longer wipes collected assistant text", async () => {
     const { session, listeners } = createSession("");
     createAgentSession.mockResolvedValue({ session });
