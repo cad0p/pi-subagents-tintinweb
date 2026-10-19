@@ -857,9 +857,6 @@ export async function runAgent(
     }
   });
 
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
-
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
   if (options.inheritContext) {
@@ -872,6 +869,9 @@ export async function runAgent(
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
+  // Subscribed after the parent-context build so a throw there cannot leak them.
+  const collector = collectResponseText(session);
+  const cleanupAbort = forwardAbortSignal(session, options.signal);
   try {
     await session.prompt(effectivePrompt);
   } finally {

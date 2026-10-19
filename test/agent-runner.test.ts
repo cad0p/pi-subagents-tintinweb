@@ -126,7 +126,10 @@ function createSession(finalText: string) {
     messages: [] as any[],
     subscribe: vi.fn((listener: (event: any) => void) => {
       listeners.push(listener);
-      return () => {};
+      return () => {
+        const i = listeners.indexOf(listener);
+        if (i !== -1) listeners.splice(i, 1);
+      };
     }),
     prompt: vi.fn(async () => {
       session.messages.push({
@@ -493,6 +496,23 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     const result = await resumeAgent(session as any, "follow-up");
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
+  });
+
+  it("runAgent and resumeAgent unsubscribe every listener when the prompt throws (#58)", async () => {
+    const run = createSession("");
+    run.session.prompt = vi.fn(async () => {
+      throw new Error("boom");
+    }) as any;
+    createAgentSession.mockResolvedValue({ session: run.session });
+    await expect(runAgent(ctx, "Explore", "go", { pi })).rejects.toThrow("boom");
+    expect(run.listeners).toHaveLength(0);
+
+    const resume = createSession("");
+    resume.session.prompt = vi.fn(async () => {
+      throw new Error("boom");
+    }) as any;
+    await expect(resumeAgent(resume.session as any, "go")).rejects.toThrow("boom");
+    expect(resume.listeners).toHaveLength(0);
   });
 
   it("runAgent reports the last message_end, so a recovered earlier error is not latched (#144)", async () => {
