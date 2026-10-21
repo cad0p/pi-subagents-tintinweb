@@ -27,6 +27,7 @@ const mockSession = () => ({
   sessionId: "child-session-id",
   messages: [],
   subscribe: () => () => {},
+  sessionManager: { getSessionFile: () => undefined },
 } as any);
 
 /** Minimal theme for asserting rendered widget text (colors stay legible wrappers). */

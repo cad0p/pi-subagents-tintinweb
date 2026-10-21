@@ -230,10 +230,10 @@ const SCOPE_GATE_NAME = "pi-subagents-scope";
  *
  * pi gates registration by the session's `tools:` allowlist, but keeps a registered
  * MCP tool callable through `ctx.executeTool()` whether or not the agent selected it —
- * so a codemode script could reach a tool outside its scope. Those nested calls do
- * reach extension `tool_call` handlers, but not the agent-level `beforeToolCall` hook,
- * and a `tool_search`-activated tool reaches the model the same way. One `tool_call`
- * handler covers both.
+ * so a codemode script could reach a tool outside its scope. Those nested calls run
+ * past extensions' `tool_call` handlers only, never `agent.beforeToolCall`, and a
+ * `tool_search`-activated tool reaches the model the same way. One `tool_call` handler
+ * covers both.
  */
 function scopeGateExtension(gate: NestedCallGate): InlineExtension {
   return {
@@ -673,13 +673,6 @@ export async function runAgent(
   // pi's MCP uses to read `<cwd>/.pi/mcp.json` — so a cross-directory session keeps the
   // parent project's settings but reports its cwd as untrusted. The loader keeps the
   // trusted manager: it loads the parent project's extensions.
-  //
-  // Not `projectTrusted: false` on the second manager: pi skips the *project* scope
-  // entirely when it is false (`loadFromStorage`), which would drop the parent
-  // project's pi settings and extension config from the child (`subagents.json` is
-  // read straight from disk and would survive either way). The flag has to
-  // stay true to load them and be answered false to describe this session's cwd, and
-  // `isProjectTrusted()` is the only seam pi exposes for the two questions.
   const sessionSettingsManager =
     resolve(effectiveCwd) === resolve(configCwd)
       ? settingsManager
@@ -918,9 +911,24 @@ export async function runAgent(
 
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
-    : SessionManager.inMemory(effectiveCwd);
+  // A subagent session is ALWAYS written to disk while it runs: a crashed or
+  // killed run must leave a transcript pi's /resume can recover. Retention
+  // after the run settles is the manager's decision (`persist_session`), never a
+  // creation-time one.
+  //
+  // The exception is a host session that is itself in-memory: pi's own
+  // `--no-session`, or any SDK host that built `SessionManager.inMemory`. Its
+  // absence of a session file is the exact signal — an argv scan would miss the
+  // SDK host and let an ephemeral session leave children on disk.
+  // The same path is `parentSession`, which nests the child under its spawner.
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const sessionManager = parentSession === undefined
+    ? SessionManager.inMemory(effectiveCwd)
+    : SessionManager.create(
+        effectiveCwd,
+        configuredSessionDir ?? defaultSessionDir,
+        { parentSession },
+      );
 
   type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
   // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
@@ -958,12 +966,11 @@ export async function runAgent(
   // ones pi would not declare. They stay registered and re-activatable: codemode and
   // `tool_search` reach them, and the scope gate above still applies.
   const undeclared = allowedTools.filter((name) => !declaredTools.includes(name));
-  const active = session.getActiveToolNames();
-  const keep = active.filter((name) => !undeclared.includes(name));
-  // Only when something is actually left over: an agent that names no
-  // `codemode`/`deferred` tool has nothing to take back, and `setActiveToolsByName`
-  // rebuilds the system prompt.
-  if (keep.length !== active.length) session.setActiveToolsByName(keep);
+  if (undeclared.length > 0) {
+    const keep = new Set(session.getActiveToolNames());
+    for (const name of undeclared) keep.delete(name);
+    session.setActiveToolsByName([...keep]);
+  }
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(

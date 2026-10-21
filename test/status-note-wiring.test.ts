@@ -42,7 +42,7 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background turn-limit abort → get_subagent_result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "partial work so far",
-      session: { dispose: vi.fn() } as any,
+      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
       aborted: true, // hard turn-limit abort
       steered: false,
     });

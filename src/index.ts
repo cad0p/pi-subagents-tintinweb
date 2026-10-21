@@ -2126,7 +2126,7 @@ Guidelines for choosing settings:
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
 - Set isolated: true if the agent should NOT have access to MCP servers or other extensions
-- Set output_transcript: false to skip writing this agent's transcript; this alone doesn't keep the run off disk (persist_session, isolation: worktree commits, and memory still write) — set those too if that's the goal
+- Set output_transcript: false to skip writing this agent's transcript; it doesn't keep the run off disk — every run writes a pi session file while it runs (kept after it settles only with persist_session: true), and isolation: worktree commits and memory still write
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
 Write the file using the write tool. Only write the file, nothing else.`;

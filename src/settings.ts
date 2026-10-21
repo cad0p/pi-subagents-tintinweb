@@ -132,8 +132,8 @@ export interface SubagentsSettings {
    * project (e.g. a repo that shouldn't leave run transcripts on disk for backup
    * or DLP tooling to ingest). A custom agent's `output_transcript` frontmatter
    * overrides this per agent. This governs only the transcript — it does NOT
-   * affect the persisted pi session (`persist_session`), worktree commits
-   * (`isolation: worktree`), or memory files.
+   * affect whether the run's pi session file is retained (`persist_session`),
+   * worktree commits (`isolation: worktree`), or memory files.
    */
   outputTranscript?: boolean;
   /**
