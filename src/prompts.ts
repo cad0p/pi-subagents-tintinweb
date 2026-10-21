@@ -161,11 +161,24 @@ export function retargetToolsSection(
     if (snippet) lines.push(`- ${name}: ${snippet}`);
   }
 
-  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>\n\n` : "";
+  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>` : "";
 
-  if (!match) return block ? block + prompt : prompt;
+  if (!match) {
+    // A prompt that already mentions `<tools` in a shape this parser does not
+    // recognise — same-line content, an attribute, a fenced XML example — must
+    // not gain a second, contradictory block. Leaving it alone under-advertises;
+    // duplicating it advertises two different lists.
+    if (prompt.includes("<tools")) return prompt;
+    // Append rather than prepend. Append mode exists so the parent prompt stays a
+    // byte-identical prefix of the child's (KV-cache reuse, see buildAgentPrompt),
+    // and a leading block would break that for exactly the parents that have no
+    // block to replace. It also keeps `<active_agent>` first in replace mode.
+    return block ? `${prompt}\n\n${block}` : prompt;
+  }
 
-  return prompt.slice(0, match.index) + block + prompt.slice(match.index + match[0].length);
+  // The match consumed the separator that followed `</tools>`; put one back when
+  // a block is written, and none when the block is stripped.
+  return prompt.slice(0, match.index) + (block ? `${block}\n\n` : "") + prompt.slice(match.index + match[0].length);
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

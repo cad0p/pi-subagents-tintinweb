@@ -471,18 +471,32 @@ describe("retargetToolsSection", () => {
     expect(prompt).toContain("You are an expert coding assistant.\n\n<rules>");
   });
 
-  it("prepends a block to a prompt that has none", () => {
+  it("appends a block to a prompt that has none", () => {
     // A parent running a custom system prompt has no block, and the child's prompt
-    // is a custom prompt to pi, so pi will not add one either.
+    // is a custom prompt to pi, so pi will not add one either. Appended, not
+    // prepended: the inherited prompt must stay a byte-identical prefix for KV
+    // cache reuse.
     const prompt = "Replace-mode prompt.\n\n# Environment\nWorking directory: /workspace";
     const out = retargetToolsSection(prompt, ["read"], { read: "Read a file" });
-    expect(out.startsWith("<tools>\n- read: Read a file\n\n")).toBe(true);
-    expect(out.endsWith(prompt)).toBe(true);
+    expect(out.startsWith(prompt)).toBe(true);
+    expect(out).toContain("<tools>\n- read: Read a file\n\nIn addition to the tools above");
+    expect(out.endsWith("</tools>")).toBe(true);
   });
 
-  it("prepends nothing when the child declares no tools and there is no block", () => {
+  it("adds nothing when the child declares no tools and there is no block", () => {
     const prompt = "Replace-mode prompt.";
     expect(retargetToolsSection(prompt, [])).toBe(prompt);
+  });
+
+  it("does not add a second block when one is present in a shape it cannot parse", () => {
+    // Same-line content, an attribute, a fenced example: appending here would give
+    // the child two contradictory lists.
+    for (const prompt of [
+      "Intro.\n\n<tools>- read: old</tools>\n\n<rules>\n- x\n</rules>",
+      'Intro.\n\n<tools name="x">\n- read: old\n</tools>\n\n<rules>\n- x\n</rules>',
+    ]) {
+      expect(retargetToolsSection(prompt, ["read"], { read: "Read a file" })).toBe(prompt);
+    }
   });
 
   it("handles a CRLF block", () => {

@@ -204,6 +204,20 @@ export function parseExtSelectors(entries: string[]): {
   return { extNames, narrowing };
 }
 
+/**
+ * Mirror of pi's `createToolNameMatcher` (mcp-servers.js): exact names plus `*`
+ * globs. `disallowed_tools` is handed to pi verbatim, so pi removes a wildcard
+ * match from the registry — this side has to agree, or the prompt advertises a
+ * tool pi already dropped and the scope gate would let it through.
+ */
+function toolNameMatcher(entries: readonly string[]): (name: string) => boolean {
+  const exact = new Set(entries.filter((entry) => !entry.includes("*")));
+  const patterns = entries
+    .filter((entry) => entry.includes("*"))
+    .map((entry) => new RegExp(`^${entry.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`));
+  return (name) => exact.has(name) || patterns.some((pattern) => pattern.test(name));
+}
+
 /** Set once the child's tool scope is known; until then the gate admits everything. */
 type NestedCallGate = { allows?: (name: string) => boolean };
 
@@ -609,8 +623,8 @@ export async function runAgent(
     options.isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
+  const disallowed = agentConfig?.disallowedTools?.length
+    ? toolNameMatcher(agentConfig.disallowedTools)
     : undefined;
 
   const extensionsSpec = Array.isArray(extensions)
@@ -718,7 +732,7 @@ export async function runAgent(
   // own scope.
   const scopedToolNames = (tools: Map<string, ToolDefinition>): string[] =>
     [...toolNames, ...tools.keys()].filter((t) => {
-      if (EXCLUDED_TOOL_NAMES.includes(t) || disallowedSet?.has(t)) return false;
+      if (EXCLUDED_TOOL_NAMES.includes(t) || disallowed?.(t)) return false;
       // Built-ins carry no definition here and are always declared; the rule is
       // about extension tools pi would leave dormant.
       if (tools.get(t)?.defaultActive !== false) return true;
@@ -892,7 +906,7 @@ export async function runAgent(
   // even when the agent never selected it.
   nestedCallGate.allows = (name) =>
     !EXCLUDED_TOOL_NAMES.includes(name) &&
-    !disallowedSet?.has(name) &&
+    !disallowed?.(name) &&
     (toolNames.includes(name) || scopedExtensionTools(loader.getExtensions()).has(name));
 
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
@@ -923,7 +937,7 @@ export async function runAgent(
     // entry would otherwise stay registered, listable by `tool_search`, and merely
     // blocked at call time by the scope gate. Excluding it here removes it from the
     // registry instead.
-    ...(disallowedSet && disallowedSet.size > 0 && { excludeTools: [...disallowedSet] }),
+    ...(disallowed && { excludeTools: agentConfig?.disallowedTools }),
     resourceLoader: loader,
   };
   if (thinkingLevel) {

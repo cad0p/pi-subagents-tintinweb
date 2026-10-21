@@ -176,6 +176,11 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     return active;
   }
 
+  /** Names in the last spawned child's tool registry (not just the active set). */
+  function registeredTools(): string[] {
+    return lastSession?.getAllTools().map((t) => t.name) ?? [];
+  }
+
   /** The prompt of the last spawned child, set by `activeToolsFor`. */
   let lastPrompt = "";
   /** The session of the last spawned child, set by `activeToolsFor`. */
@@ -272,21 +277,36 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
   });
 
   it("removes a disallowed MCP tool from the registry, not just from the allowlist", async () => {
-    // pi keeps MCP tools registered even when the allowlist does not name them
-    // (it only filters MCP when the allowlist mentions `mcp__`), so filtering
-    // names alone would leave a denylisted `mcp__` tool registered and listable
-    // by `tool_search`. The denylist reaches pi as `excludedToolNames`.
-    const active = await activeToolsFor({
-      extensions: [EXPOSURE_FIXTURE],
-      disallowedTools: ["mcp__probe__direct"],
-    });
-    expect(active).not.toContain("mcp__probe__direct");
-    expect(active).toContain("exposure_direct"); // the rest of the fixture is untouched
-    // Registry membership is the assertion that matters: the allowlist already
-    // kept it off the active list, so only `excludeTools` (pi's SDK option) can
-    // take it out of `tool_search`'s reach.
-    const registered = lastSession?.getAllTools().map((t) => t.name) ?? [];
-    expect(registered).not.toContain("mcp__probe__direct");
+    // Discriminating setup: narrowing to `exposure_direct` keeps every `mcp__`
+    // name out of the child's allowlist, so pi's `_allowlistFiltersMcp` is false
+    // and only `excludeTools` can remove the tool. With the option misnamed, the
+    // control and the denylisted run register exactly the same set.
+    const canon = extensionCanonicalName(EXPOSURE_FIXTURE);
+    const cfg = { extensions: [EXPOSURE_FIXTURE], extSelectors: [`ext:${canon}/exposure_direct`] };
+
+    await activeToolsFor(cfg);
+    expect(registeredTools()).toContain("mcp__probe__direct"); // positive control
+    expect(registeredTools()).toContain("exposure_direct");
+
+    await activeToolsFor({ ...cfg, disallowedTools: ["mcp__probe__direct"] });
+    expect(registeredTools()).not.toContain("mcp__probe__direct");
+    expect(registeredTools()).toContain("exposure_direct");
+  });
+
+  it("matches a wildcard denylist the way pi does, so the prompt agrees with the registry", async () => {
+    // pi's matcher treats `*` as a glob; this side must agree or the prompt
+    // advertises a tool pi already removed from the registry.
+    await activeToolsFor(
+      {
+        promptMode: "append",
+        systemPrompt: "",
+        extensions: [EXPOSURE_FIXTURE],
+        disallowedTools: ["mcp__probe__*"],
+      },
+      { parentPrompt: PARENT_PROMPT },
+    );
+    expect(registeredTools()).not.toContain("mcp__probe__direct");
+    expect(advertisedTools(lastPrompt)).not.toContain("mcp__probe__direct");
   });
 
   it("loads pi's built-in extensions in the child, as the main session does", async () => {
