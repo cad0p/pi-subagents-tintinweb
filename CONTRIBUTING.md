@@ -64,10 +64,11 @@ Other guidelines:
 - Match the surrounding code style (enforced by biome).
 - Do not edit `CHANGELOG.md`. Changelog entries are added by the maintainer.
 - Update the README when you add or change user-facing behavior.
-- If your change adds an upstream feature, or removes something listed there,
-  update [`docs/fork-differences.md`](docs/fork-differences.md) in the same PR.
-  That page is what keeps the next upstream merge from re-introducing a decision
-  we already made.
+- If your change adds an upstream feature, removes something listed there, or
+  establishes a new fork-only guarantee, update
+  [`docs/fork-differences.md`](docs/fork-differences.md) in the same PR. That page
+  is what keeps the next upstream merge from re-introducing a decision we already
+  made.
 
 ## Questions?
 
