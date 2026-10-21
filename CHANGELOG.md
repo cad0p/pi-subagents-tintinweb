@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - Read the final turn's failure from its run events (closes #58)
 - *(agent-runner)* Load pi's built-in extensions in subagents, scoped and trusted (closes #61) ([#63](https://github.com/cad0p/pi-subagents-tintinweb/pull/63))
 - FallbackSubagent, isolation off, strictAgentFiles, unknown frontmatter keys (closes #62) ([#64](https://github.com/cad0p/pi-subagents-tintinweb/pull/64))
+- *(nested)* Stop warning on the two nesting keys (closes #81) ([#82](https://github.com/cad0p/pi-subagents-tintinweb/pull/82))
 
 ### 🚜 Refactor
 
