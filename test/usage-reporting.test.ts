@@ -227,11 +227,16 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(textOf(result)).toContain("Agent started in background");
     });
 
-    it("defaults to off", async () => {
+    it("defaults to on", async () => {
+      // A default is only a default if it is pinned: this file boots with an
+      // empty settings object, so nothing but the code default can be in play.
       const { tools } = boot({});
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
 
-      expect(await spawn(tools)).not.toHaveProperty("usage");
+      const result = await spawn(tools);
+
+      expect(result.usage?.cost.total).toBe(0.0123);
+      expect(result.usage?.totalTokens).toBe(160);
     });
 
     it("reports an unpriced model's tokens with a zero cost rather than dropping them", async () => {

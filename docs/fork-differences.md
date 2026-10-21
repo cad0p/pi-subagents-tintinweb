@@ -22,6 +22,8 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Usage and cost surfaces.** `reportUsage`, `showCost` and `showModel`, plus the `subagents:usage` / `subagents:disposed` events and `subagents:rpc:consume` / `rpc:steer`, are ports — but the *set* of surfaces is this fork's: markdown notifications instead of an XML envelope, and a per-agent nudge instead of a grouped one, so there is no batch cost total.
 
+**`reportUsage` and `showCost` default to on.** Upstream ships both off. A session total that omits the delegated work is wrong about what the session cost, and having to find two toggles to stop being wrong is the wrong default — especially because `/agents → Settings` writes project scope only, so turning them on in one repo follows you nowhere. Both remain settings: `reportUsage` still moves numbers a statusline may already be reading, which is the one legitimate reason to leave it off. `showModel` stays off in both, because its cost is a narrow terminal row, not a wrong number.
+
 ## Deliberately not ported
 
 Each of these exists upstream and is not coming here without a new decision.

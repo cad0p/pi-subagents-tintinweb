@@ -184,17 +184,18 @@ export interface SubagentsSettings {
   fallbackSubagent?: string;
   /**
    * Whether this extension's tool results carry a `usage` field, so subagent
-   * spend reaches the parent session's own accounting. Defaults to `false`.
+   * spend reaches the parent session's own accounting. Defaults to `true`.
    *
-   * Subagents run in their own pi sessions, so by default the parent's footer,
+   * Subagents run in their own pi sessions, so without this the parent's footer,
    * statusline and `/cost` show only what the main model spent — a session that
    * delegated most of its work reads as nearly free. Pi folds
    * `toolResult.usage` into `getSessionStats()`, so attaching it makes those
    * surfaces count subagents too, under `/cost`'s "Tools/summaries" bucket.
    *
-   * Off by default because it changes numbers the user may already be tracking
-   * (a statusline reading session cost will step up), not because the numbers
-   * are wrong.
+   * On by default because the alternative is a total that is quietly wrong about
+   * what the session cost; upstream defaults it off, this fork does not. The
+   * honest caveat stands: turning it on makes numbers move that a statusline may
+   * already have been tracking, which is why it remains a setting.
    *
    * Three properties of what gets reported:
    *   - `cacheRead` IS included, because pi counts the parent's own messages
@@ -210,7 +211,7 @@ export interface SubagentsSettings {
   /**
    * Whether the subagent surfaces show an estimated dollar cost next to their
    * token counts (widget, FleetView, conversation viewer, `get_subagent_result`,
-   * completion notifications). Defaults to `false`. Applied live.
+   * completion notifications). Defaults to `true`. Applied live.
    *
    * Rendered as `~$0.0042` — the tilde marks it as pi's reported estimate rather
    * than a billed figure, and it is omitted entirely when the model has no
@@ -272,6 +273,14 @@ const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
 export const FAILURE_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
+
+/**
+ * Shipped default for `showCost`. Named because the report renderer keeps its
+ * own copy of the flag (see `result-report.ts`): a file that omits the key
+ * applies nothing, so both copies must start from the same value or the widget
+ * and the result report disagree about showing a cost.
+ */
+export const DEFAULT_SHOW_COST = true;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
