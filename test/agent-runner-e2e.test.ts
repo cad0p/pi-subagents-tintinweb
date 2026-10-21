@@ -86,9 +86,13 @@ function advertisedTools(prompt: string): string[] {
   });
 }
 
-/** Minimal `pi` stub — `detectEnv` only needs `exec` (returns non-git). */
-function makePi() {
-  return { exec: async () => ({ code: 1, stdout: "", stderr: "" }) } as any;
+/**
+ * Minimal `pi` stub — `detectEnv` only needs `exec` (returns non-git).
+ * `getActiveTools` is the parent session's declared set, which decides whether a
+ * `defaultActive: false` tool (codemode, tool_search) is activated in the child.
+ */
+function makePi(activeTools: string[] = []) {
+  return { exec: async () => ({ code: 1, stdout: "", stderr: "" }), getActiveTools: () => activeTools } as any;
 }
 
 describe("agent-runner end-to-end (real pi-mono session + real extension)", () => {
@@ -112,7 +116,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
    */
   async function activeToolsFor(
     cfg: Partial<AgentConfig>,
-    runOpts: { parentPrompt?: string } = {},
+    runOpts: { parentPrompt?: string; parentActiveTools?: string[] } = {},
   ): Promise<string[]> {
     registerAgents(
       new Map([
@@ -156,7 +160,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     lastSession = undefined;
     try {
       await runAgent(ctx, "e2e", "go", {
-        pi: makePi(),
+        pi: makePi(runOpts.parentActiveTools),
         model,
         onSessionCreated: (s) => {
           active = s.getActiveToolNames();
@@ -253,16 +257,38 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(active).toContain("exposure_direct");
     expect(active).not.toContain("mcp__probe__codemode_only");
     expect(active).not.toContain("mcp__probe__deferred");
-    // `defaultActive: false` is activated by naming it, as `--tools` does; the
-    // child's allowlist names every in-scope tool, so it stays declared.
-    expect(active).toContain("exposure_off_by_default");
+    // `defaultActive: false` is dormant in the parent, so it is dormant here too:
+    // loading an extension is not consent to activate everything it registers.
+    expect(active).not.toContain("exposure_off_by_default");
     for (const b of BUILTINS) expect(active).toContain(b);
+  });
+
+  it("activates a dormant tool the parent session has active", async () => {
+    const active = await activeToolsFor(
+      { extensions: [EXPOSURE_FIXTURE] },
+      { parentActiveTools: ["exposure_off_by_default"] },
+    );
+    expect(active).toContain("exposure_off_by_default");
   });
 
   it("loads pi's built-in extensions in the child, as the main session does", async () => {
     // The loader is built by the runner, not pi's CLI, so without the forwarded
     // factories `builtin:codemode`/`builtin:tool-search` resolve to nothing.
-    const active = await activeToolsFor({ extensions: true });
+    await activeToolsFor({ extensions: true });
+    expect(loadedBuiltinPaths()).toEqual(
+      expect.arrayContaining(["builtin:codemode", "builtin:tool-search", "builtin:mcp"]),
+    );
+  });
+
+  it("declares codemode and tool_search only when the parent session has them active", async () => {
+    const dormant = await activeToolsFor({ extensions: true });
+    expect(dormant).not.toContain("codemode");
+    expect(dormant).not.toContain("tool_search");
+
+    const active = await activeToolsFor(
+      { extensions: true },
+      { parentActiveTools: ["codemode", "tool_search"] },
+    );
     expect(active).toContain("codemode");
     expect(active).toContain("tool_search");
   });
@@ -312,16 +338,27 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       expect(lastPrompt).toContain("<rules>");
     });
 
-    it("advertises codemode and tool_search once the built-ins load in the child", async () => {
+    it("advertises codemode and tool_search when the parent session has them active", async () => {
+      await activeToolsFor(
+        { ...appendAgent, extensions: true },
+        { parentPrompt: PARENT_PROMPT, parentActiveTools: ["codemode", "tool_search"] },
+      );
+      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "codemode", "tool_search"]);
+    });
+
+    it("leaves a dormant built-in out of the block even though it loaded", async () => {
+      // The child loads builtin:codemode, but the parent never activated it — so
+      // advertising it would be the same lie the retarget exists to remove.
       await activeToolsFor({ ...appendAgent, extensions: true }, { parentPrompt: PARENT_PROMPT });
-      const advertised = advertisedTools(lastPrompt);
-      expect(advertised).toEqual([...BUILTINS, "codemode", "tool_search"]);
+      expect(advertisedTools(lastPrompt)).toEqual(BUILTINS);
     });
 
     it("advertises a loaded extension's tool with its own snippet", async () => {
       // The inherited block cannot describe a tool the parent never had.
+      // `exposure_off_by_default` is dormant and the parent has it off, so it is
+      // loaded but not declared — see the dormancy tests above.
       await activeToolsFor({ ...appendAgent, extensions: [EXPOSURE_FIXTURE] }, { parentPrompt: PARENT_PROMPT });
-      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "exposure_direct", "exposure_off_by_default"]);
+      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "exposure_direct"]);
     });
   });
 });

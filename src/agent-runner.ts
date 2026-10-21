@@ -677,6 +677,18 @@ export async function runAgent(
   // Opt-in flip: when any `ext:` selector is present, extension tools become an
   // explicit allowlist — a loaded extension not named by a selector contributes
   // no tools (its handlers still ran), and `ext:foo/bar` narrows `foo` to `bar`.
+  // Tools the parent session currently declares. A `defaultActive: false` tool —
+  // pi's `codemode` and `tool_search`, and anything an extension registers dormant —
+  // is activated in the child only when the parent has it active or this agent names
+  // its extension. Otherwise every subagent would carry codemode's tool spec, and the
+  // capability that comes with it, for a user who never turned it on: "as in the main
+  // session" has to mean the main session's actual tool set, not every tool that
+  // happens to be loaded. Read per run: the parent's set changes with `--tools` and
+  // with whatever `tool_search` activated.
+  const parentActiveTools = new Set(options.pi.getActiveTools?.() ?? []);
+  // Tools an `ext:` selector names explicitly. Naming an extension is the agent
+  // saying it wants its tools, which is the same consent `--tools` gives pi.
+  const explicitlySelected = new Set<string>();
   const scopedExtensionTools = (loaded: LoadExtensionsResult): Map<string, ToolDefinition> => {
     const tools = new Map<string, ToolDefinition>();
     if (noExtensions) return tools;
@@ -690,6 +702,9 @@ export async function runAgent(
       for (const [toolName, tool] of extension.tools) {
         if (narrowed && !narrowed.has(toolName)) continue;
         tools.set(toolName, tool.definition);
+        // Every tool reaching this line belongs to an extension the agent named,
+        // so it is selected on purpose rather than merely loaded.
+        if (optInActive) explicitlySelected.add(toolName);
       }
     }
     return tools;
@@ -702,9 +717,13 @@ export async function runAgent(
   // `codemode` and `tool_search` among them), which is what a subagent wants for its
   // own scope.
   const scopedToolNames = (tools: Map<string, ToolDefinition>): string[] =>
-    [...toolNames, ...tools.keys()].filter(
-      (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
-    );
+    [...toolNames, ...tools.keys()].filter((t) => {
+      if (EXCLUDED_TOOL_NAMES.includes(t) || disallowedSet?.has(t)) return false;
+      // Built-ins carry no definition here and are always declared; the rule is
+      // about extension tools pi would leave dormant.
+      if (tools.get(t)?.defaultActive !== false) return true;
+      return explicitlySelected.has(t) || parentActiveTools.has(t);
+    });
 
   // Names pi would DECLARE to the model: `direct`/`model-only` exposure only. A
   // `codemode`/`deferred` tool (pi's MCP server tools by default) stays reachable
