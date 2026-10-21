@@ -2,6 +2,8 @@
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Spawn them as background runs, steer them mid-run, resume completed sessions, and define your own custom agent types.
 
+> **This is a fork of [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents).** It tracks upstream but is not a mirror: some upstream features are deliberately not ported (workflows, `@handle` mentions, package-shipped agents, foreground mode, join modes), and some behaviour here has no upstream counterpart (background-only spawning, the `checkpoint` tool, the session-retention model, parent-mirrored built-in activation). Before filing a difference as a bug, check [`docs/fork-differences.md`](docs/fork-differences.md) — it lists both directions with the reason for each.
+
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
 
