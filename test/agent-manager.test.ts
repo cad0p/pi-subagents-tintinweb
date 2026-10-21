@@ -1205,21 +1205,27 @@ describe("AgentManager — session file retention", () => {
     }
   });
 
-  it("dispose() keeps the file for default and persist_session agents alike", async () => {
+  it("dispose() keeps an in-flight run's file and deletes a settled one's", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     registerKeeper();
     manager = new AgentManager();
-    const def = sessionWithFile();
-    const kept = sessionWithFile();
-    // Both runs stay in flight — the crash-recovery case dispose() must not undo.
-    spawnPending("general-purpose", def.session);
-    spawnPending("keeper", kept.session);
+    const inflight = sessionWithFile();
+    const settled = sessionWithFile();
+    // In flight — the crash-recovery case dispose() must not undo.
+    spawnPending("general-purpose", inflight.session);
+    // Settled inside the 10-minute grace window, so the record is still in the
+    // map and this is the only place its file would ever be deleted: the next
+    // process's manager starts empty.
+    const finished = spawnPending("general-purpose", settled.session);
+    finished.resolve(done(settled.session));
+    await manager.getRecord(finished.id)!.promise;
+    expect(existsSync(settled.file)).toBe(true);
 
     manager.dispose();
 
     expect(manager.listAgents()).toEqual([]);
-    expect(existsSync(def.file)).toBe(true);
-    expect(existsSync(kept.file)).toBe(true);
+    expect(existsSync(inflight.file)).toBe(true);
+    expect(existsSync(settled.file)).toBe(false);
   });
 
   it("a resumed run keeps the same session file and the same retention decision", async () => {
@@ -1238,7 +1244,7 @@ describe("AgentManager — session file retention", () => {
     vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
     await manager.resume(id, "more")!.promise;
 
-    expect(record.sessionFile).toBe(file);
+    expect(existsSync(file)).toBe(true);
     manager.clearCompleted();
     expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
   });

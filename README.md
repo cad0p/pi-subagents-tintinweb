@@ -380,10 +380,10 @@ Retention is decided when the run settles, not when the session is created:
 
 | `persist_session` | Behavior |
 |---|---|
-| `false` (default) | The session file is deleted when the agent record is removed: the 10-minute eviction after completion, or `clearCompleted()` on session switch. Until then the completed record can still `resume` the agent, which is why the file outlives the run itself. |
+| `false` (default) | The session file is deleted when the agent record is removed: the 10-minute eviction after completion, `clearCompleted()` on session switch, or a clean shutdown once the run has settled. Until then the completed record can still `resume` the agent, which is why the file outlives the run itself. |
 | `true` | The session file is kept indefinitely. |
 
-Shutdown never deletes session files: a run killed mid-flight keeps its transcript for recovery. `session_dir:` picks the directory the file is written to. On a host pi started with `--no-session`, subagent sessions are in-memory and explicitly not recoverable. A resumed agent keeps the same session file and the same retention decision as its first run.
+Shutdown keeps an in-flight run's file — a run killed mid-flight is the case this exists for — and deletes a settled one's, because the record map dies with the process and nothing would ever revisit it. `session_dir:` picks the directory the file is written to. On a host session with no file of its own (`--no-session`, or an SDK host using an in-memory session) subagent sessions are in-memory too and explicitly not recoverable. A resumed agent keeps the same session file and the same retention decision as its first run.
 
 > **Migration — `persist_session` changed meaning.** It used to mean "persist this subagent at all" (without it, the run used an in-memory session and left nothing behind). It now means "retain this subagent's session file after it settles". An agent with `persist_session: false` — or no `persist_session` at all — now writes a session file *during* the run; that file is deleted when the agent record is removed, so completed runs still leave nothing behind unless pi crashes mid-run (which is the point). Agents with `persist_session: true` behave as before, plus the parent link.
 

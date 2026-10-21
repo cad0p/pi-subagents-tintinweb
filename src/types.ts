@@ -92,12 +92,6 @@ export interface AgentRecord {
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;
-  /** Path of the child's pi session file, captured when the session is created.
-   *  Retention is decided from it when the record is removed: a
-   *  `persist_session` agent keeps the file, every other agent's is deleted
-   *  there (see `AgentManager.removeRecord`). Undefined for an in-memory child
-   *  session (host `--no-session`). */
-  sessionFile?: string;
   /** Resolved `persist_session` for this run, captured at spawn so the removal
    *  path never re-resolves the agent registry. A resume reuses the record and
    *  therefore its first run's decision. */

@@ -914,17 +914,20 @@ export async function runAgent(
   // A subagent session is ALWAYS written to disk while it runs: a crashed or
   // killed run must leave a transcript pi's /resume can recover. Retention
   // after the run settles is the manager's decision (`persist_session`), never a
-  // creation-time one. The single exception is pi's own `--no-session`: an
-  // ephemeral host leaves nothing behind, and those runs are explicitly not
-  // recoverable.
-  // `parentSession` nests the child under its spawner in pi's /resume.
+  // creation-time one.
+  //
+  // The exception is a host session that is itself in-memory: pi's own
+  // `--no-session`, or any SDK host that built `SessionManager.inMemory`. Its
+  // absence of a session file is the exact signal — an argv scan would miss the
+  // SDK host and let an ephemeral session leave children on disk.
+  // The same path is `parentSession`, which nests the child under its spawner.
   const parentSession = ctx.sessionManager.getSessionFile();
-  const sessionManager = process.argv.includes("--no-session")
+  const sessionManager = parentSession === undefined
     ? SessionManager.inMemory(effectiveCwd)
     : SessionManager.create(
         effectiveCwd,
         configuredSessionDir ?? defaultSessionDir,
-        parentSession ? { parentSession } : undefined,
+        { parentSession },
       );
 
   type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
