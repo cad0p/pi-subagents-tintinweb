@@ -743,10 +743,13 @@ export default function (pi: ExtensionAPI) {
           // caller that already showed the model this result does not pay for a
           // second copy of it.
           consumeResult: (id) => {
-            // Ownership and settledness are the RPC layer's job (assertOwned);
-            // re-checking here only produced a second, differently worded answer.
+            // Ownership is the RPC layer's job (assertOwned); settledness is not —
+            // it never looks at status. Consuming a running agent would set
+            // resultConsumed and suppress the completion notification it is still
+            // owed, so this stays the same gate the local get_subagent_result has.
             const record = manager.getRecord(id);
             if (!record) return false;
+            if (record.status === "running" || record.status === "queued") return false;
             record.resultConsumed = true;
             cancelNudge(record.id);
             return true;
@@ -769,7 +772,7 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async (event: { reason: string }) => {
+  pi.on("session_shutdown", async (event) => {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();

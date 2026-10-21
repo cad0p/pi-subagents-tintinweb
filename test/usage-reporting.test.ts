@@ -404,7 +404,7 @@ describe("reporting subagent usage back to the parent session", () => {
       });
 
       await spawn(tools);
-      await lifecycle.get("session_shutdown")?.({}, spawnCtx(cwd));
+      await lifecycle.get("session_shutdown")?.({ reason: "quit" }, spawnCtx(cwd));
 
       const names = pi.events.emit.mock.calls.map((c) => c[0]);
       const usageIdx = pi.events.emit.mock.calls.findIndex(
@@ -413,6 +413,11 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(usageIdx).toBeGreaterThan(-1);
       expect(usageIdx).toBeLessThan(names.lastIndexOf("subagents:disposed"));
       expect(names.at(-1)).toBe("subagents:disposed");
+      // The reason travels with it: pi emits session_shutdown for resume, reload,
+      // /new and /fork too, where the process lives on and a ledger must not
+      // treat this as final.
+      const disposed = pi.events.emit.mock.calls.find((c) => c[0] === "subagents:disposed");
+      expect(disposed?.[1]).toEqual({ reason: "quit" });
     });
   });
 });
