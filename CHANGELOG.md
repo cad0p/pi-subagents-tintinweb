@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - *(ui)* Render parent-to-child instructions in tool rows (closes #29)
 - Inherit parent model scope in subagent sessions (closes #36)
 - *(sessions)* Write every subagent session while it runs, keep it only with persist_session (closes #65) ([#66](https://github.com/cad0p/pi-subagents-tintinweb/pull/66))
+- *(nested)* Opt-in nested subagent delegation, depth-capped and ownership-scoped (closes #67) ([#69](https://github.com/cad0p/pi-subagents-tintinweb/pull/69))
 
 ### 🐛 Bug Fixes
 
