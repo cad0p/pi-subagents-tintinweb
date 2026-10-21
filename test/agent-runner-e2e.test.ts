@@ -309,7 +309,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(advertisedTools(lastPrompt)).not.toContain("mcp__probe__direct");
     // Positive controls: an over-matching denylist empties the allowlist and an
     // under-matching one leaves the tool registered, so without these the two
-    // assertions above also pass for a matcher that denies everything or nothing.
+    // assertions above also pass for a matcher that denies everything.
     expect(registeredTools()).toContain("exposure_direct");
     expect(advertisedTools(lastPrompt)).toContain("exposure_direct");
   });

@@ -676,7 +676,8 @@ export async function runAgent(
   //
   // Not `projectTrusted: false` on the second manager: pi skips the *project* scope
   // entirely when it is false (`loadFromStorage`), which would drop the parent
-  // project's `subagents.json` and extension config from the child. The flag has to
+  // project's pi settings and extension config from the child (`subagents.json` is
+  // read straight from disk and would survive either way). The flag has to
   // stay true to load them and be answered false to describe this session's cwd, and
   // `isProjectTrusted()` is the only seam pi exposes for the two questions.
   const sessionSettingsManager =
@@ -959,9 +960,9 @@ export async function runAgent(
   const undeclared = allowedTools.filter((name) => !declaredTools.includes(name));
   const active = session.getActiveToolNames();
   const keep = active.filter((name) => !undeclared.includes(name));
-  // Only when something is actually left over: pi never activates a `codemode`/
-  // `deferred` tool, so the usual case is a no-op and `setActiveToolsByName` would
-  // rebuild the system prompt on every spawn that loads MCP for nothing.
+  // Only when something is actually left over: an agent that names no
+  // `codemode`/`deferred` tool has nothing to take back, and `setActiveToolsByName`
+  // rebuilds the system prompt.
   if (keep.length !== active.length) session.setActiveToolsByName(keep);
 
   const baseSessionName = agentConfig?.name ?? type;
