@@ -10,10 +10,16 @@ import {
   getToolNamesForType,
   getUserAgentNames,
   isDefaultsDisabled,
+  isFallbackResolvableIn,
   isValidType,
+  NO_FALLBACK,
   registerAgents,
+  resolveEnabledTypeIn,
+  resolveSpawnType,
+  resolveSpawnTypeIn,
   resolveType,
   setDefaultsDisabled,
+  setFallbackSubagent,
 } from "../src/agent-types.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
@@ -369,6 +375,169 @@ describe("agent type registry", () => {
 
     it("has no duplicate entries", () => {
       expect(new Set(BUILTIN_TOOL_NAMES).size).toBe(BUILTIN_TOOL_NAMES.length);
+    });
+  });
+});
+
+describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
+  afterEach(() => {
+    setFallbackSubagent(undefined);
+    setDefaultsDisabled(false);
+    registerAgents(new Map());
+  });
+
+  const roster = () => new Map([
+    ["scout", makeAgentConfig({ name: "scout" })],
+    ["retired", makeAgentConfig({ name: "retired", enabled: false })],
+    ["router", makeAgentConfig({ name: "router" })],
+  ]);
+
+  it("resolves an enabled type case-insensitively", () => {
+    registerAgents(roster());
+    expect(resolveSpawnType("SCOUT")).toEqual({ ok: true, type: "scout" });
+  });
+
+  it("falls back to general-purpose when unset, reporting what was asked for", () => {
+    registerAgents(roster());
+    expect(resolveSpawnType("typoo")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "typoo",
+    });
+  });
+
+  it("rejects unknown types under `none` and names what is available", () => {
+    registerAgents(roster());
+    setFallbackSubagent(NO_FALLBACK);
+    const r = resolveSpawnType("typoo");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.message).toContain('Unknown or disabled agent type: "typoo"');
+    expect(r.message).toContain("scout");
+    expect(r.message).not.toContain("retired"); // disabled agents aren't offered
+  });
+
+  it("treats a disabled type as unresolvable, not as a valid name", () => {
+    // Regression: the old path used resolveType(), which ignores `enabled`, so a
+    // disabled agent dispatched with its own prompt and general-purpose's tools.
+    registerAgents(roster());
+    expect(resolveSpawnType("retired")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "retired",
+    });
+    setFallbackSubagent(NO_FALLBACK);
+    expect(resolveSpawnType("retired").ok).toBe(false);
+  });
+
+  it("refuses to guess between two types differing only by case", () => {
+    registerAgents(new Map([
+      ["Scout", makeAgentConfig({ name: "Scout" })],
+      ["scout", makeAgentConfig({ name: "scout" })],
+    ]));
+    // An exact match is still unambiguous...
+    expect(resolveSpawnType("scout")).toEqual({ ok: true, type: "scout" });
+    // ...but a differently-cased spelling matches both, so it must not pick one.
+    expect(resolveSpawnType("SCOUT")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "SCOUT",
+    });
+  });
+
+  it("routes unresolvable types to a named fallback agent", () => {
+    registerAgents(roster());
+    setFallbackSubagent("router");
+    expect(resolveSpawnType("typoo")).toEqual({
+      ok: true, type: "router", fellBackFrom: "typoo",
+    });
+  });
+
+  it("fails loudly when the configured fallback is itself unusable", () => {
+    // Explicit configuration that cannot work is a misconfiguration, not a
+    // second chance to guess — never a silent drop to general-purpose.
+    registerAgents(roster());
+    setFallbackSubagent("retired");
+    const r = resolveSpawnType("typoo");
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error("expected rejection");
+    expect(r.message).toContain("fallbackSubagent");
+  });
+
+  it("treats an unregistered explicit general-purpose like the unset default", () => {
+    // The settings row shows "general-purpose" for an unset fallback and cycles
+    // back to it, which materializes the value. With the default agents disabled
+    // that name is unregistered, and it must behave exactly like unset — otherwise
+    // the row's own default would brick every unresolvable dispatch.
+    setDefaultsDisabled(true);
+    try {
+      registerAgents(roster());
+      setFallbackSubagent("general-purpose");
+      expect(resolveSpawnType("typoo")).toEqual({
+        ok: true, type: "general-purpose", fellBackFrom: "typoo",
+      });
+    } finally {
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+    }
+  });
+
+  it("keeps a registered-but-disabled general-purpose an error", () => {
+    // Someone wrote that on purpose. Quietly running the all-tools tier is exactly
+    // what fallbackSubagent exists to prevent.
+    registerAgents(
+      new Map([["general-purpose", makeAgentConfig({ name: "general-purpose", enabled: false })]]),
+    );
+    setFallbackSubagent("general-purpose");
+    expect(resolveSpawnType("typoo").ok).toBe(false);
+  });
+
+  it("isFallbackResolvable agrees with what dispatch does with the configured value", () => {
+    // The settings row's verdict must be the resolver's, not a re-derivation: a
+    // disabled agent still claims its name, which an enabled-only list cannot see.
+    const registry = roster();
+    for (const value of ["scout", "SCOUT", "  scout  ", "retired", "typoo", "", "general-purpose"]) {
+      setFallbackSubagent(value);
+      expect(isFallbackResolvableIn(registry, value)).toBe(resolveSpawnTypeIn(registry, "typoo").ok);
+    }
+    setFallbackSubagent(undefined);
+  });
+
+  it("counts a disabled case-variant as claiming the name", () => {
+    // resolveUnambiguousKeyIn considers ALL keys, so an enabled "Explore" beside a
+    // disabled "explore" makes "EXPLORE" ambiguous — not a unique match.
+    const registry = new Map([
+      ["Explore", makeAgentConfig({ name: "Explore" })],
+      ["explore", makeAgentConfig({ name: "explore", enabled: false })],
+    ]);
+    expect(resolveEnabledTypeIn(registry, "EXPLORE")).toBeUndefined();
+    expect(isFallbackResolvableIn(registry, "EXPLORE")).toBe(false);
+    // An exact key still wins, as it does for dispatch.
+    expect(isFallbackResolvableIn(registry, "Explore")).toBe(true);
+  });
+
+  it("treats a missing type like any other unresolvable one", () => {
+    // Before this setting existed an empty type fell back like a typo; only
+    // opting in should change that, so the default must stay permissive.
+    registerAgents(roster());
+    for (const empty of ["", "   ", undefined]) {
+      expect(resolveSpawnType(empty)).toMatchObject({ ok: true, type: "general-purpose" });
+    }
+
+    setFallbackSubagent(NO_FALLBACK);
+    for (const empty of ["", "   ", undefined]) {
+      const r = resolveSpawnType(empty);
+      expect(r.ok).toBe(false);
+      if (r.ok) throw new Error("expected rejection");
+      expect(r.message).toContain("No agent type given");
+    }
+  });
+
+  it("resolves strictly regardless of the setting", () => {
+    // The strict seam never applies the fallback policy, so a caller that must
+    // not substitute (allowlist-scoped delegation, future callers) has one.
+    const registry = roster();
+    setFallbackSubagent("router");
+    expect(resolveEnabledTypeIn(registry, "typoo")).toBeUndefined();
+    expect(resolveEnabledTypeIn(registry, "retired")).toBeUndefined();
+    expect(resolveEnabledTypeIn(registry, " SCOUT ")).toBe("scout");
+    // ...while the policy layer still honors it.
+    expect(resolveSpawnTypeIn(registry, "typoo")).toEqual({
+      ok: true, type: "router", fellBackFrom: "typoo",
     });
   });
 });

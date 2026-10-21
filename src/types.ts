@@ -17,8 +17,18 @@ export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as con
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
 
-/** Isolation mode for agent execution. */
-export type IsolationMode = "worktree";
+/**
+ * Isolation mode for agent execution.
+ *
+ * `"off"` exists for the caller's benefit, not the runtime's: models that fill
+ * every optional parameter had no legal way to decline a single-value
+ * `isolation` field and kept spawning worktrees they had just reasoned their
+ * way out of. It is an input spelling only — `resolveAgentInvocationConfig`
+ * collapses it to `undefined`, so nothing downstream sees a value other than
+ * `"worktree"`. In an agent file it is a genuine veto, since agent config
+ * outranks tool-call params.
+ */
+export type IsolationMode = "worktree" | "off";
 
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {
@@ -64,7 +74,10 @@ export interface AgentConfig {
   isolated?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
   memory?: MemoryScope;
-  /** Isolation mode — "worktree" runs the agent in a temporary git worktree */
+  /**
+   * Isolation mode — "worktree" runs the agent in a temporary git worktree,
+   * "off" refuses one even when the caller asks (frontmatter outranks params).
+   */
   isolation?: IsolationMode;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
@@ -72,6 +85,8 @@ export interface AgentConfig {
   enabled?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+  /** Path of the .md it was loaded from. Unset for embedded defaults. */
+  sourcePath?: string;
 }
 
 /**

@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 
@@ -133,7 +133,7 @@ You are a security auditor.`);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     // `run_in_background` is no longer a recognized key — the parser reads
-    // frontmatter field-by-field and ignores it.
+    // frontmatter field-by-field and ignores it (with a load-time warning).
     expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
     expect(agent.isolated).toBe(true);
     expect(agent.systemPrompt).toBe("You are a security auditor.");
@@ -724,6 +724,268 @@ Bad isolation.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
+  });
+
+  // `isolation: off` is a veto, not a synonym for omitting the field: agent
+  // config outranks tool-call params, so it turns a caller's "worktree" back
+  // off. That is why it must survive parsing as "off" rather than undefined.
+  it("parses isolation: off", () => {
+    writeAgent("no-wt", `---
+description: Never worktree
+isolation: off
+---
+
+No worktree.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("no-wt")!.isolation).toBe("off");
+  });
+
+  // pi's frontmatter parser is not YAML 1.1, so bare `off`/`no` stay strings
+  // and only `false` becomes a boolean — accept the spellings an author is
+  // likely to reach for rather than silently dropping them.
+  it.each([
+    ["false", "isolation: false"],
+    ["none", "isolation: none"],
+    ["no", "isolation: no"],
+  ])("accepts %s as a spelling of off", (name, line) => {
+    writeAgent(`off-${name}`, `---
+${line}
+---
+
+Off.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get(`off-${name}`)!.isolation).toBe("off");
+  });
+
+  // A YAML error in one file used to escape loadFromDir and abort the whole
+  // extension load — pi exited 1 before the TUI.
+  it("skips a file with malformed frontmatter and still loads the others", () => {
+    // Unquoted `description` containing ": " — the shape Claude Code tolerates.
+    writeAgent("broken", `---
+name: broken
+description: Use this: that
+---
+
+Broken body.`);
+    writeAgent("good", `---
+description: Still loads
+---
+
+Good body.`);
+
+    const result = loadCustomAgents(tmpDir);
+
+    expect(result.has("broken")).toBe(false);
+    expect(result.get("good")?.description).toBe("Still loads");
+  });
+
+  it("names the offending file and the reason when skipping it", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("broken", "---\nname: broken\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain(join(tmpDir, ".pi", "agents", "broken.md"));
+      expect(message).toContain("Nested mappings are not allowed");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Skipping an override is not the same as skipping an agent: the name still
+  // resolves, to a different prompt, model and tool policy. Nothing downstream
+  // can flag that, because the Agent call succeeds.
+  it("warns when a skipped file was overriding an agent that stays resolvable", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeWorkspaceAgent("dup", "---\ndescription: Earlier definition\n---\n\nEarlier body.");
+      writeAgent("dup", "---\nname: dup\ndescription: Use this: that\n---\n\nBroken body.");
+
+      const result = loadCustomAgents(tmpDir);
+
+      expect(result.get("dup")?.description).toBe("Earlier definition");
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain(`Agent "dup" now loads from ${join(tmpDir, ".agents", "agents", "dup.md")} instead`);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // A disabled agent does not dispatch, so claiming the name "still resolves"
+  // to it would send the user chasing the wrong file.
+  it("does not claim a fallback when the shadowed definition is disabled", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeWorkspaceAgent("dup", "---\ndescription: Earlier definition\nenabled: false\n---\n\nEarlier body.");
+      writeAgent("dup", "---\nname: dup\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain("Skipping agent file");
+      expect(message).not.toContain("now loads from");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not claim a fallback when the skipped file overrode nothing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("lonely", "---\nname: lonely\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+
+      const message = warn.mock.calls.map(args => String(args[0])).join("\n");
+      expect(message).toContain("Skipping agent file");
+      expect(message).not.toContain("now loads from");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // strictAgentFiles: opt in to failing closed rather than running a substitute.
+  it("throws naming the file when strict, and skips it when not", () => {
+    writeAgent("broken", "---\nname: broken\ndescription: Use this: that\n---\n\nBroken.");
+    writeAgent("healthy", "---\ndescription: Fine\n---\n\nFine.");
+    const brokenPath = join(tmpDir, ".pi", "agents", "broken.md");
+
+    expect(() => loadCustomAgents(tmpDir, true)).toThrow(brokenPath);
+    expect(() => loadCustomAgents(tmpDir, true)).toThrow("Nested mappings are not allowed");
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = loadCustomAgents(tmpDir);
+      expect(result.has("broken")).toBe(false);
+      expect(result.has("healthy")).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The rule is "warn when it breaks, stay quiet while it stays broken".
+  // Suppressing an unchanged problem must not suppress it forever.
+  it("warns when a file breaks, not while it stays broken", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Two loads while broken: the second must be suppressed as unchanged.
+      writeAgent("flip", "---\nname: flip\ndescription: Use this: that\n---\n\nBroken.");
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      writeAgent("flip", "---\ndescription: Fixed\n---\n\nFixed.");
+      expect(loadCustomAgents(tmpDir).get("flip")?.description).toBe("Fixed");
+
+      // Same breakage again — a new problem, not the one already reported.
+      writeAgent("flip", "---\nname: flip\ndescription: Use this: that\n---\n\nBroken.");
+      loadCustomAgents(tmpDir);
+
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Agents reload on every Agent call, so repeating would scribble a live TUI.
+  it("warns once per message, not on every reload", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("noisy", "---\nname: noisy\ndescription: Use this: that\n---\n\nBroken body.");
+
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+      loadCustomAgents(tmpDir);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // Unknown keys are silent no-ops in a field-by-field parser: `run_in_background`
+  // and `join_mode` were removed from this fork, and `name:` was never an
+  // identity here. Warn once per file per key, through the same channel as a
+  // malformed file, instead of leaving the author to wonder why nothing happened.
+  it("warns once per unknown frontmatter key, naming the file", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const path = join(tmpDir, ".pi", "agents", "stale.md");
+      writeAgent("stale", `---
+description: Stale keys
+run_in_background: true
+join_mode: smart
+name: renamed
+---
+
+Stale.`);
+
+      const result = loadCustomAgents(tmpDir);
+
+      // The agent still loads — the warning is the only surface for the no-op.
+      expect(result.get("stale")?.description).toBe("Stale keys");
+      const messages = warn.mock.calls.map(args => String(args[0]));
+      expect(messages).toHaveLength(3);
+      for (const key of ["run_in_background", "join_mode", "name"]) {
+        expect(messages.some(m => m.includes(key) && m.includes(path))).toBe(true);
+      }
+
+      // One-time: a reload of the same file stays quiet.
+      loadCustomAgents(tmpDir);
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The known-key set has to cover every field the parser reads, or a documented
+  // field starts warning. Written as a full frontmatter rather than one key per
+  // test so a field added to the parser and forgotten in the set fails here.
+  it("does not warn for any key the parser reads", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("documented", `---
+description: Documented keys
+display_name: Documented
+tools: read, grep
+disallowed_tools: bash
+extensions: true
+inherit_extensions: true
+exclude_extensions: mcp
+skills: true
+inherit_skills: true
+scoped_models: true
+inherit_scoped_models: true
+model: anthropic/claude-opus-4-6
+thinking: high
+max_turns: 10
+persist_session: true
+output_transcript: false
+session_dir: .seams/sessions
+prompt_mode: append
+inherit_context: true
+isolated: false
+memory: project
+isolation: off
+enabled: true
+---
+
+Documented.`);
+
+      const result = loadCustomAgents(tmpDir);
+
+      expect(result.get("documented")?.description).toBe("Documented keys");
+      const unknown = warn.mock.calls
+        .map(args => String(args[0]))
+        .filter(m => m.includes("unknown frontmatter key"));
+      expect(unknown).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("honors PI_CODING_AGENT_DIR for global custom agent discovery", () => {
