@@ -17,7 +17,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -129,6 +129,13 @@ export interface SpawnOptions {
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
   rootSessionId?: string;
+  /**
+   * Config already resolved by the caller's own registry. A nested spawn reads
+   * its branch's config root, which may differ from the process-global registry
+   * `getAgentConfig` reads; without this the run would resolve the type again
+   * and could fall back to the unknown-type default.
+   */
+  agentConfig?: AgentConfig;
 }
 
 /** The five activity callbacks a resumed run forwards to its caller. */
@@ -211,11 +218,13 @@ export class AgentManager {
       turnCount: 1,
       // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
       // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
-      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
+      effectiveMaxTurns: normalizeMaxTurns(
+        options.maxTurns ?? (options.agentConfig ?? getAgentConfig(type))?.maxTurns ?? getDefaultMaxTurns(),
+      ),
       // Retention is read from the resolved agent config here, at spawn, so the
       // removal path never re-resolves the registry. A resume reuses the record
       // and therefore the decision its first run made.
-      persistSession: getAgentConfig(type)?.persistSession === true,
+      persistSession: (options.agentConfig ?? getAgentConfig(type))?.persistSession === true,
       invocation: options.invocation,
       depth: options.depth ?? 1,
       parentAgentId: options.parentAgentId,
@@ -327,6 +336,9 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      // Resolved by the caller's own registry (a nested spawn reads its branch's
+      // config root), so the run does not re-resolve it against the global one.
+      agentConfig: options.agentConfig,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must

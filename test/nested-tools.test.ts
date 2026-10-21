@@ -16,6 +16,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager, type NestedSpawnOptions } from "../src/nested-tools.js";
 import type { AgentRecord } from "../src/types.js";
+import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const MODELS = [
   { id: "allowed", name: "Allowed", provider: "anthropic" },
@@ -196,6 +197,30 @@ describe("nested Agent tool", () => {
       expect(spawns).toHaveLength(0);
     } finally {
       rmSync(workCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the branch's config even when the global registry cannot resolve the type", async () => {
+    // runAgent would otherwise resolve the type against the process-global
+    // registry and silently fall back to general-purpose (every tool) for an
+    // agent that only exists in this branch's config root.
+    registerAgents(new Map());
+    const result = await run(0, { subagent_type: "scout", description: "d", prompt: "p" });
+
+    expect(textOf(result)).toContain("Agent ID: child-1");
+    expect(spawns[0].options.agentConfig?.name).toBe("scout");
+  });
+
+  it("drops the isolation parameter when worktree isolation is switched off", () => {
+    const propertiesOf = (): Record<string, unknown> =>
+      (tools()[0].parameters as { properties: Record<string, unknown> }).properties;
+    try {
+      setWorktreeIsolationEnabled(false);
+      expect(propertiesOf()).not.toHaveProperty("isolation");
+      setWorktreeIsolationEnabled(true);
+      expect(propertiesOf()).toHaveProperty("isolation");
+    } finally {
+      setWorktreeIsolationEnabled(true);
     }
   });
 

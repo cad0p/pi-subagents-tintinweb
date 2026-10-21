@@ -31,7 +31,7 @@ import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -380,6 +380,14 @@ export interface RunOptions {
    * parent's repo, so config resolving inside it is correct.)
    */
   configCwd?: string;
+  /**
+   * The agent config to run, when the caller already resolved it from its own
+   * registry. A nested spawn resolves agents from its branch's config root,
+   * which is not necessarily what the process-global registry holds — passing
+   * the resolved config keeps the run from silently falling back to the
+   * unknown-type default (general-purpose, every tool).
+   */
+  agentConfig?: AgentConfig;
   /** Called on tool start/end with activity info. */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
@@ -544,7 +552,7 @@ export async function runAgent(
   options: RunOptions,
 ): Promise<RunResult> {
   const config = getConfig(type);
-  const agentConfig = getAgentConfig(type);
+  const agentConfig = options.agentConfig ?? getAgentConfig(type);
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;

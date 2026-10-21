@@ -22,7 +22,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
-import { buildAgentRegistry, getAgentConfig, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, registerAgents, resolveType, resolveTypeIn } from "./agent-types.js";
+import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
@@ -62,6 +62,8 @@ export interface NestedSpawnOptions {
   maxSubagentDepth: number;
   configCwd: string;
   rootSessionId?: string;
+  /** Resolved from this branch's registry; the run must not re-resolve it globally. */
+  agentConfig?: AgentConfig;
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   onSessionCreated?: (session: AgentSession) => void;
 }
@@ -201,23 +203,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         );
       }
 
-      // runAgent resolves the type against the process-global registry, not this
-      // branch's: an agent file that exists only here (added mid-session, or
-      // present in a worktree copy) would pass every check above and then run as
-      // the unknown-type fallback — general-purpose, every tool — which is
-      // exactly the substitution this gate exists to prevent. Refresh the global
-      // registry from this branch's config root first, the same thing the
-      // top-level Agent tool does per call, then require the resolution the run
-      // will actually get. A main session refreshes it again on its next spawn,
-      // so a branch-root registry is never left behind.
-      registerAgents(buildAgentRegistry(loadCustomAgents(context.configCwd)));
-      const globalType = resolveType(resolvedType);
-      if (!globalType || !getAgentConfig(globalType)) {
-        return textResult(
-          `Nested agent type "${resolvedType}" is not loaded in this session. Complete the task directly, or ask the user to reload.`,
-          true,
-        );
-      }
+      // The config resolved here is handed to the run as well: `runAgent` would
+      // otherwise resolve the type against the process-global registry, and an
+      // agent that exists only in this branch's config root would silently run
+      // as the unknown-type fallback — general-purpose, every tool.
       const config = getAgentConfigIn(registry, resolvedType);
       const invocation = resolveAgentInvocationConfig(config, params, {
         worktreeAllowed: isWorktreeIsolationEnabled(),
@@ -270,6 +259,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           inheritContext: invocation.inheritContext,
           isolation: invocation.isolation,
         },
+        agentConfig: config,
         depth: childDepth,
         parentAgentId: context.parentAgentId,
         maxSubagentDepth: context.maxSubagentDepth,
@@ -308,10 +298,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (transcriptSessionId !== undefined) {
         const rec = context.manager.getRecord(id);
         if (rec) {
-          // ctx.cwd, like the top-level path: under worktree isolation the branch's
-          // config root is the original checkout, so encoding it would put a nested
-          // transcript in a different {encoded-cwd} directory from its ancestors'.
-          rec.outputFile = createOutputFilePath(ctx.cwd, id, transcriptSessionId);
+          rec.outputFile = createOutputFilePath(context.configCwd, id, transcriptSessionId);
           writeInitialEntry(rec.outputFile, id, params.prompt, ctx.cwd);
         }
       }

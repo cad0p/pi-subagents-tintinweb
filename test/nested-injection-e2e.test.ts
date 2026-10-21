@@ -23,9 +23,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadCustomAgents } from "../src/custom-agents.js";
 import { runAgent } from "../src/agent-runner.js";
 import { buildAgentRegistry, registerAgents } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
