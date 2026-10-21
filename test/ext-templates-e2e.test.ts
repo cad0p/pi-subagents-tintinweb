@@ -118,6 +118,9 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
       isProjectTrusted: () => true,
       model,
       modelRegistry,
+      // No parent session file: the child still writes its own session, it just
+      // has no `parentSession` link to record.
+      sessionManager: { getSessionFile: () => undefined },
     };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 

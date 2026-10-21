@@ -153,6 +153,9 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       isProjectTrusted: () => true,
       model,
       modelRegistry,
+      // No parent session file: the child still writes its own session, it just
+      // has no `parentSession` link to record.
+      sessionManager: { getSessionFile: () => undefined },
     };
 
     let active: string[] = [];

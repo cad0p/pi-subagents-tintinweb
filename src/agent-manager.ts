@@ -10,7 +10,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -188,6 +188,10 @@ export class AgentManager {
       // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
       // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
       effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
+      // Retention is read from the resolved agent config here, at spawn, so the
+      // removal path never re-resolves the registry. A resume reuses the record
+      // and therefore the decision its first run made.
+      persistSession: getAgentConfig(type)?.persistSession === true,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
@@ -322,6 +326,9 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
+        // Captured before the record can be removed: `removeRecord` disposes the
+        // session first and would no longer be able to ask it for the path.
+        record.sessionFile = session.sessionManager.getSessionFile();
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -644,11 +651,30 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
+  /**
+   * Dispose a record's session and remove it from the map.
+   *
+   * The record's removal is also the child session file's disposal point: the
+   * 10-minute eviction and `clearCompleted()` on session switch are the grace
+   * window in which a live record can still resume the agent, so nothing may
+   * delete the file earlier. A `persist_session` agent keeps its file
+   * indefinitely; every other agent's file goes here. `keepSessionFile` is the
+   * shutdown path's opt-out — a run killed mid-flight must leave its transcript
+   * for crash recovery.
+   *
+   * Best-effort: a missing file, a permission error or a Windows lock must not
+   * throw into the completion/eviction path.
+   */
+  private removeRecord(id: string, record: AgentRecord, keepSessionFile = false): void {
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
+    // After dispose, so the file handle is closed — Windows will not unlink an
+    // open file.
+    if (keepSessionFile || record.persistSession || !record.sessionFile) return;
+    try {
+      rmSync(record.sessionFile, { force: true });
+    } catch { /* retention is best-effort — never fail a turn over it */ }
   }
 
   private cleanup() {
@@ -731,10 +757,11 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
-    for (const record of this.agents.values()) {
-      record.session?.dispose();
+    // Shutdown keeps every session file: a run killed mid-flight must leave its
+    // transcript for the crash-recovery follow-up.
+    for (const [id, record] of this.agents) {
+      this.removeRecord(id, record, true);
     }
-    this.agents.clear();
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean

@@ -1,4 +1,8 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -20,7 +24,13 @@ import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
 
-const mockSession = () => ({ dispose: vi.fn(), sessionId: "child-session-id" } as any);
+/** Fake child session. `sessionManager.getSessionFile` is what the manager
+ *  captures as the record's session file (undefined: nothing to retain). */
+const mockSession = () => ({
+  dispose: vi.fn(),
+  sessionId: "child-session-id",
+  sessionManager: { getSessionFile: () => undefined },
+} as any);
 
 const resolvedRun = () =>
   vi.mocked(runAgent).mockResolvedValue({
@@ -784,7 +794,7 @@ describe("AgentManager — steer()", () => {
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
     // Simulate the session becoming ready.
-    captured?.({ steer, dispose: vi.fn() });
+    captured?.({ steer, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } });
 
     expect(manager.steer(id, "go left")).toBe(true);
     expect(steer).toHaveBeenCalledWith("go left");
@@ -1066,5 +1076,170 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
     expect(record.status).toBe("error");
     expect(record.result).toBe("new partial progress"); // salvageable, this-run text
+  });
+});
+
+// Every run writes its pi session to disk while it runs. `persist_session` is a
+// RETENTION flag: the record's removal (10-minute eviction, or clearCompleted on
+// session switch) is the disposal point, and shutdown keeps every file so a run
+// killed mid-flight stays recoverable.
+describe("AgentManager — session file retention", () => {
+  let manager: AgentManager;
+  let root: string;
+
+  afterEach(() => {
+    manager?.dispose();
+    registerAgents(new Map());
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Real SessionManager, with a message already written so the file exists. */
+  function sessionWithFile(): { session: any; file: string } {
+    const sessionManager = SessionManager.create(root, join(root, "sessions"));
+    sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "hi" }],
+      timestamp: Date.now(),
+    });
+    return {
+      session: { ...mockSession(), sessionManager },
+      file: sessionManager.getSessionFile()!,
+    };
+  }
+
+  /** Register a keeper agent — persist_session: true. */
+  function registerKeeper() {
+    registerAgents(
+      new Map([
+        [
+          "keeper",
+          {
+            name: "keeper",
+            description: "keeps its session file",
+            builtinToolNames: ["read"],
+            extensions: false,
+            skills: false,
+            systemPrompt: "",
+            promptMode: "replace",
+            persistSession: true,
+          } as AgentConfig,
+        ],
+      ]),
+    );
+  }
+
+  /** Spawn a run that stays pending until the returned resolver is called. */
+  function spawnPending(type: string, session: any): { id: string; resolve: (v: unknown) => void } {
+    let resolve!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      opts.onSessionCreated?.(session);
+      return new Promise((r) => { resolve = r; });
+    });
+    const id = manager.spawn(mockPi, mockCtx, type, "p", { description: "d" });
+    return { id, resolve: (v) => resolve(v) };
+  }
+
+  const done = (session: any) => ({ responseText: "done", session, aborted: false, steered: false });
+
+  it("writes the file while the agent runs and keeps it until the record is removed", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    manager = new AgentManager();
+    const { session, file } = sessionWithFile();
+    const { id, resolve } = spawnPending("general-purpose", session);
+
+    expect(manager.getRecord(id)!.status).toBe("running");
+    expect(existsSync(file)).toBe(true); // on disk mid-run
+
+    resolve(done(session));
+    await manager.getRecord(id)!.promise;
+    // The completed record can still be resumed, so the file outlives the run.
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("deletes the file when clearCompleted() removes a default agent's record", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    manager = new AgentManager();
+    const { session, file } = sessionWithFile();
+    const { id, resolve } = spawnPending("general-purpose", session);
+    resolve(done(session));
+    await manager.getRecord(id)!.promise;
+
+    manager.clearCompleted();
+
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("keeps the file when clearCompleted() removes a persist_session record", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    registerKeeper();
+    manager = new AgentManager();
+    const { session, file } = sessionWithFile();
+    const { id, resolve } = spawnPending("keeper", session);
+    resolve(done(session));
+    await manager.getRecord(id)!.promise;
+
+    manager.clearCompleted();
+
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("evicts the default agent's file after the 10-minute grace window", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const { session, file } = sessionWithFile();
+      const { id, resolve } = spawnPending("general-purpose", session);
+      resolve(done(session));
+      await manager.getRecord(id)!.promise;
+      expect(existsSync(file)).toBe(true);
+
+      vi.advanceTimersByTime(11 * 60_000);
+
+      expect(manager.getRecord(id)).toBeUndefined();
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispose() keeps the file for default and persist_session agents alike", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    registerKeeper();
+    manager = new AgentManager();
+    const def = sessionWithFile();
+    const kept = sessionWithFile();
+    // Both runs stay in flight — the crash-recovery case dispose() must not undo.
+    spawnPending("general-purpose", def.session);
+    spawnPending("keeper", kept.session);
+
+    manager.dispose();
+
+    expect(manager.listAgents()).toEqual([]);
+    expect(existsSync(def.file)).toBe(true);
+    expect(existsSync(kept.file)).toBe(true);
+  });
+
+  it("a resumed run keeps the same session file and the same retention decision", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    manager = new AgentManager();
+    const { session, file } = sessionWithFile();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      opts.onSessionCreated?.(session);
+      return done(session) as any;
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "d" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
+    await manager.resume(id, "more")!.promise;
+
+    expect(record.sessionFile).toBe(file);
+    manager.clearCompleted();
+    expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
   });
 });

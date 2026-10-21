@@ -47,11 +47,14 @@ export interface AgentConfig {
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
-  /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
+  /** Keep this subagent's pi session file after the run settles. Every run
+   *  writes a session file while it runs (crash recovery); without this the file
+   *  is deleted when the agent record is removed — the 10-minute eviction or a
+   *  session switch. */
   persistSession?: boolean;
   /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
   outputTranscript?: boolean;
-  /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
+  /** Optional directory for the run's pi session file. Omitted = pi's normal session location. */
   sessionDir?: string;
   systemPrompt: string;
   promptMode: "replace" | "append";
@@ -89,6 +92,16 @@ export interface AgentRecord {
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;
+  /** Path of the child's pi session file, captured when the session is created.
+   *  Retention is decided from it when the record is removed: a
+   *  `persist_session` agent keeps the file, every other agent's is deleted
+   *  there (see `AgentManager.removeRecord`). Undefined for an in-memory child
+   *  session (host `--no-session`). */
+  sessionFile?: string;
+  /** Resolved `persist_session` for this run, captured at spawn so the removal
+   *  path never re-resolves the agent registry. A resume reuses the record and
+   *  therefore its first run's decision. */
+  persistSession?: boolean;
   abortController?: AbortController;
   promise?: Promise<string>;
   /** Whether the run promise has fully unwound. Tri-state: `undefined` = no run

@@ -137,7 +137,7 @@ Individual agent results render Claude Code-style in the conversation:
 
 The `Agent` tool row only ever launches a background run. Rows recorded before foreground mode was removed (`running`/`completed`/`steered`/`stopped`) replay through the error/aborted tail without a result body; completion notifications render their full report directly.
 
-By default, each `Agent`-tool spawn streams its full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot); RPC and scheduled spawns write no transcript. Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as markdown reports inside pi's standard extension-message box (`[subagent-notification]` label):
+By default, each `Agent`-tool spawn streams its full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot); RPC and scheduled spawns write no transcript. Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (whether the pi session file is retained after the run — see [Session Persistence](#session-persistence)), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files). Note that every run writes a pi session file *while* it runs, so keeping a completed run off disk means `output_transcript: false` **and** no `persist_session: true` (the session file is deleted when the agent record is removed) **and** none of `isolation: worktree` / `memory:`. Background agent completion notifications render as markdown reports inside pi's standard extension-message box (`[subagent-notification]` label):
 
 ```
 **✓ Subagent completed: Find auth files** · ↻3≤30 · 3 tool uses · 12.4k token · 4.1s
@@ -226,9 +226,9 @@ All fields are optional — sensible defaults for everything.
 | `scoped_models` | inherit parent's scope | Child session's model scope: `inherit` (or omit; must stand alone) uses the parent session's `/scoped-models` scope, `none` gives the child no scope, or a comma-separated list of `provider/modelId` entries replaces it with an explicit chain. Feeds `ctx.scopedModels` for in-session extensions — e.g. `pi-fallback-provider`'s automatic fallback after exhausted retries. Alias: `inherit_scoped_models`. See [Model Scope](#model-scope) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
-| `persist_session` | `false` | Persist this subagent as a normal pi session instead of keeping the session in memory only. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
+| `persist_session` | `false` | Keep this subagent's pi session file after it settles. Every run writes a session file while it runs (so a crashed run stays recoverable); without this flag the file is deleted when the agent record is removed — the 10-minute eviction or a session switch. The subagent's `.output` transcript is a separate knob, still written unless `output_transcript: false`. See [Session Persistence](#session-persistence) |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
-| `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd |
+| `session_dir` | pi default | Directory for this agent's pi session file (written during the run; retained after it only with `persist_session: true`). Omitted uses pi's normal session location, and relative paths resolve from the agent cwd |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
@@ -372,6 +372,21 @@ Background agents are subject to a configurable concurrency limit (default: 4). 
 
 Resumed runs (`resume`) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
 
+## Session Persistence
+
+Every subagent run is written to a normal pi session file while it runs — default agents included — so a crashed, killed, or interrupted run leaves a transcript pi's `/resume` can recover. The child's session header records the parent session file as `parentSession`, so subagent sessions nest under the run that spawned them in pi's `/resume` picker.
+
+Retention is decided when the run settles, not when the session is created:
+
+| `persist_session` | Behavior |
+|---|---|
+| `false` (default) | The session file is deleted when the agent record is removed: the 10-minute eviction after completion, or `clearCompleted()` on session switch. Until then the completed record can still `resume` the agent, which is why the file outlives the run itself. |
+| `true` | The session file is kept indefinitely. |
+
+Shutdown never deletes session files: a run killed mid-flight keeps its transcript for recovery. `session_dir:` picks the directory the file is written to. On a host pi started with `--no-session`, subagent sessions are in-memory and explicitly not recoverable. A resumed agent keeps the same session file and the same retention decision as its first run.
+
+> **Migration — `persist_session` changed meaning.** It used to mean "persist this subagent at all" (without it, the run used an in-memory session and left nothing behind). It now means "retain this subagent's session file after it settles". An agent with `persist_session: false` — or no `persist_session` at all — now writes a session file *during* the run; that file is deleted when the agent record is removed, so completed runs still leave nothing behind unless pi crashes mid-run (which is the point). Agents with `persist_session: true` behave as before, plus the parent link.
+
 ## Model Scope
 
 **Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.
@@ -404,7 +419,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Disable defaults** (`disableDefaultAgents`, default `false`): when on, the three built-in agents (general-purpose, Explore, Plan) are not registered — only your project/global custom agents are advertised and spawnable. User-defined agents are unaffected, including ones that override a default by name. The Agent tool's type list updates on the next pi session (the tool schema is registered at startup).
 
-**Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files.
+**Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files. A run's pi session file is written during the run regardless; `persist_session` decides whether it survives the agent record's removal (see [Session Persistence](#session-persistence)).
 
 **Failure preview** (`failurePreviewMaxChars`, default `65536`): caps the `Result:` body of `error`/`stopped` completion notifications, plus the metadata `Error:` line that carries a long truncated error alongside a partial result. The untruncated text remains available via `get_subagent_result` and the session record (and in the transcript when one exists).
 

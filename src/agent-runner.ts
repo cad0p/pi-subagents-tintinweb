@@ -911,9 +911,21 @@ export async function runAgent(
 
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
-    : SessionManager.inMemory(effectiveCwd);
+  // A subagent session is ALWAYS written to disk while it runs: a crashed or
+  // killed run must leave a transcript pi's /resume can recover. Retention
+  // after the run settles is the manager's decision (`persist_session`), never a
+  // creation-time one. The single exception is pi's own `--no-session`: an
+  // ephemeral host leaves nothing behind, and those runs are explicitly not
+  // recoverable.
+  // `parentSession` nests the child under its spawner in pi's /resume.
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const sessionManager = process.argv.includes("--no-session")
+    ? SessionManager.inMemory(effectiveCwd)
+    : SessionManager.create(
+        effectiveCwd,
+        configuredSessionDir ?? defaultSessionDir,
+        parentSession ? { parentSession } : undefined,
+      );
 
   type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
   // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
