@@ -26,6 +26,7 @@ vi.mock("../src/worktree.js", () => ({
 
 import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
+import { setMaxSubagentDepth } from "../src/nested-tools.js";
 import type { AgentRecord } from "../src/types.js";
 
 const mockPi = {} as any;
@@ -59,6 +60,7 @@ describe("a resumed run parks on its children", () => {
     manager?.dispose();
     manager = undefined;
     vi.mocked(runAgent).mockReset();
+    setMaxSubagentDepth(2);
   });
 
   it("continues with a child report instead of letting the settle tail abort the child", async () => {
@@ -114,5 +116,52 @@ describe("a resumed run parks on its children", () => {
     const child: AgentRecord = manager.getRecord(childId!)!;
     expect(child.status).toBe("completed");
     expect(child.resultDelivered).toBe(true);
+  });
+
+  it("parks for a child spawned after the nesting cap was lowered", async () => {
+    // The project cap drops between the parent's run and its resume. The resumed
+    // session still carries the nested tools its first run injected, so it can
+    // spawn a child — gating the resume's bridge on today's cap would leave the
+    // park loop a no-op and abort that child as the resume settles.
+    manager = new AgentManager();
+    const mgr = manager;
+    let childId: string | undefined;
+    let resolveChild: ((value: unknown) => void) | undefined;
+
+    const parentSession = fakeSession((prompt) => {
+      if (prompt === "more") {
+        childId = mgr.spawn(mockPi, mockCtx, "Explore", "child", {
+          description: "child",
+          parentAgentId: parentId,
+          depth: 2,
+        });
+        return;
+      }
+      parentSession.messages.push({ role: "assistant", content: [{ type: "text", text: "CONTINUED" }] });
+    });
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
+      if (prompt === "child") return new Promise((resolve) => { resolveChild = resolve; }) as never;
+      opts?.onSessionCreated?.(parentSession as never);
+      return Promise.resolve(done(parentSession) as never);
+    });
+    // No per-record cap: at resume time the project setting is what applies.
+    const parentId: string = manager.spawn(mockPi, mockCtx, "Explore", "parent", { description: "parent" });
+    await manager.getRecord(parentId)!.promise;
+    setMaxSubagentDepth(1);
+
+    const resumed = manager.resume(parentId, "more")!;
+    await vi.waitFor(() => expect(manager!.getRecord(parentId)!.parked).toBe(true));
+    expect(childId).toBeDefined();
+    expect(manager.getRecord(childId!)!.status).toBe("running");
+
+    resolveChild?.({ responseText: "CHILD RESULT", session: fakeSession(() => {}), aborted: false, steered: false });
+    await resumed.promise;
+
+    // The user-visible outcome: the child ran to its own completion and the
+    // resumed turn continued with the report, instead of being stopped mid-run.
+    const child: AgentRecord = manager.getRecord(childId!)!;
+    expect(child.status).toBe("completed");
+    expect(parentSession.prompt.mock.calls[1][0]).toContain("CHILD RESULT");
+    expect(resumed.result).toBe("CONTINUED");
   });
 });

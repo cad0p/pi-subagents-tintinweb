@@ -1038,20 +1038,21 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(child().status).toBe("running");
 
     await settleChild(state);
-    await vi.waitFor(() => expect(parentSession.steer).toHaveBeenCalledTimes(1));
+    // The claim is written when the steer resolves, not before it is called.
+    await vi.waitFor(() => expect(child().resultDelivered).toBe(true));
 
     const [notification] = parentSession.steer.mock.calls[0];
     expect(notification).toContain("Subagent completed");
     expect(notification).toContain("CHILD OUTPUT");
-    expect(child().resultDelivered).toBe(true);
-    // The exact text is recorded, so the park can tell a queued steer from a
-    // read one.
-    expect(child().deliveredText).toBe(notification);
+    // The notification carries a unique marker line, recorded on the record so
+    // the park can find the report in the queue or the transcript later.
+    expect(child().deliveredMarker).toBeDefined();
+    expect(notification).toContain(child().deliveredMarker);
     // The nested report goes to the parent agent, never to the main session.
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("withdraws the delivery claim when the steer into the parent session fails", async () => {
+  it("claims nothing when the steer into the parent session fails", async () => {
     const { parentSession, state, handle } = spawnParentWithChild(async () => {
       throw new Error("session is gone");
     });
@@ -1059,11 +1060,12 @@ describe("background lifecycle — model-visible surfaces", () => {
 
     await settleChild(state);
     await vi.waitFor(() => expect(parentSession.steer).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(child().deliveryPromise).toBeUndefined());
 
-    // The claim is withdrawn: the parking path can still hand this report over
-    // instead of it being dropped because "delivered" was already set.
-    await vi.waitFor(() => expect(child().resultDelivered).toBeFalsy());
-    expect(child().deliveredText).toBeUndefined();
+    // A failed steer leaves the record unclaimed, so the parking path renders
+    // the report instead of it being dropped as "already delivered".
+    expect(child().resultDelivered).toBeFalsy();
+    expect(child().deliveredMarker).toBeUndefined();
   });
 
   it("does not steer a parked parent: its continuation prompt carries the report", async () => {

@@ -10,6 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -476,9 +477,19 @@ export default function (pi: ExtensionAPI) {
    * parked parent is skipped here for the same reason.
    *
    * A steer only queues, so `resultDelivered` alone would be a claim, not a
-   * fact: a message queued after the run's last steering drain sits unread. The
-   * exact text is recorded on the record (`deliveredText`) so the park can check
-   * the session's steering queue and force one more turn to drain it.
+   * fact: a message queued after the run's last steering drain sits unread. Each
+   * notification therefore carries a unique marker line (agent id + a nonce),
+   * stored on the record as `deliveredMarker`, so the park can find it in the
+   * parent session's steering queue (queued, unread), in its transcript (read),
+   * or in neither (the delivery died — hand the report over again).
+   *
+   * The claim is written only once the steer RESOLVES, never before: `steer()`
+   * suspends before it enqueues, and the parent's turn can end inside that
+   * window. Claimed early, the marker is in neither place yet, which reads as
+   * "already handed over, nothing to do" — the parent settles and the enqueue
+   * lands in a session no turn will ever read. While it is in flight the record
+   * is unclaimed with `deliveryPromise` set, so `parkForChildReports` waits for
+   * it instead of deciding.
    */
   function deliverNestedResult(record: AgentRecord) {
     const parentAgentId = record.parentAgentId;
@@ -493,27 +504,30 @@ export default function (pi: ExtensionAPI) {
       // Parked: its continuation prompt carries this report. Stopped or gone:
       // no session is left that could act on it.
       if (!parent || parent.parked || parent.status !== "running" || !parent.session) return;
-      const notification = formatTaskNotification(
+      const session = parent.session;
+      // The marker is what every delivery check keys off, so it must not be
+      // something the notification body could contain by accident.
+      const marker = `<!-- subagent-report:${record.id}:${randomUUID().slice(0, 8)} -->`;
+      const notification = `${formatTaskNotification(
         record,
         { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) },
         showCost,
-      );
-      /** The notification never reached the session: withdraw the claim so the
-       *  parking path can still hand this report over. */
+      )}\n\n${marker}`;
       const notDelivered = (err: unknown) => {
-        record.resultDelivered = undefined;
-        record.deliveredText = undefined;
+        // Nothing was queued, so the record stays unclaimed: the park renders
+        // the report instead of it disappearing with the failed steer.
         console.warn(`[pi-subagents] failed to deliver ${record.id} to its parent: ${err instanceof Error ? err.message : String(err)}`);
       };
-      // Claim before the await: the parent's turn can end between here and the
-      // steer landing, and the park must not render the same report again.
-      record.resultDelivered = true;
-      record.deliveredText = notification;
-      try {
-        parent.session.steer(notification).catch(notDelivered);
-      } catch (err) {
-        notDelivered(err);
-      }
+      const delivery = session.steer(notification).then(
+        () => {
+          record.resultDelivered = true;
+          record.deliveredMarker = marker;
+        },
+        notDelivered,
+      ).finally(() => {
+        if (record.deliveryPromise === delivery) record.deliveryPromise = undefined;
+      });
+      record.deliveryPromise = delivery;
     });
   }
 

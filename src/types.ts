@@ -141,14 +141,25 @@ export interface AgentRecord {
    */
   resultDelivered?: boolean;
   /**
-   * The exact notification text steered into the parent session, so
-   * "delivered" can be checked against what the parent actually read: while the
-   * text is still in `session.getSteeringMessages()` no turn has taken it, and
-   * the report is still outstanding (see `AgentManager.hasChildWork`). Undefined
-   * for a report handed over in a continuation prompt, which is read by
+   * The unique marker line carried by the notification this child's report was
+   * steered into the parent session with (agent id + a nonce), so "delivered" can
+   * be checked against what the parent actually holds: in
+   * `session.getSteeringMessages()` it is queued and unread, in the transcript it
+   * has been read, and in neither it never landed (see `AgentManager.reportRead`).
+   * Keyed off a marker rather than the whole notification because an input handler
+   * in the parent session may rewrite the text it is given.
+   *
+   * Undefined for a report rendered into a continuation prompt, which is read by
    * construction.
    */
-  deliveredText?: string;
+  deliveredMarker?: string;
+  /**
+   * The steer that carries this child's report, while it is in flight.
+   * `session.steer()` suspends before it enqueues, and the parent's turn can end
+   * inside that window, so the park waits for this before judging the report —
+   * and the claim (`resultDelivered`) is written only when it resolves.
+   */
+  deliveryPromise?: Promise<void>;
   /**
    * True while a run waits on its nested children: it has released its
    * maxConcurrent slot, status stays "running" (the run has not settled), and a

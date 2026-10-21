@@ -28,8 +28,9 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import { extractText } from "./context.js";
 import { describeModel } from "./model-resolver.js";
-import { type ChildReportBatch, getMaxSubagentDepth } from "./nested-tools.js";
+import type { ChildReportBatch } from "./nested-tools.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -642,13 +643,23 @@ export class AgentManager {
    */
   async parkForChildReports(id: string, signal?: AbortSignal): Promise<ChildReportBatch> {
     const record = this.agents.get(id);
+    // Cheap gate first: a run with nothing outstanding must not churn its slot
+    // on every turn end. A delivery still in flight counts as outstanding (it is
+    // unclaimed until the steer resolves), which is what keeps the park from
+    // deciding underneath it.
     if (!record || !this.hasChildWork(id)) return { reports: [], steeringPending: false };
+    // Set before anything awaits: from here on the completion nudge skips this
+    // run, so the deliveries awaited below are the complete set.
     record.parked = true;
     this.releaseSlot(id);
     // The whole point of the release: children of this run may be sitting in
     // the queue behind the slot it just gave up.
     this.drainQueue();
     try {
+      // A delivery in flight lands in the queue or fails; either way the claim is
+      // written by its own handlers, so judging after it settles is judging
+      // against what the session actually holds.
+      await this.awaitPendingDeliveries(id);
       await this.waitForChildren(id, signal);
     } finally {
       record.parked = false;
@@ -663,34 +674,60 @@ export class AgentManager {
    *  must not settle. */
   private hasChildWork(parentId: string): boolean {
     if (this.hasLiveChildren(parentId)) return true;
-    const steering = this.steeringQueue(parentId);
     for (const record of this.agents.values()) {
       if (record.parentAgentId !== parentId) continue;
-      if (!this.reportRead(record, steering)) return true;
+      if (!this.reportRead(record, parentId)) return true;
     }
     return false;
   }
 
+  /** Reports steered into this run's session that have not landed yet: the
+   *  claim is written when the steer resolves, so waiting for it settles the
+   *  record's state. */
+  private async awaitPendingDeliveries(parentId: string): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const record of this.agents.values()) {
+      if (record.parentAgentId === parentId && record.deliveryPromise) pending.push(record.deliveryPromise);
+    }
+    await Promise.allSettled(pending);
+  }
+
   /** A run session's pending steering messages: where a report steered mid-turn
    *  waits until a turn reads it. Optional-called like the other session members
-   *  this file does not require — a pi without the queue leaves `resultDelivered`
-   *  as the only evidence a report went out. */
+   *  this file does not require — a pi without the queue leaves the conversation
+   *  as the only evidence a report was read. */
   private steeringQueue(agentId: string): readonly string[] {
     return this.agents.get(agentId)?.session?.getSteeringMessages?.() ?? [];
+  }
+
+  /** Whether a marker reached this run's conversation — a message that is in the
+   *  transcript has been read, whatever the steering queue still holds. */
+  private conversationHas(agentId: string, marker: string): boolean {
+    const session = this.agents.get(agentId)?.session;
+    if (!session) return false;
+    return session.messages.some((message) => {
+      const content = (message as { content?: unknown }).content;
+      if (typeof content === "string") return content.includes(marker);
+      return Array.isArray(content) && extractText(content).includes(marker);
+    });
   }
 
   /**
    * Whether this run has actually read the child's report.
    *
-   * A report rendered into a continuation prompt is read by construction. A
-   * report steered into the session is read only once its text leaves the
-   * steering queue: one queued after the run's last steering drain sits there
-   * unread, and calling that delivered is how a report got lost.
+   * The conversation wins over the queue, in that order: a report whose marker is
+   * in the transcript has been read even if a stale copy is still queued, while
+   * one that is queued and nowhere else has not been read by any turn yet. A
+   * delivered report with a marker in neither place never landed — it is not
+   * read, so the park hands it over again (a duplicate is survivable, a lost
+   * report is not).
    */
-  private reportRead(record: AgentRecord, steering: readonly string[]): boolean {
+  private reportRead(record: AgentRecord, parentId: string): boolean {
     if (record.resultConsumed) return true;
     if (!record.resultDelivered) return false;
-    return record.deliveredText === undefined || !steering.includes(record.deliveredText);
+    // Rendered into a continuation prompt: read by construction.
+    if (record.deliveredMarker === undefined) return true;
+    return this.conversationHas(parentId, record.deliveredMarker);
   }
 
   /** Running, queued, or stopped-but-still-unwinding: its promise has work left. */
@@ -738,10 +775,12 @@ export class AgentManager {
   /**
    * Hand a parked run what it still owes its children, once each.
    *
-   * A report it has already read (consumed, or steered and drained) is skipped.
-   * A report that was steered mid-turn but is still queued is NOT rendered again
-   * — its text is already in the conversation — it only asks for one more turn,
-   * which drains the queue.
+   * A report it has already read (consumed, or its marker in the transcript) is
+   * skipped. A report that was steered mid-turn and is still queued is NOT
+   * rendered again — its text is already in the conversation — it only asks for
+   * one more turn, which drains the queue. A report claimed as delivered but in
+   * neither place is handed over again: the delivery died, and showing a report
+   * twice beats losing it.
    */
   private claimChildReports(parentId: string): ChildReportBatch {
     const steering = this.steeringQueue(parentId);
@@ -750,12 +789,18 @@ export class AgentManager {
     for (const record of this.agents.values()) {
       if (record.parentAgentId !== parentId) continue;
       if (this.isLive(record)) continue;
-      if (this.reportRead(record, steering)) continue;
-      if (record.resultDelivered) {
+      if (this.reportRead(record, parentId)) continue;
+      if (record.deliveredMarker !== undefined && steering.some((text) => text.includes(record.deliveredMarker!))) {
+        // Substring, not equality: an input handler may rewrite the notification
+        // around the marker, and a report that is queued is unread however its
+        // text was rearranged.
         steeringPending = true;
         continue;
       }
+      // Handed over in a prompt (marker cleared on claim) or never delivered at
+      // all: render it. A lost delivery is the case that must not settle.
       record.resultDelivered = true;
+      record.deliveredMarker = undefined;
       claimed.push(record);
     }
     // Finish order, so the parent reads the reports in the order they landed.
@@ -841,7 +886,8 @@ export class AgentManager {
     record.error = undefined;
     record.resultConsumed = undefined; // a prior pull must not swallow the resume report
     record.resultDelivered = undefined; // nor must the prior run's delivery swallow this one's
-    record.deliveredText = undefined;
+    record.deliveredMarker = undefined;
+    record.deliveryPromise = undefined;
     // Run-local, mirroring a fresh spawn's initial turn count.
     record.turnCount = 1;
     // Run-local too: the prior run's latest checkpoint must not surface as the
@@ -894,16 +940,21 @@ export class AgentManager {
       // A resume drives the same session, so it still carries the nested tools
       // its first run injected: it can spawn a child. Without this bridge the
       // park loop is a no-op and the settle tail would abort that child mid-run
-      // with nobody left to read it. Same shape `startAgent` builds, subject to
-      // the same rule — a run at or past the cap can never own a child.
-      nestedRuntime: (record.depth ?? 1) < (record.maxSubagentDepth ?? getMaxSubagentDepth())
-        ? {
-            manager: this,
-            parentAgentId: id,
-            depth: record.depth ?? 1,
-            maxSubagentDepth: record.maxSubagentDepth,
-          }
-        : undefined,
+      // with nobody left to read it.
+      //
+      // Unconditional, exactly like `startAgent`: the cap is a TOOL-injection
+      // rule applied per run (`runAgent`), not a property of the record. Gating
+      // it here re-derived the cap from today's settings, so lowering
+      // `maxSubagentDepth` between a run and its resume dropped the bridge from a
+      // session that already had the tools — the one case this must not miss.
+      // Nothing is owed when the run owns no child, and `parkForChildReports`
+      // says so on its first check.
+      nestedRuntime: {
+        manager: this,
+        parentAgentId: id,
+        depth: record.depth ?? 1,
+        maxSubagentDepth: record.maxSubagentDepth,
+      },
     })
       .then(({ text, failure }) => {
         // Stop wins; a stopped resume is never overwritten with completed.

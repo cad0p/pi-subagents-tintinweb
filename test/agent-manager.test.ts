@@ -1567,7 +1567,7 @@ describe("AgentManager — nested children", () => {
    */
   async function parentWithFinishedChild(steering: string[]) {
     manager = new AgentManager();
-    const parentSession = { ...mockSession(), getSteeringMessages: () => steering };
+    const parentSession = { ...mockSession(), messages: [] as any[], getSteeringMessages: () => steering };
     vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
       if (prompt === "parent") opts?.onSessionCreated?.(parentSession);
       return Promise.resolve({
@@ -1585,23 +1585,58 @@ describe("AgentManager — nested children", () => {
       depth: 2,
     });
     await manager.getRecord(child)!.promise;
-    return { parent, child };
+    return { parent, child, parentSession };
   }
 
   it("counts a steered report still sitting in the parent's queue as unread work", async () => {
-    const steering = ["SUBAGENT REPORT TEXT"];
-    const { parent, child } = await parentWithFinishedChild(steering);
-    // The mid-turn delivery path steered the report into the session.
+    const steering = ["SUBAGENT REPORT CHILD <!-- subagent-report:child-1:abcd1234 -->"];
+    const { parent, child, parentSession } = await parentWithFinishedChild(steering);
+    // The mid-turn delivery path steered the report into the session and
+    // recorded its marker.
     const record = manager.getRecord(child)!;
     record.resultDelivered = true;
-    record.deliveredText = "SUBAGENT REPORT TEXT";
+    record.deliveredMarker = "<!-- subagent-report:child-1:abcd1234 -->";
 
     // Still queued: no turn has read it, so the run must not settle — it takes
     // one more turn, and that is what drains the queue.
     expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: true });
 
-    // A turn read it: nothing is left, and the report is not rendered again.
+    // The turn read it: the marker is in the transcript, so nothing is left and
+    // the report is not rendered a second time.
     steering.length = 0;
+    parentSession.messages.push({ role: "user", content: [{ type: "text", text: "REWRITTEN: SUBAGENT REPORT CHILD <!-- subagent-report:child-1:abcd1234 -->" }] });
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+  });
+
+  it("matches the report by its marker, so a rewritten notification is still one delivery", async () => {
+    // An input handler in the parent session may rewrite the notification text
+    // before it is queued (template expansion, a prefix). The marker rides
+    // through, so the park still sees a queued report instead of re-rendering
+    // it — exact-string matching would show it twice.
+    const steering = ["[rewritten by an input handler] <!-- subagent-report:child-1:beefcafe --> tail"];
+    const { parent, child } = await parentWithFinishedChild(steering);
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredMarker = "<!-- subagent-report:child-1:beefcafe -->";
+
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: true });
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+  });
+
+  it("renders a delivered report that is in neither the queue nor the transcript", async () => {
+    // The steer died after the claim was written (session gone, queue dropped):
+    // a duplicate report is survivable, a lost one is not, so the park hands it
+    // over again instead of settling.
+    const { parent, child } = await parentWithFinishedChild([]);
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredMarker = "<!-- subagent-report:child-1:deadbeef -->";
+
+    const { reports } = await manager.parkForChildReports(parent);
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    // Claimed for the prompt: rendered once, and read from then on.
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+    expect(manager.getRecord(child)!.deliveredMarker).toBeUndefined();
     expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
   });
 
@@ -1634,7 +1669,11 @@ describe("AgentManager — nested children", () => {
     expect(runtime).toMatchObject({ parentAgentId: parent, depth: 1, maxSubagentDepth: 2 });
   });
 
-  it("gives a resumed run no nested runtime when it sits at the cap", async () => {
+  it("hands the bridge to a resume at the cap too, leaving tool injection to the runner", async () => {
+    // The cap decides whether a run is given the nested TOOLS, per run, in the
+    // runner. The manager must not re-derive it from today's settings: a lower
+    // cap between a run and its resume would otherwise drop the bridge from a
+    // session that already has the tools.
     manager = new AgentManager();
     resolvedRun();
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", {
@@ -1647,8 +1686,10 @@ describe("AgentManager — nested children", () => {
     vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
     await manager.resume(parent, "more")!.promise;
 
-    // At the cap a run can never own a child, so it gets no bridge — the same
-    // rule that keeps the nested tools out of its session.
-    expect(vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime).toBeUndefined();
+    expect(vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime).toMatchObject({
+      parentAgentId: parent,
+      depth: 2,
+      maxSubagentDepth: 2,
+    });
   });
 });
