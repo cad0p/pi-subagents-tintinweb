@@ -484,7 +484,7 @@ describe("get_subagent_result output shapes", () => {
   });
 
   // ---- Shape 5: Not found / evicted ----
-  it("not-found renders the cleanup hint verbatim", async () => {
+  it("not-found renders the cleanup hint verbatim, as an error", async () => {
     const { tools } = await setupAgent({});
 
     const res = await tools.get("get_subagent_result").execute(
@@ -492,6 +492,9 @@ describe("get_subagent_result output shapes", () => {
     );
 
     expect(textOf(res)).toBe(`Agent not found: "nope-1234". It may have been cleaned up.`);
+    // A caller that asked for a report and got nothing must see a failure, not
+    // an empty success it could read as a quiet child.
+    expect(res.isError).toBe(true);
 
     const rendered = tools.get("get_subagent_result").renderResult(
       res,
@@ -500,6 +503,23 @@ describe("get_subagent_result output shapes", () => {
     );
     expect(rendered).toBeInstanceOf(Markdown);
     expect(rendered.text).toContain(`Agent not found: "nope-1234"`);
+  });
+
+  it("a failed agent is an error result, and a clean one is not", async () => {
+    const { tools, id } = await setupAgent({});
+    settleRecord(id, { status: "completed", result: "fine", completedAt: Date.now() });
+    const clean = await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    );
+    expect(clean.isError).toBe(false);
+
+    settleRecord(id, { status: "error", error: "boom" });
+    const failed = await tools.get("get_subagent_result").execute(
+      "gsr-tc", { agent_id: id }, undefined, undefined, {} as any,
+    );
+    // Same convention as the nested twin: an error status is a failed read.
+    expect(failed.isError).toBe(true);
+    expect(textOf(failed)).toContain("Error: boom");
   });
 
   // ---- Completed with NO output ----

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
+import { consumeResult } from "../src/agent-result-tool.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 
@@ -22,7 +23,7 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
+import { resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
@@ -1336,6 +1337,9 @@ describe("AgentManager — nested children", () => {
   afterEach(() => {
     manager?.dispose();
     vi.mocked(runAgent).mockReset();
+    // The resume mocks of earlier tests stay in `mock.calls`, and these tests
+    // read the call this test made.
+    vi.mocked(resumeAgent).mockReset();
   });
 
   /** A run that never settles until its signal aborts, like a live child. */
@@ -1345,6 +1349,49 @@ describe("AgentManager — nested children", () => {
         opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       }) as never,
     );
+
+  it("aborting a parked parent takes its running and queued children with it", async () => {
+    // maxConcurrent 2: the parent and an unrelated blocker fill the pool, so the
+    // parent's first child queues; parking frees the slot that starts it, and the
+    // second child queues behind the now-full pool.
+    manager = new AgentManager(undefined, 2);
+    const started: string[] = [];
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
+      started.push(prompt);
+      return new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }) as never;
+    });
+
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const running = manager.spawn(mockPi, mockCtx, "X", "child-running", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(running)!.status).toBe("queued");
+
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(running)!.status).toBe("running");
+    const queued = manager.spawn(mockPi, mockCtx, "X", "child-queued", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    manager.abort(parent);
+    // The park ends because the run is going down, not because there is news.
+    await expect(parked).resolves.toBeDefined();
+    expect(manager.getRecord(running)!.status).toBe("stopped");
+    expect(manager.getRecord(queued)!.status).toBe("stopped");
+
+    // The dropped child never starts orphaned when the pool frees up.
+    manager.abort(blocker);
+    await manager.waitForAll();
+    expect(started).not.toContain("child-queued");
+  });
 
   it("stops a parent's children when the parent settles", async () => {
     manager = new AgentManager();
@@ -1365,10 +1412,9 @@ describe("AgentManager — nested children", () => {
   });
 
   it("does not leak a concurrency slot when a nested child is resumed", async () => {
-    // A nested child is outside the maxConcurrent pool, so its resume must not
-    // take a slot: the increment is unconditional but the release is gated on
-    // occupiesPoolSlot, and an unmatched increment queues every later top-level
-    // spawn forever.
+    // A nested child takes a slot like any other run, so its resume must balance
+    // the increment with a release: an unmatched increment queues every later
+    // top-level spawn forever.
     manager = new AgentManager(undefined, 1);
     resolvedRun();
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
@@ -1436,24 +1482,214 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(grandchild)!.status).toBe("stopped");
   });
 
-  it("does not queue nested children behind the parent's own concurrency slot", () => {
+  it("queues a nested child behind a full pool, and a parked parent frees the slot it needs", async () => {
     manager = new AgentManager(undefined, 1);
-    hangingRun();
+    let resolveChild!: (v: { responseText: string; session: unknown; aborted: boolean; steered: boolean }) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) =>
+      prompt === "child"
+        ? new Promise((resolve) => { resolveChild = resolve; }) as never
+        : new Promise(() => {}) as never,
+    );
 
-    // The top-level spawn takes the only slot.
+    // The top-level spawn takes the only slot, and its child queues like any
+    // other run: a full pool cannot be bypassed by nesting.
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
-    expect(manager.getRecord(parent)!.status).toBe("running");
-
-    // Its children run immediately — queueing them would deadlock the parent.
-    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
       description: "child",
       parentAgentId: parent,
       depth: 2,
     });
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    // Parking gives the slot back, which is the slot the child is queued behind.
+    // Without the release the parent would wait on a child only it could start.
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(parent)!.parked).toBe(true);
     expect(manager.getRecord(child)!.status).toBe("running");
 
-    // A second top-level spawn still queues, so the pool is not bypassed.
-    const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
-    expect(manager.getRecord(sibling)!.status).toBe("queued");
+    resolveChild({ responseText: "child done", session: mockSession(), aborted: false, steered: false });
+    const { reports, steeringPending } = await parked;
+
+    // The report reached the parent exactly once, and the parent is running
+    // again with a slot of its own.
+    expect(steeringPending).toBe(false);
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+    expect(manager.getRecord(parent)!.parked).toBe(false);
+    expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(1);
+  });
+
+  it("settles a queued child whose start throws and wakes its parked parent", async () => {
+    // maxConcurrent 2: the parent and an unrelated blocker fill the pool, so both
+    // children queue. Parking frees a slot that starts the unrelated one, leaving
+    // the second child queued with the parent parked on it — a waiter is
+    // registered. That child only starts when the blocker settles, and its start
+    // throws (its cwd is gone), so this is the branch the wake exists for: no
+    // other settle path runs for it, and without the wake the parent waits
+    // forever.
+    manager = new AgentManager(undefined, 2);
+    hangingRun();
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const unrelated = manager.spawn(mockPi, mockCtx, "X", "unrelated", { description: "unrelated" });
+    const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-gone-"));
+    const child = manager.spawn(mockPi, mockCtx, "X", "child", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+      cwd,
+    });
+    expect(manager.getRecord(unrelated)!.status).toBe("queued");
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(unrelated)!.status).toBe("running");
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    // The child's directory is gone by the time it starts: drainQueue's
+    // startAgent throws on the re-validated cwd.
+    rmSync(cwd, { recursive: true, force: true });
+    manager.abort(blocker);
+    await manager.getRecord(blocker)!.promise?.catch(() => {});
+
+    const { reports } = await parked;
+    expect(manager.getRecord(child)!.status).toBe("error");
+    expect(manager.getRecord(child)!.settled).toBe(true);
+    // The failure reached the parked parent as its child's report, exactly once.
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    expect(manager.getRecord(parent)!.parked).toBe(false);
+  });
+
+  /**
+   * A settled parent and one finished child under it, with the parent's session
+   * exposing `steering` as its steering queue — the queue a report steered
+   * mid-turn waits in until a turn reads it.
+   */
+  async function parentWithFinishedChild(steering: string[]) {
+    manager = new AgentManager();
+    const parentSession = { ...mockSession(), messages: [] as any[], getSteeringMessages: () => steering };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
+      if (prompt === "parent") opts?.onSessionCreated?.(parentSession);
+      return Promise.resolve({
+        responseText: `${prompt} done`,
+        session: prompt === "parent" ? parentSession : mockSession(),
+        aborted: false,
+        steered: false,
+      }) as never;
+    });
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    await manager.getRecord(parent)!.promise;
+    const child = manager.spawn(mockPi, mockCtx, "X", "child", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    await manager.getRecord(child)!.promise;
+    return { parent, child, parentSession };
+  }
+
+  it("counts a steered report still sitting in the parent's queue as unread work", async () => {
+    const steering = ["SUBAGENT REPORT CHILD <!-- subagent-report:child-1:abcd1234 -->"];
+    const { parent, child, parentSession } = await parentWithFinishedChild(steering);
+    // The mid-turn delivery path steered the report into the session and
+    // recorded its marker.
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredMarker = "<!-- subagent-report:child-1:abcd1234 -->";
+
+    // Still queued: no turn has read it, so the run must not settle — it takes
+    // one more turn, and that is what drains the queue.
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: true });
+
+    // The turn read it: the marker is in the transcript, so nothing is left and
+    // the report is not rendered a second time.
+    steering.length = 0;
+    parentSession.messages.push({ role: "user", content: [{ type: "text", text: "REWRITTEN: SUBAGENT REPORT CHILD <!-- subagent-report:child-1:abcd1234 -->" }] });
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+  });
+
+  it("matches the report by its marker, so a rewritten notification is still one delivery", async () => {
+    // An input handler in the parent session may rewrite the notification text
+    // before it is queued (template expansion, a prefix). The marker rides
+    // through, so the park still sees a queued report instead of re-rendering
+    // it — exact-string matching would show it twice.
+    const steering = ["[rewritten by an input handler] <!-- subagent-report:child-1:beefcafe --> tail"];
+    const { parent, child } = await parentWithFinishedChild(steering);
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredMarker = "<!-- subagent-report:child-1:beefcafe -->";
+
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: true });
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+  });
+
+  it("renders a delivered report that is in neither the queue nor the transcript", async () => {
+    // The steer died after the claim was written (session gone, queue dropped):
+    // a duplicate report is survivable, a lost one is not, so the park hands it
+    // over again instead of settling.
+    const { parent, child } = await parentWithFinishedChild([]);
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredMarker = "<!-- subagent-report:child-1:deadbeef -->";
+
+    const { reports } = await manager.parkForChildReports(parent);
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    // Claimed for the prompt: rendered once, and read from then on.
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+    expect(manager.getRecord(child)!.deliveredMarker).toBeUndefined();
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+  });
+
+  it("does not hand a parked parent a report it already read", async () => {
+    const { parent, child } = await parentWithFinishedChild([]);
+    // Reading the child's result before the parent parked is what keeps it out
+    // of the continuation prompt: the caller already has it.
+    consumeResult(manager.getRecord(child)!);
+
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+    expect(manager.getRecord(child)!.resultDelivered).toBeFalsy();
+  });
+
+  it("hands a resumed run the same nested runtime its first run had", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", {
+      description: "parent",
+      maxSubagentDepth: 2,
+    });
+    await manager.getRecord(parent)!.promise;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
+    await manager.resume(parent, "more")!.promise;
+
+    // Without this bridge the resumed run's park loop is a no-op and its settle
+    // tail takes a live child down with it.
+    const runtime = vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime;
+    expect(runtime?.manager).toBe(manager);
+    expect(runtime).toMatchObject({ parentAgentId: parent, depth: 1, maxSubagentDepth: 2 });
+  });
+
+  it("hands the bridge to a resume at the cap too, leaving tool injection to the runner", async () => {
+    // The cap decides whether a run is given the nested TOOLS, per run, in the
+    // runner. The manager must not re-derive it from today's settings: a lower
+    // cap between a run and its resume would otherwise drop the bridge from a
+    // session that already has the tools.
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", {
+      description: "parent",
+      depth: 2,
+      maxSubagentDepth: 2,
+    });
+    await manager.getRecord(parent)!.promise;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
+    await manager.resume(parent, "more")!.promise;
+
+    expect(vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime).toMatchObject({
+      parentAgentId: parent,
+      depth: 2,
+      maxSubagentDepth: 2,
+    });
   });
 });

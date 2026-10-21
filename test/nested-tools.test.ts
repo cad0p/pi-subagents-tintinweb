@@ -1,7 +1,8 @@
 /**
  * nested-tools.test.ts — the child-safe delegation tool set: depth gating,
  * the per-agent allowlist, ownership scoping, the shared model scope, usage
- * folding, the abortable wait, and the checkpoint tool.
+ * folding, and the checkpoint tool — which is the main session's tool on the
+ * same shared read (agent-result-tool.ts), so the two surfaces cannot drift.
  *
  * The manager is faked so each tool's decision is asserted in isolation; the
  * real-session facts (which definition pi keeps, what the child's registry
@@ -58,6 +59,8 @@ function makeManager(): NestedAgentManager {
     resume: vi.fn((id: string) => records.get(id)),
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
+    // This fake's children never run, so a parent never has anything to park on.
+    parkForChildReports: async () => ({ reports: [], steeringPending: false }),
   };
 }
 
@@ -272,7 +275,7 @@ describe("nested Agent tool", () => {
 });
 
 describe("nested result / steer / checkpoint tools", () => {
-  it("reports an owned child's full report and rejects a foreign one", async () => {
+  it("reports an owned child's full report and hides another parent's child", async () => {
     records.set("child-1", {
       id: "child-1",
       type: "scout",
@@ -289,53 +292,49 @@ describe("nested result / steer / checkpoint tools", () => {
     records.set("foreign", { id: "foreign", status: "running", parentAgentId: "other", result: "secret" } as AgentRecord);
 
     expect(textOf(await run(1, { agent_id: "child-1" }))).toContain("done");
-    expect(textOf(await run(1, { agent_id: "foreign" }))).toContain("not owned by this parent");
+    // Same not-found response as the main session's tool: another parent's child
+    // must be indistinguishable from one that never existed — same message, and
+    // an error on both surfaces.
+    const foreign = await run(1, { agent_id: "foreign" }) as { isError?: boolean };
+    expect(textOf(foreign)).toBe('Agent not found: "foreign". It may have been cleaned up.');
+    expect(foreign.isError).toBe(true);
   });
 
-  it("wait: true resolves once the child settles", async () => {
-    const record = {
-      id: "child-1",
+  it("takes only agent_id — there is no wait to block on", () => {
+    const schema = tools()[1].parameters as unknown as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).toEqual(["agent_id"]);
+  });
+
+  it("consumes a terminal child's result on read, and leaves a live one alone", async () => {
+    // Consumption is what keeps a report out of the parent's next continuation
+    // prompt, and cancels the pending completion notification.
+    records.set("done", { id: "done", type: "scout", description: "d", status: "completed", result: "x", completedAt: Date.now() } as AgentRecord);
+    records.set("live", { id: "live", type: "scout", description: "d", status: "running", parentAgentId: "parent-1" } as AgentRecord);
+    records.get("done")!.parentAgentId = "parent-1";
+
+    await run(1, { agent_id: "live" });
+    expect(records.get("live")!.resultConsumed).toBeFalsy();
+    await run(1, { agent_id: "done" });
+    expect(records.get("done")!.resultConsumed).toBe(true);
+  });
+
+  it("marks a failed child as an error result, exactly like the main session's tool", async () => {
+    records.set("bad", {
+      id: "bad",
       type: "scout",
       description: "d",
-      status: "queued",
+      status: "error",
+      error: "boom",
+      completedAt: Date.now(),
       parentAgentId: "parent-1",
-      result: undefined as string | undefined,
-      promise: undefined as Promise<string> | undefined,
-    } as AgentRecord;
-    records.set("child-1", record);
-    setTimeout(() => {
-      record.status = "running";
-      record.promise = Promise.resolve().then(() => {
-        record.status = "completed";
-        record.result = "queued done";
-        return "queued done";
-      });
-    }, 10);
+      toolUses: 0,
+      startedAt: Date.now() - 1000,
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0,
+    } as AgentRecord);
 
-    const result = await run(1, { agent_id: "child-1", wait: true });
-    expect(textOf(result)).toContain("queued done");
-  });
-
-  it("cancelling the wait does not abort or consume the child", async () => {
-    let settle: (() => void) | undefined;
-    const record = {
-      id: "child-1",
-      status: "running",
-      parentAgentId: "parent-1",
-      promise: new Promise<void>((resolve) => { settle = resolve; }),
-    } as AgentRecord;
-    records.set("child-1", record);
-
-    const controller = new AbortController();
-    const outcome = run(1, { agent_id: "child-1", wait: true }, controller.signal).then(
-      () => "resolved",
-      (err: unknown) => (err as Error).name,
-    );
-    controller.abort();
-
-    expect(await Promise.race([outcome, new Promise((r) => setTimeout(() => r("timed-out"), 100))])).toBe("AbortError");
-    expect(record.status).toBe("running");
-    settle?.();
+    const result = await run(1, { agent_id: "bad" }) as { isError?: boolean };
+    expect(result.isError).toBe(true);
   });
 
   it("steers an owned running child and queues when the session is not ready", async () => {

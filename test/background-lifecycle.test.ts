@@ -18,6 +18,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { AgentManager } from "../src/agent-manager.js";
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { createNestedSubagentTools } from "../src/nested-tools.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 const mockPi = {} as any;
@@ -418,6 +419,40 @@ describe("background lifecycle — pooling and the completion tail", () => {
     expect(record.outputCleanup).toBeUndefined();
     expect(record.settled).toBe(true);
   });
+
+  it("drains a 3-way fan-out at maxConcurrent 2 when every parent parks on its child", async () => {
+    // Each parent owns one child and waits for it. Counting a parked parent
+    // against the pool deadlocks exactly this shape: the children queue behind
+    // capacity only their parked parents could free.
+    manager = new AgentManager(undefined, 2);
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts: any) => {
+      if (prompt.startsWith("child of")) {
+        return { responseText: `${prompt} done`, session: mockSession(), aborted: false, steered: false };
+      }
+      const nested = opts.nestedRuntime;
+      nested.manager.spawn(mockPi, mockCtx, "X", `child of ${prompt}`, {
+        description: "child", parentAgentId: nested.parentAgentId, depth: 2,
+      });
+      const { reports } = await nested.manager.parkForChildReports(nested.parentAgentId);
+      return {
+        responseText: reports.map((record: { result?: string }) => record.result).join(","),
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+      };
+    });
+
+    const parents = ["a", "b", "c"].map((p) => manager.spawn(mockPi, mockCtx, "X", p, { description: p }));
+    await manager.waitForAll();
+
+    expect(manager.hasRunning()).toBe(false);
+    for (const id of parents) {
+      const record = manager.getRecord(id)!;
+      expect(record.status).toBe("completed");
+      // Every parent continued with its child report instead of settling early.
+      expect(record.result).toContain("child of");
+    }
+  }, 5000);
 
   it("has no spawnAndWait method left", () => {
     expect((AgentManager.prototype as unknown as { spawnAndWait?: unknown }).spawnAndWait).toBeUndefined();
@@ -957,6 +992,130 @@ describe("background lifecycle — model-visible surfaces", () => {
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload.customType).toBe("subagent-notification");
     expect(payload.content).toContain(`Agent: ${id1}`);
+  });
+
+  /**
+   * Spawn a parent whose run owns one nested child and never settles on its own,
+   * exactly as a parent mid-task does. The child's run resolves on demand, so a
+   * test controls when the completion lands.
+   */
+  function spawnParentWithChild(steer: () => Promise<void> = async () => {}) {
+    const { pi } = registerExtension();
+    const parentSession = { ...mockSession(), steer: vi.fn(steer), getSteeringMessages: () => [] as string[] };
+    const state: { childId?: string; resolveChild?: (v: unknown) => void } = {};
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts: any) => {
+      if (prompt !== "parent") {
+        return new Promise((resolve) => { state.resolveChild = resolve; }) as never;
+      }
+      opts.onSessionCreated(parentSession);
+      state.childId = opts.nestedRuntime.manager.spawn(
+        pi as never,
+        spawnCtx(tmpDir),
+        "Explore",
+        "child",
+        { description: "child task", parentAgentId: opts.nestedRuntime.parentAgentId, depth: 2 },
+      );
+      return new Promise(() => {}) as never;
+    });
+    const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const parentId = handle.spawn(
+      pi, spawnCtx(tmpDir), "general-purpose", "parent", { description: "parent task" },
+    );
+    return { pi, handle, parentId, parentSession, state };
+  }
+
+  /** Settle the child spawned by spawnParentWithChild, past its settle tail. */
+  async function settleChild(state: { resolveChild?: (v: unknown) => void }): Promise<void> {
+    state.resolveChild?.({ responseText: "CHILD OUTPUT", session: mockSession(), aborted: false, steered: false });
+    // One macrotask: the settle tail (and the hold window it arms) runs on the
+    // microtasks in between.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it("delivers a nested child's completion into its parent agent's session", async () => {
+    const { parentSession, state, pi, handle } = spawnParentWithChild();
+    const child = () => handle.listAgents().find((r: { id: string }) => r.id === state.childId);
+    expect(child().status).toBe("running");
+
+    await settleChild(state);
+    // The claim is written when the steer resolves, not before it is called.
+    await vi.waitFor(() => expect(child().resultDelivered).toBe(true));
+
+    const [notification] = parentSession.steer.mock.calls[0];
+    expect(notification).toContain("Subagent completed");
+    expect(notification).toContain("CHILD OUTPUT");
+    // The notification carries a unique marker line, recorded on the record so
+    // the park can find the report in the queue or the transcript later.
+    expect(child().deliveredMarker).toBeDefined();
+    expect(notification).toContain(child().deliveredMarker);
+    // The nested report goes to the parent agent, never to the main session.
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("claims nothing when the steer into the parent session fails", async () => {
+    const { parentSession, state, handle } = spawnParentWithChild(async () => {
+      throw new Error("session is gone");
+    });
+    const child = () => handle.listAgents().find((r: { id: string }) => r.id === state.childId);
+
+    await settleChild(state);
+    await vi.waitFor(() => expect(parentSession.steer).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(child().deliveryPromise).toBeUndefined());
+
+    // A failed steer leaves the record unclaimed, so the parking path renders
+    // the report instead of it being dropped as "already delivered".
+    expect(child().resultDelivered).toBeFalsy();
+    expect(child().deliveredMarker).toBeUndefined();
+  });
+
+  it("does not steer a parked parent: its continuation prompt carries the report", async () => {
+    const { parentSession, state, parentId, handle } = spawnParentWithChild();
+    // The parent's run is waiting on this child. Steering the report in as well
+    // would deliver it twice — once here, once as the wake-up prompt — so the
+    // delivery holds off and leaves the report to whatever wakes the run.
+    handle.listAgents().find((r: { id: string }) => r.id === parentId).parked = true;
+
+    await settleChild(state);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(parentSession.steer).not.toHaveBeenCalled();
+    const child = handle.listAgents().find((r: { id: string }) => r.id === state.childId);
+    expect(child.resultDelivered).toBeFalsy();
+  });
+
+  it("a nested result read before delivery cancels the notification", async () => {
+    const { parentSession, state, pi, parentId, handle } = spawnParentWithChild();
+
+    await settleChild(state);
+    // Read it inside the hold window, through the real nested tool: consuming a
+    // terminal result is what suppresses the pending notification.
+    const nestedTools = createNestedSubagentTools({
+      // The nested tool reads records through this surface, so it resolves the
+      // child by id even though the parent-facing registry hides it.
+      manager: {
+        spawn: () => state.childId!,
+        resume: () => undefined,
+        getRecord: (id: string) => handle.listAgents().find((r: { id: string }) => r.id === id),
+        listAgents: () => handle.listAgents(),
+        parkForChildReports: async () => ({ reports: [], steeringPending: false }),
+      },
+      pi: pi as never,
+      parentAgentId: parentId,
+      depth: 1,
+      maxSubagentDepth: 2,
+      allowedSubagents: "all",
+      configCwd: tmpDir,
+    });
+    const read = await nestedTools[1].execute(
+      "tc-read", { agent_id: state.childId! }, undefined, undefined, {} as never,
+    );
+    expect(textOf(read)).toContain("CHILD OUTPUT");
+    expect(handle.listAgents().find((r: { id: string }) => r.id === state.childId).resultConsumed).toBe(true);
+
+    // Past the hold window: the nudge re-checks consumption at fire time and
+    // drops the delivery, so the parent is not told twice.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(parentSession.steer).not.toHaveBeenCalled();
   });
 
   it("routes a queued stop through the completion surface exactly once", async () => {

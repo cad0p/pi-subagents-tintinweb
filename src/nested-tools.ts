@@ -12,16 +12,18 @@
  * branch's own config root instead of the process-global one.
  *
  * This fork launches background runs only, so — unlike upstream's foreground
- * path — the Agent tool always returns an id. `get_subagent_result` therefore
- * keeps the fork's full report (turn/max-turns header, latest checkpoint,
- * artifact paths) and adds an opt-in `wait` so a parent can block on its child
- * without polling; cancelling that wait leaves the child running.
+ * path — the Agent tool always returns an id. A child's completion is pushed
+ * into its parent's session the way a top-level agent's is pushed into the main
+ * session, and the parent's run does not settle while it owns live children, so
+ * `get_subagent_result` here takes no `wait`: there is nothing to block on and
+ * nothing to poll. It is the same tool as the main session's, on the same read
+ * (see agent-result-tool.ts).
  */
 
 import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { abortable } from "./abortable.js";
+import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -29,7 +31,6 @@ import { isolationParam, resolveAgentInvocationConfig } from "./invocation-confi
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { renderAgentReport } from "./result-report.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -68,6 +69,20 @@ export interface NestedSpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
 }
 
+/** What a parked run still owes its nested children when it wakes. */
+export interface ChildReportBatch {
+  /** Reports no channel has handed to this run yet — render them into the next prompt. */
+  reports: AgentRecord[];
+  /**
+   * A report was already steered into this run's session and is still sitting in
+   * its steering queue: no turn has read it. Nothing is rendered for it (its
+   * text is already in the conversation), so this only says the run has to take
+   * one more turn — the one that drains the queue — instead of settling with the
+   * report unread.
+   */
+  steeringPending: boolean;
+}
+
 /** The manager surface nested tools need. Structural so tests can fake it. */
 export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
@@ -78,6 +93,14 @@ export interface NestedAgentManager {
   ): AgentRecord | undefined;
   getRecord(id: string): AgentRecord | undefined;
   listAgents(): AgentRecord[];
+  /**
+   * Block until this run's nested children have reported, releasing its pool
+   * slot while it waits, and return what the run still owes them: reports to
+   * feed into the session's next prompt, plus whether a report is sitting unread
+   * in its steering queue. Both empty means no child work is left and the run
+   * may settle.
+   */
+  parkForChildReports(id: string, signal?: AbortSignal): Promise<ChildReportBatch>;
 }
 
 export interface NestedToolContext {
@@ -96,11 +119,6 @@ export interface NestedToolContext {
 
 function textResult(text: string, isError = false) {
   return { content: [{ type: "text" as const, text }], isError, details: undefined };
-}
-
-/** A record is reachable only through the agent that spawned it. */
-function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): record is AgentRecord {
-  return record?.parentAgentId === parentAgentId;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -127,7 +145,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       "are accepted, and nesting is depth-limited.",
     promptSnippet: "Launch a nested subagent for bounded delegated work",
     promptGuidelines: [
-      "Nested subagents run in the background: keep working, then read the result with get_subagent_result (use wait to block).",
+      "Nested subagents run in the background: keep working. Their results are delivered to you when they finish.",
       "Never delegate understanding — hand over the exact task, files, and what you already know.",
     ],
     parameters: Type.Object({
@@ -166,7 +184,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
 
       if (params.resume) {
         const existing = context.manager.getRecord(params.resume);
-        if (!ownsRecord(existing, context.parentAgentId)) {
+        if (!isOwnedRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
         const resumed = context.manager.resume(params.resume, params.prompt, {
@@ -177,7 +195,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         return textResult(
           `Nested agent resumed in background.\nAgent ID: ${resumed.id}\n\n` +
-          `Use get_subagent_result to retrieve its result. Do not duplicate its work.`,
+          `Its result will be delivered to you when it finishes; get_subagent_result reads its full report.\n` +
+          `Do not duplicate its work.`,
         );
       }
 
@@ -311,40 +330,35 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         `Description: ${params.description}\n` +
         (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
         (scopeWarning ? `Warning: ${scopeWarning}\n` : "") +
-        `\nUse get_subagent_result to retrieve its result. Do not duplicate its work.`,
+        `\nIts result will be delivered to you when it finishes; get_subagent_result reads its full report.\n` +
+        `Do not duplicate its work.`,
       );
     },
   });
 
+  // The same tool as the main session's, on the same shared read: ownership,
+  // not-found response, consumption, report and error convention all live in
+  // agent-result-tool.ts. Only the ownership key differs — this parent's
+  // children, never another agent's.
   const resultTool = defineTool({
     name: "get_subagent_result",
     label: "Get Nested Agent Result",
     description:
-      "Check a nested agent owned by this parent, or block until it settles with wait: true. " +
-      "Cancelling the wait leaves the agent running.",
-    promptSnippet: "Check or wait for a nested subagent's result",
+      "Check a nested agent owned by this parent and read its report. Its result is also delivered to you " +
+      "when it finishes, so read a running child only to see how it is doing.",
+    promptSnippet: "Check a nested subagent's status and read its result",
     parameters: Type.Object({
       agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool." }),
-      wait: Type.Optional(
-        Type.Boolean({ description: "If true, block until the agent settles before reporting. Default: false." }),
-      ),
     }),
-    execute: async (_toolCallId, params, signal) => {
+    execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId)) {
-        return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
+      if (!isOwnedRecord(record, context.parentAgentId)) {
+        return agentNotFoundResponse(params.agent_id);
       }
-      // Cancellation (the parent's tool call is aborted) stops only this wait;
-      // the nested child keeps running and stays fetchable. A queued record has
-      // no promise until the manager starts it, so poll — abortably — until it
-      // leaves the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
-        }
-        if (record.promise) await abortable(record.promise, signal);
-      }
-      return textResult(renderAgentReport(record), record.status === "error");
+      // A report read here is not handed to this run again when it next parks:
+      // the continuation prompt claims only undelivered, unconsumed reports.
+      consumeResult(record);
+      return agentReportResponse(record);
     },
   });
 
@@ -359,7 +373,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId)) {
+      if (!isOwnedRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
       if (record.status !== "running" && record.status !== "queued") {

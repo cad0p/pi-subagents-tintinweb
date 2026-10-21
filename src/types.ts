@@ -132,6 +132,41 @@ export interface AgentRecord {
   settled?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
+  /**
+   * Set once this child's report has been handed to its parent run, by either
+   * path — steered into the parent session mid-turn, or rendered into the
+   * continuation prompt that ends a park. Whichever claims the record first sets
+   * this, so a child is handed over once. A resume clears it, because the
+   * resumed run owes its parent a report of its own.
+   */
+  resultDelivered?: boolean;
+  /**
+   * The unique marker line carried by the notification this child's report was
+   * steered into the parent session with (agent id + a nonce), so "delivered" can
+   * be checked against what the parent actually holds: in
+   * `session.getSteeringMessages()` it is queued and unread, in the transcript it
+   * has been read, and in neither it never landed (see `AgentManager.reportRead`).
+   * Keyed off a marker rather than the whole notification because an input handler
+   * in the parent session may rewrite the text it is given.
+   *
+   * Undefined for a report rendered into a continuation prompt, which is read by
+   * construction.
+   */
+  deliveredMarker?: string;
+  /**
+   * The steer that carries this child's report, while it is in flight.
+   * `session.steer()` suspends before it enqueues, and the parent's turn can end
+   * inside that window, so the park waits for this before judging the report —
+   * and the claim (`resultDelivered`) is written only when it resolves.
+   */
+  deliveryPromise?: Promise<void>;
+  /**
+   * True while a run waits on its nested children: it has released its
+   * maxConcurrent slot, status stays "running" (the run has not settled), and a
+   * child completion nudge holds off because the continuation prompt claims the
+   * report when this run wakes.
+   */
+  parked?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
   /** Worktree info if the agent is running in an isolated worktree. */

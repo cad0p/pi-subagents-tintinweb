@@ -157,6 +157,8 @@ The notification report is markdown-wrapped child output with terminal control s
 
 Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 
+A nested child's completion uses the same channel one level down: the report is steered into the parent **agent's** session, with the same hold window and the same rule that reading the result first cancels it. A parent that runs out of work while owning children does not settle — it parks, waits, and continues with their reports as its next turn — so a nested completion is never delivered into a session that has already ended. The two paths do not overlap: steered mid-turn when the parent is still running, claimed by the continuation prompt when its turn had already ended. And a steer only *queues*, so "delivered" is checked against the parent session rather than assumed: each notification carries a unique marker line (agent id plus a nonce), and the run does not settle while that marker is still in the session's steering queue — it takes one more turn to drain it — or while the steer is still in flight. A report whose marker is in neither the queue nor the transcript never landed, and is delivered again in the continuation prompt: showing a report twice is survivable, losing one is not. The one residual is that a text-rewriting input handler in a parent session can mangle the marker itself, in which case that report is also shown twice — still never lost.
+
 ## Default Agent Types
 
 | Type | Tools | Model | Prompt Mode | Description |
@@ -312,6 +314,8 @@ Check a subagent's status and retrieve its result. Use the agent ID returned by 
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to check |
 
+Reading a finished agent's result marks it consumed: the completion notification it already had parked is cancelled, so the report is never delivered twice. An unknown id is an error, not an empty success. The nested twin an agent gets with `allowed_subagents` is the same tool on the same read — same report, same not-found response, same error convention, one `agent_id` parameter — scoped to that agent's own children.
+
 ### `steer_subagent`
 
 Send a steering message to a subagent. The message interrupts after the current tool execution.
@@ -376,6 +380,8 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
+Every run that executes occupies one slot, nested children included: a subagent's children queue against the same pool as its parent. That cannot deadlock, because a parent waiting on its children **parks** — it gives its slot back for the duration of the wait, and re-takes one when its children have reported. A parked run is still `running` (its turn is not over, its session is live), it just is not counted. Without that release a parent would wait on children queued behind capacity only it could free.
+
 Resumed runs (`resume`) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
 
 ## Session Persistence
@@ -433,7 +439,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` aborts extension load, naming the file, instead of being skipped with a warning. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. For a checked-in `.pi/agents/`, failing at startup is the point: the alternative is running a *different* agent than the file names.
 
-**Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on nested subagent delegation, counted from the main session — main is 0, its subagents are 1, their children are 2. `0` or `1` disables nesting project-wide. An agent only gets the nested tools (`Agent`, `get_subagent_result`, `steer_subagent`) when its own frontmatter opts in with `allowed_subagents` *and* it sits below the cap; its `max_subagent_depth` can tighten the project cap but never raise it. A nested child does not take a `maxConcurrent` slot — its parent already holds one — and it is aborted when its parent settles, since only the parent can reach it.
+**Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on nested subagent delegation, counted from the main session — main is 0, its subagents are 1, their children are 2. `0` or `1` disables nesting project-wide. An agent only gets the nested tools (`Agent`, `get_subagent_result`, `steer_subagent`) when its own frontmatter opts in with `allowed_subagents` *and* it sits below the cap; its `max_subagent_depth` can tighten the project cap but never raise it. A nested child takes a `maxConcurrent` slot like any other run and queues behind a full pool; its parent parks (releasing its own slot) until the child reports, so the depth cap bounds how deep a branch goes, not how long it lives. A child is aborted when its parent settles or is stopped, since only the parent can reach it.
 
 **Report usage** (`reportUsage`, default `true`): subagents run in their own pi session, so without this the parent's footer, statusline and `/cost` show only what the main model spent — a session that delegated most of its work reads as nearly free. With this on, each `Agent` / `get_subagent_result` / `steer_subagent` result carries the spend accumulated since the last one, and pi folds it into the session totals under `/cost`'s "Tools/summaries" bucket. Tokens include `cacheRead` (pi bills the cached prefix on every call), cost is pi's own per-message figure, and the context-window percentage is unaffected. Two consequences worth knowing: an agent that finishes in the background has no result of its own to ride on, so its spend lands on the **next** call rather than the moment it finishes, and a session that ends with nothing pending reports nothing. Nested children are counted once each, on the top-level result. On by default here, unlike upstream: a session total that omits the delegated work is wrong about what the session cost, and the setting stays available for anyone tracking the old numbers. Turning it on does move numbers a statusline may already be reading, which is the one reason it is a setting rather than unconditional.
 
