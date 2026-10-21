@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Remove thinking param from Agent tool (closes #51) ([#52](https://github.com/cad0p/pi-subagents-tintinweb/pull/52))
 - *(tests)* Stabilize live Explore and SELF-SMOKE e2e against a real agent dir (closes #53) ([#55](https://github.com/cad0p/pi-subagents-tintinweb/pull/55))
 - Read the final turn's failure from its run events (closes #58)
+- *(agent-runner)* Load pi's built-in extensions in subagents, scoped and trusted (closes #61) ([#63](https://github.com/cad0p/pi-subagents-tintinweb/pull/63))
 
 ### 🚜 Refactor
 
