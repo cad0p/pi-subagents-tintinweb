@@ -153,6 +153,8 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "persist_session",
   "output_transcript",
   "session_dir",
+  "allowed_subagents",
+  "max_subagent_depth",
   "prompt_mode",
   "inherit_context",
   "isolated",
