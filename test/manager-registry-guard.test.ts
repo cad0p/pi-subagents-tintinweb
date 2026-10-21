@@ -94,11 +94,11 @@ describe("Symbol.for manager registry across activations", () => {
     expect((globalThis as any)[MANAGER_KEY].getRecord(id)).toBeDefined();
 
     // … and the child's shutdown does not delete the root's entry.
-    await child.lifecycle.get("session_shutdown")?.();
+    await child.lifecycle.get("session_shutdown")?.({ reason: "quit" });
     expect((globalThis as any)[MANAGER_KEY]).toBe(rootEntry);
 
     // The root's own shutdown releases the slot.
-    await root.lifecycle.get("session_shutdown")?.();
+    await root.lifecycle.get("session_shutdown")?.({ reason: "quit" });
     expect((globalThis as any)[MANAGER_KEY]).toBeUndefined();
   });
 });

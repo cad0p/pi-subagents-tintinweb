@@ -24,7 +24,14 @@ describe("cross-extension RPC", () => {
 
   beforeEach(() => {
     events = createEventBus();
-    manager = { spawn: vi.fn().mockReturnValue("agent-42"), abort: vi.fn().mockReturnValue(true) };
+    manager = {
+      spawn: vi.fn().mockReturnValue("agent-42"),
+      abort: vi.fn().mockReturnValue(true),
+      // A top-level record by default: the ownership guard lets it through.
+      getRecord: vi.fn(() => ({ parentAgentId: undefined })),
+      consumeResult: vi.fn().mockReturnValue(true),
+      steer: vi.fn().mockReturnValue(true),
+    };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
   });
@@ -195,7 +202,9 @@ describe("cross-extension RPC", () => {
     });
 
     it("returns error when agent not found", async () => {
-      (manager.abort as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      // No record behind the id — the ownership check refuses it before abort is
+      // even consulted, which is what a stale id from a caller looks like.
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:stop:reply:req-st2", reply);
@@ -203,6 +212,7 @@ describe("cross-extension RPC", () => {
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.abort).not.toHaveBeenCalled();
     });
 
     it("scopes replies — other requestIds do not receive it", async () => {

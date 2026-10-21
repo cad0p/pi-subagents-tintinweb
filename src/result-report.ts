@@ -14,8 +14,22 @@ import { checkpointsFilePath } from "./checkpoint.js";
 import { getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { toSingleLine } from "./text-safety.js";
 import type { AgentRecord } from "./types.js";
-import { formatDuration, formatTokens, getDisplayName } from "./ui/agent-widget.js";
-import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { formatCost, formatDuration, formatTokens, getDisplayName } from "./ui/agent-widget.js";
+import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+
+/**
+ * Whether the report shows an estimated cost beside the token count — the
+ * user's `showCost` setting, mirrored here by `index.ts`'s applier.
+ *
+ * Module state rather than a parameter because BOTH report callers must agree:
+ * the top-level `get_subagent_result` and its nested twin (nested-tools.ts),
+ * which a child session builds without access to the parent's settings. One
+ * source beats threading the same flag through two independent tool factories.
+ */
+let showCost = false;
+
+/** Mirror the live `showCost` setting into the report renderer. */
+export function setReportShowCost(b: boolean): void { showCost = b; }
 
 /** Format an agent's lifetime token total, or "" when zero. */
 export function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
@@ -110,6 +124,11 @@ function completedHeader(record: AgentRecord): string {
   const contextPercent = getSessionContextPercent(record.session);
   const statsParts = [`Tool uses: ${record.toolUses}`];
   if (tokens) statsParts.push(tokens);
+  // Labelled field, like its pipe-separated neighbours. Omitted entirely when
+  // there is no cost to show: an unpriced model would otherwise read `Cost:
+  // $0.00`, which claims the run was measured and free rather than never priced.
+  const cost = showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
+  if (cost) statsParts.push(`Cost: ${cost}`);
   if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
   if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
   statsParts.push(`Duration: ${duration}`);

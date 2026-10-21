@@ -207,10 +207,27 @@ export interface AgentRecord {
   effectiveMaxTurns?: number;
 }
 
+/**
+ * What a session reports as its level: pi's `ThinkingLevel` plus the `"off"` a
+ * model with thinking disabled reports. Display-only — spawning still takes a
+ * `ThinkingLevel`, so this widening cannot leak into an invocation.
+ */
+export type EffectiveThinkingLevel = ThinkingLevel | "off";
+
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Short display name for tight rows, e.g. "haiku 4.5". Always set once known. */
   modelName?: string;
-  thinking?: ThinkingLevel;
+  /** Canonical `provider/id`, for surfaces with room to disambiguate providers. */
+  modelId?: string;
+  /** The level actually in effect, once a session exists to report one. */
+  thinking?: EffectiveThinkingLevel;
+  /**
+   * What the caller asked for, kept only when they did not get it — pi clamped
+   * the level to the model's capabilities. The snapshot exists to answer "did
+   * the spawn honor my instructions?", which it cannot do if the request is
+   * lost, so it is never overwritten once set.
+   */
+  requestedThinking?: EffectiveThinkingLevel;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;

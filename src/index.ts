@@ -23,11 +23,11 @@ import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { formatLifetimeTokens, renderAgentReport } from "./result-report.js";
+import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -40,6 +40,7 @@ import {
   AgentWidget,
   buildInvocationTags,
   fgPreservingNestedStyles,
+  formatCost,
   formatDuration,
   formatMs,
   formatTokens,
@@ -51,7 +52,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent } from "./usage.js";
+import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
 // ---- Shared helpers ----
@@ -96,7 +97,7 @@ function createActivityTracker(maxTurns?: number) {
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
+    onAssistantUsage: (usage: LifetimeUsage) => {
       addUsage(state.lifetimeUsage, usage);
     },
   };
@@ -243,8 +244,13 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
  * custom-message box: terminal control sequences are stripped from every field
  * while markdown stays intact, and the body goes last (an unbalanced fence in
  * it cannot swallow the metadata above).
+ *
+ * `showCost` is the user's setting, passed in rather than read here so the
+ * formatter stays a pure function of its arguments. It gates this report only:
+ * a figure the orchestrator was not asked to track is one it may start reporting
+ * unprompted, so the setting covers LLM context too, not just what a human sees.
  */
-export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
+export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings, showCost = false): string {
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
   const context = formatSessionContext(record.session);
@@ -256,6 +262,10 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   }
   if (Number.isFinite(record.toolUses) && record.toolUses > 0) stats.push(`${record.toolUses} tool use${record.toolUses === 1 ? "" : "s"}`);
   if (Number.isFinite(totalTokens) && totalTokens > 0) stats.push(formatTokens(totalTokens));
+  // Omitted when there is no cost to show, so an unpriced model reports tokens
+  // and no dollars rather than a `$0.00` that reads as measured-and-free.
+  const cost = showCost ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
+  if (cost) stats.push(cost);
   if (context !== null) stats.push(`ctx ${context}`);
   if (Number.isFinite(record.compactionCount) && record.compactionCount > 0) stats.push(`⇊${record.compactionCount}`);
   if (Number.isFinite(durationMs) && durationMs > 0) stats.push(formatMs(durationMs));
@@ -302,6 +312,42 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
+
+  // ---- Usage reporting (all three settings default off; see SubagentsSettings) ----
+  /** Attach subagent spend to tool results, so the parent session counts it. */
+  let reportUsage = false;
+  function isReportUsageEnabled(): boolean { return reportUsage; }
+  function setReportUsage(b: boolean): void {
+    reportUsage = b;
+    // Whatever accumulated while it was on is stale the moment it goes off:
+    // draining it later would bill the parent for a window the user opted out
+    // of, in one lump, on some unrelated later tool call.
+    if (!b) pendingUsage.drain();
+  }
+  /** Show `~$X` next to token counts in the subagent surfaces. */
+  let showCost = false;
+  function isShowCostEnabled(): boolean { return showCost; }
+  function setShowCost(b: boolean): void {
+    showCost = b;
+    // The report renderer keeps its own copy of this flag because both report
+    // callers must agree (see `setReportShowCost`). That copy is module state
+    // shared with every activation in this process, so a CHILD session's
+    // settings load must not clobber the root's decision — the nested
+    // `get_subagent_result` renders for the same user, in the same session.
+    if (!inChildSessionContext()) setReportShowCost(b);
+    widget.update();
+    fleet.update();
+  }
+  /** Name the model and thinking level on the widget's running rows. */
+  let showModel = false;
+  function isShowModelEnabled(): boolean { return showModel; }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  /**
+   * Subagent spend the parent session has not been told about yet. Fed from the
+   * manager's per-message hook (the one place each message is seen exactly once)
+   * and drained onto the next tool result this extension returns.
+   */
+  const pendingUsage = new PendingUsagePool();
 
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them before
@@ -388,7 +434,7 @@ export default function (pi: ExtensionAPI) {
     try {
       pi.sendMessage({
         customType: "subagent-notification",
-        content: formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }),
+        content: formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost),
         display: true,
       }, { deliverAs: "steer", triggerTurn: true });
     } catch (err) {
@@ -417,6 +463,19 @@ export default function (pi: ExtensionAPI) {
     const tokens = total > 0
       ? { input: u.input, output: u.output, total }
       : undefined;
+    // The whole run's spend as a pi `Usage` — pi's convention for handing spend
+    // to a consumer, so `usage.cost.total` and `usage.cacheRead` are where a
+    // listener already expects them and anything pi adds to `Usage` arrives
+    // without a change here. Omitted when nothing was spent, so "spent nothing"
+    // and "never ran" stay distinguishable. Ungated by either setting: those
+    // govern what a human is shown and what the parent session counts, not what
+    // a subscriber asked for.
+    //
+    // `tokens` above is the other convention, kept as it shipped: a flat view
+    // model like pi's own `SessionStats`, carrying the DISPLAY total, which
+    // excludes cacheRead (#38). The two answer different questions and neither
+    // derives from the other.
+    const usage = toReportedUsage(u);
     return {
       id: record.id,
       type: record.type,
@@ -427,6 +486,7 @@ export default function (pi: ExtensionAPI) {
       toolUses: record.toolUses,
       durationMs,
       tokens,
+      usage,
     };
   }
 
@@ -482,6 +542,48 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
+  }, (record, usage) => {
+    // Every assistant message from every agent — nested included, exactly once.
+    // Parked here until a tool result can carry it back to the parent session;
+    // see `PendingUsagePool`. Skipped entirely when the feature is off, so no
+    // pool grows in a session that will never drain it.
+    if (reportUsage) pendingUsage.add(usage);
+    // The same message, live, for anyone keeping their own ledger — a footer
+    // that breaks spend down by agent type and thinking level, say. This is the
+    // one place every agent's spend passes through, which is why it is emitted
+    // here and not from the lifecycle events: those fire for top-level agents
+    // only, once, at the end, so a nested child would never be counted and a
+    // running agent would read as free until it stopped. Deliberately ungated by
+    // `reportUsage` — that decides whether the parent session's own totals
+    // include this spend, not whether it happened.
+    //
+    // `model` and `thinking` are read off the record per message, not captured
+    // at spawn: the record is authoritative only once the session exists and pi
+    // has clamped the level to the model (see `onSessionCreated` in
+    // agent-manager.ts).
+    const reported = toReportedUsage(usage);
+    if (!reported) return;
+    // A key whose value is unknown is omitted, never `undefined`: `model` and
+    // `thinking` until the session has reported them, `parentAgentId` on a
+    // top-level agent.
+    const invocation = record.invocation;
+    pi.events.emit("subagents:usage", {
+      id: record.id,
+      type: record.type,
+      description: record.description,
+      ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
+      ...(invocation?.thinking !== undefined ? { thinking: invocation.thinking } : {}),
+      // Set only when the caller did not get the level it asked for (pi clamped
+      // it to the model), so a ledger can show `low (asked minimal)` instead of
+      // silently relabelling.
+      ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
+      depth: record.depth ?? 1,
+      ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
+      usage: reported,
+    });
+  }, (record, message) => {
+    if (record.parentAgentId) return;
+    pi.events.emit("subagents:steered", { id: record.id, message });
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -536,6 +638,33 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
+   * Wrap a tool so its results carry back whatever subagent spend the parent
+   * session has not been told about yet (see `PendingUsagePool`).
+   *
+   * Pi copies `AgentToolResult.usage` onto the persisted tool-result message and
+   * folds it into `getSessionStats()`, which is what the footer, the statusline
+   * and `/cost` read — so this is the whole of "report usage to the parent".
+   *
+   * No tool-call-id guard: `ToolDefinition.execute` takes a `string` here, and
+   * every caller of a registered tool in this fork is pi itself, which always
+   * has one. There is no in-process clone that invokes a tool from a discarded
+   * fork of the conversation, so a result this extension produces always becomes
+   * a real message and its usage is always counted.
+   */
+  function withUsageReporting(tool: ToolDefinition): ToolDefinition {
+    const execute = tool.execute;
+    return {
+      ...tool,
+      execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+        const result = await execute(toolCallId, params, signal, onUpdate, ctx);
+        if (!reportUsage) return result;
+        const usage = pendingUsage.drain();
+        return usage ? { ...result, usage } : result;
+      },
+    };
+  }
+
+  /**
    * Register a parent-facing tool — never in a subagent session.
    *
    * A subagent session re-activates this extension in the same process, and its
@@ -546,9 +675,12 @@ export default function (pi: ExtensionAPI) {
    * Skipping the child activation makes the child's single `Agent` a
    * construction-time guarantee. Every other child has these names stripped from
    * its allowlist (EXCLUDED_TOOL_NAMES), so nothing changes for them.
+   *
+   * Every parent-facing tool is registered through here, so this is also the one
+   * place that attaches pending subagent spend to a tool result.
    */
   const registerParentTool = (tool: ToolDefinition): void => {
-    if (!inChildSessionContext()) pi.registerTool(tool);
+    if (!inChildSessionContext()) pi.registerTool(withUsageReporting(tool));
   };
 
   // --- Cross-extension RPC via pi.events ---
@@ -597,14 +729,32 @@ export default function (pi: ExtensionAPI) {
         pi,
         getCtx: () => currentCtx,
         // Same capability boundary as the manager registry: a cross-extension
-        // caller cannot forge nested ownership, and cannot stop a nested child
-        // it does not own.
+        // caller cannot forge nested ownership, and cannot stop, steer or
+        // consume a nested child it does not own.
         manager: {
           spawn: spawnTopLevel,
+          getRecord: (id) => manager.getRecord(id),
           abort: (id) => {
             const record = manager.getRecord(id);
             return !record?.parentAgentId && manager.abort(id);
           },
+          // What `get_subagent_result` does when it returns a settled result:
+          // mark it read and cancel the parked completion notification, so the
+          // caller that already showed the model this result does not pay for a
+          // second copy of it.
+          consumeResult: (id) => {
+            // Ownership is the RPC layer's job (assertOwned); settledness is not —
+            // it never looks at status. Consuming a running agent would set
+            // resultConsumed and suppress the completion notification it is still
+            // owed, so this stays the same gate the local get_subagent_result has.
+            const record = manager.getRecord(id);
+            if (!record) return false;
+            if (record.status === "running" || record.status === "queued") return false;
+            record.resultConsumed = true;
+            cancelNudge(record.id);
+            return true;
+          },
+          steer: (id, message) => manager.steer(id, message),
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -622,10 +772,12 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
+    rpcHandle?.unsubConsume();
+    rpcHandle?.unsubSteer();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
@@ -641,6 +793,17 @@ export default function (pi: ExtensionAPI) {
     mainTurnActive = false;
     fleet.dispose();
     manager.dispose();
+    // Every agent is stopped and every child session has shut down, so no more
+    // `subagents:usage` can arrive from THIS session. A ledger flushing in its
+    // own `session_shutdown` may have run before this handler aborted the agents
+    // (handlers run in load order) and missed their last messages; this is the
+    // point after which a synchronous final flush is complete.
+    //
+    // Not only an exit: pi also emits `session_shutdown` for `resume`, `reload`,
+    // `/new` and `/fork`, where the process lives on and the next session starts
+    // emitting `subagents:usage` again. The reason is carried so a listener can
+    // tell a final flush from a mid-process one.
+    pi.events.emit("subagents:disposed", { reason: event.reason });
   });
 
   // Live widget: show running agents above editor.
@@ -648,11 +811,11 @@ export default function (pi: ExtensionAPI) {
   // agent; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, agentActivity);
+  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -772,6 +935,9 @@ export default function (pi: ExtensionAPI) {
       setMaxSubagentDepth: setMaxSubagentDepth,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setFallbackSubagent: setFallbackSubagent,
+      setReportUsage,
+      setShowCost,
+      setShowModel,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1120,13 +1286,12 @@ Terse command-style prompts produce shallow, generic work.
       };
 
       // Display name for the resolved model, captured in the fresh-spawn
-      // invocation snapshot. Undefined when the model matches the parent's —
-      // the stats line omits the default.
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-        : undefined;
+      // invocation snapshot. Unconditional, not "only when it differs from the
+      // parent": a thinking level reads as a property of a model, and an agent
+      // that inherited the parent's model used to show the level with nothing to
+      // attach it to. This is the pre-session snapshot — agent-manager overwrites
+      // it with the effective values the moment a session reports them.
+      const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -1244,6 +1409,7 @@ Terse command-style prompts produce shallow, generic work.
         const displayName = getDisplayName(subagentType);
         const agentInvocation: AgentInvocation = {
           modelName,
+          modelId,
           thinking,
           // Explicit value only — the default fallback would just add noise.
           // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
@@ -1738,7 +1904,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message));
+        }, keybindings, (message: string) => manager.steer(record.id, message), showCost);
       },
       {
         overlay: true,
@@ -2151,6 +2317,9 @@ ${systemPrompt}
       // explicit configuration — which then fails loudly if general-purpose later
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
+      reportUsage: isReportUsageEnabled(),
+      showCost: isShowCostEnabled(),
+      showModel: isShowModelEnabled(),
     };
   }
 
@@ -2267,6 +2436,30 @@ ${systemPrompt}
               : ""),
           currentValue: fallbackValue,
           values: fallbackValues,
+        },
+        {
+          id: "reportUsage",
+          label: "Report usage to session",
+          description:
+            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
+          currentValue: isReportUsageEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "showCost",
+          label: "Show cost",
+          description:
+            "Show an estimated `~$0.0042` beside subagent token counts in the widget, fleet view, conversation viewer, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
+          currentValue: isShowCostEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "showModel",
+          label: "Show model",
+          description:
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The conversation viewer shows the pair either way — this adds it to the widget, where the row is already dense.",
+          currentValue: isShowModelEnabled() ? "on" : "off",
+          values: ["on", "off"],
         },
         {
           id: "fleetView",
@@ -2401,6 +2594,23 @@ ${systemPrompt}
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
+      } else if (id === "reportUsage") {
+        const enabled = value === "on";
+        setReportUsage(enabled);
+        notifyApplied(
+          ctx,
+          enabled
+            ? "Subagent usage now counted in this session's totals"
+            : "Subagent usage no longer counted in this session's totals",
+        );
+      } else if (id === "showCost") {
+        const enabled = value === "on";
+        setShowCost(enabled);
+        notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "showModel") {
+        const enabled = value === "on";
+        setShowModel(enabled);
+        notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "fleetView") {
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
