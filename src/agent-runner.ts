@@ -30,6 +30,7 @@ import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
+import { renderAgentReport } from "./result-report.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -1142,7 +1143,29 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
   try {
-    await session.prompt(effectivePrompt);
+    let nextPrompt = effectivePrompt;
+    for (;;) {
+      await session.prompt(nextPrompt);
+      // A run that owns live nested children must NOT settle: the children are
+      // hidden from every surface, so a parent that returns takes the only
+      // reader of their results with it. Park instead — release the pool slot,
+      // wait for them, and continue the loop with their rendered reports as the
+      // next prompt. Repeated until no child work is left, then settle normally.
+      // `max_turns` still applies: these are ordinary turns, so the soft limit
+      // steers a wrap-up and a hard abort ends the loop below.
+      const reports = nestedRuntime === undefined
+        ? []
+        : await nestedRuntime.manager.parkForChildReports(nestedRuntime.parentAgentId, options.signal);
+      // Empty means no child work is left. A run that was stopped or hard-aborted
+      // while parked must not start another turn either — it is going down, and
+      // the reports it claimed are for a session nobody will read again.
+      if (reports.length === 0 || aborted || options.signal?.aborted === true) break;
+      nextPrompt = [
+        "Your nested subagents have reported. Continue the task with their results — do not repeat their work.",
+        "",
+        reports.map((child) => renderAgentReport(child)).join("\n\n---\n\n"),
+      ].join("\n");
+    }
   } finally {
     unsubTurns();
     collector.unsubscribe();

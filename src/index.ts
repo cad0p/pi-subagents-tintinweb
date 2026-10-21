@@ -16,6 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, type SpawnOptions } from "./agent-manager.js";
+import { agentNotFoundMessage, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -27,7 +28,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
+import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -372,21 +373,31 @@ export default function (pi: ExtensionAPI) {
   const WIZARD_QUEUE_POLL_MS = 100;
   let mainTurnActive = false;
 
-  function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
+  /** Hold a send behind the grace window, cancellable by key. No turn gate: the
+   *  caller decides whether this notification has to wait for a boundary.
+   *  A nested child's nudge uses this directly — its parent is another agent
+   *  session, not the main one, so `mainTurnActive` says nothing about it. */
+  function holdNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
     cancelNudge(key);
+    pendingNudges.set(key, setTimeout(() => {
+      pendingNudges.delete(key);
+      try { send(); } catch { /* ignore stale completion side-effect errors */ }
+    }, delay));
+  }
+
+  function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
+    // Mid-turn: hold the notification until the main session reaches a message
+    // boundary, so it cannot land between a tool call and its result.
     if (mainTurnActive) {
+      cancelNudge(key);
       parkedNudges.set(key, send);
       return;
     }
-    pendingNudges.set(key, setTimeout(() => {
-      pendingNudges.delete(key);
+    holdNudge(key, () => {
       // A new turn may have started inside the grace window — re-park.
-      if (mainTurnActive) {
-        parkedNudges.set(key, send);
-        return;
-      }
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
-    }, delay));
+      if (mainTurnActive) parkedNudges.set(key, send);
+      else send();
+    }, delay);
   }
 
   function cancelNudge(key: string) {
@@ -451,6 +462,48 @@ export default function (pi: ExtensionAPI) {
     widget.update();
   }
 
+  /**
+   * Push a nested child's completion into its parent AGENT's session — the same
+   * channel and the same consumption rule as the main session's nudge, one level
+   * down. `resultConsumed` is re-checked at fire time, so a get_subagent_result
+   * read inside the grace window cancels this.
+   *
+   * There is no `triggerTurn` here, and none is needed: a parent that is still
+   * mid-turn takes the report at its next message boundary (pi drains the
+   * steering queue there), and a parent that finished its turn while owning
+   * children has NOT settled — it parked on them, and its wake-up prompt claims
+   * the report instead. `resultDelivered` is what keeps those two paths to
+   * exactly one delivery; a parked parent is skipped here for the same reason.
+   */
+  function deliverNestedResult(record: AgentRecord) {
+    const parentAgentId = record.parentAgentId;
+    if (parentAgentId === undefined) return;
+    if (record.resultConsumed) {
+      cancelNudge(record.id);
+      return;
+    }
+    holdNudge(record.id, () => {
+      if (record.resultConsumed || record.resultDelivered) return;
+      const parent = manager.getRecord(parentAgentId);
+      // Parked: its wake-up prompt carries this report. Stopped or gone: there is
+      // no session left that could act on it.
+      if (!parent || parent.parked || parent.status !== "running" || !parent.session) return;
+      record.resultDelivered = true;
+      const notification = formatTaskNotification(
+        record,
+        { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) },
+        showCost,
+      );
+      try {
+        parent.session.steer(notification).catch((err: unknown) => {
+          console.warn(`[pi-subagents] failed to deliver ${record.id} to its parent: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      } catch (err) {
+        console.warn(`[pi-subagents] failed to deliver ${record.id} to its parent: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+  }
+
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
     const durationMs = record.completedAt ? record.completedAt - record.startedAt : Date.now() - record.startedAt;
@@ -492,10 +545,13 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
-    // Nested children report only through their owning parent's scoped tools.
-    // Keep them out of top-level lifecycle, transcript, notification, and UI
+    // Nested children report only into their owning parent's session. Keep them
+    // out of the main session's lifecycle, transcript, notification, and UI
     // channels — nothing in the main session can act on them.
-    if (record.parentAgentId) return;
+    if (record.parentAgentId) {
+      deliverNestedResult(record);
+      return;
+    }
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -1521,21 +1577,19 @@ Terse command-style prompts produce shallow, generic work.
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      // The same read the nested tool performs, on the same shared helpers: this
+      // surface owns the records with no parent, the nested one owns its own
+      // children (see agent-result-tool.ts).
       const record = manager.getRecord(params.agent_id);
-      // Nested records belong to their spawning agent's scoped tools only.
-      if (!record || record.parentAgentId) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      if (!isOwnedRecord(record, undefined)) {
+        return textResult(agentNotFoundMessage(params.agent_id));
       }
 
-      // Mark result as consumed — suppresses the completion notification. Safe
-      // for every status: only a settled record has a nudge parked, and a
-      // running/queued one has none to cancel.
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
-        cancelNudge(params.agent_id);
-      }
+      // Consuming the result is what suppresses the completion notification —
+      // safe for every status, because only a settled record has a nudge parked.
+      if (consumeResult(record)) cancelNudge(params.agent_id);
 
-      return textResult(renderAgentReport(record));
+      return agentReportResponse(record);
     },
 
     renderResult(result, _options, theme) {

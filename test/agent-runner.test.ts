@@ -579,6 +579,119 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
 // Both runAgent and resumeAgent dispatch usage to the caller via this
 // callback. The callback feeds the AgentRecord lifetime accumulator, which
 // is the source of truth for total tokens (survives compaction).
+describe("agent-runner nested park loop", () => {
+  /** A parked parent gets its children's reports back as the next prompt; it
+   *  must not settle first. This is the load-bearing change of #83: before it, a
+   *  parent that stopped issuing tool calls simply ended, and its children were
+   *  aborted with nobody left to read their results. */
+  function childRecord(over: Partial<AgentRecord> = {}): AgentRecord {
+    return {
+      id: "child-1",
+      type: "Explore",
+      description: "child task",
+      status: "completed",
+      result: "CHILD RESULT",
+      toolUses: 1,
+      startedAt: Date.now() - 500,
+      completedAt: Date.now(),
+      lifetimeUsage: { input: 1, output: 1, cacheWrite: 0 },
+      compactionCount: 0,
+      parentAgentId: "parent-1",
+      ...over,
+    } as AgentRecord;
+  }
+
+  /** Run a parent with a manager whose park hands back `reports` per call. */
+  async function runParent(reports: AgentRecord[][], texts: string[]) {
+    const { session } = createSession("unused");
+    session.prompt.mockImplementation(async () => {
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: texts.shift() ?? "" }] });
+    });
+    createAgentSession.mockResolvedValue({ session });
+    const parkForChildReports = vi.fn();
+    for (const batch of reports) parkForChildReports.mockResolvedValueOnce(batch);
+    parkForChildReports.mockResolvedValue([]);
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "parent-1",
+      nestedRuntime: {
+        manager: {
+          spawn: vi.fn(),
+          resume: vi.fn(),
+          getRecord: vi.fn(),
+          listAgents: vi.fn(() => []),
+          parkForChildReports,
+        },
+        parentAgentId: "parent-1",
+        depth: 1,
+        maxSubagentDepth: 2,
+      },
+    });
+    return { result, session, parkForChildReports };
+  }
+
+  it("continues with a child report instead of settling when it owns live children", async () => {
+    const { result, session, parkForChildReports } = await runParent(
+      [[childRecord()]],
+      ["FIRST TURN", "CONTINUED"],
+    );
+
+    expect(parkForChildReports).toHaveBeenCalledWith("parent-1", undefined);
+    expect(session.prompt).toHaveBeenCalledTimes(2);
+    // The second turn is the child's rendered report, not an empty nudge.
+    const secondPrompt = session.prompt.mock.calls[1][0] as string;
+    expect(secondPrompt).toContain("CHILD RESULT");
+    expect(secondPrompt).toContain("nested subagents have reported");
+    // The run settles with the continued turn's answer, not the one it had
+    // before parking.
+    expect(result.responseText).toBe("CONTINUED");
+  });
+
+  it("settles after one turn when no child work is outstanding", async () => {
+    const { result, session, parkForChildReports } = await runParent([], ["ONLY TURN"]);
+
+    expect(parkForChildReports).toHaveBeenCalledTimes(1);
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(result.responseText).toBe("ONLY TURN");
+  });
+
+  it("does not start another turn when the run was stopped while parked", async () => {
+    const controller = new AbortController();
+    const { session } = createSession("unused");
+    session.prompt.mockImplementation(async () => {
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "FIRST" }] });
+    });
+    createAgentSession.mockResolvedValue({ session });
+    // Park resolves with a report because the child settled just as the run was
+    // stopped — the report belongs to a session nobody will read again.
+    const parkForChildReports = vi.fn(async () => {
+      controller.abort();
+      return [childRecord()];
+    });
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "parent-1",
+      signal: controller.signal,
+      nestedRuntime: {
+        manager: {
+          spawn: vi.fn(),
+          resume: vi.fn(),
+          getRecord: vi.fn(),
+          listAgents: vi.fn(() => []),
+          parkForChildReports,
+        },
+        parentAgentId: "parent-1",
+        depth: 1,
+        maxSubagentDepth: 2,
+      },
+    });
+
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(result.responseText).toBe("FIRST");
+  });
+});
+
 describe("agent-runner usage callback wiring", () => {
   function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any) {
     const event = { type: "message_end", message: { role: "assistant", usage } };

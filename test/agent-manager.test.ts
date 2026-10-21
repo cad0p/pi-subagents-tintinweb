@@ -1346,6 +1346,49 @@ describe("AgentManager — nested children", () => {
       }) as never,
     );
 
+  it("aborting a parked parent takes its running and queued children with it", async () => {
+    // maxConcurrent 2: the parent and an unrelated blocker fill the pool, so the
+    // parent's first child queues; parking frees the slot that starts it, and the
+    // second child queues behind the now-full pool.
+    manager = new AgentManager(undefined, 2);
+    const started: string[] = [];
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
+      started.push(prompt);
+      return new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }) as never;
+    });
+
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const running = manager.spawn(mockPi, mockCtx, "X", "child-running", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(running)!.status).toBe("queued");
+
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(running)!.status).toBe("running");
+    const queued = manager.spawn(mockPi, mockCtx, "X", "child-queued", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(queued)!.status).toBe("queued");
+
+    manager.abort(parent);
+    // The park ends because the run is going down, not because there is news.
+    await expect(parked).resolves.toBeDefined();
+    expect(manager.getRecord(running)!.status).toBe("stopped");
+    expect(manager.getRecord(queued)!.status).toBe("stopped");
+
+    // The dropped child never starts orphaned when the pool frees up.
+    manager.abort(blocker);
+    await manager.waitForAll();
+    expect(started).not.toContain("child-queued");
+  });
+
   it("stops a parent's children when the parent settles", async () => {
     manager = new AgentManager();
     resolvedRun();
@@ -1365,10 +1408,9 @@ describe("AgentManager — nested children", () => {
   });
 
   it("does not leak a concurrency slot when a nested child is resumed", async () => {
-    // A nested child is outside the maxConcurrent pool, so its resume must not
-    // take a slot: the increment is unconditional but the release is gated on
-    // occupiesPoolSlot, and an unmatched increment queues every later top-level
-    // spawn forever.
+    // A nested child takes a slot like any other run, so its resume must balance
+    // the increment with a release: an unmatched increment queues every later
+    // top-level spawn forever.
     manager = new AgentManager(undefined, 1);
     resolvedRun();
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
@@ -1436,24 +1478,39 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(grandchild)!.status).toBe("stopped");
   });
 
-  it("does not queue nested children behind the parent's own concurrency slot", () => {
+  it("queues a nested child behind a full pool, and a parked parent frees the slot it needs", async () => {
     manager = new AgentManager(undefined, 1);
-    hangingRun();
+    let resolveChild!: (v: { responseText: string; session: unknown; aborted: boolean; steered: boolean }) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) =>
+      prompt === "child"
+        ? new Promise((resolve) => { resolveChild = resolve; }) as never
+        : new Promise(() => {}) as never,
+    );
 
-    // The top-level spawn takes the only slot.
+    // The top-level spawn takes the only slot, and its child queues like any
+    // other run: a full pool cannot be bypassed by nesting.
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
-    expect(manager.getRecord(parent)!.status).toBe("running");
-
-    // Its children run immediately — queueing them would deadlock the parent.
-    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
       description: "child",
       parentAgentId: parent,
       depth: 2,
     });
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    // Parking gives the slot back, which is the slot the child is queued behind.
+    // Without the release the parent would wait on a child only it could start.
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(parent)!.parked).toBe(true);
     expect(manager.getRecord(child)!.status).toBe("running");
 
-    // A second top-level spawn still queues, so the pool is not bypassed.
-    const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
-    expect(manager.getRecord(sibling)!.status).toBe("queued");
+    resolveChild({ responseText: "child done", session: mockSession(), aborted: false, steered: false });
+    const reports = await parked;
+
+    // The report reached the parent exactly once, and the parent is running
+    // again with a slot of its own.
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+    expect(manager.getRecord(parent)!.parked).toBe(false);
+    expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(1);
   });
 });

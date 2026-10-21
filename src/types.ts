@@ -132,6 +132,21 @@ export interface AgentRecord {
   settled?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
+  /**
+   * Set once this child result reached its parent agent session. Two paths can
+   * deliver it — the completion nudge steered into a mid-turn parent, or the
+   * parked parent wake-up prompt — and whichever claims the record first sets
+   * this, so exactly one of them reports a child. A resume clears it, because
+   * the resumed run owes the parent a report of its own.
+   */
+  resultDelivered?: boolean;
+  /**
+   * True while a run waits on its nested children: it has released its
+   * maxConcurrent slot, status stays "running" (the run has not settled), and a
+   * child completion nudge holds off because this run claims the report when it
+   * wakes.
+   */
+  parked?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
   /** Worktree info if the agent is running in an isolated worktree. */
