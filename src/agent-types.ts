@@ -37,6 +37,12 @@ export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
 export const NO_FALLBACK = "none";
 
 /**
+ * The agent type an unset `fallbackSubagent` targets. Naming it explicitly is
+ * equivalent to leaving the setting unset — see `resolveSpawnTypeIn`.
+ */
+export const IMPLICIT_FALLBACK = "general-purpose";
+
+/**
  * Agent type substituted when a caller-supplied `subagent_type` doesn't resolve
  * to exactly one enabled agent. `undefined` keeps the historical behavior
  * (general-purpose); `NO_FALLBACK` makes dispatch fail closed. Set from
@@ -207,11 +213,20 @@ export function resolveSpawnTypeIn(
   }
 
   if (configured !== undefined) {
-    // An explicitly configured fallback that is itself unusable is a
-    // misconfiguration, not a second chance to guess — say so rather than
-    // quietly dropping to general-purpose.
     const fallbackKey = resolveUnambiguousKeyIn(registry, configured);
     if (fallbackKey === undefined || registry.get(fallbackKey)?.enabled === false) {
+      // Naming the implicit default is not a misconfiguration: an unset fallback
+      // already targets it, and the permissive hardcoded tier is what that
+      // resolves to even when the default agents are disabled. Erroring only
+      // when the same value is written down would make the settings row's own
+      // default brick every unresolvable dispatch the moment it is cycled to.
+      // `none` is how strict dispatch is expressed.
+      if (configured.toLowerCase() === IMPLICIT_FALLBACK) {
+        return { ok: true, type: IMPLICIT_FALLBACK, fellBackFrom: raw };
+      }
+      // An explicitly configured fallback that is itself unusable is a
+      // misconfiguration, not a second chance to guess — say so rather than
+      // quietly dropping to general-purpose.
       return {
         ok: false,
         message:
@@ -227,7 +242,7 @@ export function resolveSpawnTypeIn(
   // general-purpose resolving to `getConfig`'s all-tools hardcoded tier — is
   // what `fallbackSubagent: none` is for, not something to close under everyone
   // silently.
-  return { ok: true, type: "general-purpose", fellBackFrom: raw };
+  return { ok: true, type: IMPLICIT_FALLBACK, fellBackFrom: raw };
 }
 
 /** Resolve a caller-supplied agent type against the process-wide registry. */

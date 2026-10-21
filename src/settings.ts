@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { NO_FALLBACK } from "./agent-types.js";
+import { IMPLICIT_FALLBACK, NO_FALLBACK } from "./agent-types.js";
 import type { WidgetMode } from "./types.js";
 
 /**
@@ -29,12 +29,19 @@ export function fallbackRow(
   available: readonly string[],
   noneValue: string,
 ): { value: string; values: string[]; unresolvable: boolean } {
-  const value = configured ?? "general-purpose";
-  const unresolvable =
-    configured !== undefined &&
-    configured.toLowerCase() !== noneValue &&
-    !available.includes(configured);
-  return { value, values: [...new Set([value, ...available, noneValue])], unresolvable };
+  const value = configured ?? IMPLICIT_FALLBACK;
+  // Mirrors `resolveSpawnTypeIn`: trim, exact match first, else a unique
+  // case-insensitive match. Anything stricter marks a fallback unresolvable that
+  // dispatch happily resolves — and the row would then claim dispatch refuses it.
+  const candidate = value.trim();
+  const lowered = candidate.toLowerCase();
+  const resolved =
+    candidate === "" ||
+    lowered === noneValue ||
+    lowered === IMPLICIT_FALLBACK ||
+    available.includes(candidate) ||
+    available.filter((name) => name.toLowerCase() === lowered).length === 1;
+  return { value, values: [...new Set([value, ...available, noneValue])], unresolvable: !resolved };
 }
 
 export interface SubagentsSettings {

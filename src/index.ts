@@ -2462,6 +2462,14 @@ ${systemPrompt}
           `Worktree isolation ${enabled ? "enabled" : "disabled"}. Tool parameter updates on next pi session.`,
         );
       } else if (id === "fallbackSubagent") {
+        // The row's value list is built when the menu opens, so a toggle in the
+        // same menu (Disable defaults) can leave it stale. Persisting a fallback
+        // that dispatch would then refuse is the one outcome to avoid: keep the
+        // current value and say why, rather than writing a broken one.
+        if (fallbackRow(value, getAvailableTypes(), NO_FALLBACK).unresolvable) {
+          ctx.ui.notify(`Agent "${value}" is not available — fallback unchanged.`, "warning");
+          return;
+        }
         setFallbackSubagent(value);
         notifyApplied(
           ctx,
@@ -2477,11 +2485,9 @@ ${systemPrompt}
         }
       } else if (id === "disableDefaultAgents") {
         const enabled = value === "on";
+        // The setter re-registers the registry itself, so the next spawn already
+        // sees the toggle; this applier only has to report what it orphaned.
         setDisableDefaultAgents(enabled);
-        // Rebuild now so the registry the toggle just changed is the one the next
-        // spawn sees — and so an explicitly configured fallback that this toggle
-        // orphaned can be reported here rather than on the next failed dispatch.
-        reloadCustomAgents();
         const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK).unresolvable;
         notifyApplied(
           ctx,

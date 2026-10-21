@@ -789,4 +789,20 @@ describe("fallbackRow", () => {
     expect(row.unresolvable).toBe(false);
     expect(row.values).toEqual(["Explore", "custom", NONE]);
   });
+
+  it("resolves the way dispatch does: case-insensitive and trimmed", () => {
+    // `resolveSpawnTypeIn` trims and accepts a unique case-insensitive match, so
+    // a stricter check here would claim dispatch refuses a value it accepts.
+    expect(fallbackRow("explore", ["Explore", "custom"], NONE).unresolvable).toBe(false);
+    expect(fallbackRow("  Explore  ", ["Explore"], NONE).unresolvable).toBe(false);
+    // Ambiguous case-variants are not a match — dispatch refuses those too.
+    expect(fallbackRow("explore", ["Explore", "EXPLORE"], NONE).unresolvable).toBe(true);
+  });
+
+  it("never calls the implicit default unresolvable", () => {
+    // Unset and an explicit "general-purpose" are the same state: both target the
+    // permissive tier even when the default agents are disabled.
+    expect(fallbackRow(undefined, [], NONE).unresolvable).toBe(false);
+    expect(fallbackRow("general-purpose", [], NONE).unresolvable).toBe(false);
+  });
 });

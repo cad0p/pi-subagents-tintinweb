@@ -457,6 +457,18 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
     expect(r.message).toContain("fallbackSubagent");
   });
 
+  it("treats an explicitly configured general-purpose like the unset default", () => {
+    // The settings row shows "general-purpose" for an unset fallback and cycles
+    // back to it, which materializes the value. Naming the implicit default must
+    // not be worse than leaving it unset, or the row's own default would brick
+    // every unresolvable dispatch as soon as the default agents are disabled.
+    registerAgents(roster());
+    setFallbackSubagent("general-purpose");
+    expect(resolveSpawnType("typoo")).toEqual({
+      ok: true, type: "general-purpose", fellBackFrom: "typoo",
+    });
+  });
+
   it("treats a missing type like any other unresolvable one", () => {
     // Before this setting existed an empty type fell back like a typo; only
     // opting in should change that, so the default must stay permissive.
