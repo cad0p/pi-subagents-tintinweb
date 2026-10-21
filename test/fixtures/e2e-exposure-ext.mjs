@@ -19,6 +19,8 @@ const tool = (name, extra) => ({
 
 export default function (pi) {
   pi.registerTool(tool("exposure_direct", { promptSnippet: "Directly declared probe" }));
+  // MCP-named and directly exposed: the shape a denylisted `mcp__` tool takes.
+  pi.registerTool(tool("mcp__probe__direct", { promptSnippet: "MCP-named direct probe" }));
   pi.registerTool(tool("mcp__probe__codemode_only", { exposure: "codemode" }));
   pi.registerTool(tool("mcp__probe__deferred", { exposure: "deferred" }));
   pi.registerTool(tool("exposure_off_by_default", { defaultActive: false, promptSnippet: "Off by default probe" }));

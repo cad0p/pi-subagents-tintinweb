@@ -271,6 +271,19 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(active).toContain("exposure_off_by_default");
   });
 
+  it("removes a disallowed MCP tool from the registry, not just from the allowlist", async () => {
+    // pi keeps MCP tools registered even when the allowlist does not name them
+    // (it only filters MCP when the allowlist mentions `mcp__`), so filtering
+    // names alone would leave a denylisted `mcp__` tool registered and listable
+    // by `tool_search`. The denylist reaches pi as `excludedToolNames`.
+    const active = await activeToolsFor({
+      extensions: [EXPOSURE_FIXTURE],
+      disallowedTools: ["mcp__probe__direct"],
+    });
+    expect(active).not.toContain("mcp__probe__direct");
+    expect(active).toContain("exposure_direct"); // the rest of the fixture is untouched
+  });
+
   it("loads pi's built-in extensions in the child, as the main session does", async () => {
     // The loader is built by the runner, not pi's CLI, so without the forwarded
     // factories `builtin:codemode`/`builtin:tool-search` resolve to nothing.
@@ -358,7 +371,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       // `exposure_off_by_default` is dormant and the parent has it off, so it is
       // loaded but not declared — see the dormancy tests above.
       await activeToolsFor({ ...appendAgent, extensions: [EXPOSURE_FIXTURE] }, { parentPrompt: PARENT_PROMPT });
-      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "exposure_direct"]);
+      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "exposure_direct", "mcp__probe__direct"]);
     });
   });
 });

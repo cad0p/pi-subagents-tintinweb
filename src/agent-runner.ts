@@ -913,6 +913,13 @@ export async function runAgent(
     model,
     scopedModels,
     tools: allowedTools,
+    // The denylist has to reach pi as well as the allowlist math: MCP tools are
+    // kept registered even when the allowlist does not name them (pi only filters
+    // MCP when the allowlist mentions `mcp__`), so a `disallowed_tools: mcp__…`
+    // entry would otherwise stay registered, listable by `tool_search`, and merely
+    // blocked at call time by the scope gate. Excluding it here removes it from the
+    // registry instead.
+    ...(disallowedSet && disallowedSet.size > 0 && { excludedToolNames: [...disallowedSet] }),
     resourceLoader: loader,
   };
   if (thinkingLevel) {
