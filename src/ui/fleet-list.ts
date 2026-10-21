@@ -15,8 +15,8 @@ import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } 
 import type { AgentManager } from "../agent-manager.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
-import { getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, getDisplayName, type Theme } from "./agent-widget.js";
+import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import { type AgentActivity, formatCost, getDisplayName, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -94,6 +94,12 @@ export class FleetList {
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
+    /**
+     * Read live at render time. Whether each row shows an estimated cost after
+     * its token count. Defaults to off — the extension supplies the user's
+     * `showCost` setting.
+     */
+    private showCost: () => boolean = () => false,
   ) {}
 
   // ---- Lifecycle ----
@@ -311,6 +317,7 @@ export class FleetList {
           },
           keybindings,
           (message: string) => this.manager.steer(record.id, message),
+          this.showCost(),
         );
       },
       {
@@ -373,9 +380,12 @@ export class FleetList {
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}  ${toSingleLine(record.description)}`;
-    const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);
+    const usage = this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage;
+    const tokens = getLifetimeTotal(usage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
-    const right = theme.fg("dim", `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`);
+    const cost = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
+    const right = theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }
 }

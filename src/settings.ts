@@ -182,6 +182,55 @@ export interface SubagentsSettings {
    * meaning one thing here and another in the resolver.
    */
   fallbackSubagent?: string;
+  /**
+   * Whether this extension's tool results carry a `usage` field, so subagent
+   * spend reaches the parent session's own accounting. Defaults to `false`.
+   *
+   * Subagents run in their own pi sessions, so by default the parent's footer,
+   * statusline and `/cost` show only what the main model spent — a session that
+   * delegated most of its work reads as nearly free. Pi folds
+   * `toolResult.usage` into `getSessionStats()`, so attaching it makes those
+   * surfaces count subagents too, under `/cost`'s "Tools/summaries" bucket.
+   *
+   * Off by default because it changes numbers the user may already be tracking
+   * (a statusline reading session cost will step up), not because the numbers
+   * are wrong.
+   *
+   * Three properties of what gets reported:
+   *   - `cacheRead` IS included, because pi counts the parent's own messages
+   *     that way and the prefix really is re-billed on every call. The display
+   *     total (`getLifetimeTotal`) keeps excluding it — see `usage.ts`.
+   *   - Cost is pi's own per-message `usage.cost.total`; we price nothing, and
+   *     a model pi has no rates for contributes 0.
+   *   - The context-window percentage is untouched. Pi derives it from assistant
+   *     messages alone (`getContextUsage`), so a delegating session's context
+   *     does not appear to fill up faster.
+   */
+  reportUsage?: boolean;
+  /**
+   * Whether the subagent surfaces show an estimated dollar cost next to their
+   * token counts (widget, FleetView, conversation viewer, `get_subagent_result`,
+   * completion notifications). Defaults to `false`. Applied live.
+   *
+   * Rendered as `~$0.0042` — the tilde marks it as pi's reported estimate rather
+   * than a billed figure, and it is omitted entirely when the model has no
+   * pricing data, so a local model shows tokens and no dollars.
+   *
+   * Independent of `reportUsage`: this one is what a human reads, that one is
+   * what the parent session counts.
+   */
+  showCost?: boolean;
+  /**
+   * Whether the widget's running rows name the model driving each agent and the
+   * thinking level it is running at. Defaults to `false`.
+   *
+   * Off by default because the widget row already carries the description,
+   * turns, tool uses, tokens and elapsed time, and every character it gains is
+   * one the description loses on a narrow terminal. The conversation viewer and
+   * the `get_subagent_result` header show the pair either way — they have a line
+   * to themselves.
+   */
+  showModel?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -203,6 +252,9 @@ export interface SettingsAppliers {
   setMaxSubagentDepth: (n: number) => void;
   setWorktreeIsolation: (b: boolean) => void;
   setFallbackSubagent: (v: string | undefined) => void;
+  setReportUsage: (b: boolean) => void;
+  setShowCost: (b: boolean) => void;
+  setShowModel: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -288,6 +340,15 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.worktreeIsolation === "boolean") {
     out.worktreeIsolation = r.worktreeIsolation;
   }
+  if (typeof r.reportUsage === "boolean") {
+    out.reportUsage = r.reportUsage;
+  }
+  if (typeof r.showCost === "boolean") {
+    out.showCost = r.showCost;
+  }
+  if (typeof r.showModel === "boolean") {
+    out.showModel = r.showModel;
+  }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -363,6 +424,9 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
+  if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
+  if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
+  if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
 }
 
 /**

@@ -135,6 +135,7 @@ import {
 } from "../src/agent-runner.js";
 import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
+import type { LifetimeUsage } from "../src/usage.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -588,7 +589,7 @@ describe("agent-runner usage callback wiring", () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: Array<{ input: number; output: number; cacheWrite: number }> = [];
+    const seen: LifetimeUsage[] = [];
     session.prompt = vi.fn(async () => {
       // Two assistant messages over the run
       emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10 });
@@ -601,19 +602,28 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
+    // cacheRead and cost are forwarded too, and default to 0 rather than absent:
+    // the accounting path needs a number for every field, and a provider that
+    // reports neither still produced a message pi can price at nothing.
     expect(seen).toEqual([
-      { input: 100, output: 50, cacheWrite: 10 },
-      { input: 200, output: 80, cacheWrite: 20 },
+      { input: 100, output: 50, cacheWrite: 10, cacheRead: 0, cost: 0 },
+      { input: 200, output: 80, cacheWrite: 20, cacheRead: 0, cost: 0 },
     ]);
   });
 
-  it("runAgent normalizes partial usage objects to 0 for missing fields", async () => {
+  it("runAgent forwards the message's cacheRead and pi's cost.total", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: any[] = [];
+    const seen: LifetimeUsage[] = [];
     session.prompt = vi.fn(async () => {
-      emitMessageEnd(listeners, { input: 50 }); // output, cacheWrite missing
+      emitMessageEnd(listeners, {
+        input: 100,
+        output: 50,
+        cacheWrite: 10,
+        cacheRead: 900,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0.3, cacheWrite: 0.4, total: 0.0123 },
+      });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
@@ -622,7 +632,27 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
+    // Only the total is carried: the per-kind split is pi's, and nothing here
+    // reads it. Pricing is never re-derived from rates.
+    expect(seen).toEqual([{ input: 100, output: 50, cacheWrite: 10, cacheRead: 900, cost: 0.0123 }]);
+  });
+
+  it("runAgent normalizes partial usage objects to 0 for missing fields", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 50 }); // every other field missing
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      onAssistantUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }]);
   });
 
   it("runAgent skips the callback when message_end has no usage field", async () => {
@@ -653,7 +683,7 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5, cacheRead: 0, cost: 0 }]);
   });
 
   it("resumeAgent resets per-message text and counts turns like runAgent", async () => {

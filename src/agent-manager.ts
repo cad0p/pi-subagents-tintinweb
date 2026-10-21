@@ -17,13 +17,32 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import { describeModel } from "./model-resolver.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
+/**
+ * Fired by `steer()` once a message is delivered or queued. Every steer path
+ * that goes through the manager reports through it — the widget, the fleet
+ * list, the conversation viewer, and the cross-extension RPC. The steer tools
+ * (`steer_subagent` in index.ts and its nested twin) bypass this method because
+ * they await the session directly, so they emit on their own.
+ */
+export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
+/**
+ * Fired once per assistant `message_end`, for EVERY agent this manager owns —
+ * top-level and nested alike, spawns and resumes. The one place where each
+ * message is seen exactly once: `AgentRecord.lifetimeUsage` is deliberately
+ * double-booked into ancestors (see `nested-tools.ts`) so a hidden child's spend
+ * shows up on the record a human can see, which makes those records useless as
+ * a basis for anything that must not count a message twice — parent-session
+ * accounting above all.
+ */
+export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /** Default max concurrent background agents. */
@@ -150,6 +169,8 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
+  private onUsage?: OnAgentUsage;
+  private onSteered?: OnAgentSteered;
   private maxConcurrent: number;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
@@ -165,10 +186,14 @@ export class AgentManager {
     maxConcurrent = DEFAULT_MAX_CONCURRENT,
     onStart?: OnAgentStart,
     onCompact?: OnAgentCompact,
+    onUsage?: OnAgentUsage,
+    onSteered?: OnAgentSteered,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
+    this.onUsage = onUsage;
+    this.onSteered = onSteered;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -359,6 +384,7 @@ export class AgentManager {
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {
@@ -375,6 +401,29 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
+        // The model and thinking level are only knowable once pi has resolved
+        // its defaults and clamped the level to what the model supports. Writing
+        // them back here makes the record authoritative, so every surface reads
+        // one place instead of each re-deriving "session, else the request" for
+        // itself. An agent started outside the Agent tool (RPC, scheduler) has
+        // no invocation yet and gains one here.
+        if (session.model) {
+          record.invocation ??= {};
+          // Read the kept request first: a caller's level survives being clamped
+          // AND, one line later, being replaced by the effective one.
+          const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+          Object.assign(record.invocation, describeModel(session.model));
+          // Guarded: a session that reports no level keeps the request rather
+          // than losing it. Overwriting unconditionally would turn a stubbed or
+          // older session into a blank `thinking:` tag, which is worse than the
+          // stale-but-true value it replaced.
+          if (session.thinkingLevel) {
+            record.invocation.thinking = session.thinkingLevel;
+            if (requested && requested !== session.thinkingLevel) {
+              record.invocation.requestedThinking = requested;
+            }
+          }
+        }
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -639,6 +688,7 @@ export class AgentManager {
       },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        this.onUsage?.(record, usage);
         callbacks?.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {
@@ -675,7 +725,10 @@ export class AgentManager {
    * current tool execution and appears as a user message. If the session isn't
    * ready yet, the message is queued on `pendingSteers` and flushed when the
    * session is created. Returns false if the agent can't accept steering
-   * (unknown id, or no longer running/queued).
+   * (unknown id, or no longer running/queued). Fires `onSteered` on either
+   * accepted path, so the viewers and the cross-extension RPC report the steer
+   * the same way without each emitting by hand. The steer tools bypass this
+   * method because they await delivery.
    */
   steer(id: string, message: string): boolean {
     const record = this.agents.get(id);
@@ -687,6 +740,7 @@ export class AgentManager {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);
     }
+    this.onSteered?.(record, message);
     return true;
   }
 

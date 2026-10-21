@@ -32,6 +32,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
+import type { LifetimeUsage } from "./usage.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -399,8 +400,13 @@ export interface RunOptions {
    * Called once per assistant message_end with that message's usage delta.
    * Lets callers maintain a lifetime accumulator that survives compaction
    * (which replaces session.state.messages and resets stats-derived sums).
+   *
+   * `cost` is pi's own `usage.cost.total` for that message — priced from the
+   * model's rates, so it is 0 (not missing) for a model pi has no pricing for.
+   * We never price anything ourselves; every dollar figure this extension shows
+   * or reports traces back to this field.
    */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  onAssistantUsage?: (usage: LifetimeUsage) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -1111,6 +1117,8 @@ export async function runAgent(
         input: u.input ?? 0,
         output: u.output ?? 0,
         cacheWrite: u.cacheWrite ?? 0,
+        cacheRead: u.cacheRead ?? 0,
+        cost: u.cost?.total ?? 0,
       });
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
@@ -1161,7 +1169,7 @@ export async function resumeAgent(
     onToolActivity?: (activity: ToolActivity) => void;
     onTextDelta?: (delta: string, fullText: string) => void;
     onTurnEnd?: (turnCount: number) => void;
-    onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+    onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
@@ -1199,6 +1207,8 @@ export async function resumeAgent(
             input: u.input ?? 0,
             output: u.output ?? 0,
             cacheWrite: u.cacheWrite ?? 0,
+            cacheRead: u.cacheRead ?? 0,
+            cost: u.cost?.total ?? 0,
           });
         }
         if (event.type === "compaction_end" && !event.aborted && event.result) {

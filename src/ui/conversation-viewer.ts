@@ -10,9 +10,9 @@ import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWi
 import { extractText } from "../context.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
-import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
@@ -46,6 +46,12 @@ export class ConversationViewer implements Component {
     keybindings?: ViewerKeybindings,
     /** Send a steering message to the agent. Omitted → no compose affordance. */
     private onSteer?: (message: string) => void,
+    /**
+     * Whether the header shows an estimated cost after the token count. Read
+     * once, at construction: the overlay is opened from a menu or the fleet
+     * list, so the setting cannot change while it is on screen.
+     */
+    private showCost = false,
   ) {
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -153,11 +159,16 @@ export class ConversationViewer implements Component {
     const headerParts: string[] = [duration];
     const toolUses = this.activity?.toolUses ?? this.record.toolUses;
     if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
-    const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
+    // The viewer opens on finished agents too, whose activity entry is long
+    // gone — the record is the only place their totals survive.
+    const usage = this.activity?.lifetimeUsage ?? this.record.lifetimeUsage;
+    const tokens = getLifetimeTotal(usage);
     if (tokens > 0) {
       const percent = getSessionContextPercent(this.activity?.session);
       headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
     }
+    const cost = this.showCost ? formatCost(getLifetimeCost(usage)) : "";
+    if (cost) headerParts.push(cost);
 
     lines.push(row(
       `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", toSingleLine(this.record.description))} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
@@ -275,9 +286,13 @@ export class ConversationViewer implements Component {
   }
 
   private invocationLine(): string | undefined {
-    const { modelName, tags } = buildInvocationTags(this.record.invocation);
+    // Canonical id here, short label everywhere else: this overlay is opened to
+    // inspect one agent and has the width for it, and two providers can serve
+    // models whose short names read alike.
+    const { modelName, modelId, tags } = buildInvocationTags(this.record.invocation);
     const sanitizedTags = tags.map(t => toSingleLine(t));
-    const parts = modelName ? [toSingleLine(modelName), ...sanitizedTags] : sanitizedTags;
+    const model = modelId ?? modelName;
+    const parts = model ? [toSingleLine(model), ...sanitizedTags] : sanitizedTags;
     if (parts.length === 0) return undefined;
     return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
   }
