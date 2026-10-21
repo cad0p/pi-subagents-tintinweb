@@ -655,26 +655,28 @@ export class AgentManager {
    * 10-minute eviction and `clearCompleted()` on session switch are the grace
    * window in which a live record can still resume the agent, so nothing may
    * delete the file earlier. A `persist_session` agent keeps its file
-   * indefinitely; every other agent's file goes here. `keepSessionFile` is the
-   * shutdown path's opt-out — a run killed mid-flight must leave its transcript
-   * for crash recovery, while a settled one is deleted like at any other removal:
-   * the next process's manager starts with an empty map, so this is the last
-   * chance to delete it.
+   * indefinitely; every other settled agent's file goes here.
+   *
+   * A run still in flight keeps its file even at removal: deleting the file a
+   * live child is still appending to loses the transcript the crash-recovery
+   * case exists for. The callers that could reach one — eviction and the session
+   * switch — skip it for the same reason, so this is the second line of defence,
+   * not the only one.
    *
    * Best-effort: a missing file, a permission error or a Windows lock must not
    * throw into the completion/eviction path.
    */
-  private removeRecord(id: string, record: AgentRecord, keepSessionFile = false): void {
+  private removeRecord(id: string, record: AgentRecord): void {
     // Read from the session, not a copy taken at creation: pi moves the file on
     // `ctx.newSession()`/`fork()`, and deleting the path it started with would
     // leak the one it actually wrote.
-    const sessionFile = record.session?.sessionManager?.getSessionFile();
+    const sessionFile = record.session?.sessionManager.getSessionFile();
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
     // After dispose, so the file handle is closed — Windows will not unlink an
     // open file.
-    if (keepSessionFile || record.persistSession || !sessionFile) return;
+    if (record.settled === false || record.persistSession || !sessionFile) return;
     try {
       rmSync(sessionFile, { force: true });
     } catch { /* retention is best-effort — never fail a turn over it */ }
@@ -684,6 +686,9 @@ export class AgentManager {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      // Stopped but still unwinding: removing it would dispose a session a live
+      // run is still writing to, and the file has to outlive the run.
+      if (record.settled === false) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -698,6 +703,8 @@ export class AgentManager {
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      // See cleanup(): an unwinding run keeps its record until it settles.
+      if (record.settled === false) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -761,10 +768,10 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     // An in-flight run keeps its session file for the crash-recovery follow-up;
-    // a settled one is deleted here, because the record map dies with the process
-    // and nothing would ever revisit it.
+    // a settled one is deleted here, because the manager's map is discarded and
+    // nothing would ever revisit it.
     for (const [id, record] of this.agents) {
-      this.removeRecord(id, record, record.settled === false);
+      this.removeRecord(id, record);
     }
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }

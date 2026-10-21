@@ -333,6 +333,9 @@ describe("instruction rendering", () => {
       // consumed, non-running records), then re-render with the same state.
       record.resultConsumed = true;
       record.status = "completed";
+      // Settled as well as completed: an unwinding run keeps its record, so the
+      // status alone no longer makes it evictable.
+      record.settled = true;
       lifecycle.get("session_before_switch")();
       expect(handle.getRecord(id)).toBeUndefined();
 
@@ -603,12 +606,12 @@ describe("instruction rendering", () => {
       const { id, record } = await spawnBackground(tools);
 
       const steerFn = vi.fn(async () => {});
-      record.session = { steer: steerFn } as any;
+      record.session = { steer: steerFn, sessionManager: { getSessionFile: () => undefined } } as any;
       const sent = await steer.execute("tc", { agent_id: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
       expect(sent.details.steerOutcome).toBe("sent");
       expect(steerFn).toHaveBeenCalledWith("go left");
 
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }) } as any;
+      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined } } as any;
       const failed = await steer.execute("tc", { agent_id: id, message: "go right" }, undefined, undefined, spawnCtx(cwd));
       expect(failed.details.steerOutcome).toBe("failed");
       expect(failed.content[0].text).toBe("Failed to steer agent: boom");
@@ -618,7 +621,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const steer = tools.get("steer_subagent");
       const { id, record } = await spawnBackground(tools);
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }) } as any;
+      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined } } as any;
 
       const failed = await steer.execute("tc", { agent_id: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
       const theme = makeTheme();

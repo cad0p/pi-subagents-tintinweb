@@ -322,7 +322,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
   it("clearCompleted calls dispose on sessions of removed records", async () => {
     manager = new AgentManager();
     const disposeSpy = vi.fn();
-    const sess = { dispose: disposeSpy };
+    const sess = { dispose: disposeSpy, sessionManager: { getSessionFile: () => undefined } };
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
       session: sess as any,
@@ -1205,14 +1205,43 @@ describe("AgentManager — session file retention", () => {
     }
   });
 
+  it("leaves a stopped-but-unwinding record alone in both removal paths", async () => {
+    // A stopped run whose promise has not unwound is still appending to its
+    // session: evicting it would dispose a live session and unlink the file the
+    // crash-recovery case exists for.
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const { session, file } = sessionWithFile();
+      const dispose = vi.fn();
+      session.dispose = dispose;
+      const { id } = spawnPending("general-purpose", session); // never resolves
+      const record = manager.getRecord(id)!;
+      record.status = "stopped";
+      record.completedAt = Date.now() - 11 * 60_000;
+
+      manager.clearCompleted();
+      vi.advanceTimersByTime(11 * 60_000);
+
+      expect(manager.getRecord(id)).toBeDefined();
+      expect(dispose).not.toHaveBeenCalled();
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("dispose() keeps an in-flight run's file and deletes a settled one's", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     registerKeeper();
     manager = new AgentManager();
     const inflight = sessionWithFile();
     const settled = sessionWithFile();
+    const kept = sessionWithFile();
     // In flight — the crash-recovery case dispose() must not undo.
     spawnPending("general-purpose", inflight.session);
+    // Also in flight, but with persist_session: kept for a second reason.
+    spawnPending("keeper", kept.session);
     // Settled inside the 10-minute grace window, so the record is still in the
     // map and this is the only place its file would ever be deleted: the next
     // process's manager starts empty.
@@ -1225,6 +1254,7 @@ describe("AgentManager — session file retention", () => {
 
     expect(manager.listAgents()).toEqual([]);
     expect(existsSync(inflight.file)).toBe(true);
+    expect(existsSync(kept.file)).toBe(true);
     expect(existsSync(settled.file)).toBe(false);
   });
 
@@ -1244,7 +1274,8 @@ describe("AgentManager — session file retention", () => {
     vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
     await manager.resume(id, "more")!.promise;
 
-    expect(existsSync(file)).toBe(true);
+    // The resume reused the record, so it is still the file the first run wrote.
+    expect(record.session?.sessionManager.getSessionFile()).toBe(file);
     manager.clearCompleted();
     expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
   });
