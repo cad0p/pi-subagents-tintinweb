@@ -23,8 +23,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import { runAgent } from "../src/agent-runner.js";
-import { registerAgents } from "../src/agent-types.js";
+import { buildAgentRegistry, registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
@@ -81,6 +82,9 @@ describe("nested tool injection into a real child session", () => {
   ): Promise<{ session: AgentSession; spawns: SpawnCall[] }> {
     registerAgents(
       new Map([
+        // The delegable agents too: the nested tool refuses a type that only
+        // exists in the branch registry, because the run resolves globally.
+        ...buildAgentRegistry(loadCustomAgents(cwd)),
         [
           "e2e",
           {

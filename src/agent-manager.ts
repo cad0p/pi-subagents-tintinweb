@@ -611,7 +611,10 @@ export class AgentManager {
     // Occupies a slot but is never gated by maxConcurrent — a burst of resumes
     // can exceed the cap by design. They share the pool counter, so queued
     // fresh spawns wait for these resumes to settle before drainQueue admits them.
-    this.runningBackground++;
+    // A nested child is not in the pool (`occupiesPoolSlot`), and afterRun only
+    // decrements for records that are: counting it here leaked a slot per nested
+    // resume until every top-level spawn queued forever.
+    if (occupiesPoolSlot(record)) this.runningBackground++;
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;

@@ -1364,6 +1364,27 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(child)!.status).toBe("stopped");
   });
 
+  it("does not leak a concurrency slot when a nested child is resumed", async () => {
+    // A nested child is outside the maxConcurrent pool, so its resume must not
+    // take a slot: the increment is unconditional but the release is gated on
+    // occupiesPoolSlot, and an unmatched increment queues every later top-level
+    // spawn forever.
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+      description: "nested child",
+      parentAgentId: "parent-1",
+      depth: 1,
+    });
+    await manager.getRecord(child)!.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
+    await manager.resume(child, "more")!.promise;
+
+    expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(0);
+  });
+
   it("stops children spawned during a resumed turn when that turn settles", async () => {
     manager = new AgentManager();
     resolvedRun();
