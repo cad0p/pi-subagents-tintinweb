@@ -17,16 +17,16 @@ import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, S
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
-import { resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
@@ -48,6 +48,7 @@ import {
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
 // ---- Shared helpers ----
 
@@ -306,14 +307,19 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 }
 
 export default function (pi: ExtensionAPI) {
+  // Read directly rather than waiting for applyAndEmitLoaded below: this decides
+  // the initial load, which happens hundreds of lines before settings are applied.
+  let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
+
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
-  const reloadCustomAgents = () => {
-    const userAgents = loadCustomAgents(process.cwd());
+  const reloadCustomAgents = (strict = false) => {
+    const userAgents = loadCustomAgents(process.cwd(), strict);
     registerAgents(userAgents);
   };
 
-  // Initial load
-  reloadCustomAgents();
+  // Initial load — the only strict one. A bad edit mid-session must not kill the
+  // session on the next unrelated spawn, so every later reload keeps warning.
+  reloadCustomAgents(strictAgentFiles);
 
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
@@ -503,11 +509,22 @@ export default function (pi: ExtensionAPI) {
   // session's entry. The first activation (the root session) wins; child
   // activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+  // Every caller-supplied spawn that reaches the manager from outside the Agent
+  // tool goes through here, so `fallbackSubagent` gates cross-extension callers
+  // too (#183). The RPC layer already throws for an unresolvable model rather
+  // than falling back silently; a bad agent type should not be quieter. Throws
+  // become error envelopes at the RPC boundary. Reload first so an agent file
+  // added mid-session is spawnable here too, not only through the Agent tool.
+  const spawnTopLevel = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    reloadCustomAgents();
+    const dispatch = resolveSpawnType(type);
+    if (!dispatch.ok) throw new Error(dispatch.message);
+    return manager.spawn(piRef, ctxRef, dispatch.type, prompt, options);
+  };
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
+    spawn: spawnTopLevel,
     getRecord: (id: string) => manager.getRecord(id),
     listAgents: () => manager.listAgents(),
   };
@@ -561,7 +578,10 @@ export default function (pi: ExtensionAPI) {
         events: pi.events,
         pi,
         getCtx: () => currentCtx,
-        manager,
+        manager: {
+          spawn: spawnTopLevel,
+          abort: (id) => manager.abort(id),
+        },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -725,12 +745,15 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
       setOutputTranscript: setOutputTranscript,
+      setWorktreeIsolation: setWorktreeIsolationEnabled,
+      setFallbackSubagent: setFallbackSubagent,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -760,6 +783,21 @@ export default function (pi: ExtensionAPI) {
     ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
     : "";
 
+  // Same trade as scheduleParam/scheduleGuideline above: `isolationParam` drops
+  // the field from the schema when the project set `worktreeIsolation: false`,
+  // so the prose has to go with it. Left in, it would teach the model to pass a
+  // parameter that isn't declared — accepted (TypeBox sets no
+  // `additionalProperties: false`) and then silently dropped by the resolver.
+  // With no per-result note by design, the model would have every reason to go
+  // on reporting a `pi-agent-*` branch that was never created.
+  const isolationGuideline = isWorktreeIsolationEnabled()
+    ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
+    : "";
+
+  const isolationCompactGuideline = isWorktreeIsolationEnabled()
+    ? `\n- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.`
+    : "";
+
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
   // the same load-bearing facts as the full version at ~75% fewer tokens, for
   // small/local models. Per-option details live in the param descriptions.
@@ -772,8 +810,7 @@ Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - You will be notified on subagent completion/failure — never poll or sleep.
 - Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -796,8 +833,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running subagent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -821,6 +857,7 @@ Terse command-style prompts produce shallow, generic work.
       typeList: buildTypeListText,
       compactTypeList: buildCompactTypeListText,
       agentDir: getAgentDir,
+      isolationGuideline: () => isolationGuideline,
       scheduleGuideline: () => scheduleGuideline,
     };
     // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
@@ -901,11 +938,7 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
         }),
       ),
-      isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-        }),
-      ),
+      ...isolationParam(isWorktreeIsolationEnabled()),
       ...scheduleParam,
     }),
 
@@ -980,13 +1013,37 @@ Terse command-style prompts produce shallow, generic work.
       reloadCustomAgents();
 
       const rawType = params.subagent_type as SubagentType;
-      const resolved = resolveType(rawType);
-      const subagentType = resolved ?? "general-purpose";
+      // Single decision point for dispatch (#183): unknown, disabled and
+      // case-ambiguous types are refused here, BEFORE anything spawns, so a
+      // background or scheduled call can't start running the wrong agent while
+      // the caller is still unaware. `fallbackSubagent` decides whether an
+      // unresolvable type falls back or fails closed.
+      const dispatch = resolveSpawnType(rawType);
+      // `resume` replays a stored session and ignores `subagent_type` entirely,
+      // but the parameter is required by the schema — so gating it here would
+      // make a live agent unresumable the moment its type is deleted, disabled,
+      // or gains a case-clashing sibling. Only a real spawn is gated.
+      if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
+      const subagentType = dispatch.ok ? dispatch.type : rawType;
+      // What the caller actually asked for, named once: `fellBackFrom` is "" for
+      // a blank request, so reading it inline invites the `??`-vs-`||` slip that
+      // would persist an empty type into a scheduled job.
+      const requestedType = (dispatch.ok && dispatch.fellBackFrom) || subagentType;
+      // Computed at resolution rather than after the run, so the schedule and
+      // background branches carry it too. Resume deliberately doesn't: it
+      // replays the stored session and ignores `subagent_type` entirely, so a
+      // note about type substitution would be describing something that didn't
+      // happen.
+      const fallbackNote = dispatch.ok && dispatch.fellBackFrom !== undefined
+        ? `Note: Unknown agent type "${dispatch.fellBackFrom}" — using ${resolveType(subagentType) ? subagentType : "the fallback agent config"}.\n\n`
+        : "";
 
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
-      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
+      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params, {
+        worktreeAllowed: isWorktreeIsolationEnabled(),
+      });
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
@@ -1078,7 +1135,9 @@ Terse command-style prompts produce shallow, generic work.
             name: params.description as string,
             description: params.description as string,
             schedule: params.schedule as string,
-            subagent_type: subagentType,
+            // The caller's own name, not the substitute — the scheduler re-resolves
+            // at fire time, and the original is what a user edits.
+            subagent_type: requestedType,
             prompt: params.prompt as string,
             thinking: thinking,
             max_turns: effectiveMaxTurns,
@@ -1088,7 +1147,7 @@ Terse command-style prompts produce shallow, generic work.
           warnOnOutOfScopeModel();
           const next = scheduler.getNextRun(job.id);
           return textResult(
-            `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
+            `${fallbackNote}Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
             `Next run: ${next ?? "(unknown)"}. ` +
             `Manage via /agents → Scheduled jobs.`,
           );
@@ -1249,7 +1308,7 @@ Terse command-style prompts produce shallow, generic work.
 
         const isQueued = record?.status === "queued";
         return textResult(
-          `Agent ${isQueued ? "queued" : "started"} in background.\n` +
+          `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
@@ -2047,8 +2106,14 @@ disallowed_tools: <comma-separated tool names to block, even if otherwise availa
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
-memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
-isolation: <"worktree" to run in isolated git worktree. Omit for normal>
+memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
+      // Offering the field on a project that turned worktrees off would bake a
+      // request that is refused at spawn time into a file that outlives the
+      // session. Built per invocation, so this read is live.
+      isWorktreeIsolationEnabled()
+        ? `\nisolation: <"worktree" to run in isolated git worktree; "off" to refuse one even when the caller asks. Omit for normal>`
+        : ""
+    }
 ---
 
 <system prompt body — instructions for the agent>
@@ -2195,12 +2260,19 @@ ${systemPrompt}
       graceTurns: getGraceTurns(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      strictAgentFiles,
       failurePreviewMaxChars,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       widgetMode: getWidgetMode(),
       outputTranscript: getOutputTranscriptDefault(),
+      worktreeIsolation: isWorktreeIsolationEnabled(),
+      // Deliberately NOT `?? "general-purpose"`: every settings change writes the
+      // whole snapshot, and materializing the implicit default would turn it into
+      // explicit configuration — which then fails loudly if general-purpose later
+      // goes away. undefined is dropped by JSON.stringify.
+      fallbackSubagent: getFallbackSubagent(),
     };
   }
 
@@ -2211,6 +2283,13 @@ ${systemPrompt}
       const mc = manager.getMaxConcurrent();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
+      // Label what unset actually does — it targets general-purpose even when
+      // that is unregistered (the permissive hardcoded tier), so showing "none"
+      // there would advertise strict dispatch for the most permissive state.
+      // `values` still offers only resolvable targets, so the user cannot
+      // persist a fallback that would hard-error on every dispatch.
+      const fallbackValue = getFallbackSubagent() ?? "general-purpose";
+      const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
 
       return [
         {
@@ -2249,6 +2328,13 @@ ${systemPrompt}
           values: ["on", "off"],
         },
         {
+          id: "strictAgentFiles",
+          label: "Strict agent files",
+          description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
+          currentValue: strictAgentFiles ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "failurePreviewMaxChars",
           label: "Failure preview max chars",
           description: "Max chars for failure preview before truncation (Enter to type)",
@@ -2268,6 +2354,21 @@ ${systemPrompt}
           description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
           currentValue: getOutputTranscriptDefault() ? "on" : "off",
           values: ["on", "off"],
+        },
+        {
+          id: "worktreeIsolation",
+          label: "Worktree isolation",
+          description:
+            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
+          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "fallbackSubagent",
+          label: "Fallback agent",
+          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
+          currentValue: fallbackValue,
+          values: fallbackValues,
         },
         {
           id: "fleetView",
@@ -2331,6 +2432,27 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "strictAgentFiles") {
+        const enabled = value === "on";
+        strictAgentFiles = enabled;
+        notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
+      } else if (id === "worktreeIsolation") {
+        const enabled = value === "on";
+        setWorktreeIsolationEnabled(enabled);
+        // The refusal is live, but the tool schema is built at registration, so
+        // the isolation parameter only appears/disappears next session.
+        notifyApplied(
+          ctx,
+          `Worktree isolation ${enabled ? "enabled" : "disabled"}. Tool parameter updates on next pi session.`,
+        );
+      } else if (id === "fallbackSubagent") {
+        setFallbackSubagent(value);
+        notifyApplied(
+          ctx,
+          value === NO_FALLBACK
+            ? "Unknown or disabled agent types will now be rejected"
+            : `Unknown agent types will fall back to ${value}`,
+        );
       } else if (id === "failurePreviewMaxChars") {
         const n = parseInt(value, 10);
         if (n >= 1 && n <= FAILURE_PREVIEW_MAX_CHARS_CEILING) {

@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { NO_FALLBACK } from "./agent-types.js";
 import type { WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -45,6 +46,18 @@ export interface SubagentsSettings {
   scopeModels?: boolean;
   /** Max chars for failure preview before truncation. Defaults to 65536 (64 KiB). */
   failurePreviewMaxChars?: number;
+  /**
+   * When true, an unreadable or unparseable agent `.md` aborts extension load
+   * instead of being skipped with a warning — pi exits, naming the file.
+   *
+   * Startup only, by design. Mid-session reloads (one per `Agent` call) keep
+   * warning: a bad edit at 3pm should not kill the session on the next
+   * unrelated spawn, where the failure would look disconnected from its cause.
+   * For a checked-in `.pi/agents/`, failing at startup is the point — the
+   * alternative is running a *different* agent than the file names.
+   * Defaults to false.
+   */
+  strictAgentFiles?: boolean;
   /**
    * When true, the three built-in default agents (general-purpose, Explore, Plan)
    * are not registered at startup. User-defined agents from project/global custom
@@ -87,6 +100,44 @@ export interface SubagentsSettings {
    * (`isolation: worktree`), or memory files.
    */
   outputTranscript?: boolean;
+  /**
+   * Whether `isolation: "worktree"` may create a worktree at all. Defaults to
+   * `true`. Set `false` on a repo where worktrees are too slow or too large to
+   * be worth it: a requested worktree is then dropped and the agent runs in the
+   * main checkout.
+   *
+   * The drop is deliberately silent — there is no per-result note, because the
+   * setting exists for projects whose model asks for a worktree on every call,
+   * where a note would be noise on every result. What keeps the orchestrator
+   * from claiming a `pi-agent-*` branch anyway is that it is never told the
+   * capability exists: `isolationParam` (invocation-config.ts) drops the field
+   * from the tool schema, and `isolationGuideline` (index.ts) drops the
+   * matching prose from the full and compact descriptions — a custom one opts
+   * in via the `{{isolationGuideline}}` placeholder. Anything that
+   * reintroduces the prose has to reintroduce a note with it.
+   *
+   * Deliberately a downgrade rather than an error. The fail-loud rule covers
+   * worktrees that *cannot* be created; this is the user declining one, and
+   * throwing would reject exactly the calls that the `isolation: "off"` value
+   * exists to tolerate. Enforced below the tool boundary, so it also covers the
+   * scheduler and the unvalidated cross-extension RPC path.
+   */
+  worktreeIsolation?: boolean;
+  /**
+   * Agent type substituted when a caller-supplied `subagent_type` doesn't
+   * resolve to exactly one enabled agent (unknown, disabled, or ambiguous by
+   * case). Omitted keeps the historical `general-purpose` fallback; a type name
+   * routes those calls to that agent instead; `"none"` disables the fallback so
+   * dispatch fails closed with an error naming the available types.
+   *
+   * The boolean `false` is accepted as a spelling of `"none"`, because a boolean
+   * would otherwise be dropped as the wrong type and silently leave the
+   * PERMISSIVE default in place while the author believes strict dispatch is on
+   * — the wrong direction to fail for this setting. Every other value is an
+   * agent name, so a mistaken `"off"` fails loudly at dispatch rather than
+   * meaning one thing here and another in the resolver.
+   */
+  fallbackSubagent?: string;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -98,12 +149,15 @@ export interface SettingsAppliers {
   setGraceTurns: (n: number) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setStrictAgentFiles: (b: boolean) => void;
   setFailurePreviewMaxChars: (chars: number) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
+  setWorktreeIsolation: (b: boolean) => void;
+  setFallbackSubagent: (v: string | undefined) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -153,6 +207,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
   }
+  if (typeof r.strictAgentFiles === "boolean") {
+    out.strictAgentFiles = r.strictAgentFiles;
+  }
   if (
     Number.isInteger(r.failurePreviewMaxChars) &&
     (r.failurePreviewMaxChars as number) >= 1 &&
@@ -174,6 +231,19 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.outputTranscript === "boolean") {
     out.outputTranscript = r.outputTranscript;
+  }
+  if (typeof r.worktreeIsolation === "boolean") {
+    out.worktreeIsolation = r.worktreeIsolation;
+  }
+  if (r.fallbackSubagent === false) {
+    // The only non-string spelling worth accepting: a boolean would otherwise be
+    // dropped, silently leaving the PERMISSIVE default in place. Every string is
+    // an agent name except the `none` sentinel, which the resolver recognizes —
+    // so a mistaken "off" fails loudly at dispatch instead of meaning something
+    // different here than it does there.
+    out.fallbackSubagent = NO_FALLBACK;
+  } else if (typeof r.fallbackSubagent === "string" && r.fallbackSubagent.trim()) {
+    out.fallbackSubagent = r.fallbackSubagent.trim();
   }
   return out;
 }
@@ -230,12 +300,15 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.failurePreviewMaxChars === "number") appliers.setFailurePreviewMaxChars(s.failurePreviewMaxChars);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
+  if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
+  if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
 }
 
 /**

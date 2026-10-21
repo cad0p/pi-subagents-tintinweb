@@ -28,6 +28,25 @@ export interface WorktreeInfo {
   workPath: string;
 }
 
+/**
+ * Project-wide switch for worktree isolation (`worktreeIsolation` in
+ * subagents.json). Default `true` — unchanged behaviour.
+ *
+ * The `"off"` isolation value gives a model a legal way to decline a worktree,
+ * but it still depends on the model choosing it. This is the deterministic half
+ * of the same fix: on a large repo where every worktree costs real time and
+ * disk, turning it off means no caller can create one, whatever it passes.
+ */
+let worktreeIsolationEnabled = true;
+
+export function setWorktreeIsolationEnabled(enabled: boolean): void {
+  worktreeIsolationEnabled = enabled;
+}
+
+export function isWorktreeIsolationEnabled(): boolean {
+  return worktreeIsolationEnabled;
+}
+
 export interface WorktreeCleanupResult {
   /** Whether changes were found in the worktree. */
   hasChanges: boolean;

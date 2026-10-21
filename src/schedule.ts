@@ -20,7 +20,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
-import { isValidType } from "./agent-types.js";
+import { resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
@@ -327,14 +327,21 @@ export class SubagentScheduler {
       if (!job?.enabled) return;
 
       // The registry can change after arming (e.g. the user disables default
-      // agents). Re-check at fire time: spawn() would otherwise fall back to a
-      // write-capable general-purpose config the user never scheduled.
-      if (!isValidType(job.subagent_type)) {
+      // agents, or deletes the agent a job names). Re-resolve at fire time with
+      // the same decision point every other spawn path uses (#183), so the
+      // project's `fallbackSubagent` policy applies here too — an unresolvable
+      // type routes to the configured fallback, or is refused under `none`.
+      // This does not reload from disk (the scheduler has no reason to rebuild
+      // process-global state from a timer), so it catches changes that went
+      // through /agents or an Agent call — not a file deleted directly from a
+      // shell.
+      const dispatch = resolveSpawnType(job.subagent_type);
+      if (!dispatch.ok) {
         // The fire aborts here, so stop the timer: an interval that keeps
         // ticking would outlive the record the store is about to reclassify
         // into `skipped`, and a later load could revive and fire it.
         this.unscheduleJob(id);
-        this.reportJobError(id, `Agent type "${job.subagent_type}" is not available`);
+        this.reportJobError(id, dispatch.message);
         return;
       }
 
@@ -351,7 +358,7 @@ export class SubagentScheduler {
         if (typeof r !== "string") resolvedModel = r;
       }
 
-      const agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
+      const agentId = manager.spawn(pi, ctx, dispatch.type, job.prompt, {
         description: job.description,
         bypassQueue: true,
         model: resolvedModel,

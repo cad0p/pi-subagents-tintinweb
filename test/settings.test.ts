@@ -135,6 +135,52 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips worktreeIsolation; drops non-boolean", () => {
+    saveSettings({ worktreeIsolation: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
+    saveSettings({ worktreeIsolation: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: true });
+    writeProject({ worktreeIsolation: "off" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("round-trips strictAgentFiles; drops non-boolean", () => {
+    saveSettings({ strictAgentFiles: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
+    saveSettings({ strictAgentFiles: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+    writeProject({ strictAgentFiles: "yes" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
+    // Only the boolean needs an alias: it would otherwise be dropped, leaving
+    // the PERMISSIVE default while the author believed strict was on. Every
+    // string stays an agent name, so a mistaken "off" fails loudly at dispatch
+    // instead of meaning one thing here and another in the resolver.
+    for (const spelling of ["none", "NONE", " none ", false]) {
+      writeProject({ fallbackSubagent: spelling });
+      expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+    }
+    writeProject({ fallbackSubagent: "off" });
+    expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+  });
+
+  it("drops fallbackSubagent values that aren't a string or `false`, without coercing them", () => {
+    // String(["none"]) is "none" — coercing would silently enable strict mode.
+    for (const junk of [["none"], null, 42, true, {}]) {
+      writeProject({ fallbackSubagent: junk });
+      expect(loadSettings(projectDir)).toEqual({});
+    }
+  });
+
+  it("keeps a named fallback agent and trims it", () => {
+    writeProject({ fallbackSubagent: "  my-router  " });
+    expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
+    writeProject({ fallbackSubagent: "   " });
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});
@@ -411,12 +457,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 
@@ -504,6 +553,27 @@ describe("settings persistence", () => {
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
     });
 
+    it("applies worktreeIsolation (both true and false)", () => {
+      applySettings({ worktreeIsolation: false }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(false);
+      applySettings({ worktreeIsolation: true }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(true);
+    });
+
+    it("applies strictAgentFiles (both true and false)", () => {
+      applySettings({ strictAgentFiles: true }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
+      applySettings({ strictAgentFiles: false }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(false);
+    });
+
+    it("applies fallbackSubagent through to the registry", () => {
+      // Without this, deleting the applySettings line for this field leaves the
+      // whole suite green while `subagents.json` silently stops working.
+      applySettings({ fallbackSubagent: "none" }, appliers);
+      expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
+    });
+
     it("applies failurePreviewMaxChars; skips it when absent", () => {
       applySettings({ failurePreviewMaxChars: 1000 }, appliers);
       expect(appliers.setFailurePreviewMaxChars).toHaveBeenCalledWith(1000);
@@ -564,12 +634,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 

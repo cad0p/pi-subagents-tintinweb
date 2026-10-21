@@ -13,9 +13,13 @@ vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
   cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
   pruneWorktrees: vi.fn(),
+  // The manager gates worktree creation on the project switch; the mock must
+  // expose it or every worktree spawn throws a TypeError instead.
+  isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
 import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
+import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -532,6 +536,46 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+});
+
+// The project switch has to bite below the tool boundary: cross-extension RPC
+// forwards its options straight to spawn(), so a schema that omits the
+// isolation parameter can't stop a caller that never saw the schema (#184).
+describe("AgentManager — worktreeIsolation: false refuses worktrees", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(true);
+  });
+
+  it("creates no worktree for an RPC-shaped spawn when the project disabled it", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockClear();
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(false);
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+
+    // Downgraded, not rejected — the user opted out, so the call still runs.
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)!.worktree).toBeUndefined();
+  });
+
+  it("does not mask a genuine worktree failure while enabled", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(true);
+
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    })).toThrow(/isolation: "worktree"/);
   });
 });
 

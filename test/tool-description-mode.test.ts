@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import subagentsExtension from "../src/index.js";
+import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const EXAMPLE_TEMPLATE = fileURLToPath(new URL("../examples/agent-tool-description.md", import.meta.url));
 
@@ -73,6 +74,11 @@ describe("toolDescriptionMode", () => {
   afterEach(async () => {
     await shutdown?.();
     shutdown = undefined;
+    // applySettings only applies keys that are PRESENT, so a subagents.json
+    // without `worktreeIsolation` leaves the module singleton wherever the
+    // previous test left it. Reset it so each setup()'s settings decide, and
+    // so the "default" assertions below really test the default.
+    setWorktreeIsolationEnabled(true);
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -137,7 +143,7 @@ describe("toolDescriptionMode", () => {
         "- You will be notified on subagent completion/failure — never poll or sleep.",
         "- Verify an agent's claimed code changes before reporting work done.",
         "- resume continues a previous agent by ID; steer_subagent messages a running one.",
-        '- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.',
+        '- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.',
       ].join("\n"),
     );
   });
@@ -155,7 +161,7 @@ describe("toolDescriptionMode", () => {
         "- Use steer_subagent to send mid-run messages to a running subagent.",
         "- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.",
         "- Use inherit_context if the agent needs the parent conversation history.",
-        '- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel code modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.',
+        '- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.',
       ].join("\n"),
     );
   });
@@ -251,11 +257,28 @@ describe("toolDescriptionMode", () => {
     expect(desc).not.toContain("schedule");
   });
 
+  it("{{isolationGuideline}} expands to the isolation bullet when worktrees are on (default)", () => {
+    const tools = setup({ toolDescriptionMode: "custom" }, () => {
+      writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "RULES:{{isolationGuideline}}\nEND");
+    });
+    const desc: string = tools.get("Agent").description;
+    expect(desc).toContain('RULES:\n- Use isolation: "worktree"');
+  });
+
+  it("{{isolationGuideline}} expands to the empty string when worktree isolation is disabled", () => {
+    const tools = setup({ toolDescriptionMode: "custom", worktreeIsolation: false }, () => {
+      writeFileSync(join(tmpDir, ".pi", "agent-tool-description.md"), "RULES:{{isolationGuideline}}\nEND");
+    });
+    const desc: string = tools.get("Agent").description;
+    expect(desc).toContain("RULES:\nEND");
+    expect(desc).not.toContain("isolation");
+  });
+
   it("every documented placeholder is replaced — no {{ }} residue", () => {
     const tools = setup({ toolDescriptionMode: "custom" }, () => {
       writeFileSync(
         join(tmpDir, ".pi", "agent-tool-description.md"),
-        "A {{typeList}} B {{compactTypeList}} C {{agentDir}} D {{scheduleGuideline}} E",
+        "A {{typeList}} B {{compactTypeList}} C {{agentDir}} D {{scheduleGuideline}} E {{isolationGuideline}} F",
       );
     });
     const desc: string = tools.get("Agent").description;
@@ -293,5 +316,43 @@ describe("toolDescriptionMode", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  // The schema half of `worktreeIsolation: false` shipped without the prose
+  // half upstream: `isolationParam` dropped the field while both descriptions
+  // kept telling the model to pass it. Nothing rejects the undeclared key
+  // (TypeBox sets no additionalProperties: false) and, by design, nothing notes
+  // the downgrade on the result — so the model had every reason to report a
+  // `pi-agent-*` branch that was never created. Schema and prose move together.
+  describe("worktreeIsolation gates the isolation parameter and its prose", () => {
+    const props = (tools: Map<string, any>) =>
+      Object.keys(tools.get("Agent").parameters?.properties ?? {});
+
+    it("advertises `isolation` in schema and prose by default", () => {
+      const tools = setup();
+      expect(props(tools)).toContain("isolation");
+      expect(tools.get("Agent").description).toContain('Use isolation: "worktree"');
+    });
+
+    it("drops both when worktree isolation is disabled", () => {
+      const tools = setup({ worktreeIsolation: false });
+      const names = props(tools);
+      expect(names).not.toContain("isolation");
+      expect(tools.get("Agent").description).not.toContain("isolation");
+      // One field, not the tool — and the neighbouring gate is unaffected.
+      expect(names).toEqual(expect.arrayContaining(["prompt", "description", "subagent_type", "schedule"]));
+    });
+
+    it("drops the compact description's bullet too", () => {
+      const enabled = setup({ toolDescriptionMode: "compact" });
+      expect(enabled.get("Agent").description).toContain('isolation: "worktree"');
+    });
+
+    it("compact mode says nothing about isolation when disabled", () => {
+      const tools = setup({ toolDescriptionMode: "compact", worktreeIsolation: false });
+      expect(tools.get("Agent").description).not.toContain("isolation");
+      // The bullet above it survives — the gate trims a suffix, not the list.
+      expect(tools.get("Agent").description).toContain("resume continues a previous agent by ID");
+    });
   });
 });

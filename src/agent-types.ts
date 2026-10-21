@@ -33,6 +33,26 @@ export function isDefaultsDisabled(): boolean { return disableDefaults; }
 /** Set whether default agents are disabled. */
 export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
 
+/** `fallbackSubagent` value that disables the fallback entirely (strict dispatch). */
+export const NO_FALLBACK = "none";
+
+/**
+ * Agent type substituted when a caller-supplied `subagent_type` doesn't resolve
+ * to exactly one enabled agent. `undefined` keeps the historical behavior
+ * (general-purpose); `NO_FALLBACK` makes dispatch fail closed. Set from
+ * `subagents.json` (`fallbackSubagent`).
+ *
+ * Module state rather than an index.ts closure because every caller-supplied
+ * spawn path needs it — the Agent tool, the scheduler, and cross-extension RPC.
+ */
+let fallbackSubagent: string | undefined;
+
+/** Get the configured fallback agent type. undefined = general-purpose. */
+export function getFallbackSubagent(): string | undefined { return fallbackSubagent; }
+
+/** Set the configured fallback agent type. undefined = general-purpose. */
+export function setFallbackSubagent(v: string | undefined): void { fallbackSubagent = v; }
+
 /**
  * Register agents into the unified registry.
  * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
@@ -77,7 +97,12 @@ export function getAgentConfig(name: string): AgentConfig | undefined {
 
 /** Get all enabled type names (for spawning and tool descriptions). */
 export function getAvailableTypes(): string[] {
-  return [...agents.entries()]
+  return getAvailableTypesIn(agents);
+}
+
+/** Get all enabled type names from a registry (for spawning and tool descriptions). */
+export function getAvailableTypesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.entries()]
     .filter(([_, config]) => config.enabled !== false)
     .map(([name]) => name);
 }
@@ -106,6 +131,108 @@ export function isValidType(type: string): boolean {
   const key = resolveKey(type);
   if (!key) return false;
   return agents.get(key)?.enabled !== false;
+}
+
+/**
+ * Case-insensitive resolution that refuses to guess. An exact match always wins;
+ * otherwise the name must match exactly one key. Two agents differing only in
+ * case are reachable (`loadCustomAgents` keys by filename across three
+ * directories), and picking whichever came first would silently dispatch a
+ * different agent, model and tool policy than the caller meant.
+ */
+function resolveUnambiguousKeyIn(registry: Map<string, AgentConfig>, name: string): string | undefined {
+  if (registry.has(name)) return name;
+  const lower = name.toLowerCase();
+  const matches = [...registry.keys()].filter(key => key.toLowerCase() === lower);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * The canonical key for a caller-supplied name that identifies exactly one
+ * ENABLED agent, or undefined. Strict by construction: no fallback, no guessing
+ * between case-variants.
+ */
+export function resolveEnabledTypeIn(
+  registry: Map<string, AgentConfig>,
+  requested: unknown,
+): string | undefined {
+  const raw = typeof requested === "string" ? requested.trim() : "";
+  if (!raw) return undefined;
+  const key = resolveUnambiguousKeyIn(registry, raw);
+  return key !== undefined && registry.get(key)?.enabled !== false ? key : undefined;
+}
+
+/** Outcome of resolving a caller-supplied `subagent_type` into a spawnable type. */
+export type SpawnTypeResolution =
+  /** Spawn this type. `fellBackFrom` is set when it isn't what the caller asked for. */
+  | { ok: true; type: string; fellBackFrom?: string }
+  /** Refuse the spawn and return this message to the caller. */
+  | { ok: false; message: string };
+
+/**
+ * Resolve a caller-supplied agent type against a registry, applying the
+ * `fallbackSubagent` policy. The single decision point for every caller-supplied
+ * spawn — the Agent tool, the scheduler and cross-extension RPC — so a type that
+ * fails here never reaches `runAgent`, where `getConfig` would silently
+ * substitute general-purpose.
+ *
+ * Unknown, disabled, and case-ambiguous names are all treated the same way:
+ * the caller named something that doesn't identify exactly one enabled agent.
+ *
+ * Pure over `registry` — callers that need fresh agent files reload before
+ * calling (the Agent tool already does, per spawn). Reloading here would mean
+ * importing custom-agents.ts, which imports this module.
+ */
+export function resolveSpawnTypeIn(
+  registry: Map<string, AgentConfig>,
+  requested: unknown,
+): SpawnTypeResolution {
+  const raw = typeof requested === "string" ? requested.trim() : "";
+  const available = () => getAvailableTypesIn(registry).join(", ") || "(none)";
+
+  const key = resolveEnabledTypeIn(registry, raw);
+  if (key !== undefined) return { ok: true, type: key };
+
+  // A missing type follows the same policy as a wrong one rather than always
+  // erroring: before this setting existed an empty type fell back like any
+  // other unresolvable name, and only opting in should change that.
+  const reason = raw ? `Unknown or disabled agent type: "${raw}".` : "No agent type given.";
+
+  // Trimmed like `requested`: a padded value set programmatically would
+  // otherwise be reported as a missing agent.
+  const configured = typeof fallbackSubagent === "string" ? fallbackSubagent.trim() : undefined;
+
+  if (configured !== undefined && configured.toLowerCase() === NO_FALLBACK) {
+    return { ok: false, message: `${reason} Available: ${available()}.` };
+  }
+
+  if (configured !== undefined) {
+    // An explicitly configured fallback that is itself unusable is a
+    // misconfiguration, not a second chance to guess — say so rather than
+    // quietly dropping to general-purpose.
+    const fallbackKey = resolveUnambiguousKeyIn(registry, configured);
+    if (fallbackKey === undefined || registry.get(fallbackKey)?.enabled === false) {
+      return {
+        ok: false,
+        message:
+          `${reason} The configured fallbackSubagent "${configured}" is itself ` +
+          `unknown or disabled. Available: ${available()}.`,
+      };
+    }
+    return { ok: true, type: fallbackKey, fellBackFrom: raw };
+  }
+
+  // Unset: historical behavior, deliberately unchanged. The fallback stays the
+  // default, so the pre-existing hole it leaves — an unregistered
+  // general-purpose resolving to `getConfig`'s all-tools hardcoded tier — is
+  // what `fallbackSubagent: none` is for, not something to close under everyone
+  // silently.
+  return { ok: true, type: "general-purpose", fellBackFrom: raw };
+}
+
+/** Resolve a caller-supplied agent type against the process-wide registry. */
+export function resolveSpawnType(requested: unknown): SpawnTypeResolution {
+  return resolveSpawnTypeIn(agents, requested);
 }
 
 /** Tool names required for memory management. */
