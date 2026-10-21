@@ -30,7 +30,7 @@ import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDe
 import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
@@ -313,9 +313,9 @@ export default function (pi: ExtensionAPI) {
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
 
-  // ---- Usage reporting (all three settings default off; see SubagentsSettings) ----
+  // ---- Usage reporting (`reportUsage`/`showCost` default on, `showModel` off; see SubagentsSettings) ----
   /** Attach subagent spend to tool results, so the parent session counts it. */
-  let reportUsage = false;
+  let reportUsage = true;
   function isReportUsageEnabled(): boolean { return reportUsage; }
   function setReportUsage(b: boolean): void {
     reportUsage = b;
@@ -325,7 +325,7 @@ export default function (pi: ExtensionAPI) {
     if (!b) pendingUsage.drain();
   }
   /** Show `~$X` next to token counts in the subagent surfaces. */
-  let showCost = false;
+  let showCost = DEFAULT_SHOW_COST;
   function isShowCostEnabled(): boolean { return showCost; }
   function setShowCost(b: boolean): void {
     showCost = b;

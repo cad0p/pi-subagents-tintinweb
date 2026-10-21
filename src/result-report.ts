@@ -11,6 +11,7 @@
 
 import { existsSync } from "node:fs";
 import { checkpointsFilePath } from "./checkpoint.js";
+import { DEFAULT_SHOW_COST } from "./settings.js";
 import { getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { toSingleLine } from "./text-safety.js";
 import type { AgentRecord } from "./types.js";
@@ -26,7 +27,7 @@ import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type Lifet
  * which a child session builds without access to the parent's settings. One
  * source beats threading the same flag through two independent tool factories.
  */
-let showCost = false;
+let showCost = DEFAULT_SHOW_COST;
 
 /** Mirror the live `showCost` setting into the report renderer. */
 export function setReportShowCost(b: boolean): void { showCost = b; }
