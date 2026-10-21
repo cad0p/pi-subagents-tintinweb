@@ -28,6 +28,7 @@ Thumbs.db
 *.tmp
 .temp/
 .pi/readcache
+.pi/subagent-schedules/
 .claude
 .vscode
 coverage/
