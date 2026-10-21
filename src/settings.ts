@@ -19,10 +19,12 @@ import type { WidgetMode } from "./types.js";
  * from what is shown", which is what every other row means.
  *
  * `unresolvable` reports an explicitly configured fallback that no longer names
- * an enabled agent (deleted, disabled, or a default with `disableDefaultAgents`
- * on). Dispatch refuses in that state, so the row must say so rather than
- * presenting it as a working target. An *unset* fallback is not unresolvable:
- * it deliberately targets `general-purpose` even when unregistered.
+ * an enabled agent — deleted, disabled, or a default with `disableDefaultAgents`
+ * on. Dispatch refuses in that state, so the row must say so rather than
+ * presenting it as a working target. `general-purpose` is the exception in both
+ * directions: it resolves to the permissive hardcoded tier whether it is
+ * configured or unset, and dispatch accepts it either way, so an unset fallback
+ * is never unresolvable and neither is an explicit `general-purpose`.
  */
 export function fallbackRow(
   configured: string | undefined,
