@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getAgentConfig, registerAgents } from "../src/agent-types.js";
-import { buildAgentPrompt } from "../src/prompts.js";
+import { buildAgentPrompt, retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig, EnvInfo } from "../src/types.js";
 
 const env: EnvInfo = {
@@ -408,5 +408,71 @@ describe("buildAgentPrompt", () => {
         expect(tagIndex).toBeLessThan(envIndex);
       }
     });
+  });
+});
+
+describe("retargetToolsSection", () => {
+  // The block pi generates for its own default prompt, which an append-mode child
+  // inherits from the parent verbatim.
+  const parentPrompt = [
+    "You are an expert coding assistant.",
+    "",
+    "<tools>",
+    "- read: Read file contents",
+    "- bash: Execute bash commands (ls, grep, find, etc.)",
+    "- codemode: Run a script that calls tools",
+    "- tool_search: Search for tools that are not loaded yet and load the matches",
+    "",
+    "In addition to the tools above, you may have access to other custom tools depending on the project.",
+    "</tools>",
+    "",
+    "<rules>",
+    "- Be concise in your responses",
+    "</rules>",
+  ].join("\n");
+
+  it("lists exactly the given tools, dropping inherited ones the child lacks", () => {
+    const prompt = retargetToolsSection(parentPrompt, ["read", "bash"]);
+    expect(prompt).toContain("<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n\n");
+    expect(prompt).not.toContain("codemode");
+    expect(prompt).not.toContain("tool_search");
+  });
+
+  it("adds a tool the child declares but the parent never listed", () => {
+    // The child's own extension tools are not in the inherited block at all.
+    const prompt = retargetToolsSection(parentPrompt, ["read", "codemode"], {
+      codemode: "Run a script that calls tools",
+    });
+    expect(prompt).toContain("- read: Read file contents");
+    expect(prompt).toContain("- codemode: Run a script that calls tools");
+  });
+
+  it("prefers the child's snippet over the inherited one", () => {
+    const prompt = retargetToolsSection(parentPrompt, ["read"], { read: "Read a file, paginated" });
+    expect(prompt).toContain("- read: Read a file, paginated");
+    expect(prompt).not.toContain("- read: Read file contents");
+  });
+
+  it("keeps the list in the child's declaration order", () => {
+    const prompt = retargetToolsSection(parentPrompt, ["bash", "read"]);
+    expect(prompt.indexOf("- bash:")).toBeLessThan(prompt.indexOf("- read:"));
+  });
+
+  it("leaves a tool without a snippet out of the list, as pi does", () => {
+    const prompt = retargetToolsSection(parentPrompt, ["read", "mystery_tool"]);
+    expect(prompt).not.toContain("mystery_tool");
+  });
+
+  it("strips the block when the child declares no tools", () => {
+    const prompt = retargetToolsSection(parentPrompt, []);
+    expect(prompt).not.toContain("<tools>");
+    expect(prompt).not.toContain("In addition to the tools above");
+    // The surrounding sections keep their single blank-line separation.
+    expect(prompt).toContain("You are an expert coding assistant.\n\n<rules>");
+  });
+
+  it("leaves a prompt with no <tools> block untouched", () => {
+    const prompt = "Replace-mode prompt.\n\n# Environment\nWorking directory: /workspace";
+    expect(retargetToolsSection(prompt, ["read"])).toBe(prompt);
   });
 });

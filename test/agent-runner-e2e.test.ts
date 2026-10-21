@@ -27,6 +27,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extensionCanonicalName, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -40,9 +41,50 @@ import { registerFauxProvider } from "./helpers/pi-ai.js";
 vi.setConfig({ testTimeout: 30_000 });
 
 const FIXTURE = resolve(fileURLToPath(new URL("./fixtures/e2e-probe-ext.mjs", import.meta.url)));
+const EXPOSURE_FIXTURE = resolve(fileURLToPath(new URL("./fixtures/e2e-exposure-ext.mjs", import.meta.url)));
 /** The fixture registers exactly this tool. */
 const EXT_TOOL = "e2e_probe";
 const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+
+/**
+ * The parent's prompt, shaped as pi builds it for a main session: the `<tools>`
+ * block advertises codemode and tool search, which the parent session has.
+ */
+const PARENT_PROMPT = [
+  "You are an expert coding assistant operating inside pi.",
+  "",
+  "<tools>",
+  ...BUILTINS.map((name) => `- ${name}: ${name} snippet`),
+  "- codemode: Run a script that calls tools",
+  "- tool_search: Search for tools that are not loaded yet and load the matches",
+  "",
+  "In addition to the tools above, you may have access to other custom tools depending on the project.",
+  "</tools>",
+  "",
+  "<rules>",
+  "- Be concise in your responses",
+  "</rules>",
+].join("\n");
+
+/**
+ * The prompt pi built the child session with. pi keeps it in the private options
+ * it hands its own prompt builder — the same reach the tool-veto e2e makes into
+ * `_beforeToolCall`.
+ */
+function systemPromptOf(session: AgentSession): string {
+  const options = (session as unknown as { _baseSystemPromptOptions?: { customPrompt?: string } })
+    ._baseSystemPromptOptions;
+  return options?.customPrompt ?? "";
+}
+
+/** Tool names a prompt's `<tools>` block advertises. */
+function advertisedTools(prompt: string): string[] {
+  const block = /<tools>\n([\s\S]*?)\n<\/tools>/.exec(prompt)?.[1] ?? "";
+  return block.split("\n").flatMap((line) => {
+    const name = /^- ([^:]+): /.exec(line)?.[1];
+    return name ? [name] : [];
+  });
+}
 
 /** Minimal `pi` stub — `detectEnv` only needs `exec` (returns non-git). */
 function makePi() {
@@ -68,7 +110,10 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
    * Register `cfg` as agent type "e2e", run it through the REAL runAgent, and
    * return the real session's active tool names captured at construction time.
    */
-  async function activeToolsFor(cfg: Partial<AgentConfig>): Promise<string[]> {
+  async function activeToolsFor(
+    cfg: Partial<AgentConfig>,
+    runOpts: { parentPrompt?: string } = {},
+  ): Promise<string[]> {
     registerAgents(
       new Map([
         [
@@ -98,22 +143,65 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       registerProvider: () => {},
       unregisterProvider: () => {},
     };
-    const ctx: any = { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry };
+    const ctx: any = {
+      cwd,
+      getSystemPrompt: () => runOpts.parentPrompt ?? "PARENT",
+      isProjectTrusted: () => true,
+      model,
+      modelRegistry,
+    };
 
     let active: string[] = [];
+    let prompt = "";
+    lastSession = undefined;
     try {
       await runAgent(ctx, "e2e", "go", {
         pi: makePi(),
         model,
         onSessionCreated: (s) => {
           active = s.getActiveToolNames();
+          prompt = systemPromptOf(s);
+          lastSession = s;
         },
       });
     } catch {
       // A no-op/erroring prompt turn is fine — the gated tool set is fixed at
       // construction, which `onSessionCreated` already captured.
     }
+    lastPrompt = prompt;
     return active;
+  }
+
+  /** The prompt of the last spawned child, set by `activeToolsFor`. */
+  let lastPrompt = "";
+  /** The session of the last spawned child, set by `activeToolsFor`. */
+  let lastSession: AgentSession | undefined;
+
+  /**
+   * Paths of the extensions the child's real loader ended up with, pi's built-ins
+   * only — the runner's own inline scope gate is not one of the agent's.
+   */
+  function loadedBuiltinPaths(): string[] {
+    const session = lastSession as unknown as {
+      _resourceLoader: { getExtensions: () => { extensions: Array<{ path: string }> } };
+    };
+    return session._resourceLoader
+      .getExtensions()
+      .extensions.map((e) => e.path)
+      .filter((path) => path.startsWith("builtin:"));
+  }
+
+  /**
+   * Run one tool call through the child's real `tool_call` dispatch — the path both
+   * a model-issued call and a `ctx.executeTool()` call from a codemode script take.
+   * `_beforeToolCall` is private pi API; this is the reach upstream's tool-veto e2e
+   * makes for the same reason.
+   */
+  async function dispatchToolCall(name: string): Promise<{ block?: boolean } | undefined> {
+    const session = lastSession as unknown as {
+      _beforeToolCall: (context: unknown, parentToolCallId?: string) => Promise<{ block?: boolean } | undefined>;
+    };
+    return session._beforeToolCall({ toolCall: { name, id: "t1" }, args: {} }, "parent-call");
   }
 
   it("real pi-mono admits an extension-registered tool when it's in the allowlist (#47)", async () => {
@@ -156,5 +244,84 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(active).toContain(EXT_TOOL); // selected → surfaces despite the flip
     expect(active).toContain("read");
     expect(active).not.toContain("bash"); // builtinToolNames: ["read"] only
+  });
+
+  it("activates only the tools pi would declare — codemode/deferred tools stay off", async () => {
+    // pi's MCP registers server tools as `mcp__<server>__<tool>` with `codemode`
+    // exposure: reachable from codemode scripts, never declared to the model.
+    const active = await activeToolsFor({ extensions: [EXPOSURE_FIXTURE] });
+    expect(active).toContain("exposure_direct");
+    expect(active).not.toContain("mcp__probe__codemode_only");
+    expect(active).not.toContain("mcp__probe__deferred");
+    // `defaultActive: false` is activated by naming it, as `--tools` does; the
+    // child's allowlist names every in-scope tool, so it stays declared.
+    expect(active).toContain("exposure_off_by_default");
+    for (const b of BUILTINS) expect(active).toContain(b);
+  });
+
+  it("loads pi's built-in extensions in the child, as the main session does", async () => {
+    // The loader is built by the runner, not pi's CLI, so without the forwarded
+    // factories `builtin:codemode`/`builtin:tool-search` resolve to nothing.
+    const active = await activeToolsFor({ extensions: true });
+    expect(active).toContain("codemode");
+    expect(active).toContain("tool_search");
+  });
+
+  it("keeps pi's built-ins out when the agent loads no extensions", async () => {
+    const active = await activeToolsFor({ extensions: false });
+    expect(active).not.toContain("codemode");
+    expect(active).not.toContain("tool_search");
+    expect(loadedBuiltinPaths()).toEqual([]);
+  });
+
+  it("loads exactly the named built-in when extensions: [builtin:tool-search]", async () => {
+    await activeToolsFor({ extensions: ["builtin:tool-search"] });
+    expect(loadedBuiltinPaths()).toEqual(["builtin:tool-search"]);
+  });
+
+  it("drops one built-in by name (exclude_extensions: builtin:mcp)", async () => {
+    await activeToolsFor({ extensions: true, excludeExtensions: ["builtin:mcp"] });
+    expect(loadedBuiltinPaths()).not.toContain("builtin:mcp");
+    expect(loadedBuiltinPaths()).toContain("builtin:codemode");
+  });
+
+  it("vetoes an out-of-scope tool on the child's real tool_call dispatch", async () => {
+    // pi keeps a registered MCP tool callable through `ctx.executeTool()` even when
+    // the agent never selected it, and those nested calls reach only the extension
+    // `tool_call` handlers. The inline scope gate is what closes that hole.
+    const canon = extensionCanonicalName(FIXTURE);
+    await activeToolsFor({ extensions: [FIXTURE], extSelectors: [`ext:${canon}`] });
+    await expect(dispatchToolCall(EXT_TOOL)).resolves.toBeUndefined();
+    await expect(dispatchToolCall("not_this_agents_tool")).resolves.toMatchObject({ block: true });
+  });
+
+  describe("append-mode prompt", () => {
+    /** An append-mode agent: it inherits the parent's prompt verbatim. */
+    const appendAgent: Partial<AgentConfig> = { promptMode: "append", systemPrompt: "" };
+
+    it("advertises exactly the child's tools, not the parent's codemode/tool_search", async () => {
+      // Evidence for the fork bug: the child inherited the MAIN session's `<tools>`
+      // block and was told it had codemode and tool_search, then called them.
+      await activeToolsFor({ ...appendAgent, extensions: false }, { parentPrompt: PARENT_PROMPT });
+      const advertised = advertisedTools(lastPrompt);
+      expect(advertised).toEqual(BUILTINS);
+      expect(lastPrompt).not.toContain("codemode");
+      expect(lastPrompt).not.toContain("tool_search");
+      // The rest of the inherited prompt survives untouched.
+      expect(lastPrompt).toContain("You are an expert coding assistant operating inside pi.");
+      expect(lastPrompt).toContain("<rules>");
+    });
+
+    it("advertises codemode and tool_search once the built-ins load in the child", async () => {
+      await activeToolsFor({ ...appendAgent, extensions: true }, { parentPrompt: PARENT_PROMPT });
+      const advertised = advertisedTools(lastPrompt);
+      expect(advertised).toEqual([...BUILTINS, "codemode", "tool_search"]);
+    });
+
+    it("advertises a loaded extension's tool with its own snippet", async () => {
+      // The inherited block cannot describe a tool the parent never had.
+      await activeToolsFor({ ...appendAgent, extensions: [EXPOSURE_FIXTURE] }, { parentPrompt: PARENT_PROMPT });
+      expect(advertisedTools(lastPrompt)).toEqual([...BUILTINS, "exposure_direct", "exposure_off_by_default"]);
+    });
   });
 });

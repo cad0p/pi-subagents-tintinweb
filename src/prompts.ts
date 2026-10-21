@@ -110,6 +110,54 @@ ${envBlock}`;
   return activeAgentTag + replaceHeader + worktreeSection + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
+/** One-line tool snippets keyed by tool name, as pi's `<tools>` section prints them. */
+export type ToolSnippets = Record<string, string>;
+
+/** The line pi puts after the tool list in a `<tools>` section. */
+const TOOLS_TRAILER =
+  "In addition to the tools above, you may have access to other custom tools depending on the project.";
+
+/**
+ * Replace the `<tools>` block of an inherited prompt with one describing the tools
+ * THIS agent declares.
+ *
+ * An append-mode agent inherits the parent's prompt verbatim, `<tools>` block
+ * included — so a child that lacks `codemode`, `tool_search`, or an extension tool the
+ * parent has is told it has them and then calls a tool that does not exist. pi cannot
+ * rebuild the block for us: the child's prompt arrives as `systemPromptOverride`, i.e.
+ * as a custom prompt, and pi only generates `<tools>` for its own default prompt.
+ *
+ * Snippets come from the inherited block (pi's builtin tools, which the child's
+ * definitions do not carry) and from `snippets` (the child's own extension tools,
+ * which the inherited block may not list at all). `snippets` wins on a name both have.
+ * A tool without a snippet is left out, as pi does, and an agent declaring no tools at
+ * all loses the block entirely rather than advertising an empty list.
+ */
+export function retargetToolsSection(
+  prompt: string,
+  toolNames: readonly string[],
+  snippets: ToolSnippets = {},
+): string {
+  const match = /<tools>\n([\s\S]*?)\n<\/tools>(\n\n)?/.exec(prompt);
+  if (!match) return prompt;
+
+  const inherited = new Map<string, string>();
+  for (const line of match[1].split("\n")) {
+    const entry = /^- ([^:]+): (.+)$/.exec(line);
+    if (entry) inherited.set(entry[1], entry[2]);
+  }
+
+  const lines: string[] = [];
+  for (const name of toolNames) {
+    const snippet = snippets[name] ?? inherited.get(name);
+    if (snippet) lines.push(`- ${name}: ${snippet}`);
+  }
+
+  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>` : "";
+  const end = match.index + match[0].length;
+  return prompt.slice(0, match.index) + block + (block ? (match[2] ?? "") : "") + prompt.slice(end);
+}
+
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */
 const genericBase = `# Role
 You are a general-purpose coding agent for complex, multi-step tasks.
