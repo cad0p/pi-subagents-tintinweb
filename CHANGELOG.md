@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.0] - 2026-10-21
+## [0.22.0] - 2026-10-21
 
 > **⚠️ Breaking — `persist_session` changed meaning.** It used to mean "persist this subagent at all"; without it the run used an in-memory session and left nothing behind. It now means "retain this subagent's session file after it settles": every run writes a session file while it runs, so a crashed or killed run stays recoverable, and the file is deleted when the agent record is removed unless `persist_session: true`. Migration: an agent that relied on the old default to keep a run off disk must set `output_transcript: false`, avoid `persist_session`, `isolation: worktree` and `memory:`, or run pi with `--no-session`, which keeps subagent sessions in memory as before.
 
