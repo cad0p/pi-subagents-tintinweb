@@ -252,9 +252,11 @@ tools: "*, ext:mcp/search"        # built-ins plus one extension tool
 
 extensions: false                 # no extensions load
 extensions: [mcp]                 # only mcp loads
+extensions: [builtin:mcp, builtin:codemode]  # pi's built-in MCP + codemode
 extensions: ["*", "/abs/foo.ts"]  # all defaults plus one path-loaded extension
 
 exclude_extensions: pi-notify     # everything except pi-notify (with extensions: true)
+exclude_extensions: builtin:mcp   # everything except pi's built-in MCP
 
 # Specialist: load one extension, expose only one of its tools, keep built-ins
 extensions: [mcp]
@@ -268,6 +270,9 @@ A few rules the examples don't make obvious:
 - `extensions:` is the sole loading authority. `ext:foo` in `tools:` narrows what surfaces; it can't load `foo` on its own. Mismatches fire `extension-error:…` warnings.
 - Any `ext:` entry flips extension tools to an explicit allowlist — unnamed extensions still load (handlers fire) but expose no tools. So `tools: "*, ext:mcp/search"` exposes only `search` from `mcp`, nothing from any other extension.
 - Extension names match case-insensitively (`[Mcp]` = `[mcp]`); tool names in `ext:foo/bar` stay case-sensitive.
+- pi's built-in extensions (`builtin:mcp`, `builtin:codemode`, `builtin:tool-search`) load in subagents as they do in the main session, so with `extensions: true` **every subagent starts its own set of `mcp.json` servers**. Address them by the full `builtin:` name — bare `[mcp]` matches a third-party extension named `mcp`, not the built-in — and narrow their tools with `ext:builtin:mcp/<tool>`. MCP tools are reached through codemode (or `tool_search` for `deferred` servers), so an `ext:` allowlist must name that bridge too, as pi's `--tools read,codemode,'mcp__*'` does: `tools: "read, ext:builtin:codemode, ext:builtin:mcp/mcp__radius__search"`. Opt out per agent with `exclude_extensions: builtin:mcp`, or everywhere with `-builtin:mcp` in pi's `extensions` setting; starting pi with `--no-mcp` keeps MCP out of subagents too, and `--no-extensions` keeps all three built-ins out. MCP tools stay undeclared until codemode or `tool_search` reaches them, as in the main session, and a codemode script can only call tools inside the agent's scope. `codemode` and `tool_search` themselves are `defaultActive: false` in pi: listing `builtin:codemode` under `extensions:` loads the extension but leaves the tool dormant unless the parent session has it active or the agent names it (`tools: "read, ext:builtin:codemode"`).
+- Subagents inherit the parent session's **project trust**: in a project you did not trust, a subagent loads none of its `.pi` extensions or settings and never starts the servers in its `.pi/mcp.json`. A subagent spawned into another directory (`Agent` tool `cwd`) still uses the parent project's settings but treats that directory as untrusted.
+- An append-mode agent's prompt inherits the parent's, so the `<tools>` block it carries is rewritten to list exactly the tools that agent has. A subagent without codemode or `tool_search` is no longer told it has them, and one that loads them is told about them.
 - An installed **package** extension matches by its package short name (`@scope/pi-subagents` → `[pi-subagents]`), in addition to its path-derived name (a package whose entry is `src/index.ts` also answers to `[src]`). Prefer the package name — the path-derived one is incidental.
 - Plain `tools:` typos fail loudly: `tools: reed, grep` fires `tools-error:…` instead of silently producing an under-tooled agent.
 - `exclude_extensions:` wins over `extensions:` and over `ext:` selectors — an excluded extension never loads and a `tools: ext:` entry can't pull it back. Plain names only (no paths, no `*`); a name matching nothing fires an `extension-error:…` warning.

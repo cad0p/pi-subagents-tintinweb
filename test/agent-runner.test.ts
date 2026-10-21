@@ -32,11 +32,18 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  // The runner forwards these to the child loader's `extensionFactories`. Stubbed
+  // to the shape pi returns: a factory that registers nothing.
+  createCodemodeExtension: () => () => {},
+  createMcpExtension: () => () => {},
+  createToolSearchExtension: () => () => {},
   // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
-  // (an unknown path becomes an error row, mirroring a failed load) and then
-  // runs extensionsOverride over the result.
+  // (an unknown path becomes an error row, mirroring a failed load), then runs
+  // extensionsOverride over the result, then reads the system prompt override —
+  // the order pi's own reload() uses.
   DefaultResourceLoader: class {
     opts: any;
+    systemPrompt: string | undefined;
     constructor(options: any) {
       this.opts = options;
       defaultResourceLoaderCtor(options);
@@ -48,15 +55,18 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
       // resolve to; an unregistered path simply yields no extension (a failed load).
       if (this.opts.noExtensions) {
         loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
-        return;
-      }
-      if (this.opts.extensionsOverride) {
+      } else if (this.opts.extensionsOverride) {
         loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
       }
+      this.systemPrompt = this.opts.systemPromptOverride?.(undefined);
     }
 
     getExtensions() {
       return loaderExtensionsRef.current;
+    }
+
+    getSystemPrompt() {
+      return this.systemPrompt;
     }
   },
   getAgentDir,
@@ -88,6 +98,8 @@ vi.mock("../src/agent-types.js", () => ({
   getMemoryToolNames: vi.fn(() => []),
   getReadOnlyMemoryToolNames: vi.fn(() => []),
   getToolNamesForType: vi.fn(() => ["read"]),
+  // Snippets for the <tools> block; the real one builds them from pi's factories.
+  getBuiltinToolSnippets: vi.fn(() => ({ read: "Read a file" })),
 }));
 
 vi.mock("../src/env.js", () => ({
@@ -96,6 +108,9 @@ vi.mock("../src/env.js", () => ({
 
 vi.mock("../src/prompts.js", () => ({
   buildAgentPrompt: vi.fn(() => "system prompt"),
+  // Identity: the retargeting itself is unit-tested against the real module
+  // (prompts.test.ts); here we assert what the runner asks it to list.
+  retargetToolsSection: vi.fn((prompt: string) => prompt),
 }));
 
 vi.mock("../src/memory.js", () => ({
@@ -118,6 +133,7 @@ import {
   runAgent,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
+import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
 
 function createSession(finalText: string) {
@@ -152,6 +168,7 @@ const ctx = {
   model: undefined,
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
+  isProjectTrusted: vi.fn(() => true),
   sessionManager: { getBranch: vi.fn(() => []) },
   scopedModels: [],
 } as any;
@@ -161,12 +178,14 @@ const pi = {} as any;
 beforeEach(() => {
   createAgentSession.mockReset();
   defaultResourceLoaderCtor.mockClear();
+  vi.mocked(retargetToolsSection).mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
   settingsManagerGetSessionDir.mockReset();
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
+  ctx.isProjectTrusted.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
 });
 
@@ -207,7 +226,7 @@ describe("agent-runner final output capture", () => {
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
     }));
-    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir");
+    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir", { projectTrusted: true });
     expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp/worktree");
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/worktree",
@@ -706,6 +725,9 @@ import {
 
 const BUILTINS_7 = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
+/** The fields of pi's `ToolDefinition` the runner reads off a mock extension tool. */
+type MockToolDefinition = { name: string; exposure?: string; promptSnippet?: string };
+
 function makeAgentConfig(overrides: Record<string, unknown> = {}) {
   return {
     name: "test-agent",
@@ -733,12 +755,19 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** Register extensions for the mock loader, keyed by extension path → tool names. */
-function withExtensions(spec: Record<string, string[]>) {
+/**
+ * Register extensions for the mock loader, keyed by extension path → its tools.
+ * A tool is either its name (registered with pi's defaults) or a definition
+ * fragment, for the exposure and snippet fields the runner reads.
+ */
+function withExtensions(spec: Record<string, Array<string | MockToolDefinition>>) {
   loaderExtensionsRef.current = {
     extensions: Object.entries(spec).map(([path, tools]) => ({
       path,
-      tools: new Map(tools.map((n) => [n, {}])),
+      tools: new Map(tools.map((t) => {
+        const definition = typeof t === "string" ? { name: t } : t;
+        return [definition.name, { definition, sourceInfo: {} }];
+      })),
     })),
     errors: [],
     runtime: {},
@@ -910,6 +939,276 @@ describe("agent-runner master tool allowlist", () => {
   });
 });
 
+// ─── pi's built-ins, project trust, and the scope gate ──────────────────
+// A subagent's loader is built here, not by pi's CLI, so pi's built-in
+// extensions (MCP, codemode, tool search) and the parent's project-trust
+// decision have to be handed to it explicitly.
+describe("agent-runner pi built-ins, project trust and tool scope", () => {
+  function setup(overrides: Record<string, unknown> = {}) {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig(overrides));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(overrides));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+  }
+
+  /** The inline extensions the runner registered with the child loader. */
+  function extensionFactories(): Array<{
+    name?: string;
+    factory: (ext: unknown) => void;
+    builtin?: boolean;
+    replaceable?: boolean;
+    hidden?: boolean;
+  }> {
+    return lastLoaderOpts().extensionFactories as ReturnType<typeof extensionFactories>;
+  }
+
+  /** Loader options of the LAST spawn — tests here run the runner more than once. */
+  function latestLoaderOpts(): Record<string, unknown> {
+    return defaultResourceLoaderCtor.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+  }
+
+  /** Run the inline scope gate and return the handler it registered. */
+  function scopeGateHandler(): (event: { toolName: string }) => { block?: boolean } | undefined {
+    const gate = extensionFactories().find((f) => f.name === "pi-subagents-scope");
+    expect(gate).toBeDefined();
+    let handler: ((event: { toolName: string }) => { block?: boolean } | undefined) | undefined;
+    gate?.factory({ on: (_event: string, fn: typeof handler) => (handler = fn) });
+    expect(handler).toBeDefined();
+    return handler as NonNullable<typeof handler>;
+  }
+
+  it("forwards pi's built-in extensions to the child loader, as pi's CLI does", async () => {
+    // Without these a `builtin:<name>` path resolves to nothing, so pi's MCP,
+    // codemode and tool search never load in a subagent.
+    setup();
+    withExtensions({});
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const builtins = extensionFactories().filter((f) => f.builtin);
+    expect(builtins.map((f) => f.name)).toEqual(["codemode", "tool-search", "mcp"]);
+    for (const factory of builtins) {
+      expect(factory).toMatchObject({ builtin: true, replaceable: true });
+      expect(typeof factory.factory).toBe("function");
+    }
+  });
+
+  it("a child that loads no extensions gets neither the built-ins nor the scope gate", async () => {
+    setup({ extensions: false });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    // The static allowlist already gates the registry; a gate would only add a
+    // handler to a session with nothing to gate.
+    expect(extensionFactories().some((f) => f.name === "pi-subagents-scope")).toBe(false);
+  });
+
+  it("passes the parent's project-trust decision to the child's settings and loader", async () => {
+    setup();
+    withExtensions({});
+    ctx.isProjectTrusted.mockReturnValueOnce(false);
+    const { session } = createSession("UNTRUSTED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp", "/mock/agent-dir", { projectTrusted: false });
+    // One manager for both, so the loader and the session agree on what loads.
+    const settingsManager = settingsManagerCreate.mock.results[0].value;
+    expect(lastLoaderOpts().settingsManager).toBe(settingsManager);
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({ settingsManager }));
+  });
+
+  it("a cross-directory spawn keeps the parent project's settings but reports its cwd untrusted", async () => {
+    // Trust covers the parent's project, not a directory the spawn was sent into:
+    // extensions that read `<cwd>/.pi` (pi's MCP among them) must not act on it.
+    setup();
+    withExtensions({});
+    const { session } = createSession("CROSS");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/target", configCwd: "/project" });
+
+    expect(settingsManagerCreate).toHaveBeenCalledTimes(2);
+    for (const call of settingsManagerCreate.mock.calls) {
+      expect(call).toEqual(["/project", "/mock/agent-dir", { projectTrusted: true }]);
+    }
+    const loaderManager = lastLoaderOpts().settingsManager;
+    const sessionManager = createAgentSession.mock.calls[0][0].settingsManager;
+    expect(sessionManager).not.toBe(loaderManager);
+    expect(sessionManager.isProjectTrusted()).toBe(false);
+  });
+
+  it("reuses one settings manager when the spawn stays in the parent's project", async () => {
+    setup();
+    withExtensions({});
+    const { session } = createSession("SAME");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/worktree", configCwd: "/worktree" });
+
+    expect(settingsManagerCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("mirrors --no-mcp and --no-extensions into the child loader", async () => {
+    setup();
+    withExtensions({});
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(latestLoaderOpts().disabledBuiltinExtensions).toBeUndefined();
+
+    process.argv.push("--no-mcp");
+    try {
+      await runAgent(ctx, "Explore", "go", { pi });
+    } finally {
+      process.argv.pop();
+    }
+    expect(latestLoaderOpts().disabledBuiltinExtensions).toEqual(["mcp"]);
+
+    for (const flag of ["--no-extensions", "-ne"]) {
+      process.argv.push(flag);
+      try {
+        await runAgent(ctx, "Explore", "go", { pi });
+      } finally {
+        process.argv.pop();
+      }
+      expect(latestLoaderOpts().disabledBuiltinExtensions).toEqual(["codemode", "tool-search", "mcp"]);
+    }
+  });
+
+  it("the scope gate admits the agent's own tools and blocks an unknown name", async () => {
+    setup();
+    withExtensions({ "/ext/foo.ts": ["foo_read"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const handler = scopeGateHandler();
+    expect(handler({ toolName: "read" })).toBeUndefined();
+    expect(handler({ toolName: "foo_read" })).toBeUndefined();
+    expect(handler({ toolName: "not_registered_anywhere" })).toMatchObject({ block: true });
+  });
+
+  it("the scope gate vetoes a tool registered after the allowlist was built", async () => {
+    // pi's MCP registers a server's tools once it connects, i.e. after the child's
+    // allowlist was handed to `createAgentSession`. A codemode script can reach
+    // them through `ctx.executeTool()`, so the gate must judge them live.
+    setup({ extensions: ["mcp"] });
+    withExtensions({ "/ext/mcp.ts": [] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const handler = scopeGateHandler();
+    expect(handler({ toolName: "mcp__srv__lookup" })).toMatchObject({ block: true });
+
+    // The server connects: its tool now belongs to an in-scope extension.
+    withExtensions({ "/ext/mcp.ts": ["mcp__srv__lookup"] });
+    expect(handler({ toolName: "mcp__srv__lookup" })).toBeUndefined();
+    expect(lastToolsPassed()).not.toContain("mcp__srv__lookup");
+  });
+
+  it("the scope gate honours the ext: narrowing and disallowedTools", async () => {
+    setup({ extensions: ["mcp"], extSelectors: ["ext:mcp/mcp__srv__lookup"], disallowedTools: ["bash"] });
+    withExtensions({ "/ext/mcp.ts": ["mcp__srv__lookup", "mcp__srv__other"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const handler = scopeGateHandler();
+    expect(handler({ toolName: "mcp__srv__lookup" })).toBeUndefined();
+    expect(handler({ toolName: "mcp__srv__other" })).toMatchObject({ block: true });
+    expect(handler({ toolName: "bash" })).toMatchObject({ block: true });
+    expect(handler({ toolName: "read" })).toBeUndefined();
+  });
+
+  it("the scope gate survives an extensions: allowlist that names no gate", async () => {
+    // The gate is an inline extension; the per-agent allowlist filters loaded
+    // extensions by name, and must not drop the gate along with them.
+    setup({ extensions: ["mcp"] });
+    withExtensions({ "/ext/mcp.ts": ["mcp_tool"], "/ext/other.ts": ["other_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const override = lastLoaderOpts().extensionsOverride as (base: unknown) => { extensions: Array<{ path: string }> };
+    const filtered = override({
+      extensions: [
+        { path: "/ext/mcp.ts", tools: new Map() },
+        { path: "/ext/other.ts", tools: new Map() },
+        { path: "<inline:pi-subagents-scope>", tools: new Map() },
+      ],
+      errors: [],
+      runtime: {},
+    });
+    expect(filtered.extensions.map((e) => e.path)).toEqual(["/ext/mcp.ts", "<inline:pi-subagents-scope>"]);
+  });
+
+  it("retargets the inherited <tools> block at the tools THIS agent declares", async () => {
+    setup({ extensions: true });
+    withExtensions({
+      "builtin:codemode": [{ name: "codemode" }],
+      "builtin:tool-search": [{ name: "tool_search" }],
+      "/ext/mcp.ts": [
+        { name: "mcp__srv__lookup", exposure: "codemode" },
+        { name: "mcp__srv__direct", exposure: "direct", promptSnippet: "Look something up" },
+      ],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const [prompt, declared, snippets] = vi.mocked(retargetToolsSection).mock.calls[0];
+    expect(prompt).toBe("system prompt");
+    expect(declared).toEqual([...BUILTINS_7, "codemode", "tool_search", "mcp__srv__direct"]);
+    expect(declared).not.toContain("mcp__srv__lookup");
+    // Built-in snippets come from pi's definitions (mocked here), extension
+    // snippets from the child's own tool definitions.
+    expect(snippets).toEqual({ read: "Read a file", mcp__srv__direct: "Look something up" });
+  });
+
+  it("takes back the tools pi would not declare, keeping them registered", async () => {
+    // pi activates every tool its allowlist names, `codemode` exposure included.
+    // Those must stay undeclared, as in the main session, but reachable through
+    // codemode — so they stay in the allowlist.
+    setup({ extensions: true });
+    withExtensions({
+      "/ext/mcp.ts": [{ name: "mcp__srv__tool", exposure: "codemode" }, "direct_tool"],
+    });
+    const { session } = createSession("OK");
+    session.getActiveToolNames = vi.fn(() => [...BUILTINS_7, "mcp__srv__tool", "direct_tool"]);
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(session.setActiveToolsByName).toHaveBeenCalledWith([...BUILTINS_7, "direct_tool"]);
+    expect(lastToolsPassed()).toContain("mcp__srv__tool");
+  });
+
+  it("a child with no tools loses the inherited <tools> block entirely", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce([]);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const [, declared] = vi.mocked(retargetToolsSection).mock.calls[0];
+    expect(declared).toEqual([]);
+  });
+});
+
 // ─── extensions: string[] as a loader-level extension filter ────────────
 // An array entry is a bare name (filters default-discovered extensions),
 // a path (loads that extension fresh), or "*" (keep all defaults).
@@ -930,6 +1229,9 @@ describe("extensionCanonicalName", () => {
     expect(extensionCanonicalName("/x/MCP.ts")).toBe("mcp");
     expect(extensionCanonicalName("/x/MyExt.js")).toBe("myext");
     expect(extensionCanonicalName("/x/Foo/index.ts")).toBe("foo");
+  });
+  it("keeps a `builtin:<name>` path as-is", () => {
+    expect(extensionCanonicalName("builtin:mcp")).toBe("builtin:mcp");
   });
 });
 
@@ -953,6 +1255,20 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
     const dir = pkgDir("@cad0p/Pi-Subagents-Tintinweb", ["./src/index.ts"]);
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents-tintinweb"]);
+  });
+
+  it("never resolves a `builtin:<name>` path against the process cwd's manifest", () => {
+    // `builtin:mcp` names no file, so climbing from it would read the cwd's
+    // package.json — and a project that happens to declare that path would alias
+    // pi's built-in MCP to its own package name.
+    const dir = pkgDir("evil", ["./builtin:mcp"]);
+    const prev = process.cwd();
+    process.chdir(dir);
+    try {
+      expect(extensionCanonicalNames("builtin:mcp")).toEqual(["builtin:mcp"]);
+    } finally {
+      process.chdir(prev);
+    }
   });
 
   it("adds no alias for a loose file with no enclosing package.json", () => {
@@ -1073,6 +1389,28 @@ describe("agent-runner extension allowlist", () => {
     expect(tools).toContain("mcp");
     expect(tools).toContain("mcp_call");
     expect(tools).not.toContain("other_tool");
+  });
+
+  it("['builtin:mcp'] keeps pi's built-in MCP and drops the other built-ins", async () => {
+    setupArrayAgent(["builtin:mcp"]);
+    withExtensions({
+      "builtin:mcp": ["mcp_builtin_tool"],
+      "builtin:codemode": ["codemode"],
+      "/ext/mcp.ts": ["mcp_ext_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    // A built-in answers to its full `builtin:<name>` path — bare `[mcp]` names a
+    // third-party extension called mcp, which is a different thing.
+    const tools = lastToolsPassed();
+    expect(tools).toContain("mcp_builtin_tool");
+    expect(tools).not.toContain("codemode");
+    expect(tools).not.toContain("mcp_ext_tool");
+    expect(onToolActivity.mock.calls.map((c) => c[0]?.toolName).filter((n) => n?.startsWith("extension-error:"))).toEqual([]);
   });
 
   it("matches a package-installed extension by its package short name, not just its src dir (#143)", async () => {
@@ -1258,6 +1596,24 @@ describe("agent-runner exclude_extensions", () => {
     expect(extensionErrors(onToolActivity)).toEqual([]);
   });
 
+  it("extensions: true + exclude builtin:mcp — pi's built-in MCP is dropped, no typo warning", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["builtin:mcp"] });
+    withExtensions({
+      "builtin:mcp": ["mcp_builtin_tool"],
+      "builtin:codemode": ["codemode"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    const tools = lastToolsPassed();
+    expect(tools).not.toContain("mcp_builtin_tool");
+    expect(tools).toContain("codemode");
+    expect(extensionErrors(onToolActivity)).toEqual([]);
+  });
+
   it("['*'] + exclude — wildcard no longer short-circuits, exclusion applies", async () => {
     setupAgent({ extensions: ["*"], excludeExtensions: ["notify"] });
     withExtensions({
@@ -1440,6 +1796,11 @@ describe("parseExtSelectors", () => {
     expect(parseExtSelectors(["ext:foo/bar/baz"]).narrowing.get("foo")).toEqual(
       new Set(["bar/baz"]),
     );
+  });
+  it("keeps a `builtin:` name whole, as in ext:builtin:mcp/<tool>", () => {
+    const { extNames, narrowing } = parseExtSelectors(["ext:builtin:mcp/mcp__radius__search"]);
+    expect(extNames).toEqual(new Set(["builtin:mcp"]));
+    expect(narrowing.get("builtin:mcp")).toEqual(new Set(["mcp__radius__search"]));
   });
   it("skips empty name and empty tool halves", () => {
     const { extNames, narrowing } = parseExtSelectors(["ext:", "ext:foo/"]);

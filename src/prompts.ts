@@ -110,6 +110,77 @@ ${envBlock}`;
   return activeAgentTag + replaceHeader + worktreeSection + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
+/** One-line tool snippets keyed by tool name, as pi's `<tools>` section prints them. */
+export type ToolSnippets = Record<string, string>;
+
+/** The line pi puts after the tool list in a `<tools>` section. */
+const TOOLS_TRAILER =
+  "In addition to the tools above, you may have access to other custom tools depending on the project.";
+
+/**
+ * Replace the `<tools>` block of an inherited prompt with one describing the tools
+ * THIS agent declares.
+ *
+ * An append-mode agent inherits the parent's prompt verbatim, `<tools>` block
+ * included — so a child that lacks `codemode`, `tool_search`, or an extension tool the
+ * parent has is told it has them and then calls a tool that does not exist. pi cannot
+ * rebuild the block for us: the child's prompt arrives as `systemPromptOverride`, i.e.
+ * as a custom prompt, and pi only generates `<tools>` for its own default prompt.
+ *
+ * Snippets come from `snippets` (pi's built-in tool definitions and the child's own
+ * extension tools) and, as a fallback, from the inherited block, which is the only
+ * place a tool this fork knows nothing about is described. `snippets` wins on a name
+ * both have. A tool without a snippet is left out, as pi does, and an agent declaring
+ * no tools at all loses the block entirely rather than advertising an empty list.
+ *
+ * A prompt with no block at all gets one prepended: a parent running a custom system
+ * prompt has none, and the child's prompt is a custom prompt to pi, so pi will not add
+ * one either — an agent that declares tools and advertises none is the same lie in the
+ * other direction.
+ */
+export function retargetToolsSection(
+  prompt: string,
+  toolNames: readonly string[],
+  snippets: ToolSnippets = {},
+): string {
+  // Tolerate CRLF: pi writes `\n`, but an inherited custom prompt may not, and a
+  // failed match would leave the child with no block at all.
+  const match = /<tools>\r?\n([\s\S]*?)\r?\n<\/tools>(?:\r?\n){0,2}/.exec(prompt);
+
+  const inherited = new Map<string, string>();
+  if (match) {
+    for (const line of match[1].split(/\r?\n/)) {
+      const entry = /^- ([^:]+): (.+?)\r?$/.exec(line);
+      if (entry) inherited.set(entry[1], entry[2]);
+    }
+  }
+
+  const lines: string[] = [];
+  for (const name of toolNames) {
+    const snippet = snippets[name] ?? inherited.get(name);
+    if (snippet) lines.push(`- ${name}: ${snippet}`);
+  }
+
+  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>` : "";
+
+  if (!match) {
+    // A prompt that already mentions `<tools` in a shape this parser does not
+    // recognise — same-line content, an attribute, a fenced XML example — must
+    // not gain a second, contradictory block. Leaving it alone under-advertises;
+    // duplicating it advertises two different lists.
+    if (prompt.includes("<tools")) return prompt;
+    // Append rather than prepend. Append mode exists so the parent prompt stays a
+    // byte-identical prefix of the child's (KV-cache reuse, see buildAgentPrompt),
+    // and a leading block would break that for exactly the parents that have no
+    // block to replace. It also keeps `<active_agent>` first in replace mode.
+    return block ? `${prompt}\n\n${block}` : prompt;
+  }
+
+  // The match consumed the separator that followed `</tools>`; put one back when
+  // a block is written, and none when the block is stripped.
+  return prompt.slice(0, match.index) + (block ? `${block}\n\n` : "") + prompt.slice(match.index + match[0].length);
+}
+
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */
 const genericBase = `# Role
 You are a general-purpose coding agent for complex, multi-step tasks.
