@@ -229,7 +229,7 @@ describe("turn-gated completion notifications", () => {
 
     // The prior run completes while the main session is idle, so its nudge is
     // armed as a real 200ms timer (not parked).
-    const childSession = { dispose: vi.fn(), sessionId: "child-session", messages: [], subscribe: () => () => {} };
+    const childSession = { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined }, sessionId: "child-session", messages: [], subscribe: () => () => {} };
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "FIRST-RESULT",
       session: childSession as any,
@@ -275,7 +275,7 @@ describe("turn-gated completion notifications", () => {
 
     // The prior run completes while the main session is idle, so its nudge is
     // armed as a real 200ms timer (not parked).
-    const childSession = { dispose: vi.fn(), sessionId: "child-session", messages: [], subscribe: () => () => {} };
+    const childSession = { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined }, sessionId: "child-session", messages: [], subscribe: () => () => {} };
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "FIRST-RESULT",
       session: childSession as any,

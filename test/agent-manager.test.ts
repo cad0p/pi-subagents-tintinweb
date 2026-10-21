@@ -1209,6 +1209,7 @@ describe("AgentManager — session file retention", () => {
     // A stopped run whose promise has not unwound is still appending to its
     // session: evicting it would dispose a live session and unlink the file the
     // crash-recovery case exists for.
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
     try {
       manager = new AgentManager();
