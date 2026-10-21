@@ -26,7 +26,7 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type SubagentType, type WidgetMode } from "./types.js";
@@ -2133,6 +2133,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
     let id: string;
     try {
+      // Deliberately outside `resolveSpawnType`: this is the extension's own
+      // generator, not a caller-supplied spawn, and it wants the all-tools tier.
+      // Routing it through `fallbackSubagent: none` would break the wizard for
+      // users who opted into strict dispatch.
       id = manager.spawn(pi, ctx, "general-purpose", generatePrompt, {
         description: `Generate ${name} agent`,
         maxTurns: WIZARD_MAX_TURNS,
@@ -2288,8 +2292,16 @@ ${systemPrompt}
       // there would advertise strict dispatch for the most permissive state.
       // `values` still offers only resolvable targets, so the user cannot
       // persist a fallback that would hard-error on every dispatch.
-      const fallbackValue = getFallbackSubagent() ?? "general-purpose";
-      const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
+      // The row must never show a value that is absent from `values`: pi-tui's
+      // cycle handler computes `values.indexOf(currentValue)` and writes
+      // `values[0]` on -1, so a missing current value turns one Enter into a
+      // silent rewrite to whatever happens to be first — a custom agent, once the
+      // defaults are disabled. Including the current value makes Enter mean
+      // "cycle from what is shown", which is what every other row means.
+      const fallback = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK);
+      const fallbackValue = fallback.value;
+      const fallbackValues = fallback.values;
+      const fallbackUnresolvable = fallback.unresolvable;
 
       return [
         {
@@ -2366,7 +2378,11 @@ ${systemPrompt}
         {
           id: "fallbackSubagent",
           label: "Fallback agent",
-          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
+          description:
+            `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)` +
+            (fallbackUnresolvable
+              ? " — currently unresolvable: that agent is deleted, disabled, or a default with Disable defaults on, so unknown types are refused"
+              : ""),
           currentValue: fallbackValue,
           values: fallbackValues,
         },
@@ -2462,7 +2478,18 @@ ${systemPrompt}
       } else if (id === "disableDefaultAgents") {
         const enabled = value === "on";
         setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
+        // Rebuild now so the registry the toggle just changed is the one the next
+        // spawn sees — and so an explicitly configured fallback that this toggle
+        // orphaned can be reported here rather than on the next failed dispatch.
+        reloadCustomAgents();
+        const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK).unresolvable;
+        notifyApplied(
+          ctx,
+          `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.` +
+            (orphaned
+              ? ` Fallback agent "${getFallbackSubagent()}" no longer resolves — unknown agent types will be refused until it is changed.`
+              : ""),
+        );
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
         setOutputTranscript(enabled);

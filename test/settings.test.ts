@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAndEmitLoaded,
   applySettings,
+  fallbackRow,
   loadSettings,
   persistToastFor,
   type SettingsAppliers,
@@ -736,5 +737,56 @@ describe("settings persistence", () => {
         rmSync(filePosingAsCwd, { force: true });
       }
     });
+  });
+});
+
+/**
+ * The `fallbackSubagent` row's value list. pi-tui's cycle handler writes
+ * `values[0]` when the current value is not in `values`, so the invariant that
+ * matters is "the shown value is always offered" — otherwise one Enter silently
+ * replaces a fallback the user never chose.
+ */
+describe("fallbackRow", () => {
+  const NONE = "none";
+
+  it("always offers the value it shows", () => {
+    const cases: Array<[string | undefined, string[]]> = [
+      [undefined, []],
+      [undefined, ["custom"]],
+      ["Explore", ["custom"]],
+      ["Explore", ["Explore", "custom"]],
+      ["general-purpose", []],
+      [NONE, ["custom"]],
+    ];
+    for (const [configured, available] of cases) {
+      const row = fallbackRow(configured, available, NONE);
+      expect(row.values).toContain(row.value);
+    }
+  });
+
+  it("shows general-purpose for an unset fallback, and does not call it unresolvable", () => {
+    // Unset deliberately targets general-purpose even when it is unregistered:
+    // the permissive hardcoded tier is the historical behaviour, not a fault.
+    const row = fallbackRow(undefined, ["custom"], NONE);
+    expect(row.value).toBe("general-purpose");
+    expect(row.unresolvable).toBe(false);
+  });
+
+  it("reports a configured fallback that no longer resolves", () => {
+    const row = fallbackRow("Explore", ["custom"], NONE);
+    expect(row.value).toBe("Explore");
+    expect(row.unresolvable).toBe(true);
+  });
+
+  it("treats a configured 'none' as resolvable and lists it once", () => {
+    const row = fallbackRow(NONE, ["custom"], NONE);
+    expect(row.unresolvable).toBe(false);
+    expect(row.values.filter(v => v === NONE)).toHaveLength(1);
+  });
+
+  it("does not duplicate an available fallback in the list", () => {
+    const row = fallbackRow("Explore", ["Explore", "custom"], NONE);
+    expect(row.unresolvable).toBe(false);
+    expect(row.values).toEqual(["Explore", "custom", NONE]);
   });
 });

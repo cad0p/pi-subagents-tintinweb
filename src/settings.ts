@@ -8,6 +8,35 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
 import type { WidgetMode } from "./types.js";
 
+/**
+ * What the `fallbackSubagent` row shows and offers.
+ *
+ * The current value is always included in `values`. pi-tui's cycle handler
+ * computes `values.indexOf(currentValue)` and writes `values[0]` when that is
+ * -1, so a row whose current value is absent from its own list turns a single
+ * Enter into a silent rewrite to whatever happens to sort first — a custom
+ * agent, once the defaults are disabled. Including it makes Enter mean "cycle
+ * from what is shown", which is what every other row means.
+ *
+ * `unresolvable` reports an explicitly configured fallback that no longer names
+ * an enabled agent (deleted, disabled, or a default with `disableDefaultAgents`
+ * on). Dispatch refuses in that state, so the row must say so rather than
+ * presenting it as a working target. An *unset* fallback is not unresolvable:
+ * it deliberately targets `general-purpose` even when unregistered.
+ */
+export function fallbackRow(
+  configured: string | undefined,
+  available: readonly string[],
+  noneValue: string,
+): { value: string; values: string[]; unresolvable: boolean } {
+  const value = configured ?? "general-purpose";
+  const unresolvable =
+    configured !== undefined &&
+    configured.toLowerCase() !== noneValue &&
+    !available.includes(configured);
+  return { value, values: [...new Set([value, ...available, noneValue])], unresolvable };
+}
+
 export interface SubagentsSettings {
   maxConcurrent?: number;
   /**
