@@ -133,18 +133,27 @@ export interface AgentRecord {
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /**
-   * Set once this child result reached its parent agent session. Two paths can
-   * deliver it — the completion nudge steered into a mid-turn parent, or the
-   * parked parent wake-up prompt — and whichever claims the record first sets
-   * this, so exactly one of them reports a child. A resume clears it, because
-   * the resumed run owes the parent a report of its own.
+   * Set once this child's report has been handed to its parent run, by either
+   * path — steered into the parent session mid-turn, or rendered into the
+   * continuation prompt that ends a park. Whichever claims the record first sets
+   * this, so a child is handed over once. A resume clears it, because the
+   * resumed run owes its parent a report of its own.
    */
   resultDelivered?: boolean;
   /**
+   * The exact notification text steered into the parent session, so
+   * "delivered" can be checked against what the parent actually read: while the
+   * text is still in `session.getSteeringMessages()` no turn has taken it, and
+   * the report is still outstanding (see `AgentManager.hasChildWork`). Undefined
+   * for a report handed over in a continuation prompt, which is read by
+   * construction.
+   */
+  deliveredText?: string;
+  /**
    * True while a run waits on its nested children: it has released its
    * maxConcurrent slot, status stays "running" (the run has not settled), and a
-   * child completion nudge holds off because this run claims the report when it
-   * wakes.
+   * child completion nudge holds off because the continuation prompt claims the
+   * report when this run wakes.
    */
   parked?: boolean;
   /** Steering messages queued before the session was ready. */

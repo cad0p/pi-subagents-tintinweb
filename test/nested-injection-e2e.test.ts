@@ -53,7 +53,7 @@ function makeNestedManager(spawns: SpawnCall[]) {
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
     // The real manager parks a run on its live children; this fake owns none.
-    parkForChildReports: async () => [],
+    parkForChildReports: async () => ({ reports: [], steeringPending: false }),
   };
 }
 

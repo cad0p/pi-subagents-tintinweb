@@ -7,7 +7,7 @@
  * `allowed_subagents` (nested-tools.ts, its own children only). They differ in
  * exactly one input — which `parentAgentId` a record must carry to be reachable
  * — so everything else lives here: the ownership predicate, the not-found
- * message, result consumption, and the report plus its error convention.
+ * response, result consumption, and the report plus its error convention.
  */
 import { renderAgentReport } from "./result-report.js";
 import type { AgentRecord } from "./types.js";
@@ -25,18 +25,28 @@ export function isOwnedRecord(
   return record !== undefined && record.parentAgentId === parentAgentId;
 }
 
-/** One message for both surfaces, worded as the cleanup hint it is. */
-export function agentNotFoundMessage(agentId: string): string {
-  return `Agent not found: "${agentId}". It may have been cleaned up.`;
+/**
+ * The one not-found response, worded as the cleanup hint it is. An unknown id is
+ * an error on both surfaces: a caller that asked for a report and got nothing
+ * must see a failure, not an empty success it could mistake for a quiet child.
+ */
+export function agentNotFoundResponse(agentId: string) {
+  return {
+    content: [{ type: "text" as const, text: `Agent not found: "${agentId}". It may have been cleaned up.` }],
+    details: undefined,
+    isError: true,
+  };
 }
 
 /**
  * Mark a terminal record's result as read, and report whether it did.
  *
- * This is what suppresses the pending completion notification: both delivery
- * paths re-check `resultConsumed` at fire time, so a read that lands inside the
- * grace window cancels it rather than racing it. A running or queued record has
- * no notification parked yet and nothing to consume.
+ * Consuming is what keeps a report out of the next continuation prompt: the
+ * parked parent claims only reports that are neither delivered nor consumed
+ * (`claimChildReports`), so a caller that has already read a child's result is
+ * not handed it a second time. On the main surface it also cancels the pending
+ * completion notification, which re-checks this flag at fire time. A running or
+ * queued record has produced nothing to consume.
  */
 export function consumeResult(record: AgentRecord): boolean {
   if (record.status === "running" || record.status === "queued") return false;

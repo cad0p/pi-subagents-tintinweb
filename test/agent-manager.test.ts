@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
+import { consumeResult } from "../src/agent-result-tool.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 
@@ -22,7 +23,7 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
+import { resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
@@ -1336,6 +1337,9 @@ describe("AgentManager — nested children", () => {
   afterEach(() => {
     manager?.dispose();
     vi.mocked(runAgent).mockReset();
+    // The resume mocks of earlier tests stay in `mock.calls`, and these tests
+    // read the call this test made.
+    vi.mocked(resumeAgent).mockReset();
   });
 
   /** A run that never settles until its signal aborts, like a live child. */
@@ -1504,13 +1508,147 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(child)!.status).toBe("running");
 
     resolveChild({ responseText: "child done", session: mockSession(), aborted: false, steered: false });
-    const reports = await parked;
+    const { reports, steeringPending } = await parked;
 
     // The report reached the parent exactly once, and the parent is running
     // again with a slot of its own.
+    expect(steeringPending).toBe(false);
     expect(reports.map((r) => r.id)).toEqual([child]);
     expect(manager.getRecord(child)!.resultDelivered).toBe(true);
     expect(manager.getRecord(parent)!.parked).toBe(false);
     expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(1);
+  });
+
+  it("settles a queued child whose start throws and wakes its parked parent", async () => {
+    // maxConcurrent 2: the parent and an unrelated blocker fill the pool, so both
+    // children queue. Parking frees a slot that starts the unrelated one, leaving
+    // the second child queued with the parent parked on it — a waiter is
+    // registered. That child only starts when the blocker settles, and its start
+    // throws (its cwd is gone), so this is the branch the wake exists for: no
+    // other settle path runs for it, and without the wake the parent waits
+    // forever.
+    manager = new AgentManager(undefined, 2);
+    hangingRun();
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    const blocker = manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker" });
+    const unrelated = manager.spawn(mockPi, mockCtx, "X", "unrelated", { description: "unrelated" });
+    const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-gone-"));
+    const child = manager.spawn(mockPi, mockCtx, "X", "child", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+      cwd,
+    });
+    expect(manager.getRecord(unrelated)!.status).toBe("queued");
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    const parked = manager.parkForChildReports(parent);
+    expect(manager.getRecord(unrelated)!.status).toBe("running");
+    expect(manager.getRecord(child)!.status).toBe("queued");
+
+    // The child's directory is gone by the time it starts: drainQueue's
+    // startAgent throws on the re-validated cwd.
+    rmSync(cwd, { recursive: true, force: true });
+    manager.abort(blocker);
+    await manager.getRecord(blocker)!.promise?.catch(() => {});
+
+    const { reports } = await parked;
+    expect(manager.getRecord(child)!.status).toBe("error");
+    expect(manager.getRecord(child)!.settled).toBe(true);
+    // The failure reached the parked parent as its child's report, exactly once.
+    expect(reports.map((r) => r.id)).toEqual([child]);
+    expect(manager.getRecord(parent)!.parked).toBe(false);
+  });
+
+  /**
+   * A settled parent and one finished child under it, with the parent's session
+   * exposing `steering` as its steering queue — the queue a report steered
+   * mid-turn waits in until a turn reads it.
+   */
+  async function parentWithFinishedChild(steering: string[]) {
+    manager = new AgentManager();
+    const parentSession = { ...mockSession(), getSteeringMessages: () => steering };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts) => {
+      if (prompt === "parent") opts?.onSessionCreated?.(parentSession);
+      return Promise.resolve({
+        responseText: `${prompt} done`,
+        session: prompt === "parent" ? parentSession : mockSession(),
+        aborted: false,
+        steered: false,
+      }) as never;
+    });
+    const parent = manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent" });
+    await manager.getRecord(parent)!.promise;
+    const child = manager.spawn(mockPi, mockCtx, "X", "child", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    await manager.getRecord(child)!.promise;
+    return { parent, child };
+  }
+
+  it("counts a steered report still sitting in the parent's queue as unread work", async () => {
+    const steering = ["SUBAGENT REPORT TEXT"];
+    const { parent, child } = await parentWithFinishedChild(steering);
+    // The mid-turn delivery path steered the report into the session.
+    const record = manager.getRecord(child)!;
+    record.resultDelivered = true;
+    record.deliveredText = "SUBAGENT REPORT TEXT";
+
+    // Still queued: no turn has read it, so the run must not settle — it takes
+    // one more turn, and that is what drains the queue.
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: true });
+
+    // A turn read it: nothing is left, and the report is not rendered again.
+    steering.length = 0;
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+  });
+
+  it("does not hand a parked parent a report it already read", async () => {
+    const { parent, child } = await parentWithFinishedChild([]);
+    // Reading the child's result before the parent parked is what keeps it out
+    // of the continuation prompt: the caller already has it.
+    consumeResult(manager.getRecord(child)!);
+
+    expect(await manager.parkForChildReports(parent)).toEqual({ reports: [], steeringPending: false });
+    expect(manager.getRecord(child)!.resultDelivered).toBeFalsy();
+  });
+
+  it("hands a resumed run the same nested runtime its first run had", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", {
+      description: "parent",
+      maxSubagentDepth: 2,
+    });
+    await manager.getRecord(parent)!.promise;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
+    await manager.resume(parent, "more")!.promise;
+
+    // Without this bridge the resumed run's park loop is a no-op and its settle
+    // tail takes a live child down with it.
+    const runtime = vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime;
+    expect(runtime?.manager).toBe(manager);
+    expect(runtime).toMatchObject({ parentAgentId: parent, depth: 1, maxSubagentDepth: 2 });
+  });
+
+  it("gives a resumed run no nested runtime when it sits at the cap", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", {
+      description: "parent",
+      depth: 2,
+      maxSubagentDepth: 2,
+    });
+    await manager.getRecord(parent)!.promise;
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
+    await manager.resume(parent, "more")!.promise;
+
+    // At the cap a run can never own a child, so it gets no bridge — the same
+    // rule that keeps the nested tools out of its session.
+    expect(vi.mocked(resumeAgent).mock.calls[0][2]?.nestedRuntime).toBeUndefined();
   });
 });

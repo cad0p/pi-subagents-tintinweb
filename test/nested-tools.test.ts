@@ -60,7 +60,7 @@ function makeManager(): NestedAgentManager {
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
     // This fake's children never run, so a parent never has anything to park on.
-    parkForChildReports: async () => [],
+    parkForChildReports: async () => ({ reports: [], steeringPending: false }),
   };
 }
 
@@ -292,10 +292,12 @@ describe("nested result / steer / checkpoint tools", () => {
     records.set("foreign", { id: "foreign", status: "running", parentAgentId: "other", result: "secret" } as AgentRecord);
 
     expect(textOf(await run(1, { agent_id: "child-1" }))).toContain("done");
-    // Same not-found message as the main session's tool: another parent's child
-    // must be indistinguishable from one that never existed.
-    expect(textOf(await run(1, { agent_id: "foreign" })))
-      .toBe('Agent not found: "foreign". It may have been cleaned up.');
+    // Same not-found response as the main session's tool: another parent's child
+    // must be indistinguishable from one that never existed — same message, and
+    // an error on both surfaces.
+    const foreign = await run(1, { agent_id: "foreign" }) as { isError?: boolean };
+    expect(textOf(foreign)).toBe('Agent not found: "foreign". It may have been cleaned up.');
+    expect(foreign.isError).toBe(true);
   });
 
   it("takes only agent_id — there is no wait to block on", () => {
@@ -304,8 +306,8 @@ describe("nested result / steer / checkpoint tools", () => {
   });
 
   it("consumes a terminal child's result on read, and leaves a live one alone", async () => {
-    // Consumption is what suppresses the pending completion notification — the
-    // delivery re-checks this flag at fire time.
+    // Consumption is what keeps a report out of the parent's next continuation
+    // prompt, and cancels the pending completion notification.
     records.set("done", { id: "done", type: "scout", description: "d", status: "completed", result: "x", completedAt: Date.now() } as AgentRecord);
     records.set("live", { id: "live", type: "scout", description: "d", status: "running", parentAgentId: "parent-1" } as AgentRecord);
     records.get("done")!.parentAgentId = "parent-1";

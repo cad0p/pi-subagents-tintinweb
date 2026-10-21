@@ -157,7 +157,7 @@ The notification report is markdown-wrapped child output with terminal control s
 
 Each completion is its own notification, delivered through pi's steering queue. To receive several completions in a single parent turn, set pi's `steeringMode: "all"` (pi's default `"one-at-a-time"` delivers one per turn).
 
-A nested child's completion uses the same channel one level down: the report is steered into the parent **agent's** session, with the same hold window and the same rule that reading the result first cancels it. A parent that has run out of work while owning children does not settle — it parks, waits, and continues with their reports as its next turn — so a nested completion is never delivered into a session that has already ended.
+A nested child's completion uses the same channel one level down: the report is steered into the parent **agent's** session, with the same hold window and the same rule that reading the result first cancels it. A parent that runs out of work while owning children does not settle — it parks, waits, and continues with their reports as its next turn — so a nested completion is never delivered into a session that has already ended. The two paths do not overlap: steered mid-turn when the parent is still running, claimed by the continuation prompt when its turn had already ended. And a steer only *queues*, so "delivered" is checked against the session's steering queue rather than assumed: a report still sitting in that queue when the turn ends forces one more turn to read it, instead of the run settling with it unread.
 
 ## Default Agent Types
 
@@ -314,7 +314,7 @@ Check a subagent's status and retrieve its result. Use the agent ID returned by 
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to check |
 
-Reading a finished agent's result marks it consumed: the completion notification it already had parked is cancelled, so the report is never delivered twice. The nested twin an agent gets with `allowed_subagents` is the same tool on the same read — same report, same not-found message, same error convention — scoped to that agent's own children.
+Reading a finished agent's result marks it consumed: the completion notification it already had parked is cancelled, so the report is never delivered twice. An unknown id is an error, not an empty success. The nested twin an agent gets with `allowed_subagents` is the same tool on the same read — same report, same not-found response, same error convention, one `agent_id` parameter — scoped to that agent's own children.
 
 ### `steer_subagent`
 

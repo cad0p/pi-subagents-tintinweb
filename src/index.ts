@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, type SpawnOptions } from "./agent-manager.js";
-import { agentNotFoundMessage, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
+import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -470,10 +470,15 @@ export default function (pi: ExtensionAPI) {
    *
    * There is no `triggerTurn` here, and none is needed: a parent that is still
    * mid-turn takes the report at its next message boundary (pi drains the
-   * steering queue there), and a parent that finished its turn while owning
-   * children has NOT settled — it parked on them, and its wake-up prompt claims
-   * the report instead. `resultDelivered` is what keeps those two paths to
-   * exactly one delivery; a parked parent is skipped here for the same reason.
+   * steering queue there), and a parent that has already left its turn has NOT
+   * settled — it parked on its children, and the continuation prompt claims the
+   * report instead. `resultDelivered` keeps those two paths to one delivery; a
+   * parked parent is skipped here for the same reason.
+   *
+   * A steer only queues, so `resultDelivered` alone would be a claim, not a
+   * fact: a message queued after the run's last steering drain sits unread. The
+   * exact text is recorded on the record (`deliveredText`) so the park can check
+   * the session's steering queue and force one more turn to drain it.
    */
   function deliverNestedResult(record: AgentRecord) {
     const parentAgentId = record.parentAgentId;
@@ -485,21 +490,29 @@ export default function (pi: ExtensionAPI) {
     holdNudge(record.id, () => {
       if (record.resultConsumed || record.resultDelivered) return;
       const parent = manager.getRecord(parentAgentId);
-      // Parked: its wake-up prompt carries this report. Stopped or gone: there is
-      // no session left that could act on it.
+      // Parked: its continuation prompt carries this report. Stopped or gone:
+      // no session is left that could act on it.
       if (!parent || parent.parked || parent.status !== "running" || !parent.session) return;
-      record.resultDelivered = true;
       const notification = formatTaskNotification(
         record,
         { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) },
         showCost,
       );
-      try {
-        parent.session.steer(notification).catch((err: unknown) => {
-          console.warn(`[pi-subagents] failed to deliver ${record.id} to its parent: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      } catch (err) {
+      /** The notification never reached the session: withdraw the claim so the
+       *  parking path can still hand this report over. */
+      const notDelivered = (err: unknown) => {
+        record.resultDelivered = undefined;
+        record.deliveredText = undefined;
         console.warn(`[pi-subagents] failed to deliver ${record.id} to its parent: ${err instanceof Error ? err.message : String(err)}`);
+      };
+      // Claim before the await: the parent's turn can end between here and the
+      // steer landing, and the park must not render the same report again.
+      record.resultDelivered = true;
+      record.deliveredText = notification;
+      try {
+        parent.session.steer(notification).catch(notDelivered);
+      } catch (err) {
+        notDelivered(err);
       }
     });
   }
@@ -799,14 +812,12 @@ export default function (pi: ExtensionAPI) {
           // caller that already showed the model this result does not pay for a
           // second copy of it.
           consumeResult: (id) => {
-            // Ownership is the RPC layer's job (assertOwned); settledness is not —
-            // it never looks at status. Consuming a running agent would set
-            // resultConsumed and suppress the completion notification it is still
-            // owed, so this stays the same gate the local get_subagent_result has.
+            // Ownership is the RPC layer's job (assertOwned). The running/queued
+            // gate is not: it belongs to the consumption rule, which lives once in
+            // agent-result-tool.ts, so a caller on this path cannot suppress the
+            // report of an agent that has not produced one yet.
             const record = manager.getRecord(id);
-            if (!record) return false;
-            if (record.status === "running" || record.status === "queued") return false;
-            record.resultConsumed = true;
+            if (!record || !consumeResult(record)) return false;
             cancelNudge(record.id);
             return true;
           },
@@ -1582,7 +1593,7 @@ Terse command-style prompts produce shallow, generic work.
       // children (see agent-result-tool.ts).
       const record = manager.getRecord(params.agent_id);
       if (!isOwnedRecord(record, undefined)) {
-        return textResult(agentNotFoundMessage(params.agent_id));
+        return agentNotFoundResponse(params.agent_id);
       }
 
       // Consuming the result is what suppresses the completion notification —

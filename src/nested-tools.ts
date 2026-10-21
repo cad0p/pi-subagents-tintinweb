@@ -23,7 +23,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { agentNotFoundMessage, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
+import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -69,6 +69,20 @@ export interface NestedSpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
 }
 
+/** What a parked run still owes its nested children when it wakes. */
+export interface ChildReportBatch {
+  /** Reports no channel has handed to this run yet — render them into the next prompt. */
+  reports: AgentRecord[];
+  /**
+   * A report was already steered into this run's session and is still sitting in
+   * its steering queue: no turn has read it. Nothing is rendered for it (its
+   * text is already in the conversation), so this only says the run has to take
+   * one more turn — the one that drains the queue — instead of settling with the
+   * report unread.
+   */
+  steeringPending: boolean;
+}
+
 /** The manager surface nested tools need. Structural so tests can fake it. */
 export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
@@ -81,10 +95,12 @@ export interface NestedAgentManager {
   listAgents(): AgentRecord[];
   /**
    * Block until this run's nested children have reported, releasing its pool
-   * slot while it waits, and return the reports to feed back into the run's
-   * session. Empty when there is no child work left, i.e. the run may settle.
+   * slot while it waits, and return what the run still owes them: reports to
+   * feed into the session's next prompt, plus whether a report is sitting unread
+   * in its steering queue. Both empty means no child work is left and the run
+   * may settle.
    */
-  parkForChildReports(id: string, signal?: AbortSignal): Promise<AgentRecord[]>;
+  parkForChildReports(id: string, signal?: AbortSignal): Promise<ChildReportBatch>;
 }
 
 export interface NestedToolContext {
@@ -321,7 +337,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   });
 
   // The same tool as the main session's, on the same shared read: ownership,
-  // not-found message, consumption, report and error convention all live in
+  // not-found response, consumption, report and error convention all live in
   // agent-result-tool.ts. Only the ownership key differs — this parent's
   // children, never another agent's.
   const resultTool = defineTool({
@@ -337,11 +353,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
       if (!isOwnedRecord(record, context.parentAgentId)) {
-        return textResult(agentNotFoundMessage(params.agent_id));
+        return agentNotFoundResponse(params.agent_id);
       }
-      // Consumption is what cancels the pending completion nudge: the delivery
-      // re-checks this flag at fire time (the nested tool has no handle on the
-      // main activation's nudge timers).
+      // A report read here is not handed to this run again when it next parks:
+      // the continuation prompt claims only undelivered, unconsumed reports.
       consumeResult(record);
       return agentReportResponse(record);
     },

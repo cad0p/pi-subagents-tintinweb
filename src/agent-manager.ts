@@ -14,6 +14,11 @@
  * could free), waits for them, and continues with their reports. A parked run
  * therefore does NOT occupy a slot — `slotHolders`, not `status`, is the
  * authority for the counter.
+ *
+ * A child's report reaches its parent two ways: steered into the parent session
+ * while its turn is still running, or rendered into the continuation prompt that
+ * ends a park. `resultDelivered` says a report went out; `deliveredText` plus
+ * the parent session's steering queue say whether a turn has read it yet.
  */
 
 import { randomUUID } from "node:crypto";
@@ -24,6 +29,7 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { describeModel } from "./model-resolver.js";
+import { type ChildReportBatch, getMaxSubagentDepth } from "./nested-tools.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -549,6 +555,21 @@ export class AgentManager {
     if (baseCwd) {
       this.reclaimWorktree(record, baseCwd);
     }
+    this.reportSettledWithoutRun(record);
+  }
+
+  /**
+   * The one tail for a record whose run never executed: report it on the
+   * completion surface exactly once, mark it fully unwound, then wake whoever
+   * was parked on it.
+   *
+   * The wake is load-bearing, not a courtesy. A record can be the last
+   * outstanding child of a parked parent, and nothing else would ever wake that
+   * parent: it would never settle, `waitForAll` and the RPC would hang, and
+   * `/agents` would show "running" forever. `settled` precedes the wake because
+   * the parked parent re-reads it.
+   */
+  private reportSettledWithoutRun(record: AgentRecord): void {
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     record.settled = true;
     this.wakeChildWaiters(record.parentAgentId);
@@ -606,11 +627,12 @@ export class AgentManager {
 
   /**
    * Park a run that still owes its nested children something: release the pool
-   * slot, wait for every child to settle, and hand back the reports the run must
-   * feed into its session.
+   * slot, wait for every child to settle, and hand back what the run still owes
+   * them — reports to feed into its session, and whether a report it was already
+   * steered is sitting unread in its steering queue.
    *
-   * An empty result means "settle normally" — no child work is outstanding — so
-   * the caller can treat any non-empty list as "there is more to do".
+   * No reports and no pending steer means "settle normally" — nothing is
+   * outstanding — so the caller can treat anything else as "there is more to do".
    *
    * The slot release is what keeps a waiting parent from deadlocking the
    * children it waits for: without it they queue behind capacity only the parent
@@ -618,9 +640,9 @@ export class AgentManager {
    * tail release stays balanced even when the run was stopped while parked; like
    * a resume, that can push the count above the limit for an instant.
    */
-  async parkForChildReports(id: string, signal?: AbortSignal): Promise<AgentRecord[]> {
+  async parkForChildReports(id: string, signal?: AbortSignal): Promise<ChildReportBatch> {
     const record = this.agents.get(id);
-    if (!record || !this.hasChildWork(id)) return [];
+    if (!record || !this.hasChildWork(id)) return { reports: [], steeringPending: false };
     record.parked = true;
     this.releaseSlot(id);
     // The whole point of the release: children of this run may be sitting in
@@ -637,15 +659,38 @@ export class AgentManager {
   }
 
   /** True while this run owns a child that is still live, or one whose report
-   *  has not reached the run session yet. Undelivered reports count: they are
-   *  the other reason a parent must not settle. */
+   *  it has not read yet. Unread reports count: they are the other reason a parent
+   *  must not settle. */
   private hasChildWork(parentId: string): boolean {
     if (this.hasLiveChildren(parentId)) return true;
+    const steering = this.steeringQueue(parentId);
     for (const record of this.agents.values()) {
       if (record.parentAgentId !== parentId) continue;
-      if (!record.resultDelivered && !record.resultConsumed) return true;
+      if (!this.reportRead(record, steering)) return true;
     }
     return false;
+  }
+
+  /** A run session's pending steering messages: where a report steered mid-turn
+   *  waits until a turn reads it. Optional-called like the other session members
+   *  this file does not require — a pi without the queue leaves `resultDelivered`
+   *  as the only evidence a report went out. */
+  private steeringQueue(agentId: string): readonly string[] {
+    return this.agents.get(agentId)?.session?.getSteeringMessages?.() ?? [];
+  }
+
+  /**
+   * Whether this run has actually read the child's report.
+   *
+   * A report rendered into a continuation prompt is read by construction. A
+   * report steered into the session is read only once its text leaves the
+   * steering queue: one queued after the run's last steering drain sits there
+   * unread, and calling that delivered is how a report got lost.
+   */
+  private reportRead(record: AgentRecord, steering: readonly string[]): boolean {
+    if (record.resultConsumed) return true;
+    if (!record.resultDelivered) return false;
+    return record.deliveredText === undefined || !steering.includes(record.deliveredText);
   }
 
   /** Running, queued, or stopped-but-still-unwinding: its promise has work left. */
@@ -691,21 +736,30 @@ export class AgentManager {
   }
 
   /**
-   * Hand a parked run the reports no other channel has delivered yet, once each.
-   * The completion nudge re-checks resultDelivered at fire time, so exactly one of
-   * the two paths reports a child: whichever claims it first.
+   * Hand a parked run what it still owes its children, once each.
+   *
+   * A report it has already read (consumed, or steered and drained) is skipped.
+   * A report that was steered mid-turn but is still queued is NOT rendered again
+   * — its text is already in the conversation — it only asks for one more turn,
+   * which drains the queue.
    */
-  private claimChildReports(parentId: string): AgentRecord[] {
+  private claimChildReports(parentId: string): ChildReportBatch {
+    const steering = this.steeringQueue(parentId);
     const claimed: AgentRecord[] = [];
+    let steeringPending = false;
     for (const record of this.agents.values()) {
       if (record.parentAgentId !== parentId) continue;
       if (this.isLive(record)) continue;
-      if (record.resultDelivered || record.resultConsumed) continue;
+      if (this.reportRead(record, steering)) continue;
+      if (record.resultDelivered) {
+        steeringPending = true;
+        continue;
+      }
       record.resultDelivered = true;
       claimed.push(record);
     }
     // Finish order, so the parent reads the reports in the order they landed.
-    return claimed.sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
+    return { reports: claimed.sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0)), steeringPending };
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -737,7 +791,10 @@ export class AgentManager {
         // A throwing onStart can follow worktree creation: reclaim the copy
         // and its registration (best-effort, like the run handlers' cleanup).
         this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
-        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        // Same tail as any other never-started record. Reporting the failure is
+        // not enough: the record is gone as a live child either way, so a parked
+        // parent waiting on it has to be woken or it hangs forever.
+        this.reportSettledWithoutRun(record);
       }
     }
   }
@@ -784,6 +841,7 @@ export class AgentManager {
     record.error = undefined;
     record.resultConsumed = undefined; // a prior pull must not swallow the resume report
     record.resultDelivered = undefined; // nor must the prior run's delivery swallow this one's
+    record.deliveredText = undefined;
     // Run-local, mirroring a fresh spawn's initial turn count.
     record.turnCount = 1;
     // Run-local too: the prior run's latest checkpoint must not surface as the
@@ -833,6 +891,19 @@ export class AgentManager {
         callbacks?.onCompaction?.(info);
       },
       signal: record.abortController.signal,
+      // A resume drives the same session, so it still carries the nested tools
+      // its first run injected: it can spawn a child. Without this bridge the
+      // park loop is a no-op and the settle tail would abort that child mid-run
+      // with nobody left to read it. Same shape `startAgent` builds, subject to
+      // the same rule — a run at or past the cap can never own a child.
+      nestedRuntime: (record.depth ?? 1) < (record.maxSubagentDepth ?? getMaxSubagentDepth())
+        ? {
+            manager: this,
+            parentAgentId: id,
+            depth: record.depth ?? 1,
+            maxSubagentDepth: record.maxSubagentDepth,
+          }
+        : undefined,
     })
       .then(({ text, failure }) => {
         // Stop wins; a stopped resume is never overwritten with completed.

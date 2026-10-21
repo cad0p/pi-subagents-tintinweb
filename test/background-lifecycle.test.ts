@@ -433,7 +433,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
       nested.manager.spawn(mockPi, mockCtx, "X", `child of ${prompt}`, {
         description: "child", parentAgentId: nested.parentAgentId, depth: 2,
       });
-      const reports = await nested.manager.parkForChildReports(nested.parentAgentId);
+      const { reports } = await nested.manager.parkForChildReports(nested.parentAgentId);
       return {
         responseText: reports.map((record: { result?: string }) => record.result).join(","),
         session: mockSession(),
@@ -999,9 +999,9 @@ describe("background lifecycle — model-visible surfaces", () => {
    * exactly as a parent mid-task does. The child's run resolves on demand, so a
    * test controls when the completion lands.
    */
-  function spawnParentWithChild() {
+  function spawnParentWithChild(steer: () => Promise<void> = async () => {}) {
     const { pi } = registerExtension();
-    const parentSession = { ...mockSession(), steer: vi.fn(async () => {}) };
+    const parentSession = { ...mockSession(), steer: vi.fn(steer), getSteeringMessages: () => [] as string[] };
     const state: { childId?: string; resolveChild?: (v: unknown) => void } = {};
     vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, opts: any) => {
       if (prompt !== "parent") {
@@ -1044,11 +1044,29 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(notification).toContain("Subagent completed");
     expect(notification).toContain("CHILD OUTPUT");
     expect(child().resultDelivered).toBe(true);
+    // The exact text is recorded, so the park can tell a queued steer from a
+    // read one.
+    expect(child().deliveredText).toBe(notification);
     // The nested report goes to the parent agent, never to the main session.
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("does not steer a parked parent: its wake-up prompt carries the report", async () => {
+  it("withdraws the delivery claim when the steer into the parent session fails", async () => {
+    const { parentSession, state, handle } = spawnParentWithChild(async () => {
+      throw new Error("session is gone");
+    });
+    const child = () => handle.listAgents().find((r: { id: string }) => r.id === state.childId);
+
+    await settleChild(state);
+    await vi.waitFor(() => expect(parentSession.steer).toHaveBeenCalledTimes(1));
+
+    // The claim is withdrawn: the parking path can still hand this report over
+    // instead of it being dropped because "delivered" was already set.
+    await vi.waitFor(() => expect(child().resultDelivered).toBeFalsy());
+    expect(child().deliveredText).toBeUndefined();
+  });
+
+  it("does not steer a parked parent: its continuation prompt carries the report", async () => {
     const { parentSession, state, parentId, handle } = spawnParentWithChild();
     // The parent's run is waiting on this child. Steering the report in as well
     // would deliver it twice — once here, once as the wake-up prompt — so the
@@ -1077,7 +1095,7 @@ describe("background lifecycle — model-visible surfaces", () => {
         resume: () => undefined,
         getRecord: (id: string) => handle.listAgents().find((r: { id: string }) => r.id === id),
         listAgents: () => handle.listAgents(),
-        parkForChildReports: async () => [],
+        parkForChildReports: async () => ({ reports: [], steeringPending: false }),
       },
       pi: pi as never,
       parentAgentId: parentId,

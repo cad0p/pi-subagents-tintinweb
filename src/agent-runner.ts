@@ -32,7 +32,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { renderAgentReport } from "./result-report.js";
 import { preloadSkills } from "./skill-loader.js";
-import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentRecord, SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 
 /**
@@ -349,6 +349,22 @@ export interface ToolActivity {
   toolName: string;
 }
 
+/**
+ * The nested-delegation bridge a manager hands a run it owns: what the run needs
+ * to spawn children, read their reports, and park on them until they land.
+ *
+ * A resume gets the same bridge as the original spawn, because a resumed session
+ * still carries the nested tools its first run injected.
+ */
+export interface NestedRuntime {
+  manager: NestedAgentManager;
+  parentAgentId: string;
+  /** This agent's own depth; its children spawn at depth + 1. */
+  depth: number;
+  /** Branch cap inherited from the spawn, else the project setting. */
+  maxSubagentDepth?: number;
+}
+
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
@@ -417,14 +433,7 @@ export interface RunOptions {
    * Runtime bridge for opt-in nested delegation. Present only for agents the
    * manager spawned (a top-level run has no parent to scope children to).
    */
-  nestedRuntime?: {
-    manager: NestedAgentManager;
-    parentAgentId: string;
-    /** This agent's own depth; its children spawn at depth + 1. */
-    depth: number;
-    /** Branch cap inherited from the spawn, else the project setting. */
-    maxSubagentDepth?: number;
-  };
+  nestedRuntime?: NestedRuntime;
 }
 
 export interface RunResult {
@@ -550,6 +559,62 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
   if (isAbsolute(sessionDir)) return sessionDir;
   return resolve(cwd, sessionDir);
+}
+
+/**
+ * Drive a session until it owns no nested child work: prompt it, park on the
+ * children it still owns, then feed what they owe back as the next prompt.
+ *
+ * A run that owns live nested children must NOT settle — the children are hidden
+ * from every surface, so a parent that returns takes the only reader of their
+ * results with it. It parks instead (releasing its pool slot), and continues when
+ * they report: with their rendered reports, or — when one was already steered
+ * into the session and is still queued — with one more turn to read it.
+ * Repeated until no child work is left, then it returns to settle normally.
+ *
+ * Shared by `runAgent` and `resumeAgent` because a resume drives the SAME
+ * session, with the nested tools its first run injected still attached: a resumed
+ * turn that spawns a child and returns would have that child aborted by the
+ * settle tail with nobody left to read it.
+ *
+ * `max_turns` still applies — these are ordinary turns, so the soft limit steers
+ * a wrap-up and a hard abort ends the loop. `stopped` is that hard-abort flag,
+ * which only `runAgent` tracks; a run stopped or aborted while parked must not
+ * start another turn either, because the reports it claimed are for a session
+ * nobody will read again.
+ */
+async function runUntilChildrenReported(
+  session: AgentSession,
+  prompt: string,
+  nestedRuntime: NestedRuntime | undefined,
+  signal: AbortSignal | undefined,
+  stopped?: () => boolean,
+): Promise<void> {
+  let nextPrompt = prompt;
+  for (;;) {
+    await session.prompt(nextPrompt);
+    const owed = nestedRuntime === undefined
+      ? { reports: [], steeringPending: false }
+      : await nestedRuntime.manager.parkForChildReports(nestedRuntime.parentAgentId, signal);
+    // Nothing owed means no child work is left.
+    if ((owed.reports.length === 0 && !owed.steeringPending) || stopped?.() === true || signal?.aborted === true) {
+      return;
+    }
+    nextPrompt = childReportPrompt(owed.reports);
+  }
+}
+
+/**
+ * The prompt that ends a park: the reports no channel has handed this run yet,
+ * or — when a report was already steered into the session and is still queued —
+ * only the instruction to continue. That case renders nothing, because the
+ * report is in the conversation already; the turn itself is what drains the
+ * steering queue, and settling instead would drop it unread.
+ */
+function childReportPrompt(reports: readonly AgentRecord[]): string {
+  const intro = "Your nested subagents have reported. Continue the task with their results — do not repeat their work.";
+  if (reports.length === 0) return intro;
+  return [intro, "", reports.map((report) => renderAgentReport(report)).join("\n\n---\n\n")].join("\n");
 }
 
 export async function runAgent(
@@ -1143,29 +1208,7 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
   try {
-    let nextPrompt = effectivePrompt;
-    for (;;) {
-      await session.prompt(nextPrompt);
-      // A run that owns live nested children must NOT settle: the children are
-      // hidden from every surface, so a parent that returns takes the only
-      // reader of their results with it. Park instead — release the pool slot,
-      // wait for them, and continue the loop with their rendered reports as the
-      // next prompt. Repeated until no child work is left, then settle normally.
-      // `max_turns` still applies: these are ordinary turns, so the soft limit
-      // steers a wrap-up and a hard abort ends the loop below.
-      const reports = nestedRuntime === undefined
-        ? []
-        : await nestedRuntime.manager.parkForChildReports(nestedRuntime.parentAgentId, options.signal);
-      // Empty means no child work is left. A run that was stopped or hard-aborted
-      // while parked must not start another turn either — it is going down, and
-      // the reports it claimed are for a session nobody will read again.
-      if (reports.length === 0 || aborted || options.signal?.aborted === true) break;
-      nextPrompt = [
-        "Your nested subagents have reported. Continue the task with their results — do not repeat their work.",
-        "",
-        reports.map((child) => renderAgentReport(child)).join("\n\n---\n\n"),
-      ].join("\n");
-    }
+    await runUntilChildrenReported(session, effectivePrompt, nestedRuntime, options.signal, () => aborted);
   } finally {
     unsubTurns();
     collector.unsubscribe();
@@ -1195,6 +1238,8 @@ export async function resumeAgent(
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
+    /** Same bridge the original run got: this session can still own children. */
+    nestedRuntime?: NestedRuntime;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
   // Boundary for the history fallback: the session already holds prior turns,
@@ -1241,7 +1286,7 @@ export async function resumeAgent(
     : () => {};
 
   try {
-    await session.prompt(prompt);
+    await runUntilChildrenReported(session, prompt, options.nestedRuntime, options.signal);
   } finally {
     collector.unsubscribe();
     unsubEvents();

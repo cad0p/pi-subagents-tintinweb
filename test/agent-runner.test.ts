@@ -133,6 +133,7 @@ import {
   runAgent,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
+import type { ChildReportBatch } from "../src/nested-tools.js";
 import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
 import type { LifetimeUsage } from "../src/usage.js";
@@ -601,16 +602,16 @@ describe("agent-runner nested park loop", () => {
     } as AgentRecord;
   }
 
-  /** Run a parent with a manager whose park hands back `reports` per call. */
-  async function runParent(reports: AgentRecord[][], texts: string[]) {
+  /** Run a parent with a manager whose park hands back one batch per call. */
+  async function runParent(batches: ChildReportBatch[], texts: string[]) {
     const { session } = createSession("unused");
     session.prompt.mockImplementation(async () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: texts.shift() ?? "" }] });
     });
     createAgentSession.mockResolvedValue({ session });
     const parkForChildReports = vi.fn();
-    for (const batch of reports) parkForChildReports.mockResolvedValueOnce(batch);
-    parkForChildReports.mockResolvedValue([]);
+    for (const batch of batches) parkForChildReports.mockResolvedValueOnce(batch);
+    parkForChildReports.mockResolvedValue({ reports: [], steeringPending: false });
     const result = await runAgent(ctx, "Explore", "go", {
       pi,
       agentId: "parent-1",
@@ -632,7 +633,7 @@ describe("agent-runner nested park loop", () => {
 
   it("continues with a child report instead of settling when it owns live children", async () => {
     const { result, session, parkForChildReports } = await runParent(
-      [[childRecord()]],
+      [{ reports: [childRecord()], steeringPending: false }],
       ["FIRST TURN", "CONTINUED"],
     );
 
@@ -655,6 +656,23 @@ describe("agent-runner nested park loop", () => {
     expect(result.responseText).toBe("ONLY TURN");
   });
 
+  it("takes one more turn for a report still queued in the session, without repeating it", async () => {
+    // A report steered into the session mid-turn that no turn has drained yet:
+    // its text is already in the conversation, so the park renders nothing and
+    // asks for the one turn that reads it instead of settling with it unread.
+    const { result, session, parkForChildReports } = await runParent(
+      [{ reports: [], steeringPending: true }],
+      ["FIRST TURN", "DRAINED"],
+    );
+
+    expect(parkForChildReports).toHaveBeenCalledTimes(2);
+    expect(session.prompt).toHaveBeenCalledTimes(2);
+    expect(session.prompt.mock.calls[1][0]).toBe(
+      "Your nested subagents have reported. Continue the task with their results — do not repeat their work.",
+    );
+    expect(result.responseText).toBe("DRAINED");
+  });
+
   it("does not start another turn when the run was stopped while parked", async () => {
     const controller = new AbortController();
     const { session } = createSession("unused");
@@ -666,7 +684,7 @@ describe("agent-runner nested park loop", () => {
     // stopped — the report belongs to a session nobody will read again.
     const parkForChildReports = vi.fn(async () => {
       controller.abort();
-      return [childRecord()];
+      return { reports: [childRecord()], steeringPending: false };
     });
 
     const result = await runAgent(ctx, "Explore", "go", {
