@@ -242,7 +242,9 @@ export class AgentWidget {
    */
   private widgetAgents() {
     if (this.mode() === "off") return [];
-    return this.manager.listAgents();
+    // Nested children are reachable only through their parent's scoped tools;
+    // showing them here would offer rows nothing in this session can act on.
+    return this.manager.listAgents().filter((a) => !a.parentAgentId);
   }
 
   /** Set the UI context (grabbed from first tool execution). */

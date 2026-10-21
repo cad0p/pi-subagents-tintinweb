@@ -22,11 +22,13 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getBuiltinToolSnippets, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
+import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -396,6 +398,18 @@ export interface RunOptions {
    * pre-compaction context size estimate. Aborted compactions don't fire.
    */
   onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  /**
+   * Runtime bridge for opt-in nested delegation. Present only for agents the
+   * manager spawned (a top-level run has no parent to scope children to).
+   */
+  nestedRuntime?: {
+    manager: NestedAgentManager;
+    parentAgentId: string;
+    /** This agent's own depth; its children spawn at depth + 1. */
+    depth: number;
+    /** Branch cap inherited from the spawn, else the project setting. */
+    maxSubagentDepth?: number;
+  };
 }
 
 export interface RunResult {
@@ -681,6 +695,36 @@ export async function runAgent(
         });
   const nestedCallGate: NestedCallGate = {};
 
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents`, the manager handed down a nestedRuntime, and this
+  // agent sits below the branch cap. Their names collide with EXCLUDED_TOOL_NAMES
+  // by design, so the scoping below re-admits them explicitly.
+  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // A per-agent cap may only tighten the inherited one — an agent can never
+  // grant itself more nesting room than the project allows.
+  const effectiveMaxDepth = agentConfig?.maxSubagentDepth === undefined
+    ? inheritedMaxDepth
+    : Math.min(inheritedMaxDepth, agentConfig.maxSubagentDepth);
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than four tools whose
+  // every call is an error. This is also what makes maxSubagentDepth 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
+    ? createNestedSubagentTools({
+        manager: nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map((tool) => tool.name));
+
   // Extension-registered tools the subagent may use, keyed by name, read from the
   // loader's LIVE extension tool maps: extensions register tools long after load
   // (pi's MCP registers a server's tools once it connects) and `registerTool` writes
@@ -731,8 +775,10 @@ export async function runAgent(
   // `codemode` and `tool_search` among them), which is what a subagent wants for its
   // own scope.
   const scopedToolNames = (tools: Map<string, ToolDefinition>): string[] =>
-    [...toolNames, ...tools.keys()].filter((t) => {
-      if (EXCLUDED_TOOL_NAMES.includes(t) || disallowed?.(t)) return false;
+    [...toolNames, ...tools.keys(), ...nestedToolNames].filter((t) => {
+      // The orchestration tools stay stripped from every subagent — except the
+      // nested ones this agent opted into, which carry the same names on purpose.
+      if ((EXCLUDED_TOOL_NAMES.includes(t) && !nestedToolNames.has(t)) || disallowed?.(t)) return false;
       // Built-ins carry no definition here and are always declared; the rule is
       // about extension tools pi would leave dormant.
       if (tools.get(t)?.defaultActive !== false) return true;
@@ -761,6 +807,12 @@ export async function runAgent(
     const snippets: Record<string, string> = { ...getBuiltinToolSnippets() };
     for (const [name, definition] of tools) {
       if (definition.promptSnippet) snippets[name] = definition.promptSnippet;
+    }
+    // Injected nested tools are not extension tools, so their snippets have to
+    // be added here — otherwise the child is handed Agent/get_subagent_result
+    // and told nothing about them.
+    for (const definition of nestedTools) {
+      if (definition.promptSnippet) snippets[definition.name] = definition.promptSnippet;
     }
     return retargetToolsSection(systemPrompt, declarableTools(tools), snippets);
   };
@@ -801,7 +853,10 @@ export async function runAgent(
     systemPromptOverride: () => childPrompt(loader.getExtensions()),
     appendSystemPromptOverride: () => [],
   });
-  await loader.reload();
+  // Marked as a child session: the extension factory runs inside reload(), and a
+  // subagent activation must not register the parent-facing tools (see
+  // child-context.ts).
+  await runInChildSessionContext(() => loader.reload());
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -905,9 +960,9 @@ export async function runAgent(
   // callable through `ctx.executeTool()` (a codemode script) and through `tool_search`
   // even when the agent never selected it.
   nestedCallGate.allows = (name) =>
-    !EXCLUDED_TOOL_NAMES.includes(name) &&
-    !disallowed?.(name) &&
-    (toolNames.includes(name) || scopedExtensionTools(loader.getExtensions()).has(name));
+    ((!EXCLUDED_TOOL_NAMES.includes(name) || nestedToolNames.has(name)) &&
+      !disallowed?.(name) &&
+      (toolNames.includes(name) || nestedToolNames.has(name) || scopedExtensionTools(loader.getExtensions()).has(name)));
 
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
@@ -950,13 +1005,14 @@ export async function runAgent(
     // blocked at call time by the scope gate. Excluding it here removes it from the
     // registry instead.
     ...(disallowed && { excludeTools: agentConfig?.disallowedTools }),
+    ...(nestedTools.length > 0 && { customTools: nestedTools }),
     resourceLoader: loader,
   };
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
-  const { session } = await createAgentSession(sessionOpts);
+  const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
 
   // pi activates every tool its allowlist names, `codemode`/`deferred` exposure
   // included. Those must stay undeclared, as in the main session, so take back the

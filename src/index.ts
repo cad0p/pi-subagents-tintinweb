@@ -10,20 +10,24 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+import { saveCheckpoint } from "./checkpoint.js";
+import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { resolveAgentInvocationConfig } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
+import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
+import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { formatLifetimeTokens, renderAgentReport } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -47,28 +51,13 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { addUsage, formatSessionContext, getLifetimeTotal, getSessionContextPercent } from "./usage.js";
 
 // ---- Shared helpers ----
 
 /** Tool execute return value for a text response. */
 function textResult<D>(msg: string, details?: D) {
   return { content: [{ type: "text" as const, text: msg }], details };
-}
-
-/** Derive the `.checkpoints.md` path from `outputFile`. Mirrors the
- *  `record.outputFile` gate (undefined when suppressed). Appends the suffix
- *  unconditionally — a `replace(/\.output$/, ...)` would silently return the
- *  transcript path unchanged if `outputFile` ever lacked the suffix. */
-function checkpointsFilePath(outputFile: string | undefined): string | undefined {
-  if (!outputFile) return undefined;
-  return `${outputFile}.checkpoints.md`;
-}
-
-/** Format an agent's lifetime token total, or "" when zero. */
-function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
-  const t = getLifetimeTotal(o.lifetimeUsage);
-  return t > 0 ? formatTokens(t) : "";
 }
 
 /**
@@ -122,16 +111,6 @@ function createActivityTracker(maxTurns?: number) {
  * selected model — pi clamps unsupported levels down.
  */
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-
-/**
- * Salvaged partial output of a failed run, as a labeled suffix for the error
- * surfaces (or "" if the run produced nothing). `record.result` is bounded to
- * the run's own turns, so this is never a stale earlier answer (#144).
- */
-function partialOutputSuffix(record: AgentRecord): string {
-  const partial = record.result?.trim();
-  return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
-}
 
 /** Human-readable status word for the completion report header. */
 function getStatusWord(status: string): string {
@@ -447,6 +426,10 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
+    // Nested children report only through their owning parent's scoped tools.
+    // Keep them out of top-level lifecycle, transcript, notification, and UI
+    // channels — nothing in the main session can act on them.
+    if (record.parentAgentId) return;
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -475,6 +458,7 @@ export default function (pi: ExtensionAPI) {
     sendIndividualNudge(record);
     widget.update();
   }, undefined, (record) => {
+    if (record.parentAgentId) return;
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -482,6 +466,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
     });
   }, (record, info) => {
+    if (record.parentAgentId) return;
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
       id: record.id,
@@ -503,18 +488,52 @@ export default function (pi: ExtensionAPI) {
   // session's entry. The first activation (the root session) wins; child
   // activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+  // Cross-package callers may supply arbitrary options. Nested ownership and
+  // config-root metadata are internal capabilities issued only by the scoped
+  // nested tools — a forged `parentAgentId` would hide a top-level agent from
+  // every surface, and `rootSessionId` names a transcript directory, so a
+  // forged value is a path-traversal primitive.
+  const spawnTopLevel = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    const safeOptions = { ...(options ?? {}) };
+    delete safeOptions.parentAgentId;
+    delete safeOptions.depth;
+    delete safeOptions.maxSubagentDepth;
+    delete safeOptions.configCwd;
+    delete safeOptions.rootSessionId;
+    return manager.spawn(piRef, ctxRef, type, prompt, safeOptions);
+  };
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
+    spawn: spawnTopLevel,
+    // `listAgents` stays unfiltered on purpose: the subagent-facing `checkpoint`
+    // tool resolves its own nested record through it by session id.
+    getRecord: (id: string) => {
+      const record = manager.getRecord(id);
+      return record?.parentAgentId ? undefined : record;
+    },
     listAgents: () => manager.listAgents(),
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
   }
+
+  /**
+   * Register a parent-facing tool — never in a subagent session.
+   *
+   * A subagent session re-activates this extension in the same process, and its
+   * local manager is empty: an `Agent` registered there could only spawn into a
+   * manager nobody reads. Worse, an opted-in child receives the nested `Agent`
+   * as an SDK custom tool, so registering ours too would put two definitions of
+   * the same name in one registry and leave the survivor to pi's precedence.
+   * Skipping the child activation makes the child's single `Agent` a
+   * construction-time guarantee. Every other child has these names stripped from
+   * its allowlist (EXCLUDED_TOOL_NAMES), so nothing changes for them.
+   */
+  const registerParentTool = (tool: ToolDefinition): void => {
+    if (!inChildSessionContext()) pi.registerTool(tool);
+  };
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
@@ -561,7 +580,16 @@ export default function (pi: ExtensionAPI) {
         events: pi.events,
         pi,
         getCtx: () => currentCtx,
-        manager,
+        // Same capability boundary as the manager registry: a cross-extension
+        // caller cannot forge nested ownership, and cannot stop a nested child
+        // it does not own.
+        manager: {
+          spawn: spawnTopLevel,
+          abort: (id) => {
+            const record = manager.getRecord(id);
+            return !record?.parentAgentId && manager.abort(id);
+          },
+        },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -613,12 +641,10 @@ export default function (pi: ExtensionAPI) {
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
-  // Project/global default for writing the subagent .output transcript. A custom
-  // agent's `output_transcript` frontmatter overrides this per spawn; when the
-  // frontmatter is silent, this default applies. Read live at spawn time.
-  let outputTranscriptDefault = true;
-  function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
-  function setOutputTranscript(b: boolean): void { outputTranscriptDefault = b; }
+  // Project/global default for writing the subagent .output transcript lives in
+  // output-file.ts (both spawn paths read it). A custom agent's
+  // `output_transcript` frontmatter overrides it per spawn; when the frontmatter
+  // is silent, that default applies. Read live at spawn time.
 
   // Master switch for the schedule subagent feature. Defaults to enabled.
   // Read once at extension init (before tool registration) so the Agent tool's
@@ -631,15 +657,10 @@ export default function (pi: ExtensionAPI) {
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
   // ---- Scope models configuration ----
-  // When enabled, subagent model choices are validated against `enabledModels`
-  // from pi's settings — both global `<agentDir>/settings.json` and
-  // project-local `<cwd>/.pi/settings.json` (project overrides global).
-  // Off by default; opt-in via `/agents → Settings`. See docstring on
-  // SubagentsSettings.scopeModels for the hard-error vs warn-and-proceed
-  // policy and its rationale.
-  let scopeModelsEnabled = false;
-  function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
-  function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
+  // The enable flag and the validation policy live in model-scope.ts, so the
+  // nested delegation tools enforce the same allowlist the top-level Agent tool
+  // does. Off by default; opt-in via `/agents → Settings`. See the
+  // SubagentsSettings.scopeModels docstring for the warn-and-proceed policy.
 
   // ---- Failure preview configuration ----
   let failurePreviewMaxChars = DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
@@ -730,7 +751,8 @@ export default function (pi: ExtensionAPI) {
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
-      setOutputTranscript: setOutputTranscript,
+      setOutputTranscript: setOutputTranscriptDefault,
+      setMaxSubagentDepth: setMaxSubagentDepth,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -859,7 +881,7 @@ Terse command-style prompts produce shallow, generic work.
     return fullAgentToolDescription;
   })();
 
-  pi.registerTool(defineTool({
+  registerParentTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: agentToolDescription,
@@ -1022,13 +1044,8 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Scope validation: the effective resolved model is checked against the
-      // user's enabledModels list (read in `enabled-models.ts`).
-      //
-      // Design: scopeModels guards against frontmatter-pinned or parent-inherited
-      // models drifting out of the user's allowlist. Both warn and proceed —
-      // frontmatter is authoritative (the agent's author/installer chose it),
-      // and the parent's model was chosen by the user when starting the session.
-      // See SubagentsSettings.scopeModels docstring for the full policy.
+      // user's enabledModels list. Policy lives in model-scope.ts so the nested
+      // delegation tools apply the same allowlist to a nested spawn.
       //
       // Call this only where the model is accepted for use — after a schedule
       // job is registered, or once a spawn is admitted — so a refused call
@@ -1036,18 +1053,17 @@ Terse command-style prompts produce shallow, generic work.
       // A throwing notify is swallowed: the warning is advisory and cannot
       // fail the accepted call.
       const warnOnOutOfScopeModel = (): void => {
-        if (!isScopeModelsEnabled() || !model) return;
-        const allowed = resolveEnabledModels(readEnabledModels(ctx.cwd), ctx.modelRegistry, ctx.cwd);
-        if (allowed && !isModelInScope(model, allowed)) {
-          const agentLabel = toSingleLine(customConfig?.displayName ?? subagentType);
-          const modelLabel = toSingleLine(resolvedConfig.modelInput ?? `${model.provider}/${model.id}`);
-          try {
-            ctx.ui.notify(
-              `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
-              "warning",
-            );
-          } catch { /* ignore notification errors */ }
-        }
+        const warning = modelScopeWarning({
+          model,
+          cwd: ctx.cwd,
+          modelRegistry: ctx.modelRegistry,
+          agentLabel: toSingleLine(customConfig?.displayName ?? subagentType),
+          modelInput: resolvedConfig.modelInput,
+        });
+        if (!warning) return;
+        try {
+          ctx.ui.notify(warning, "warning");
+        } catch { /* ignore notification errors */ }
       };
 
       // Display name for the resolved model, captured in the fresh-spawn
@@ -1100,7 +1116,11 @@ Terse command-style prompts produce shallow, generic work.
       // Resume existing agent — kick off a background resume and return an envelope.
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        // Nested records are reachable only through their spawning agent's
+        // scoped tools; the top-level tool treats them as absent.
+        if (!existing || existing.parentAgentId) {
+          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+        }
         // Running (including the start prologue, where `settled` may still hold
         // the prior run's `true`), queued, or winding down — starting now would
         // race the previous run's settle handler. A queued record has no session
@@ -1214,6 +1234,7 @@ Terse command-style prompts produce shallow, generic work.
             thinkingLevel: thinking,
             isolation,
             invocation: agentInvocation,
+            rootSessionId: ctx.sessionManager.getSessionId(),
             ...bgCallbacks,
           });
         } catch (err) {
@@ -1267,7 +1288,7 @@ Terse command-style prompts produce shallow, generic work.
 
   // ---- get_subagent_result tool ----
 
-  pi.registerTool(defineTool({
+  registerParentTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
@@ -1280,38 +1301,20 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      // Nested records belong to their spawning agent's scoped tools only.
+      if (!record || record.parentAgentId) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
-      // existsSync gates cover out-of-band file deletion (checkpointsFileOk is latching-true).
-      const checkpointsCandidate = checkpointsFilePath(record.outputFile);
-      const checkpointsPath =
-        record.checkpointsFileOk && checkpointsCandidate && existsSync(checkpointsCandidate)
-          ? checkpointsCandidate
-          : undefined;
-      const transcriptPath =
-        record.outputFile && existsSync(record.outputFile) ? record.outputFile : undefined;
-
-      if (record.status === "running") {
-        return textResult(renderRunning(record, checkpointsPath, transcriptPath));
+      // Mark result as consumed — suppresses the completion notification. Safe
+      // for every status: only a settled record has a nudge parked, and a
+      // running/queued one has none to cancel.
+      if (record.status !== "running" && record.status !== "queued") {
+        record.resultConsumed = true;
+        cancelNudge(params.agent_id);
       }
 
-      // Queued agent: has not started running yet. Return a short shape with no
-      // file paths and no result body, mirroring the `running` early return.
-      if (record.status === "queued") {
-        return textResult(renderQueued(record));
-      }
-
-      // Mark result as consumed — suppresses the completion notification.
-      // Queued agents return above; this block only runs for terminal statuses.
-      record.resultConsumed = true;
-      cancelNudge(params.agent_id);
-
-      if (record.status === "error") {
-        return textResult(renderTerminal(record, checkpointsPath, transcriptPath, true));
-      }
-      return textResult(renderTerminal(record, checkpointsPath, transcriptPath, false));
+      return textResult(renderAgentReport(record));
     },
 
     renderResult(result, _options, theme) {
@@ -1325,120 +1328,12 @@ Terse command-style prompts produce shallow, generic work.
     },
   }));
 
-  /** Queued subagent: no file paths, result body, or footer — nothing produced yet. */
-  function renderQueued(record: AgentRecord): string {
-    const displayName = toSingleLine(getDisplayName(record.type));
-    return (
-      `Agent: ${toSingleLine(record.id)} (queued — not started yet)\n` +
-      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n` +
-      `This agent is waiting to start. It will begin running when a concurrent-agent slot frees up.`
-    );
-  }
-
-  /** Running subagent: header (turn/elapsed), latest checkpoint, file paths, polling-discouragement footer. */
-  function renderRunning(
-    record: AgentRecord,
-    checkpointsPath: string | undefined,
-    transcriptPath: string | undefined,
-  ): string {
-    const displayName = toSingleLine(getDisplayName(record.type));
-    const turn = record.turnCount ?? 0;
-    const maxTurns = record.effectiveMaxTurns;
-    const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
-    const turnLabel = maxTurns != null ? `turn ${turn}/${maxTurns}` : `turn ${turn}`;
-
-    let output =
-      `Agent: ${toSingleLine(record.id)} (still running — ${turnLabel}, ${elapsedSeconds}s elapsed)\n` +
-      `Type: ${displayName} | Description: ${toSingleLine(record.description)}\n\n`;
-
-    if (record.lastCheckpoint) {
-      output +=
-        `Latest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
-        `  ${record.lastCheckpoint.summary}\n\n`;
-      output += fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, true));
-    } else {
-      output += `No checkpoint yet — the subagent hasn't called the checkpoint tool.\n\n`;
-      output += fileSection(checkpointsPath, transcriptPath,
-        "  grep or read the transcript for detail on what it's doing. Do not poll repeatedly.");
-    }
-    return output;
-  }
-
-  /** Completed/errored subagent: completed header, result or error block, latest checkpoint, file paths. */
-  function renderTerminal(
-    record: AgentRecord,
-    checkpointsPath: string | undefined,
-    transcriptPath: string | undefined,
-    errored: boolean,
-  ): string {
-    const header = completedHeader(record);
-    const body = errored
-      ? `Error: ${record.error}${partialOutputSuffix(record)}`
-      : record.result?.trim() || "No output.";
-
-    let output = `${header}\n\n${body}`;
-    if (record.lastCheckpoint) {
-      output +=
-        `\n\nLatest checkpoint (turn ${record.lastCheckpoint.turn}):\n` +
-        `  ${record.lastCheckpoint.summary}`;
-    }
-    output += "\n\n" + fileSection(checkpointsPath, transcriptPath, footerForPaths(checkpointsPath, transcriptPath, false));
-    return output;
-  }
-
-  /** Shared header for completed/errored shapes (Status + stats + status note). */
-  function completedHeader(record: AgentRecord): string {
-    const displayName = toSingleLine(getDisplayName(record.type));
-    const duration = formatDuration(record.startedAt, record.completedAt);
-    const tokens = formatLifetimeTokens(record);
-    const contextPercent = getSessionContextPercent(record.session);
-    const statsParts = [`Tool uses: ${record.toolUses}`];
-    if (tokens) statsParts.push(tokens);
-    if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
-    if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
-    statsParts.push(`Duration: ${duration}`);
-    return (
-      `Agent: ${toSingleLine(record.id)}\n` +
-      `Type: ${displayName} | Status: ${toSingleLine(record.status)}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-      `Description: ${toSingleLine(record.description)}`
-    );
-  }
-
-  /** The checkpoint-history / full-transcript path block, aligned to a shared column, plus the footer. */
-  function fileSection(
-    checkpointsPath: string | undefined,
-    transcriptPath: string | undefined,
-    footer: string,
-  ): string {
-    let s = "";
-    if (checkpointsPath) s += `Checkpoint history: ${toSingleLine(checkpointsPath)}\n`;
-    if (transcriptPath) s += `Full transcript:   ${toSingleLine(transcriptPath)}\n`;
-    s += footer;
-    return s;
-  }
-
-  /** Footer matching the paths actually rendered (existsSync can suppress either independently). */
-  function footerForPaths(
-    checkpointsPath: string | undefined,
-    transcriptPath: string | undefined,
-    running: boolean,
-  ): string {
-    const suffix = running ? " Do not poll repeatedly." : "";
-    if (checkpointsPath && transcriptPath) {
-      return `  grep or read the checkpoints / transcript for more detail.${suffix}`;
-    }
-    if (checkpointsPath) {
-      return `  grep or read the checkpoints file for more detail.${suffix}`;
-    }
-    return `  grep or read the transcript for more detail.${suffix}`;
-  }
-
   // ---- steer_subagent tool ----
 
   type SteerOutcome = "sent" | "queued" | "not-found" | "not-running" | "failed";
   const steerResult = (msg: string, steerOutcome: SteerOutcome) => textResult(msg, { steerOutcome });
 
-  pi.registerTool(defineTool({
+  registerParentTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
@@ -1512,7 +1407,7 @@ Terse command-style prompts produce shallow, generic work.
 
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.parentAgentId) {
         return steerResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`, "not-found");
       }
       if (record.status !== "running" && record.status !== "queued") {
@@ -1575,31 +1470,7 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult("Checkpoint failed: agent record not found.");
         }
-
-        const turn = record.turnCount ?? 0;
-        const maxTurns = record.effectiveMaxTurns;
-        const elapsedSeconds = Math.round((Date.now() - record.startedAt) / 1000);
-        record.lastCheckpoint = { turn, summary: params.summary };
-
-        // Best-effort: a write failure (disk full, missing parent dir) returns a soft
-        // warning instead of crashing the call. checkpointsFileOk is latching-true —
-        // see AgentRecord.checkpointsFileOk for the suppression contract.
-        const checkpointsPath = checkpointsFilePath(record.outputFile);
-        const maxTurnsLabel = maxTurns != null ? `/${maxTurns}` : "";
-        if (checkpointsPath) {
-          try {
-            appendFileSync(
-              checkpointsPath,
-              `## Turn ${turn}${maxTurnsLabel} — ${elapsedSeconds}s elapsed\n${params.summary}\n\n`,
-              "utf-8",
-            );
-            record.checkpointsFileOk = true;
-          } catch (err) {
-            return textResult(`Checkpoint saved in memory, but file write failed: ${err instanceof Error ? err.message : String(err)}.`);
-          }
-        }
-
-        return textResult(`Checkpoint saved (turn ${turn}${maxTurnsLabel}, ${elapsedSeconds}s).`);
+        return textResult(saveCheckpoint(record, params.summary));
       },
     }));
   }
@@ -1647,7 +1518,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -1771,7 +1642,7 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
@@ -1923,6 +1794,10 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
     if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
+    if (cfg.allowedSubagents !== undefined) {
+      fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
+    }
+    if (cfg.maxSubagentDepth !== undefined) fmFields.push(`max_subagent_depth: ${cfg.maxSubagentDepth}`);
 
     const content = `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 
@@ -2049,6 +1924,8 @@ output_transcript: <false to write no transcript file or path for this agent. In
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
 isolation: <"worktree" to run in isolated git worktree. Omit for normal>
+allowed_subagents: <"all", a comma-separated list of agent types this agent may delegate to, or omit for no nested delegation>
+max_subagent_depth: <optional per-agent nesting cap; can only lower the project's maxSubagentDepth>
 ---
 
 <system prompt body — instructions for the agent>
@@ -2193,6 +2070,7 @@ ${systemPrompt}
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
+      maxSubagentDepth: getMaxSubagentDepth(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
       failurePreviewMaxChars,
@@ -2204,13 +2082,14 @@ ${systemPrompt}
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "failurePreviewMaxChars"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth", "failurePreviewMaxChars"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
+      const msd = getMaxSubagentDepth();
 
       return [
         {
@@ -2233,6 +2112,13 @@ ${systemPrompt}
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "schedulingEnabled",
@@ -2315,6 +2201,17 @@ ${systemPrompt}
           setGraceTurns(n);
           notifyApplied(ctx, `Grace turns set to ${n}`);
         }
+      } else if (id === "maxSubagentDepth") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          setMaxSubagentDepth(n);
+          notifyApplied(
+            ctx,
+            n <= 1
+              ? "Nested delegation disabled"
+              : `Nested depth set to ${n}. Applies to agents started from now on.`,
+          );
+        }
       } else if (id === "schedulingEnabled") {
         const enabled = value === "on";
         if (enabled === isSchedulingEnabled()) {
@@ -2343,7 +2240,7 @@ ${systemPrompt}
         notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
-        setOutputTranscript(enabled);
+        setOutputTranscriptDefault(enabled);
         notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
@@ -2408,6 +2305,7 @@ ${systemPrompt}
         maxConcurrent: { current: String(manager.getMaxConcurrent()), label: "Max concurrency (1+)" },
         defaultMaxTurns: { current: String(getDefaultMaxTurns() ?? 0), label: "Default max turns (0 = unlimited)" },
         graceTurns: { current: String(getGraceTurns()), label: "Grace turns (1+)" },
+        maxSubagentDepth: { current: String(getMaxSubagentDepth()), label: "Nested depth (0/1 = nesting off)" },
         failurePreviewMaxChars: { current: String(failurePreviewMaxChars), label: "Failure preview max chars (1+)" },
       };
       const { current, label } = numericPrompt[result];
