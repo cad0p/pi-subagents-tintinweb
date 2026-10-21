@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -966,6 +966,8 @@ max_turns: 10
 persist_session: true
 output_transcript: false
 session_dir: .seams/sessions
+allowed_subagents: general-purpose, Explore
+max_subagent_depth: 2
 prompt_mode: append
 inherit_context: true
 isolated: false
@@ -986,6 +988,19 @@ Documented.`);
     } finally {
       warn.mockRestore();
     }
+  });
+
+  // The fixture above is hand-maintained, so it only guards the keys someone
+  // remembered to write into it — `allowed_subagents` and `max_subagent_depth`
+  // were both read by the parser and warned as unknown. Read the parser instead:
+  // every `fm.<key>` it touches must be in the known set, whatever the fixture says.
+  it("known-key set covers every field the parser reads", () => {
+    const source = readFileSync(new URL("../src/custom-agents.ts", import.meta.url), "utf-8");
+    const knownBlock = source.match(/KNOWN_FRONTMATTER_KEYS[\s\S]*?\]\);/)?.[0] ?? "";
+    const known = new Set([...knownBlock.matchAll(/"([a-z_]+)"/g)].map(m => m[1]));
+    const parsed = new Set([...source.matchAll(/fm\.([a-z_]+)/g)].map(m => m[1]));
+    expect(parsed.size).toBeGreaterThan(0);
+    expect([...parsed].filter(key => !known.has(key))).toEqual([]);
   });
 
   it("honors PI_CODING_AGENT_DIR for global custom agent discovery", () => {
