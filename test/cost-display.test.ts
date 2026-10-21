@@ -196,11 +196,12 @@ describe("get_subagent_result", () => {
 
   type ToolResult = { content: { type: string; text: string }[] };
 
-  /** Boot with an explicit `showCost` (always named, so the module-level report
-   *  flag this file shares is never left over from a previous test). */
-  function boot(showCost: boolean) {
+  /** Boot with explicit settings — `{}` to let the code defaults decide, and
+   *  `{ showCost }` everywhere else, so the module-level report flag this file
+   *  shares is never left over from a previous test. */
+  function boot(settings: Record<string, unknown>) {
     mkdirSync(join(cwd, ".pi"), { recursive: true });
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ showCost }));
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify(settings));
     const { pi, tools } = makePi();
     subagentsExtension(pi);
     return { pi, tools };
@@ -229,20 +230,28 @@ describe("get_subagent_result", () => {
 
   it("reports the cost as its own labelled field", async () => {
     // Catches a cost that is computed and never rendered on this surface.
-    const { tools } = boot(true);
+    const { tools } = boot({ showCost: true });
+    expect(await reportAfterSpending(tools, COST)).toContain("Cost: ~$0.0123");
+  });
+
+  it("defaults to on", async () => {
+    // Empty settings: nothing but the code default can be in play. This is the
+    // one place that would catch the flag and the report renderer's own copy
+    // drifting apart — a file that omits the key applies neither.
+    const { tools } = boot({});
     expect(await reportAfterSpending(tools, COST)).toContain("Cost: ~$0.0123");
   });
 
   it("omits the field entirely when unpriced", async () => {
     // `Cost: $0.00` would read as measured-and-free.
-    const { tools } = boot(true);
+    const { tools } = boot({ showCost: true });
     const report = await reportAfterSpending(tools, 0);
     expect(report).toContain("1.2k token");
     expect(report).not.toContain("Cost:");
   });
 
   it("omits the field when the setting is off", async () => {
-    const { tools } = boot(false);
+    const { tools } = boot({ showCost: false });
     const report = await reportAfterSpending(tools, COST);
     expect(report).toContain("1.2k token");
     expect(report).not.toContain("Cost:");
