@@ -137,6 +137,7 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "description",
   "display_name",
   "tools",
+  "disallowed_tools",
   "extensions",
   "inherit_extensions",
   "exclude_extensions",

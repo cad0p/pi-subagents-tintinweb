@@ -942,6 +942,52 @@ Stale.`);
     }
   });
 
+  // The known-key set has to cover every field the parser reads, or a documented
+  // field starts warning. Written as a full frontmatter rather than one key per
+  // test so a field added to the parser and forgotten in the set fails here.
+  it("does not warn for any key the parser reads", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeAgent("documented", `---
+description: Documented keys
+display_name: Documented
+tools: read, grep
+disallowed_tools: bash
+extensions: true
+inherit_extensions: true
+exclude_extensions: mcp
+skills: true
+inherit_skills: true
+scoped_models: true
+inherit_scoped_models: true
+model: anthropic/claude-opus-4-6
+thinking: high
+max_turns: 10
+persist_session: true
+output_transcript: false
+session_dir: .seams/sessions
+prompt_mode: append
+inherit_context: true
+isolated: false
+memory: project
+isolation: off
+enabled: true
+---
+
+Documented.`);
+
+      const result = loadCustomAgents(tmpDir);
+
+      expect(result.get("documented")?.description).toBe("Documented keys");
+      const unknown = warn.mock.calls
+        .map(args => String(args[0]))
+        .filter(m => m.includes("unknown frontmatter key"));
+      expect(unknown).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("honors PI_CODING_AGENT_DIR for global custom agent discovery", () => {
     const altAgentDir = mkdtempSync(join(tmpdir(), "pi-alt-agent-"));
     const originalEnv = process.env.PI_CODING_AGENT_DIR;
