@@ -10,6 +10,7 @@ import {
   getToolNamesForType,
   getUserAgentNames,
   isDefaultsDisabled,
+  isFallbackResolvableIn,
   isValidType,
   NO_FALLBACK,
   registerAgents,
@@ -457,16 +458,56 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
     expect(r.message).toContain("fallbackSubagent");
   });
 
-  it("treats an explicitly configured general-purpose like the unset default", () => {
+  it("treats an unregistered explicit general-purpose like the unset default", () => {
     // The settings row shows "general-purpose" for an unset fallback and cycles
-    // back to it, which materializes the value. Naming the implicit default must
-    // not be worse than leaving it unset, or the row's own default would brick
-    // every unresolvable dispatch as soon as the default agents are disabled.
-    registerAgents(roster());
+    // back to it, which materializes the value. With the default agents disabled
+    // that name is unregistered, and it must behave exactly like unset — otherwise
+    // the row's own default would brick every unresolvable dispatch.
+    setDefaultsDisabled(true);
+    try {
+      registerAgents(roster());
+      setFallbackSubagent("general-purpose");
+      expect(resolveSpawnType("typoo")).toEqual({
+        ok: true, type: "general-purpose", fellBackFrom: "typoo",
+      });
+    } finally {
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+    }
+  });
+
+  it("keeps a registered-but-disabled general-purpose an error", () => {
+    // Someone wrote that on purpose. Quietly running the all-tools tier is exactly
+    // what fallbackSubagent exists to prevent.
+    registerAgents(
+      new Map([["general-purpose", makeAgentConfig({ name: "general-purpose", enabled: false })]]),
+    );
     setFallbackSubagent("general-purpose");
-    expect(resolveSpawnType("typoo")).toEqual({
-      ok: true, type: "general-purpose", fellBackFrom: "typoo",
-    });
+    expect(resolveSpawnType("typoo").ok).toBe(false);
+  });
+
+  it("isFallbackResolvable agrees with what dispatch does with the configured value", () => {
+    // The settings row's verdict must be the resolver's, not a re-derivation: a
+    // disabled agent still claims its name, which an enabled-only list cannot see.
+    const registry = roster();
+    for (const value of ["scout", "SCOUT", "  scout  ", "retired", "typoo", "", "general-purpose"]) {
+      setFallbackSubagent(value);
+      expect(isFallbackResolvableIn(registry, value)).toBe(resolveSpawnTypeIn(registry, "typoo").ok);
+    }
+    setFallbackSubagent(undefined);
+  });
+
+  it("counts a disabled case-variant as claiming the name", () => {
+    // resolveUnambiguousKeyIn considers ALL keys, so an enabled "Explore" beside a
+    // disabled "explore" makes "EXPLORE" ambiguous — not a unique match.
+    const registry = new Map([
+      ["Explore", makeAgentConfig({ name: "Explore" })],
+      ["explore", makeAgentConfig({ name: "explore", enabled: false })],
+    ]);
+    expect(resolveEnabledTypeIn(registry, "EXPLORE")).toBeUndefined();
+    expect(isFallbackResolvableIn(registry, "EXPLORE")).toBe(false);
+    // An exact key still wins, as it does for dispatch.
+    expect(isFallbackResolvableIn(registry, "Explore")).toBe(true);
   });
 
   it("treats a missing type like any other unresolvable one", () => {

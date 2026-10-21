@@ -17,7 +17,7 @@ import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, S
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
@@ -2298,7 +2298,7 @@ ${systemPrompt}
       // silent rewrite to whatever happens to be first — a custom agent, once the
       // defaults are disabled. Including the current value makes Enter mean
       // "cycle from what is shown", which is what every other row means.
-      const fallback = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK);
+      const fallback = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK, isFallbackResolvable);
       const fallbackValue = fallback.value;
       const fallbackValues = fallback.values;
       const fallbackUnresolvable = fallback.unresolvable;
@@ -2466,7 +2466,11 @@ ${systemPrompt}
         // same menu (Disable defaults) can leave it stale. Persisting a fallback
         // that dispatch would then refuse is the one outcome to avoid: keep the
         // current value and say why, rather than writing a broken one.
-        if (fallbackRow(value, getAvailableTypes(), NO_FALLBACK).unresolvable) {
+        if (fallbackRow(value, getAvailableTypes(), NO_FALLBACK, isFallbackResolvable).unresolvable) {
+          // pi-tui has already written the refused value into the row, so put the
+          // real one back or the next Enter cycles past a value the user can no
+          // longer select.
+          list?.updateValue("fallbackSubagent", getFallbackSubagent() ?? IMPLICIT_FALLBACK);
           ctx.ui.notify(`Agent "${value}" is not available — fallback unchanged.`, "warning");
           return;
         }
@@ -2488,7 +2492,8 @@ ${systemPrompt}
         // The setter re-registers the registry itself, so the next spawn already
         // sees the toggle; this applier only has to report what it orphaned.
         setDisableDefaultAgents(enabled);
-        const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK).unresolvable;
+        const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK, isFallbackResolvable)
+          .unresolvable;
         notifyApplied(
           ctx,
           `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.` +
@@ -2513,7 +2518,7 @@ ${systemPrompt}
       }
     }
 
-    let list: SettingsList;
+    let list: SettingsList | undefined;
     // Track current selection index directly (SettingsList doesn't expose it).
     // Updated on arrow keys so Enter knows which field is selected immediately.
     let currentIndex = 0;
@@ -2534,7 +2539,7 @@ ${systemPrompt}
       const container = new Container();
       container.addChild(new Text("⚙  Subagent Settings", 0, 0));
       container.addChild(new Spacer(1));
-      container.addChild(list);
+      if (list) container.addChild(list);
 
       return {
         render: (w: number) => container.render(w),
@@ -2552,7 +2557,7 @@ ${systemPrompt}
             done(items[currentIndex].id);
             return;
           }
-          list.handleInput?.(data);
+          list?.handleInput?.(data);
         },
       };
     });

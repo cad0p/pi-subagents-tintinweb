@@ -153,6 +153,12 @@ function resolveUnambiguousKeyIn(registry: Map<string, AgentConfig>, name: strin
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+/** Whether any key in the registry matches `name` case-insensitively. */
+function isNameClaimed(registry: Map<string, AgentConfig>, name: string): boolean {
+  const lower = name.toLowerCase();
+  return [...registry.keys()].some((key) => key.toLowerCase() === lower);
+}
+
 /**
  * The canonical key for a caller-supplied name that identifies exactly one
  * ENABLED agent, or undefined. Strict by construction: no fallback, no guessing
@@ -215,13 +221,15 @@ export function resolveSpawnTypeIn(
   if (configured !== undefined) {
     const fallbackKey = resolveUnambiguousKeyIn(registry, configured);
     if (fallbackKey === undefined || registry.get(fallbackKey)?.enabled === false) {
-      // Naming the implicit default is not a misconfiguration: an unset fallback
-      // already targets it, and the permissive hardcoded tier is what that
-      // resolves to even when the default agents are disabled. Erroring only
-      // when the same value is written down would make the settings row's own
-      // default brick every unresolvable dispatch the moment it is cycled to.
-      // `none` is how strict dispatch is expressed.
-      if (configured.toLowerCase() === IMPLICIT_FALLBACK) {
+      // Naming the implicit default is not a misconfiguration when nothing in the
+      // registry claims the name at all: an unset fallback already targets it, and
+      // the permissive hardcoded tier is what that resolves to even when the
+      // default agents are disabled — the case the settings row's own default
+      // cycles through. A registered-but-disabled general-purpose, or a
+      // case-ambiguous name, stays an error like any other: someone wrote that on
+      // purpose, and quietly running the all-tools tier is what `fallbackSubagent`
+      // exists to prevent. `none` is how strict dispatch is expressed.
+      if (configured.toLowerCase() === IMPLICIT_FALLBACK && !isNameClaimed(registry, configured)) {
         return { ok: true, type: IMPLICIT_FALLBACK, fellBackFrom: raw };
       }
       // An explicitly configured fallback that is itself unusable is a
@@ -248,6 +256,26 @@ export function resolveSpawnTypeIn(
 /** Resolve a caller-supplied agent type against the process-wide registry. */
 export function resolveSpawnType(requested: unknown): SpawnTypeResolution {
   return resolveSpawnTypeIn(agents, requested);
+}
+
+/**
+ * Whether a configured `fallbackSubagent` names something dispatch would accept.
+ *
+ * Mirrors `resolveSpawnTypeIn`'s policy exactly, including the ambiguity over ALL
+ * registry keys (not just the enabled ones) and the implicit default's unregistered
+ * case. The settings row uses this so it cannot tell the user a value is fine while
+ * dispatch refuses it, or the reverse.
+ */
+export function isFallbackResolvableIn(registry: Map<string, AgentConfig>, configured: string): boolean {
+  const name = configured.trim();
+  const key = resolveUnambiguousKeyIn(registry, name);
+  if (key !== undefined) return registry.get(key)?.enabled !== false;
+  return name.toLowerCase() === IMPLICIT_FALLBACK && !isNameClaimed(registry, name);
+}
+
+/** Whether a configured fallback resolves, against the process-wide registry. */
+export function isFallbackResolvable(configured: string): boolean {
+  return isFallbackResolvableIn(agents, configured);
 }
 
 /** Tool names required for memory management. */

@@ -28,20 +28,15 @@ export function fallbackRow(
   configured: string | undefined,
   available: readonly string[],
   noneValue: string,
+  resolvable: (name: string) => boolean,
 ): { value: string; values: string[]; unresolvable: boolean } {
   const value = configured ?? IMPLICIT_FALLBACK;
-  // Mirrors `resolveSpawnTypeIn`: trim, exact match first, else a unique
-  // case-insensitive match. Anything stricter marks a fallback unresolvable that
-  // dispatch happily resolves — and the row would then claim dispatch refuses it.
-  const candidate = value.trim();
-  const lowered = candidate.toLowerCase();
-  const resolved =
-    candidate === "" ||
-    lowered === noneValue ||
-    lowered === IMPLICIT_FALLBACK ||
-    available.includes(candidate) ||
-    available.filter((name) => name.toLowerCase() === lowered).length === 1;
-  return { value, values: [...new Set([value, ...available, noneValue])], unresolvable: !resolved };
+  // `resolvable` is `isFallbackResolvable`, i.e. the resolver's own policy. The
+  // uniqueness rule needs the full registry (a disabled agent still claims its
+  // name), which `available` alone cannot express — so the caller supplies the
+  // verdict rather than this function re-deriving a half-truth.
+  const unresolvable = value.trim().toLowerCase() !== noneValue && !resolvable(value);
+  return { value, values: [...new Set([value, ...available, noneValue])], unresolvable };
 }
 
 export interface SubagentsSettings {

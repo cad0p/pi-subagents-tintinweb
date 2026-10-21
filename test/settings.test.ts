@@ -749,6 +749,9 @@ describe("settings persistence", () => {
 describe("fallbackRow", () => {
   const NONE = "none";
 
+  const always = () => true;
+  const never = () => false;
+
   it("always offers the value it shows", () => {
     const cases: Array<[string | undefined, string[]]> = [
       [undefined, []],
@@ -759,7 +762,7 @@ describe("fallbackRow", () => {
       [NONE, ["custom"]],
     ];
     for (const [configured, available] of cases) {
-      const row = fallbackRow(configured, available, NONE);
+      const row = fallbackRow(configured, available, NONE, always);
       expect(row.values).toContain(row.value);
     }
   });
@@ -767,42 +770,33 @@ describe("fallbackRow", () => {
   it("shows general-purpose for an unset fallback, and does not call it unresolvable", () => {
     // Unset deliberately targets general-purpose even when it is unregistered:
     // the permissive hardcoded tier is the historical behaviour, not a fault.
-    const row = fallbackRow(undefined, ["custom"], NONE);
+    const row = fallbackRow(undefined, ["custom"], NONE, (n) => n === "general-purpose");
     expect(row.value).toBe("general-purpose");
     expect(row.unresolvable).toBe(false);
   });
 
-  it("reports a configured fallback that no longer resolves", () => {
-    const row = fallbackRow("Explore", ["custom"], NONE);
+  it("reports a configured fallback the resolver rejects", () => {
+    const row = fallbackRow("Explore", ["custom"], NONE, never);
     expect(row.value).toBe("Explore");
     expect(row.unresolvable).toBe(true);
   });
 
   it("treats a configured 'none' as resolvable and lists it once", () => {
-    const row = fallbackRow(NONE, ["custom"], NONE);
+    const row = fallbackRow(NONE, ["custom"], NONE, never);
     expect(row.unresolvable).toBe(false);
     expect(row.values.filter(v => v === NONE)).toHaveLength(1);
   });
 
   it("does not duplicate an available fallback in the list", () => {
-    const row = fallbackRow("Explore", ["Explore", "custom"], NONE);
+    const row = fallbackRow("Explore", ["Explore", "custom"], NONE, always);
     expect(row.unresolvable).toBe(false);
     expect(row.values).toEqual(["Explore", "custom", NONE]);
   });
 
-  it("resolves the way dispatch does: case-insensitive and trimmed", () => {
-    // `resolveSpawnTypeIn` trims and accepts a unique case-insensitive match, so
-    // a stricter check here would claim dispatch refuses a value it accepts.
-    expect(fallbackRow("explore", ["Explore", "custom"], NONE).unresolvable).toBe(false);
-    expect(fallbackRow("  Explore  ", ["Explore"], NONE).unresolvable).toBe(false);
-    // Ambiguous case-variants are not a match — dispatch refuses those too.
-    expect(fallbackRow("explore", ["Explore", "EXPLORE"], NONE).unresolvable).toBe(true);
-  });
-
-  it("never calls the implicit default unresolvable", () => {
-    // Unset and an explicit "general-purpose" are the same state: both target the
-    // permissive tier even when the default agents are disabled.
-    expect(fallbackRow(undefined, [], NONE).unresolvable).toBe(false);
-    expect(fallbackRow("general-purpose", [], NONE).unresolvable).toBe(false);
+  it("takes the verdict from the resolver rather than re-deriving one", () => {
+    // The uniqueness rule needs the full registry, which `available` cannot
+    // express (a disabled agent still claims its name). Delegating is the point.
+    expect(fallbackRow("explore", ["Explore"], NONE, always).unresolvable).toBe(false);
+    expect(fallbackRow("explore", ["Explore"], NONE, never).unresolvable).toBe(true);
   });
 });
