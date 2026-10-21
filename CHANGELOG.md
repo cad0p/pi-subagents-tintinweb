@@ -40,6 +40,7 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Require independent agent review in the verification checklist (closes #54) ([#56](https://github.com/cad0p/pi-subagents-tintinweb/pull/56))
+- State what this fork deliberately does differently from upstream (closes #71) ([#72](https://github.com/cad0p/pi-subagents-tintinweb/pull/72))
 
 ### ⚙️ Miscellaneous Tasks
 
