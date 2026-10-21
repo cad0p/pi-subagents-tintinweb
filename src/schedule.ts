@@ -335,9 +335,9 @@ export class SubagentScheduler {
       // process-global state from a timer), so it catches changes that went
       // through /agents or an Agent call — not a file deleted directly from a
       // shell. A *persisted* job whose type was already unresolvable when the
-      // store loaded never reaches this point: `sanitizeJob` reclassifies it
-      // `skipped` there, so the policy below covers the registry changes that
-      // happen while the job is armed.
+      // store loaded never reaches this point: `sanitizeJob` rejects it on load
+      // and the record is filed under `skipped`, so the policy below covers the
+      // registry changes that happen while the job is armed.
       const dispatch = resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) {
         // The fire aborts here, so stop the timer: an interval that keeps

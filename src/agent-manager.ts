@@ -58,7 +58,7 @@ interface SpawnArgs {
   options: SpawnOptions;
 }
 
-interface SpawnOptions {
+export interface SpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;

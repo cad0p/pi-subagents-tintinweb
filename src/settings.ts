@@ -35,7 +35,10 @@ export function fallbackRow(
   // uniqueness rule needs the full registry (a disabled agent still claims its
   // name), which `available` alone cannot express — so the caller supplies the
   // verdict rather than this function re-deriving a half-truth.
-  const unresolvable = value.trim().toLowerCase() !== noneValue && !resolvable(value);
+  // Only a *configured* value can be unresolvable: an unset fallback deliberately
+  // targets the permissive hardcoded tier even when that agent is unregistered or
+  // disabled, so calling it broken would report a refusal dispatch never performs.
+  const unresolvable = configured !== undefined && value.trim().toLowerCase() !== noneValue && !resolvable(value);
   return { value, values: [...new Set([value, ...available, noneValue])], unresolvable };
 }
 

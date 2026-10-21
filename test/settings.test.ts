@@ -775,6 +775,15 @@ describe("fallbackRow", () => {
     expect(row.unresolvable).toBe(false);
   });
 
+  it("does not call an unset fallback unresolvable even when the resolver rejects it", () => {
+    // The implicit target is a hardcoded permissive tier, not a configured agent:
+    // reporting it as broken made the Disable-defaults toast say 'Fallback agent
+    // "undefined" no longer resolves' and claim refusals that never happen.
+    const row = fallbackRow(undefined, ["custom"], NONE, never);
+    expect(row.value).toBe("general-purpose");
+    expect(row.unresolvable).toBe(false);
+  });
+
   it("reports a configured fallback the resolver rejects", () => {
     const row = fallbackRow("Explore", ["custom"], NONE, never);
     expect(row.value).toBe("Explore");

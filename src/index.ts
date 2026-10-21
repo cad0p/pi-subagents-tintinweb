@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { AgentManager } from "./agent-manager.js";
+import { AgentManager, type SpawnOptions } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -515,7 +515,7 @@ export default function (pi: ExtensionAPI) {
   // than falling back silently; a bad agent type should not be quieter. Throws
   // become error envelopes at the RPC boundary. Reload first so an agent file
   // added mid-session is spawnable here too, not only through the Agent tool.
-  const spawnTopLevel = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+  const spawnTopLevel = (piRef: ExtensionAPI, ctxRef: ExtensionContext, type: SubagentType, prompt: string, options: SpawnOptions) => {
     reloadCustomAgents();
     const dispatch = resolveSpawnType(type);
     if (!dispatch.ok) throw new Error(dispatch.message);
