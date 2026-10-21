@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - *(notifications)* Render completion reports as markdown and drop the custom renderer (closes #27)
 - *(ui)* Render parent-to-child instructions in tool rows (closes #29)
 - Inherit parent model scope in subagent sessions (closes #36)
+- *(sessions)* Write every subagent session while it runs, keep it only with persist_session (closes #65) ([#66](https://github.com/cad0p/pi-subagents-tintinweb/pull/66))
 
 ### 🐛 Bug Fixes
 
