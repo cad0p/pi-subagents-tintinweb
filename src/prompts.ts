@@ -127,24 +127,32 @@ const TOOLS_TRAILER =
  * rebuild the block for us: the child's prompt arrives as `systemPromptOverride`, i.e.
  * as a custom prompt, and pi only generates `<tools>` for its own default prompt.
  *
- * Snippets come from the inherited block (pi's builtin tools, which the child's
- * definitions do not carry) and from `snippets` (the child's own extension tools,
- * which the inherited block may not list at all). `snippets` wins on a name both have.
- * A tool without a snippet is left out, as pi does, and an agent declaring no tools at
- * all loses the block entirely rather than advertising an empty list.
+ * Snippets come from `snippets` (pi's built-in tool definitions and the child's own
+ * extension tools) and, as a fallback, from the inherited block, which is the only
+ * place a tool this fork knows nothing about is described. `snippets` wins on a name
+ * both have. A tool without a snippet is left out, as pi does, and an agent declaring
+ * no tools at all loses the block entirely rather than advertising an empty list.
+ *
+ * A prompt with no block at all gets one prepended: a parent running a custom system
+ * prompt has none, and the child's prompt is a custom prompt to pi, so pi will not add
+ * one either — an agent that declares tools and advertises none is the same lie in the
+ * other direction.
  */
 export function retargetToolsSection(
   prompt: string,
   toolNames: readonly string[],
   snippets: ToolSnippets = {},
 ): string {
-  const match = /<tools>\n([\s\S]*?)\n<\/tools>(\n\n)?/.exec(prompt);
-  if (!match) return prompt;
+  // Tolerate CRLF: pi writes `\n`, but an inherited custom prompt may not, and a
+  // failed match would leave the child with no block at all.
+  const match = /<tools>\r?\n([\s\S]*?)\r?\n<\/tools>(?:\r?\n){0,2}/.exec(prompt);
 
   const inherited = new Map<string, string>();
-  for (const line of match[1].split("\n")) {
-    const entry = /^- ([^:]+): (.+)$/.exec(line);
-    if (entry) inherited.set(entry[1], entry[2]);
+  if (match) {
+    for (const line of match[1].split(/\r?\n/)) {
+      const entry = /^- ([^:]+): (.+?)\r?$/.exec(line);
+      if (entry) inherited.set(entry[1], entry[2]);
+    }
   }
 
   const lines: string[] = [];
@@ -153,9 +161,11 @@ export function retargetToolsSection(
     if (snippet) lines.push(`- ${name}: ${snippet}`);
   }
 
-  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>` : "";
-  const end = match.index + match[0].length;
-  return prompt.slice(0, match.index) + block + (block ? (match[2] ?? "") : "") + prompt.slice(end);
+  const block = lines.length > 0 ? `<tools>\n${lines.join("\n")}\n\n${TOOLS_TRAILER}\n</tools>\n\n` : "";
+
+  if (!match) return block ? block + prompt : prompt;
+
+  return prompt.slice(0, match.index) + block + prompt.slice(match.index + match[0].length);
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

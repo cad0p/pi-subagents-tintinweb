@@ -98,6 +98,8 @@ vi.mock("../src/agent-types.js", () => ({
   getMemoryToolNames: vi.fn(() => []),
   getReadOnlyMemoryToolNames: vi.fn(() => []),
   getToolNamesForType: vi.fn(() => ["read"]),
+  // Snippets for the <tools> block; the real one builds them from pi's factories.
+  getBuiltinToolSnippets: vi.fn(() => ({ read: "Read a file" })),
 }));
 
 vi.mock("../src/env.js", () => ({
@@ -1170,7 +1172,9 @@ describe("agent-runner pi built-ins, project trust and tool scope", () => {
     expect(prompt).toBe("system prompt");
     expect(declared).toEqual([...BUILTINS_7, "codemode", "tool_search", "mcp__srv__direct"]);
     expect(declared).not.toContain("mcp__srv__lookup");
-    expect(snippets).toEqual({ mcp__srv__direct: "Look something up" });
+    // Built-in snippets come from pi's definitions (mocked here), extension
+    // snippets from the child's own tool definitions.
+    expect(snippets).toEqual({ read: "Read a file", mcp__srv__direct: "Look something up" });
   });
 
   it("takes back the tools pi would not declare, keeping them registered", async () => {

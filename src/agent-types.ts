@@ -5,7 +5,18 @@
  * User agents override defaults with the same name. Disabled agents are kept but excluded from spawning.
  */
 
-import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
+import {
+  createBashToolDefinition,
+  createCodingTools,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createPowerShellToolDefinition,
+  createReadOnlyTools,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import type { AgentConfig } from "./types.js";
 
@@ -20,6 +31,40 @@ import type { AgentConfig } from "./types.js";
 export const BUILTIN_TOOL_NAMES: string[] = [
   ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
 ];
+
+/**
+ * One-line `<tools>` snippets for the built-in tools, keyed by name.
+ *
+ * An append-mode child inherits the parent's `<tools>` block, which lists only
+ * the tools the parent has *active* — pi's default set is read/bash/edit/write —
+ * while an agent's `tools:` defaults to every built-in, grep/find/ls included.
+ * Retargeting the block from the inherited text alone would therefore advertise
+ * fewer tools than the child can call. These come from pi's own definitions, so
+ * the wording cannot drift from what pi prints in a main session.
+ */
+let builtinToolSnippets: Record<string, string> | undefined;
+
+/** Snippets for pi's built-in tools, built on first use (see above). */
+export function getBuiltinToolSnippets(): Record<string, string> {
+  // Built by calling pi's own factories rather than importing a snippet table, so
+  // the wording cannot drift. Called with the process cwd: a snippet is static text
+  // and nothing here executes the tool.
+  builtinToolSnippets ??= Object.fromEntries(
+    [
+      createReadToolDefinition("."),
+      createBashToolDefinition("."),
+      createEditToolDefinition("."),
+      createWriteToolDefinition("."),
+      createGrepToolDefinition("."),
+      createFindToolDefinition("."),
+      createLsToolDefinition("."),
+      createPowerShellToolDefinition("."),
+    ].flatMap((definition) =>
+      definition.promptSnippet ? [[definition.name, definition.promptSnippet] as const] : [],
+    ),
+  );
+  return builtinToolSnippets;
+}
 
 /** Unified runtime registry of all agents (defaults + user-defined). */
 const agents = new Map<string, AgentConfig>();

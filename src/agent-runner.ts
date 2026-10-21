@@ -21,7 +21,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getBuiltinToolSnippets, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
@@ -740,7 +740,11 @@ export async function runAgent(
    */
   const childPrompt = (loaded: LoadExtensionsResult): string => {
     const tools = scopedExtensionTools(loaded);
-    const snippets: Record<string, string> = {};
+    // Built-ins first: the inherited block only describes the parent's *active*
+    // tools, so an agent whose `tools:` reaches beyond that set would otherwise
+    // be advertised fewer tools than it declares. Child definitions win on a
+    // name both have.
+    const snippets: Record<string, string> = { ...getBuiltinToolSnippets() };
     for (const [name, definition] of tools) {
       if (definition.promptSnippet) snippets[name] = definition.promptSnippet;
     }
@@ -919,7 +923,7 @@ export async function runAgent(
     // entry would otherwise stay registered, listable by `tool_search`, and merely
     // blocked at call time by the scope gate. Excluding it here removes it from the
     // registry instead.
-    ...(disallowedSet && disallowedSet.size > 0 && { excludedToolNames: [...disallowedSet] }),
+    ...(disallowedSet && disallowedSet.size > 0 && { excludeTools: [...disallowedSet] }),
     resourceLoader: loader,
   };
   if (thinkingLevel) {

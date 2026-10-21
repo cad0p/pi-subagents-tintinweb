@@ -471,8 +471,26 @@ describe("retargetToolsSection", () => {
     expect(prompt).toContain("You are an expert coding assistant.\n\n<rules>");
   });
 
-  it("leaves a prompt with no <tools> block untouched", () => {
+  it("prepends a block to a prompt that has none", () => {
+    // A parent running a custom system prompt has no block, and the child's prompt
+    // is a custom prompt to pi, so pi will not add one either.
     const prompt = "Replace-mode prompt.\n\n# Environment\nWorking directory: /workspace";
-    expect(retargetToolsSection(prompt, ["read"])).toBe(prompt);
+    const out = retargetToolsSection(prompt, ["read"], { read: "Read a file" });
+    expect(out.startsWith("<tools>\n- read: Read a file\n\n")).toBe(true);
+    expect(out.endsWith(prompt)).toBe(true);
+  });
+
+  it("prepends nothing when the child declares no tools and there is no block", () => {
+    const prompt = "Replace-mode prompt.";
+    expect(retargetToolsSection(prompt, [])).toBe(prompt);
+  });
+
+  it("handles a CRLF block", () => {
+    const crlf =
+      "Intro.\r\n\r\n<tools>\r\n- read: Read file contents\r\n</tools>\r\n\r\n<rules>\r\n- Be concise\r\n</rules>";
+    const out = retargetToolsSection(crlf, ["read", "bash"], { bash: "Run a command" });
+    expect(out).toContain("- read: Read file contents");
+    expect(out).toContain("- bash: Run a command");
+    expect(out).toContain("<rules>");
   });
 });

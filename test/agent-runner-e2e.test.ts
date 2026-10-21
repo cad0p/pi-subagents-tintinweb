@@ -282,6 +282,11 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     });
     expect(active).not.toContain("mcp__probe__direct");
     expect(active).toContain("exposure_direct"); // the rest of the fixture is untouched
+    // Registry membership is the assertion that matters: the allowlist already
+    // kept it off the active list, so only `excludeTools` (pi's SDK option) can
+    // take it out of `tool_search`'s reach.
+    const registered = lastSession?.getAllTools().map((t) => t.name) ?? [];
+    expect(registered).not.toContain("mcp__probe__direct");
   });
 
   it("loads pi's built-in extensions in the child, as the main session does", async () => {
@@ -349,6 +354,26 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       // The rest of the inherited prompt survives untouched.
       expect(lastPrompt).toContain("You are an expert coding assistant operating inside pi.");
       expect(lastPrompt).toContain("<rules>");
+    });
+
+    it("advertises builtins the parent never listed", async () => {
+      // pi's default active set is read/bash/edit/write; an agent's `tools:`
+      // defaults to every built-in, grep/find/ls included. The inherited block
+      // alone cannot describe them, so snippets come from pi's definitions.
+      const parentPrompt = [
+        "You are an expert coding assistant operating inside pi.",
+        "",
+        "<tools>",
+        "- read: read snippet",
+        "- bash: bash snippet",
+        "- edit: edit snippet",
+        "- write: write snippet",
+        "",
+        "In addition to the tools above, you may have access to other custom tools depending on the project.",
+        "</tools>",
+      ].join("\n");
+      await activeToolsFor({ ...appendAgent }, { parentPrompt });
+      expect(advertisedTools(lastPrompt)).toEqual(BUILTINS);
     });
 
     it("advertises codemode and tool_search when the parent session has them active", async () => {
