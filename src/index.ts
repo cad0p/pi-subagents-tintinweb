@@ -743,9 +743,10 @@ export default function (pi: ExtensionAPI) {
           // caller that already showed the model this result does not pay for a
           // second copy of it.
           consumeResult: (id) => {
+            // Ownership and settledness are the RPC layer's job (assertOwned);
+            // re-checking here only produced a second, differently worded answer.
             const record = manager.getRecord(id);
-            if (!record || record.parentAgentId) return false;
-            if (record.status === "running" || record.status === "queued") return false;
+            if (!record) return false;
             record.resultConsumed = true;
             cancelNudge(record.id);
             return true;
@@ -768,7 +769,7 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event: { reason: string }) => {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -790,12 +791,16 @@ export default function (pi: ExtensionAPI) {
     fleet.dispose();
     manager.dispose();
     // Every agent is stopped and every child session has shut down, so no more
-    // `subagents:usage` can arrive. A ledger flushing in its own
-    // `session_shutdown` may have run before this handler aborted the agents
+    // `subagents:usage` can arrive from THIS session. A ledger flushing in its
+    // own `session_shutdown` may have run before this handler aborted the agents
     // (handlers run in load order) and missed their last messages; this is the
-    // point after which a synchronous final flush is complete. Synchronous:
-    // `emit` does not await listeners, and pi exits once this handler returns.
-    pi.events.emit("subagents:disposed", {});
+    // point after which a synchronous final flush is complete.
+    //
+    // Not only an exit: pi also emits `session_shutdown` for `resume`, `reload`,
+    // `/new` and `/fork`, where the process lives on and the next session starts
+    // emitting `subagents:usage` again. The reason is carried so a listener can
+    // tell a final flush from a mid-process one.
+    pi.events.emit("subagents:disposed", { reason: event.reason });
   });
 
   // Live widget: show running agents above editor.

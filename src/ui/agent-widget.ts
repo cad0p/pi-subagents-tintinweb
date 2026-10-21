@@ -117,7 +117,9 @@ export function formatTokens(count: number): string {
  * measured, and rounding it to `~$0.0000` would say the opposite.
  */
 export function formatCost(cost: number): string {
-  if (!(cost > 0)) return "";                     // also catches NaN
+  // Also catches NaN and Infinity: a non-finite total would otherwise render
+  // "~$Infinity" through toFixed.
+  if (!Number.isFinite(cost) || cost <= 0) return "";
   if (cost < 0.0001) return "<$0.0001";
   if (cost >= 1) return `~$${cost.toFixed(2)}`;
   // Under a dollar: cents at minimum, four decimals at most, nothing trailing.
