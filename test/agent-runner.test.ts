@@ -1248,12 +1248,15 @@ describe("agent-runner pi built-ins, project trust and tool scope", () => {
 
     await runAgent(ctx, "scout", "go", {
       pi,
-      agentConfig: makeAgentConfig({ builtinToolNames: ["grep"], extensions: false, skills: false }) as never,
+      // Diverges from the module mock on both halves: the global says "read" and
+      // extensions: false, so a regression shows up in either assertion.
+      agentConfig: makeAgentConfig({ builtinToolNames: ["grep"], extensions: true, skills: false }),
     });
 
     expect(createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ tools: ["grep"] }),
     );
+    expect(lastLoaderOpts().noExtensions).toBe(false);
   });
 
   it("a child with no tools loses the inherited <tools> block entirely", async () => {
