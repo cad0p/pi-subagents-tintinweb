@@ -8,10 +8,15 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+// The transcript default lives in output-file.ts (both spawn paths read it), so
+// the mock has to carry its accessors or the extension cannot apply the setting.
+const transcriptDefault = vi.hoisted(() => ({ enabled: true }));
 vi.mock("../src/output-file.js", () => ({
   createOutputFilePath: vi.fn(() => "/tmp/fake-subagent.output"),
   writeInitialEntry: vi.fn(),
   streamToOutputFile: vi.fn(() => vi.fn()),
+  getOutputTranscriptDefault: () => transcriptDefault.enabled,
+  setOutputTranscriptDefault: (b: boolean) => { transcriptDefault.enabled = b; },
 }));
 
 import { runAgent } from "../src/agent-runner.js";

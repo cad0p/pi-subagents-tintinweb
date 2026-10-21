@@ -77,6 +77,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
       outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : undefined,
       sessionDir: str(fm.session_dir),
+      allowedSubagents: parseAllowedSubagents(fm.allowed_subagents),
+      maxSubagentDepth: nonNegativeInt(fm.max_subagent_depth),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
@@ -203,6 +205,22 @@ function parseCsvField(val: unknown): string[] | undefined {
   if (!s || s === "none") return undefined;
   const items = s.split(",").map(t => t.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Parse the nested-delegation allowlist. Single field, default-off:
+ * omitted/empty/"none"/`false` → undefined (no nested tools); "all"/"*"/`true`
+ * → "all" (any enabled agent); csv → only the listed types.
+ *
+ * Booleans are accepted because `extensions:`/`skills:` take them and users
+ * generalize: without this, YAML's `true` stringifies into an agent type
+ * literally named "true", so the tools appear and every spawn is refused.
+ */
+function parseAllowedSubagents(val: unknown): "all" | string[] | undefined {
+  if (typeof val === "boolean") return val ? "all" : undefined;
+  const items = parseCsvField(val);
+  if (!items) return undefined;
+  return items.some(i => i === "*" || i.toLowerCase() === "all") ? "all" : items;
 }
 
 /**

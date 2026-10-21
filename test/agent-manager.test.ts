@@ -1125,8 +1125,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
 // Every run writes its pi session to disk while it runs. `persist_session` is a
 // RETENTION flag: the record's removal (10-minute eviction, or clearCompleted on
-// session switch) is the disposal point, and shutdown keeps every file so a run
-// killed mid-flight stays recoverable.
+// session switch) is the disposal point, and shutdown keeps only a run that is
+// still unwinding so a run killed mid-flight stays recoverable.
 describe("AgentManager — session file retention", () => {
   let manager: AgentManager;
   let root: string;
@@ -1323,5 +1323,137 @@ describe("AgentManager — session file retention", () => {
     expect(record.session?.sessionManager.getSessionFile()).toBe(file);
     manager.clearCompleted();
     expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
+  });
+});
+
+// Nested delegation lifecycle: a nested child is reachable only through the
+// agent that spawned it (its owning parent's scoped tools), so one that outlives
+// its parent burns tokens nobody can see or stop. And it must not take a
+// maxConcurrent slot: its parent already holds one, so queueing it behind that
+// parent would deadlock a parent waiting on its own child.
+describe("AgentManager — nested children", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(runAgent).mockReset();
+  });
+
+  /** A run that never settles until its signal aborts, like a live child. */
+  const hangingRun = () =>
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) =>
+      new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }) as never,
+    );
+
+  it("stops a parent's children when the parent settles", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    hangingRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(child)!.status).toBe("running");
+
+    await manager.getRecord(parent)!.promise;
+
+    expect(manager.getRecord(child)!.status).toBe("stopped");
+  });
+
+  it("does not leak a concurrency slot when a nested child is resumed", async () => {
+    // A nested child is outside the maxConcurrent pool, so its resume must not
+    // take a slot: the increment is unconditional but the release is gated on
+    // occupiesPoolSlot, and an unmatched increment queues every later top-level
+    // spawn forever.
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+      description: "nested child",
+      parentAgentId: "parent-1",
+      depth: 1,
+    });
+    await manager.getRecord(child)!.promise;
+
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
+    await manager.resume(child, "more")!.promise;
+
+    expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(0);
+  });
+
+  it("stops children spawned during a resumed turn when that turn settles", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    await manager.getRecord(id)!.promise;
+
+    // The resumed turn spawns a child, then settles.
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockImplementation(async () => {
+      hangingRun();
+      manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+        description: "child of resumed turn",
+        parentAgentId: id,
+        depth: 2,
+      });
+      return { text: "resumed" };
+    });
+
+    const resumed = manager.resume(id, "more")!;
+    await resumed.promise;
+
+    const children = manager.listAgents().filter((r) => r.parentAgentId === id);
+    expect(children).toHaveLength(1);
+    expect(children[0].status).toBe("stopped");
+  });
+
+  it("stops grandchildren transitively, each through its own settle tail", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    hangingRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    const grandchild = manager.spawn(mockPi, mockCtx, "general-purpose", "g", {
+      description: "grandchild",
+      parentAgentId: child,
+      depth: 3,
+    });
+
+    await manager.getRecord(parent)!.promise;
+    // The child's own settle tail runs asynchronously after its abort; give the
+    // rejection chain a turn to land before asserting on the grandchild.
+    await manager.getRecord(child)!.promise?.catch(() => {});
+
+    expect(manager.getRecord(child)!.status).toBe("stopped");
+    expect(manager.getRecord(grandchild)!.status).toBe("stopped");
+  });
+
+  it("does not queue nested children behind the parent's own concurrency slot", () => {
+    manager = new AgentManager(undefined, 1);
+    hangingRun();
+
+    // The top-level spawn takes the only slot.
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    expect(manager.getRecord(parent)!.status).toBe("running");
+
+    // Its children run immediately — queueing them would deadlock the parent.
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
+      description: "child",
+      parentAgentId: parent,
+      depth: 2,
+    });
+    expect(manager.getRecord(child)!.status).toBe("running");
+
+    // A second top-level spawn still queues, so the pool is not bypassed.
+    const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
+    expect(manager.getRecord(sibling)!.status).toBe("queued");
   });
 });

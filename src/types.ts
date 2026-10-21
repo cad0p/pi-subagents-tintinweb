@@ -66,6 +66,14 @@ export interface AgentConfig {
   outputTranscript?: boolean;
   /** Optional directory for the run's pi session file. Omitted = pi's normal session location. */
   sessionDir?: string;
+  /**
+   * Nested delegation, off by default: undefined = no nested tools;
+   * "all" = any enabled agent; string[] = only those agent types.
+   */
+  allowedSubagents?: "all" | string[];
+  /** Per-agent nesting cap. Can only tighten the inherited
+   *  `maxSubagentDepth`, never raise it. Omitted = inherit. */
+  maxSubagentDepth?: number;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
@@ -175,6 +183,20 @@ export interface AgentRecord {
   sessionId?: string;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Nesting depth: a top-level subagent is 1, its children 2, and so on. */
+  depth?: number;
+  /** Set on records spawned by a nested delegation tool: the owning agent's id.
+   *  Nested records are reachable only through their parent's scoped tools, so
+   *  every top-level surface (notification, widget, `/agents`, RPC, the Agent
+   *  tool) filters them out. */
+  parentAgentId?: string;
+  /** Effective nesting cap inherited by this branch, so a child hands its own
+   *  cap down instead of re-reading the process setting. */
+  maxSubagentDepth?: number;
+  /** Session id of the root (main) session this branch descends from. Nested
+   *  spawns inherit it so their transcripts file under the same session
+   *  directory as their ancestors' instead of the child session's own id. */
+  rootSessionId?: string;
   /** Effective max turns applied to the agent's run — caller-supplied value,
    *  then the agent-config value, then the settings default
    *  (`getDefaultMaxTurns()`), then normalized. Captured at spawn so

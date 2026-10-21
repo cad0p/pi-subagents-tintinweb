@@ -1237,6 +1237,28 @@ describe("agent-runner pi built-ins, project trust and tool scope", () => {
     expect(lastToolsPassed()).toContain("mcp__srv__tool");
   });
 
+  it("takes tools and extension policy from a caller-resolved config, not the global registry", async () => {
+    // A nested spawn resolves its agent from its branch's config root, so the
+    // runner must not re-derive the tool set globally: that is how a branch-only
+    // agent silently ran as general-purpose. The mocked global answers "read"
+    // (see the module mock), so a regression shows up as the wrong tool here
+    // rather than as an accidental pass.
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "scout", "go", {
+      pi,
+      // Diverges from the module mock on both halves: the global says "read" and
+      // extensions: false, so a regression shows up in either assertion.
+      agentConfig: makeAgentConfig({ builtinToolNames: ["grep"], extensions: true, skills: false }),
+    });
+
+    expect(createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ tools: ["grep"] }),
+    );
+    expect(lastLoaderOpts().noExtensions).toBe(false);
+  });
+
   it("a child with no tools loses the inherited <tools> block entirely", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));

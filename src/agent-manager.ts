@@ -3,6 +3,7 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
+ * Nested children are exempt from that pool — see `occupiesPoolSlot`.
  * Resumes are exempt from the admission gate: they start immediately and are
  * counted while they run, so a parent-visible continuation is never silently
  * deferred behind fresh spawns — a burst of resumes can therefore exceed the
@@ -16,7 +17,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -48,6 +49,19 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
   if (!isDirectory) {
     throw new Error(`SpawnOptions.cwd is not a directory: "${cwd}"`);
   }
+}
+
+/**
+ * Whether a record occupies one of the `maxConcurrent` background slots.
+ * Nested children don't: their parent already holds a slot, so counting (and
+ * therefore queueing) them would deadlock a parent that waits on its own child.
+ *
+ * Note this bounds nothing horizontally — the depth cap limits how DEEP nesting
+ * goes, not how WIDE. A parent's only limit on concurrent children is that each
+ * spawn costs it a turn, which is unbounded when max turns is unlimited.
+ */
+function occupiesPoolSlot(record: Pick<AgentRecord, "parentAgentId">): boolean {
+  return record.parentAgentId === undefined;
 }
 
 interface SpawnArgs {
@@ -105,6 +119,23 @@ export interface SpawnOptions {
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
+  /** Nesting depth: a top-level subagent is 1. */
+  depth?: number;
+  /** Parent agent ID for ownership-scoped nested controls. */
+  parentAgentId?: string;
+  /** Effective inherited nesting cap for this branch. */
+  maxSubagentDepth?: number;
+  /** Config-discovery root inherited by nested launches when it differs from the working directory. */
+  configCwd?: string;
+  /** Root session id, inherited by nested launches so transcripts stay grouped. */
+  rootSessionId?: string;
+  /**
+   * Config already resolved by the caller's own registry. A nested spawn reads
+   * its branch's config root, which may differ from the process-global registry
+   * `getAgentConfig` reads; without this the run would resolve the type again
+   * and could fall back to the unknown-type default.
+   */
+  agentConfig?: AgentConfig;
 }
 
 /** The five activity callbacks a resumed run forwards to its caller. */
@@ -187,18 +218,24 @@ export class AgentManager {
       turnCount: 1,
       // max_turns: 0 (unlimited) maps to undefined; the full fallback chain
       // is resolved here so every spawn path agrees. See AgentRecord.effectiveMaxTurns.
-      effectiveMaxTurns: normalizeMaxTurns(options.maxTurns ?? getAgentConfig(type)?.maxTurns ?? getDefaultMaxTurns()),
+      effectiveMaxTurns: normalizeMaxTurns(
+        options.maxTurns ?? (options.agentConfig ?? getAgentConfig(type))?.maxTurns ?? getDefaultMaxTurns(),
+      ),
       // Retention is read from the resolved agent config here, at spawn, so the
       // removal path never re-resolves the registry. A resume reuses the record
       // and therefore the decision its first run made.
-      persistSession: getAgentConfig(type)?.persistSession === true,
+      persistSession: (options.agentConfig ?? getAgentConfig(type))?.persistSession === true,
       invocation: options.invocation,
+      depth: options.depth ?? 1,
+      parentAgentId: options.parentAgentId,
+      maxSubagentDepth: options.maxSubagentDepth,
+      rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (!options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
@@ -289,7 +326,7 @@ export class AgentManager {
     // Increment only after every synchronous throw site (cwd/worktree
     // validation, onStart) — the runner calls are async, so any later throw
     // arrives as a rejection through .catch/.finally and cannot leak the slot.
-    this.runningBackground++;
+    if (occupiesPoolSlot(record)) this.runningBackground++;
     record.settled = false;
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -299,6 +336,9 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      // Resolved by the caller's own registry (a nested spawn reads its branch's
+      // config root), so the run does not re-resolve it against the global one.
+      agentConfig: options.agentConfig,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must
@@ -306,7 +346,7 @@ export class AgentManager {
       // (incl. relative extension paths and memory) inside the worktree copy.
       cwd: worktreeCwd ?? customCwd,
       worktree: worktreePromptInfo,
-      configCwd: customCwd !== undefined ? ctx.cwd : undefined,
+      configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
@@ -325,6 +365,12 @@ export class AgentManager {
         record.compactionCount++;
         this.onCompact?.(record, info);
         options.onCompaction?.(info);
+      },
+      nestedRuntime: {
+        manager: this,
+        parentAgentId: id,
+        depth: record.depth ?? 1,
+        maxSubagentDepth: record.maxSubagentDepth,
       },
       onSessionCreated: (session) => {
         record.session = session;
@@ -400,9 +446,15 @@ export class AgentManager {
     record.promise = promise;
   }
 
-  /** Shared completion tail: release the slot, flush the transcript, notify, drain. */
+  /** Shared completion tail: release the slot, stop orphaned children, flush the transcript, notify, drain. */
   private afterRun(record: AgentRecord): void {
-    this.runningBackground--;
+    if (occupiesPoolSlot(record)) this.runningBackground--;
+    // Children spawned by this run must not outlive it — they are hidden from
+    // every surface and reachable only through this agent, so an orphan would
+    // burn tokens unseen. Runs on every settle path, which is what also covers
+    // a resumed turn: grandchildren follow transitively, each through its own
+    // settle tail.
+    this.abortOwnedChildren(record.id);
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -465,6 +517,18 @@ export class AgentManager {
    *  during the synchronous `onStart` emit. */
   private stoppedInStartPrologue(record: AgentRecord): boolean {
     return record.status === "stopped" || record.abortController?.signal.aborted === true;
+  }
+
+  /**
+   * Stop the nested children a settled parent owns. Nested records are hidden
+   * from the UI and only their owner can consume them, so a child outliving its
+   * parent would burn tokens unseen with no way to reach it. Grandchildren are
+   * covered transitively — each abort lands in that child's own settle path.
+   */
+  private abortOwnedChildren(parentId: string): void {
+    for (const [id, record] of this.agents) {
+      if (record.parentAgentId === parentId) this.abort(id);
+    }
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -559,7 +623,10 @@ export class AgentManager {
     // Occupies a slot but is never gated by maxConcurrent — a burst of resumes
     // can exceed the cap by design. They share the pool counter, so queued
     // fresh spawns wait for these resumes to settle before drainQueue admits them.
-    this.runningBackground++;
+    // A nested child is not in the pool (`occupiesPoolSlot`), and afterRun only
+    // decrements for records that are: counting it here leaked a slot per nested
+    // resume until every top-level spawn queued forever.
+    if (occupiesPoolSlot(record)) this.runningBackground++;
     const promise = resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;

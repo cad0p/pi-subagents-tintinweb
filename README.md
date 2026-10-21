@@ -232,6 +232,8 @@ All fields are optional — sensible defaults for everything.
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
+| `allowed_subagents` | — | Opt this agent into nested delegation: `all`, or a comma-separated list of agent types it may spawn. Omitted = no nested tools at all |
+| `max_subagent_depth` | inherit | Per-agent nesting cap. Can only tighten the project's `maxSubagentDepth`, never raise it |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
@@ -412,7 +414,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, scheduling on/off, scope models on/off, strict agent files on/off, fallback agent, disable defaults on/off, output transcript on/off, worktree isolation on/off, fleet view on/off, failure preview max chars, tool description full/compact/custom, widget all/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, scheduling on/off, scope models on/off, strict agent files on/off, fallback agent, disable defaults on/off, output transcript on/off, worktree isolation on/off, fleet view on/off, failure preview max chars, tool description full/compact/custom, widget all/off) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -428,6 +430,8 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 **Worktree isolation** (`worktreeIsolation`, default `true`): whether `isolation: worktree` may create a worktree at all. Set `false` on a repo where a copy costs too much time or disk: a requested worktree is then dropped and the agent runs in the main checkout, on every path — agent files, scheduled jobs, and cross-extension RPC. The refusal is immediate; the `isolation` parameter and its usage note are also dropped from the Agent tool spec (next pi session) so the model is never told a capability exists. Custom tool descriptions opt in to the matching prose with `{{isolationGuideline}}`.
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` aborts extension load, naming the file, instead of being skipped with a warning. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. For a checked-in `.pi/agents/`, failing at startup is the point: the alternative is running a *different* agent than the file names.
+
+**Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on nested subagent delegation, counted from the main session — main is 0, its subagents are 1, their children are 2. `0` or `1` disables nesting project-wide. An agent only gets the nested tools (`Agent`, `get_subagent_result`, `steer_subagent`) when its own frontmatter opts in with `allowed_subagents` *and* it sits below the cap; its `max_subagent_depth` can tighten the project cap but never raise it. A nested child does not take a `maxConcurrent` slot — its parent already holds one — and it is aborted when its parent settles, since only the parent can reach it.
 
 **Failure preview** (`failurePreviewMaxChars`, default `65536`): caps the `Result:` body of `error`/`stopped` completion notifications, plus the metadata `Error:` line that carries a long truncated error alongside a partial result. The untruncated text remains available via `get_subagent_result` and the session record (and in the transcript when one exists).
 
