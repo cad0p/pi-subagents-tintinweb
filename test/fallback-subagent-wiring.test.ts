@@ -142,6 +142,26 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     );
   });
 
+  it("says nothing about a blank type, which is not a typo", async () => {
+    const { tools } = boot();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false,
+    });
+
+    const result = await tools.get("Agent").execute(
+      "tc-blank",
+      { prompt: "do it", description: "blank type", subagent_type: "" },
+      undefined, undefined, ctx(),
+    );
+
+    // The fallback still routes, but reporting `Unknown agent type ""` describes a
+    // mistake the caller did not make: omitting the type is the normal case.
+    expect(textOf(result)).not.toContain("Unknown agent type");
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.anything(), "general-purpose", "do it", expect.anything(),
+    );
+  });
+
   it("carries the fallback note on the background envelope", async () => {
     // The note is computed at resolution, before spawn, so a background caller
     // sees it in the same envelope that reports the agent id (#183).

@@ -1034,7 +1034,7 @@ Terse command-style prompts produce shallow, generic work.
       // replays the stored session and ignores `subagent_type` entirely, so a
       // note about type substitution would be describing something that didn't
       // happen.
-      const fallbackNote = dispatch.ok && dispatch.fellBackFrom !== undefined
+      const fallbackNote = dispatch.ok && dispatch.fellBackFrom
         ? `Note: Unknown agent type "${dispatch.fellBackFrom}" — using ${resolveType(subagentType) ? subagentType : "the fallback agent config"}.\n\n`
         : "";
 
