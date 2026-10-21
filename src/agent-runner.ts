@@ -230,10 +230,10 @@ const SCOPE_GATE_NAME = "pi-subagents-scope";
  *
  * pi gates registration by the session's `tools:` allowlist, but keeps a registered
  * MCP tool callable through `ctx.executeTool()` whether or not the agent selected it —
- * so a codemode script could reach a tool outside its scope. Those nested calls run
- * past extensions' `tool_call` handlers only, never `agent.beforeToolCall`, and a
- * `tool_search`-activated tool reaches the model the same way. One `tool_call` handler
- * covers both.
+ * so a codemode script could reach a tool outside its scope. Those nested calls do
+ * reach extension `tool_call` handlers, but not the agent-level `beforeToolCall` hook,
+ * and a `tool_search`-activated tool reaches the model the same way. One `tool_call`
+ * handler covers both.
  */
 function scopeGateExtension(gate: NestedCallGate): InlineExtension {
   return {
@@ -673,6 +673,12 @@ export async function runAgent(
   // pi's MCP uses to read `<cwd>/.pi/mcp.json` — so a cross-directory session keeps the
   // parent project's settings but reports its cwd as untrusted. The loader keeps the
   // trusted manager: it loads the parent project's extensions.
+  //
+  // Not `projectTrusted: false` on the second manager: pi skips the *project* scope
+  // entirely when it is false (`loadFromStorage`), which would drop the parent
+  // project's `subagents.json` and extension config from the child. The flag has to
+  // stay true to load them and be answered false to describe this session's cwd, and
+  // `isProjectTrusted()` is the only seam pi exposes for the two questions.
   const sessionSettingsManager =
     resolve(effectiveCwd) === resolve(configCwd)
       ? settingsManager
@@ -951,11 +957,12 @@ export async function runAgent(
   // ones pi would not declare. They stay registered and re-activatable: codemode and
   // `tool_search` reach them, and the scope gate above still applies.
   const undeclared = allowedTools.filter((name) => !declaredTools.includes(name));
-  if (undeclared.length > 0) {
-    const keep = new Set(session.getActiveToolNames());
-    for (const name of undeclared) keep.delete(name);
-    session.setActiveToolsByName([...keep]);
-  }
+  const active = session.getActiveToolNames();
+  const keep = active.filter((name) => !undeclared.includes(name));
+  // Only when something is actually left over: pi never activates a `codemode`/
+  // `deferred` tool, so the usual case is a no-op and `setActiveToolsByName` would
+  // rebuild the system prompt on every spawn that loads MCP for nothing.
+  if (keep.length !== active.length) session.setActiveToolsByName(keep);
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
