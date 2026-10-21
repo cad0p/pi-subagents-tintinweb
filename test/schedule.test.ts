@@ -14,7 +14,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
+import { NO_FALLBACK, registerAgents, setDefaultsDisabled, setFallbackSubagent } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
 import type { ScheduledSubagent } from "../src/types.js";
@@ -406,6 +406,9 @@ describe("SubagentScheduler — fire path", () => {
     scheduler.stop();
     vi.useRealTimers();
     setDefaultsDisabled(false);
+    // Module-global: restore here, not at the end of a test body, so a failing
+    // assertion can't leak strict dispatch into every test that follows.
+    setFallbackSubagent(undefined);
     registerAgents(new Map());
     rmSync(tmp, { recursive: true, force: true });
   });
@@ -421,6 +424,33 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(20_000);
     expect(manager.spawn).toHaveBeenCalledTimes(3);
+  });
+
+  it("refuses at fire time when the job's agent type no longer resolves", () => {
+    // The registry is what production populates at activation; a job outliving
+    // its agent must not silently run something else (#183).
+    registerAgents(new Map());
+    setFallbackSubagent(NO_FALLBACK);
+    scheduler.addJob({
+      name: "gone", description: "vanished agent", schedule: "+1s",
+      subagent_type: "deleted-since", prompt: "run",
+    });
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    // The record is reclassified into the store's `skipped` list by the write
+    // below (its agent type no longer validates), so lastStatus is not readable
+    // through get() — the emitted event is the observable surface here.
+    // Pin WHY it failed — "didn't spawn" alone would be satisfied by any
+    // unrelated pre-spawn throw.
+    expect(pi.events.emit).toHaveBeenCalledWith(
+      "subagents:scheduled",
+      expect.objectContaining({
+        type: "error",
+        error: expect.stringContaining("Unknown or disabled agent type"),
+      }),
+    );
   });
 
   it("one-shot fires once and auto-disables", async () => {
@@ -493,7 +523,10 @@ describe("SubagentScheduler — fire path", () => {
       name: "read-only", description: "x", schedule: "1s",
       subagent_type: "Explore", prompt: "x",
     });
-    // The user disables default agents mid-session — Explore is gone.
+    // The user disables default agents mid-session — Explore is gone. Strict
+    // dispatch (fallbackSubagent: none) is what refuses the fire; the default
+    // policy would route it to general-purpose.
+    setFallbackSubagent(NO_FALLBACK);
     setDefaultsDisabled(true);
     registerAgents(new Map());
 
@@ -504,11 +537,32 @@ describe("SubagentScheduler — fire path", () => {
     }));
   });
 
+  it("routes a case-ambiguous job type through the fallback at fire time", () => {
+    // The store accepts "SCOUT" because isValidType() resolves case-insensitively
+    // to the first match; dispatch refuses to guess between two case variants and
+    // applies the fallback policy (#183). This is the scheduler half of that
+    // single decision point.
+    const cfg = { description: "Scout", extensions: true, skills: true, systemPrompt: "s", promptMode: "replace" as const };
+    registerAgents(new Map([
+      ["Scout", { ...cfg, name: "Scout" }],
+      ["scout", { ...cfg, name: "scout" }],
+    ]));
+    scheduler.addJob({
+      name: "ambiguous", description: "x", schedule: "1s",
+      subagent_type: "SCOUT", prompt: "x",
+    });
+
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(manager.spawn.mock.calls[0][2]).toBe("general-purpose");
+  });
+
   it("clears the timer when a fire aborts on an invalid agent type", () => {
     scheduler.addJob({
       name: "read-only-timer", description: "x", schedule: "1s",
       subagent_type: "Explore", prompt: "x",
     });
+    setFallbackSubagent(NO_FALLBACK);
     setDefaultsDisabled(true);
     registerAgents(new Map());
     // Isolate the guard from the reclassification path: a real

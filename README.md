@@ -221,7 +221,7 @@ All fields are optional — sensible defaults for everything.
 | `skills` | `true` | Inherit skills from parent. Can be a comma-separated list of skill names to preload (see [Skill Preloading](#skill-preloading) for discovery locations) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
-| `isolation` | — | Set to `worktree` to run in an isolated git worktree |
+| `isolation` | — | `worktree` runs the agent in an isolated git worktree. `off` (also `none` / `no` / `false`) refuses one even when the caller asks — frontmatter outranks tool-call params |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
 | `scoped_models` | inherit parent's scope | Child session's model scope: `inherit` (or omit; must stand alone) uses the parent session's `/scoped-models` scope, `none` gives the child no scope, or a comma-separated list of `provider/modelId` entries replaces it with an explicit chain. Feeds `ctx.scopedModels` for in-session extensions — e.g. `pi-fallback-provider`'s automatic fallback after exhausted retries. Alias: `inherit_scoped_models`. See [Model Scope](#model-scope) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
@@ -235,6 +235,8 @@ All fields are optional — sensible defaults for everything.
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
+
+A key this extension doesn't read (a typo, or a field from another tool such as `run_in_background`, `join_mode`, or `name:`) is a silent no-op in the field-by-field parser, so it is reported once per file per key at load — same warning channel as a malformed file — instead of being dropped quietly. A file whose frontmatter cannot be parsed is skipped with a warning naming the path (and, when it was overriding another agent, the file that now wins); `strictAgentFiles` turns that skip into a startup failure.
 
 **Forgiving `model:` resolution.** A `model:` pin is matched against pi's model registry tolerantly, so cosmetic id variations don't silently drop the agent back to the parent's model: `.` and `-` are treated as equivalent in version numbers (`claude-haiku-4.5` ≡ `claude-haiku-4-5`), a trailing `-YYYYMMDD` date stamp is optional (`anthropic/claude-haiku-4-5-20251001` matches an undated registry id and vice-versa), and a `provider/modelId` whose named provider doesn't carry that model retries the bare id against every provider. Precedence is **exact → fuzzy under the named provider → same model under any provider → unavailable**, so an exact match always wins and dated snapshots aren't conflated. If nothing resolves, the pin can't run and the agent inherits the parent model — `/agents → Agent types` flags this case as `(unavailable, fallback: inherit)` and shows the resolved target `(→ provider/id)` when resolution lands on a different provider or version than configured. (This is distinct from [Model Scope](#model-scope) enforcement, which matches the `enabledModels` allowlist by *exact* entry.)
 
@@ -293,7 +295,7 @@ Launch a sub-agent.
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
-| `isolation` | `"worktree"` | no | Run in an isolated git worktree |
+| `isolation` | `"worktree"` or `"off"` | no | `worktree` runs in an isolated git worktree; `off` declines one (the default) |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
 Press ctrl+o to show the initial prompt in the tool row (the collapsed row shows only the type and description).
@@ -395,7 +397,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, scheduling on/off, scope models on/off, disable defaults on/off, output transcript on/off, fleet view on/off, failure preview max chars, tool description full/compact/custom, widget all/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, scheduling on/off, scope models on/off, strict agent files on/off, fallback agent, disable defaults on/off, output transcript on/off, worktree isolation on/off, fleet view on/off, failure preview max chars, tool description full/compact/custom, widget all/off) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -405,6 +407,12 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 **Disable defaults** (`disableDefaultAgents`, default `false`): when on, the three built-in agents (general-purpose, Explore, Plan) are not registered — only your project/global custom agents are advertised and spawnable. User-defined agents are unaffected, including ones that override a default by name. The Agent tool's type list updates on the next pi session (the tool schema is registered at startup).
 
 **Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files.
+
+**Fallback agent** (`fallbackSubagent`, default `general-purpose`): the agent used when a caller-supplied `subagent_type` doesn't resolve to exactly one enabled agent — unknown, disabled, or ambiguous because two agents differ only by case. Name any enabled agent to route those calls there instead, or set `none` for **strict**, fail-closed dispatch: the call is refused with an error listing the available types, and nothing spawns. Strict mode matters most for background and scheduled calls, which would otherwise start executing a substituted agent before the caller learns anything. Also settable from `/agents → Settings → Fallback agent`. The boolean `false` is accepted as a spelling of `none`, because it would otherwise be dropped as the wrong type and silently leave the permissive default in place. Every other value is read as an agent name, so a mistaken `off` fails loudly at dispatch rather than meaning one thing in the settings file and another in the resolver. A fallback agent that is itself unknown or disabled is a misconfiguration and is reported rather than quietly replaced. The fallback applies to the `Agent` tool, the scheduler at fire time, and cross-extension RPC; a scheduled job stores the type the caller actually named, and a resume is exempt because it replays a stored session and ignores `subagent_type`. A job whose type was already unknown when the store loaded is hidden from the scheduler there and kept verbatim in the store file, so it never reaches dispatch: the fire-time policy covers the registry changes that happen while a job is armed.
+
+**Worktree isolation** (`worktreeIsolation`, default `true`): whether `isolation: worktree` may create a worktree at all. Set `false` on a repo where a copy costs too much time or disk: a requested worktree is then dropped and the agent runs in the main checkout, on every path — agent files, scheduled jobs, and cross-extension RPC. The refusal is immediate; the `isolation` parameter and its usage note are also dropped from the Agent tool spec (next pi session) so the model is never told a capability exists. Custom tool descriptions opt in to the matching prose with `{{isolationGuideline}}`.
+
+**Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` aborts extension load, naming the file, instead of being skipped with a warning. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. For a checked-in `.pi/agents/`, failing at startup is the point: the alternative is running a *different* agent than the file names.
 
 **Failure preview** (`failurePreviewMaxChars`, default `65536`): caps the `Result:` body of `error`/`stopped` completion notifications, plus the metadata `Error:` line that carries a long truncated error alongside a partial result. The untruncated text remains available via `get_subagent_result` and the session record (and in the transcript when one exists).
 
@@ -419,7 +427,7 @@ Launch an autonomous agent. Available types:
 Custom agents live in .pi/agents/ or {{agentDir}}/agents/.
 ```
 
-Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`, `{{scheduleGuideline}}` (expands with its own leading newline + `- ` bullet when scheduling is on — place it directly after your last rule line; empty when scheduling is off). Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
+Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`, `{{scheduleGuideline}}` (expands with its own leading newline + `- ` bullet when scheduling is on — place it directly after your last rule line; empty when scheduling is off), `{{isolationGuideline}}` (same shape, empty when `worktreeIsolation` is off). Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
 
 **Starting point:** copy [`examples/agent-tool-description.md`](examples/agent-tool-description.md) — it reproduces the default full description exactly (a CI test keeps it in sync), so you can trim from a known-good baseline instead of writing from scratch.
 

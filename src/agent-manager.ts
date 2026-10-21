@@ -18,7 +18,7 @@ import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type Tool
 import { getAgentConfig } from "./agent-types.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -58,7 +58,7 @@ interface SpawnArgs {
   options: SpawnOptions;
 }
 
-interface SpawnOptions {
+export interface SpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
@@ -236,9 +236,12 @@ export class AgentManager {
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done
     // BEFORE state mutation so a throw doesn't leave the record half-running.
+    // The project switch is enforced here as well as at the tool boundary
+    // because cross-extension RPC forwards its options unvalidated — a schema
+    // that omits the field can't stop a caller that never saw the schema.
     let worktreeCwd: string | undefined;
     let worktreePromptInfo: { path: string; parentCwd: string } | undefined;
-    if (options.isolation === "worktree") {
+    if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = createWorktree(baseCwd, id);
       if (!wt) {
         throw new Error(
