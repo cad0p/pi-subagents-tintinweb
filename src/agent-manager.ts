@@ -19,7 +19,7 @@ import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type Tool
 import { getAgentConfig } from "./agent-types.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -72,7 +72,7 @@ interface SpawnArgs {
   options: SpawnOptions;
 }
 
-interface SpawnOptions {
+export interface SpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
@@ -268,9 +268,12 @@ export class AgentManager {
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done
     // BEFORE state mutation so a throw doesn't leave the record half-running.
+    // The project switch is enforced here as well as at the tool boundary
+    // because cross-extension RPC forwards its options unvalidated — a schema
+    // that omits the field can't stop a caller that never saw the schema.
     let worktreeCwd: string | undefined;
     let worktreePromptInfo: { path: string; parentCwd: string } | undefined;
-    if (options.isolation === "worktree") {
+    if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = createWorktree(baseCwd, id);
       if (!wt) {
         throw new Error(
@@ -360,9 +363,6 @@ export class AgentManager {
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
-        // Captured before the record can be removed: `removeRecord` disposes the
-        // session first and would no longer be able to ask it for the path.
-        record.sessionFile = session.sessionManager.getSessionFile();
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -710,22 +710,30 @@ export class AgentManager {
    * 10-minute eviction and `clearCompleted()` on session switch are the grace
    * window in which a live record can still resume the agent, so nothing may
    * delete the file earlier. A `persist_session` agent keeps its file
-   * indefinitely; every other agent's file goes here. `keepSessionFile` is the
-   * shutdown path's opt-out — a run killed mid-flight must leave its transcript
-   * for crash recovery.
+   * indefinitely; every other settled agent's file goes here.
+   *
+   * A run still in flight keeps its file even at removal: deleting the file a
+   * live child is still appending to loses the transcript the crash-recovery
+   * case exists for. The callers that could reach one — eviction and the session
+   * switch — skip it for the same reason, so this is the second line of defence,
+   * not the only one.
    *
    * Best-effort: a missing file, a permission error or a Windows lock must not
    * throw into the completion/eviction path.
    */
-  private removeRecord(id: string, record: AgentRecord, keepSessionFile = false): void {
+  private removeRecord(id: string, record: AgentRecord): void {
+    // Read from the session, not a copy taken at creation: pi moves the file on
+    // `ctx.newSession()`/`fork()`, and deleting the path it started with would
+    // leak the one it actually wrote.
+    const sessionFile = record.session?.sessionManager.getSessionFile();
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
     // After dispose, so the file handle is closed — Windows will not unlink an
     // open file.
-    if (keepSessionFile || record.persistSession || !record.sessionFile) return;
+    if (record.settled === false || record.persistSession || !sessionFile) return;
     try {
-      rmSync(record.sessionFile, { force: true });
+      rmSync(sessionFile, { force: true });
     } catch { /* retention is best-effort — never fail a turn over it */ }
   }
 
@@ -733,6 +741,9 @@ export class AgentManager {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      // Stopped but still unwinding: removing it would dispose a session a live
+      // run is still writing to, and the file has to outlive the run.
+      if (record.settled === false) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -747,6 +758,8 @@ export class AgentManager {
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      // See cleanup(): an unwinding run keeps its record until it settles.
+      if (record.settled === false) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -809,10 +822,11 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
-    // Shutdown keeps every session file: a run killed mid-flight must leave its
-    // transcript for the crash-recovery follow-up.
+    // An in-flight run keeps its session file for the crash-recovery follow-up;
+    // a settled one is deleted here, because the manager's map is discarded and
+    // nothing would ever revisit it.
     for (const [id, record] of this.agents) {
-      this.removeRecord(id, record, true);
+      this.removeRecord(id, record);
     }
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }

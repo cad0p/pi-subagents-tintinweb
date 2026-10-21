@@ -183,7 +183,8 @@ beforeEach(() => {
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
   ctx.sessionManager.getSessionFile.mockReset();
-  ctx.sessionManager.getSessionFile.mockReturnValue(undefined);
+  // A normal host session has a file; the ephemeral case opts out per test.
+  ctx.sessionManager.getSessionFile.mockReturnValue("/sessions/parent.jsonl");
   settingsManagerGetSessionDir.mockReset();
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
@@ -230,7 +231,7 @@ describe("agent-runner final output capture", () => {
     }));
     expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir", { projectTrusted: true });
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, undefined);
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, { parentSession: "/sessions/parent.jsonl" });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
@@ -799,7 +800,7 @@ describe("agent-runner session persistence", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, undefined);
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, { parentSession: "/sessions/parent.jsonl" });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       sessionManager: { kind: "persistent-session-manager" },
     }));
@@ -813,19 +814,15 @@ describe("agent-runner session persistence", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, undefined);
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, { parentSession: "/sessions/parent.jsonl" });
   });
 
-  it("falls back to an in-memory session when the host runs with --no-session", async () => {
-    process.argv.push("--no-session");
-    try {
-      const { session } = createSession("OK");
-      createAgentSession.mockResolvedValue({ session });
+  it("falls back to an in-memory session when the host session has no file", async () => {
+    ctx.sessionManager.getSessionFile.mockReturnValue(undefined);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
 
-      await runAgent(ctx, "Explore", "go", { pi });
-    } finally {
-      process.argv.pop();
-    }
+    await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
     expect(sessionManagerCreate).not.toHaveBeenCalled();
@@ -853,7 +850,7 @@ describe("agent-runner session persistence", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions", undefined);
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions", { parentSession: "/sessions/parent.jsonl" });
   });
 
   it("uses a frontmatter sessionDir when one is configured", async () => {
@@ -869,7 +866,7 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerCreate).toHaveBeenCalledWith(
       "/repo",
       "/repo/.seams/pi-sessions/seam-plan-reviewer",
-      undefined,
+      { parentSession: "/sessions/parent.jsonl" },
     );
   });
 });

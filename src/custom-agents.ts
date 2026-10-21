@@ -6,7 +6,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
-import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
+import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./types.js";
 
 /**
  * Scan for custom agent .md files from multiple locations.
@@ -20,20 +20,23 @@ import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
  * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
-export function loadCustomAgents(cwd: string): Map<string, AgentConfig> {
+export function loadCustomAgents(cwd: string, strict = false): Map<string, AgentConfig> {
   const globalDir = join(getAgentDir(), "agents");
   const workspaceProjectDir = join(cwd, ".agents", "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
-  loadFromDir(globalDir, agents, "global");            // lowest priority
-  loadFromDir(workspaceProjectDir, agents, "project"); // shared workspace
-  loadFromDir(projectDir, agents, "project");          // highest priority (overwrites)
+  loadFromDir(globalDir, agents, "global", strict);            // lowest priority
+  loadFromDir(workspaceProjectDir, agents, "project", strict); // shared workspace
+  loadFromDir(projectDir, agents, "project", strict);          // highest priority (overwrites)
+
+  warnedLastLoad = warnedThisLoad;
+  warnedThisLoad = new Set();
   return agents;
 }
 
 /** Load agent configs from a directory into the map. */
-function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global"): void {
+function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global", strict: boolean): void {
   if (!existsSync(dir)) return;
 
   let files: string[];
@@ -45,15 +48,15 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
 
   for (const file of files) {
     const name = basename(file, ".md");
+    const path = join(dir, file);
 
-    let content: string;
-    try {
-      content = readFileSync(join(dir, file), "utf-8");
-    } catch {
+    const parsed = readAgentFile(path, strict);
+    if (!parsed) {
+      warnSkippedOverride(name, agents);
       continue;
     }
-
-    const { frontmatter: fm, body } = parseFrontmatter<Record<string, unknown>>(content);
+    const { frontmatter: fm, body } = parsed;
+    warnUnknownKeys(path, fm);
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
 
@@ -81,11 +84,103 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
       isolated: fm.isolated != null ? fm.isolated === true : undefined,
       memory: parseMemory(fm.memory),
-      isolation: fm.isolation === "worktree" ? "worktree" : undefined,
+      isolation: parseIsolation(fm.isolation),
       enabled: fm.enabled !== false,  // default true; explicitly false disables
       source,
+      sourcePath: path,
     });
   }
+}
+
+/**
+ * Read and parse one agent file, or warn and return undefined for the caller to
+ * skip. One bad file must not take the whole extension down with it — an
+ * unparseable `.md` used to abort activation, so pi exited before the TUI.
+ *
+ * The path is as much of the fix as the recovery: a bare YAML error ("line 2,
+ * column 14") is unactionable when agents come from three directories at once,
+ * and the only other symptom is `Unknown agent type`, which reads like a typo.
+ *
+ * Under `strict` the same failure rethrows, still naming the path, so callers
+ * that opted into failing closed stop rather than run a substituted agent.
+ */
+function readAgentFile(path: string, strict: boolean): { frontmatter: Record<string, unknown>; body: string } | undefined {
+  try {
+    return parseFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (strict) throw new Error(`${path}: ${reason}`);
+    warnIfNew(`Skipping agent file ${path}: ${reason}`);
+    return undefined;
+  }
+}
+
+/**
+ * A skipped file that was overriding an already-loaded agent leaves the name
+ * pointing at a *different* file — its own prompt, model and tools. Nothing
+ * downstream can flag that: unlike an unknown type, the `Agent` call succeeds.
+ */
+function warnSkippedOverride(name: string, agents: Map<string, AgentConfig>): void {
+  const surviving = agents.get(name);
+  // Nothing shadowed, or what it shadowed is disabled: dispatch refuses the type
+  // either way (see resolveEnabledTypeIn), so there is no substitution to report.
+  if (!surviving?.sourcePath || surviving.enabled === false) return;
+  warnIfNew(`Agent "${name}" now loads from ${surviving.sourcePath} instead`);
+}
+
+/**
+ * Frontmatter keys this loader reads. The parser below is field-by-field, so a
+ * key outside this set is a silent no-op: a typo, or a field from another tool
+ * (`run_in_background`, `join_mode`, `name:`) that reads as configuration and
+ * does nothing. Reported once per file per key at load — the same channel as a
+ * malformed file — rather than per spawn, where it would be noise.
+ */
+const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
+  "description",
+  "display_name",
+  "tools",
+  "disallowed_tools",
+  "extensions",
+  "inherit_extensions",
+  "exclude_extensions",
+  "skills",
+  "inherit_skills",
+  "scoped_models",
+  "inherit_scoped_models",
+  "model",
+  "thinking",
+  "max_turns",
+  "persist_session",
+  "output_transcript",
+  "session_dir",
+  "prompt_mode",
+  "inherit_context",
+  "isolated",
+  "memory",
+  "isolation",
+  "enabled",
+]);
+
+function warnUnknownKeys(path: string, frontmatter: Record<string, unknown>): void {
+  for (const key of Object.keys(frontmatter)) {
+    if (KNOWN_FRONTMATTER_KEYS.has(key)) continue;
+    warnIfNew(`Ignoring unknown frontmatter key "${key}" in ${path}`);
+  }
+}
+
+let warnedLastLoad = new Set<string>();
+let warnedThisLoad = new Set<string>();
+
+/**
+ * Agents reload on activation and again on every `Agent` call, so an unchanged
+ * problem would re-warn all session — over a painted TUI, since pi does not
+ * redirect console output. Compare against the previous load rather than every
+ * load ever, so a file that is fixed and then broken again still reports.
+ */
+function warnIfNew(message: string): void {
+  warnedThisLoad.add(message);
+  if (warnedLastLoad.has(message)) return;
+  console.warn(`[pi-subagents] ${message}`);
 }
 
 // ---- Field parsers ----
@@ -170,6 +265,24 @@ function csvListOptional(val: unknown): string[] | undefined {
  */
 function parseMemory(val: unknown): MemoryScope | undefined {
   if (val === "user" || val === "project" || val === "local") return val;
+  return undefined;
+}
+
+/**
+ * Parse the `isolation` frontmatter field.
+ *
+ * `off` is kept as a value rather than folded into `undefined` because the two
+ * do not mean the same thing here: agent config outranks tool-call params, so
+ * `off` vetoes a caller's `worktree` while an absent field lets it through.
+ *
+ * pi's frontmatter parser is not YAML 1.1 — bare `off` and `no` arrive as
+ * strings and only `false` becomes a boolean — so all three spellings are
+ * accepted rather than leaving an author's intent silently dropped. Anything
+ * else stays `undefined`, as before.
+ */
+function parseIsolation(val: unknown): IsolationMode | undefined {
+  if (val === "worktree") return "worktree";
+  if (val === "off" || val === "none" || val === "no" || val === false) return "off";
   return undefined;
 }
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAndEmitLoaded,
   applySettings,
+  fallbackRow,
   loadSettings,
   persistToastFor,
   type SettingsAppliers,
@@ -133,6 +134,52 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
     writeProject({ outputTranscript: "no" } as any);
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("round-trips worktreeIsolation; drops non-boolean", () => {
+    saveSettings({ worktreeIsolation: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
+    saveSettings({ worktreeIsolation: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: true });
+    writeProject({ worktreeIsolation: "off" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("round-trips strictAgentFiles; drops non-boolean", () => {
+    saveSettings({ strictAgentFiles: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
+    saveSettings({ strictAgentFiles: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+    writeProject({ strictAgentFiles: "yes" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("accepts `none` and `false` as the disabled fallback, nothing else", () => {
+    // Only the boolean needs an alias: it would otherwise be dropped, leaving
+    // the PERMISSIVE default while the author believed strict was on. Every
+    // string stays an agent name, so a mistaken "off" fails loudly at dispatch
+    // instead of meaning one thing here and another in the resolver.
+    for (const spelling of ["none", "NONE", " none ", false]) {
+      writeProject({ fallbackSubagent: spelling });
+      expect(loadSettings(projectDir).fallbackSubagent?.toLowerCase()).toBe("none");
+    }
+    writeProject({ fallbackSubagent: "off" });
+    expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "off" });
+  });
+
+  it("drops fallbackSubagent values that aren't a string or `false`, without coercing them", () => {
+    // String(["none"]) is "none" — coercing would silently enable strict mode.
+    for (const junk of [["none"], null, 42, true, {}]) {
+      writeProject({ fallbackSubagent: junk });
+      expect(loadSettings(projectDir)).toEqual({});
+    }
+  });
+
+  it("keeps a named fallback agent and trims it", () => {
+    writeProject({ fallbackSubagent: "  my-router  " });
+    expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
+    writeProject({ fallbackSubagent: "   " });
+    expect(loadSettings(projectDir)).toEqual({});
   });
 
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
@@ -411,12 +458,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 
@@ -504,6 +554,27 @@ describe("settings persistence", () => {
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
     });
 
+    it("applies worktreeIsolation (both true and false)", () => {
+      applySettings({ worktreeIsolation: false }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(false);
+      applySettings({ worktreeIsolation: true }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(true);
+    });
+
+    it("applies strictAgentFiles (both true and false)", () => {
+      applySettings({ strictAgentFiles: true }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
+      applySettings({ strictAgentFiles: false }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(false);
+    });
+
+    it("applies fallbackSubagent through to the registry", () => {
+      // Without this, deleting the applySettings line for this field leaves the
+      // whole suite green while `subagents.json` silently stops working.
+      applySettings({ fallbackSubagent: "none" }, appliers);
+      expect(appliers.setFallbackSubagent).toHaveBeenCalledWith("none");
+    });
+
     it("applies failurePreviewMaxChars; skips it when absent", () => {
       applySettings({ failurePreviewMaxChars: 1000 }, appliers);
       expect(appliers.setFailurePreviewMaxChars).toHaveBeenCalledWith(1000);
@@ -564,12 +635,15 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
+        setFallbackSubagent: vi.fn(),
       };
     });
 
@@ -663,5 +737,75 @@ describe("settings persistence", () => {
         rmSync(filePosingAsCwd, { force: true });
       }
     });
+  });
+});
+
+/**
+ * The `fallbackSubagent` row's value list. pi-tui's cycle handler writes
+ * `values[0]` when the current value is not in `values`, so the invariant that
+ * matters is "the shown value is always offered" — otherwise one Enter silently
+ * replaces a fallback the user never chose.
+ */
+describe("fallbackRow", () => {
+  const NONE = "none";
+
+  const always = () => true;
+  const never = () => false;
+
+  it("always offers the value it shows", () => {
+    const cases: Array<[string | undefined, string[]]> = [
+      [undefined, []],
+      [undefined, ["custom"]],
+      ["Explore", ["custom"]],
+      ["Explore", ["Explore", "custom"]],
+      ["general-purpose", []],
+      [NONE, ["custom"]],
+    ];
+    for (const [configured, available] of cases) {
+      const row = fallbackRow(configured, available, NONE, always);
+      expect(row.values).toContain(row.value);
+    }
+  });
+
+  it("shows general-purpose for an unset fallback, and does not call it unresolvable", () => {
+    // Unset deliberately targets general-purpose even when it is unregistered:
+    // the permissive hardcoded tier is the historical behaviour, not a fault.
+    const row = fallbackRow(undefined, ["custom"], NONE, (n) => n === "general-purpose");
+    expect(row.value).toBe("general-purpose");
+    expect(row.unresolvable).toBe(false);
+  });
+
+  it("does not call an unset fallback unresolvable even when the resolver rejects it", () => {
+    // The implicit target is a hardcoded permissive tier, not a configured agent:
+    // reporting it as broken made the Disable-defaults toast say 'Fallback agent
+    // "undefined" no longer resolves' and claim refusals that never happen.
+    const row = fallbackRow(undefined, ["custom"], NONE, never);
+    expect(row.value).toBe("general-purpose");
+    expect(row.unresolvable).toBe(false);
+  });
+
+  it("reports a configured fallback the resolver rejects", () => {
+    const row = fallbackRow("Explore", ["custom"], NONE, never);
+    expect(row.value).toBe("Explore");
+    expect(row.unresolvable).toBe(true);
+  });
+
+  it("treats a configured 'none' as resolvable and lists it once", () => {
+    const row = fallbackRow(NONE, ["custom"], NONE, never);
+    expect(row.unresolvable).toBe(false);
+    expect(row.values.filter(v => v === NONE)).toHaveLength(1);
+  });
+
+  it("does not duplicate an available fallback in the list", () => {
+    const row = fallbackRow("Explore", ["Explore", "custom"], NONE, always);
+    expect(row.unresolvable).toBe(false);
+    expect(row.values).toEqual(["Explore", "custom", NONE]);
+  });
+
+  it("takes the verdict from the resolver rather than re-deriving one", () => {
+    // The uniqueness rule needs the full registry, which `available` cannot
+    // express (a disabled agent still claims its name). Delegating is the point.
+    expect(fallbackRow("explore", ["Explore"], NONE, always).unresolvable).toBe(false);
+    expect(fallbackRow("explore", ["Explore"], NONE, never).unresolvable).toBe(true);
   });
 });

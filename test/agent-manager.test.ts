@@ -17,9 +17,13 @@ vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
   cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
   pruneWorktrees: vi.fn(),
+  // The manager gates worktree creation on the project switch; the mock must
+  // expose it or every worktree spawn throws a TypeError instead.
+  isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
 import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
+import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -322,7 +326,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
   it("clearCompleted calls dispose on sessions of removed records", async () => {
     manager = new AgentManager();
     const disposeSpy = vi.fn();
-    const sess = { dispose: disposeSpy };
+    const sess = { dispose: disposeSpy, sessionManager: { getSessionFile: () => undefined } };
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
       session: sess as any,
@@ -542,6 +546,46 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+});
+
+// The project switch has to bite below the tool boundary: cross-extension RPC
+// forwards its options straight to spawn(), so a schema that omits the
+// isolation parameter can't stop a caller that never saw the schema (#184).
+describe("AgentManager — worktreeIsolation: false refuses worktrees", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(true);
+  });
+
+  it("creates no worktree for an RPC-shaped spawn when the project disabled it", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockClear();
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(false);
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+
+    // Downgraded, not rejected — the user opted out, so the call still runs.
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)!.worktree).toBeUndefined();
+  });
+
+  it("does not mask a genuine worktree failure while enabled", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+    vi.mocked(isWorktreeIsolationEnabled).mockReturnValue(true);
+
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    })).toThrow(/isolation: "worktree"/);
   });
 });
 
@@ -1081,8 +1125,8 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
 // Every run writes its pi session to disk while it runs. `persist_session` is a
 // RETENTION flag: the record's removal (10-minute eviction, or clearCompleted on
-// session switch) is the disposal point, and shutdown keeps every file so a run
-// killed mid-flight stays recoverable.
+// session switch) is the disposal point, and shutdown keeps only a run that is
+// still unwinding so a run killed mid-flight stays recoverable.
 describe("AgentManager — session file retention", () => {
   let manager: AgentManager;
   let root: string;
@@ -1205,21 +1249,58 @@ describe("AgentManager — session file retention", () => {
     }
   });
 
-  it("dispose() keeps the file for default and persist_session agents alike", async () => {
+  it("leaves a stopped-but-unwinding record alone in both removal paths", async () => {
+    // A stopped run whose promise has not unwound is still appending to its
+    // session: evicting it would dispose a live session and unlink the file the
+    // crash-recovery case exists for.
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const { session, file } = sessionWithFile();
+      const dispose = vi.fn();
+      session.dispose = dispose;
+      const { id } = spawnPending("general-purpose", session); // never resolves
+      const record = manager.getRecord(id)!;
+      record.status = "stopped";
+      record.completedAt = Date.now() - 11 * 60_000;
+
+      manager.clearCompleted();
+      vi.advanceTimersByTime(11 * 60_000);
+
+      expect(manager.getRecord(id)).toBeDefined();
+      expect(dispose).not.toHaveBeenCalled();
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispose() keeps an in-flight run's file and deletes a settled one's", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     registerKeeper();
     manager = new AgentManager();
-    const def = sessionWithFile();
+    const inflight = sessionWithFile();
+    const settled = sessionWithFile();
     const kept = sessionWithFile();
-    // Both runs stay in flight — the crash-recovery case dispose() must not undo.
-    spawnPending("general-purpose", def.session);
+    // In flight — the crash-recovery case dispose() must not undo.
+    spawnPending("general-purpose", inflight.session);
+    // Also in flight, but with persist_session: kept for a second reason.
     spawnPending("keeper", kept.session);
+    // Settled inside the 10-minute grace window, so the record is still in the
+    // map and this is the only place its file would ever be deleted: the next
+    // process's manager starts empty.
+    const finished = spawnPending("general-purpose", settled.session);
+    finished.resolve(done(settled.session));
+    await manager.getRecord(finished.id)!.promise;
+    expect(existsSync(settled.file)).toBe(true);
 
     manager.dispose();
 
     expect(manager.listAgents()).toEqual([]);
-    expect(existsSync(def.file)).toBe(true);
+    expect(existsSync(inflight.file)).toBe(true);
     expect(existsSync(kept.file)).toBe(true);
+    expect(existsSync(settled.file)).toBe(false);
   });
 
   it("a resumed run keeps the same session file and the same retention decision", async () => {
@@ -1238,7 +1319,8 @@ describe("AgentManager — session file retention", () => {
     vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
     await manager.resume(id, "more")!.promise;
 
-    expect(record.sessionFile).toBe(file);
+    // The resume reused the record, so it is still the file the first run wrote.
+    expect(record.session?.sessionManager.getSessionFile()).toBe(file);
     manager.clearCompleted();
     expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
   });

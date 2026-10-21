@@ -160,7 +160,10 @@ describe("subagent session persistence (real SessionManager)", () => {
     expect(header.parentSession).toBe(parentSessionFile);
   });
 
-  it("omits parentSession when the host session has no file", async () => {
+  it("runs in memory when the host session has no file", async () => {
+    // A host session with no file is ephemeral — pi's `--no-session`, or an SDK
+    // host that built `SessionManager.inMemory`. Its children must leave nothing
+    // behind either, and there is no spawner file to link them to.
     registerAgent();
     let sessionManager!: SessionManager;
     createAgentSession.mockImplementation(async (options: { sessionManager: SessionManager }) => {
@@ -175,22 +178,8 @@ describe("subagent session persistence (real SessionManager)", () => {
       { pi },
     );
 
-    const header = JSON.parse(readFileSync(sessionManager.getSessionFile()!, "utf-8").split("\n")[0]);
-    expect(header).not.toHaveProperty("parentSession");
-  });
-
-  it("writes no file at all under the host's --no-session", async () => {
-    registerAgent();
-    process.argv.push("--no-session");
-    try {
-      const { sessionManager, fileExistedDuringRun } = await run();
-
-      expect(sessionManager.isPersisted()).toBe(false);
-      expect(sessionManager.getSessionFile()).toBeUndefined();
-      expect(fileExistedDuringRun).toBe(false);
-    } finally {
-      process.argv.pop();
-    }
+    expect(sessionManager.isPersisted()).toBe(false);
+    expect(sessionManager.getSessionFile()).toBeUndefined();
     expect(childFiles()).toEqual([]);
   });
 });
