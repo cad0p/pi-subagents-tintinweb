@@ -82,8 +82,9 @@ describe("nested tool injection into a real child session", () => {
   ): Promise<{ session: AgentSession; spawns: SpawnCall[] }> {
     registerAgents(
       new Map([
-        // The delegable agents too: the nested tool refuses a type that only
-        // exists in the branch registry, because the run resolves globally.
+        // The delegable agents too, as the extension's own reload would register
+        // them; the nested spawn hands its resolved config to the run instead of
+        // depending on this.
         ...buildAgentRegistry(loadCustomAgents(cwd)),
         [
           "e2e",

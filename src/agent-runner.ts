@@ -551,8 +551,23 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
-  const config = getConfig(type);
-  const agentConfig = options.agentConfig ?? getAgentConfig(type);
+  const resolvedConfig = options.agentConfig;
+  const agentConfig = resolvedConfig ?? getAgentConfig(type);
+  // Every derived field comes from the same config: a nested spawn resolves the
+  // agent from its branch's config root, and re-deriving tools or extension
+  // policy from the process-global registry would run a different agent than the
+  // one the caller validated (all built-ins, general-purpose's extensions).
+  const config = resolvedConfig
+    ? {
+        displayName: resolvedConfig.displayName ?? resolvedConfig.name,
+        description: resolvedConfig.description,
+        builtinToolNames: resolvedConfig.builtinToolNames ?? [...BUILTIN_TOOL_NAMES],
+        extensions: resolvedConfig.extensions,
+        excludeExtensions: resolvedConfig.excludeExtensions,
+        skills: resolvedConfig.skills,
+        promptMode: resolvedConfig.promptMode,
+      }
+    : getConfig(type);
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -583,7 +598,7 @@ export async function runAgent(
     }
   }
 
-  let toolNames = getToolNamesForType(type);
+  let toolNames = resolvedConfig ? [...config.builtinToolNames] : getToolNamesForType(type);
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.

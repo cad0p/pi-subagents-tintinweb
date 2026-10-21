@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildAgentRegistry, registerAgents } from "../src/agent-types.js";
+import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager, type NestedSpawnOptions } from "../src/nested-tools.js";
@@ -98,10 +98,10 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "nested-tools-"));
   writeAgent("scout");
   writeAgent("reviewer");
-  // runAgent resolves the type against the process-global registry, which the
-  // extension reloads from the config root at session start. The nested tool
-  // refuses a type that only exists in the branch registry, so mirror that here.
-  registerAgents(buildAgentRegistry(loadCustomAgents(cwd)));
+  // Mirror production, where the extension reloads the process-global registry
+  // from the config root at session start. The nested spawn no longer depends on
+  // it — the resolved config is handed to the run — so a test that clears this
+  // registration exercises the branch-only path.
   records = new Map();
   spawns = [];
   manager = makeManager();
