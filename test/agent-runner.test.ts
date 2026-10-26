@@ -1996,6 +1996,20 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
 
     expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/abs/x.ts", "/abs/y.ts"]);
   });
+
+  it("an agent's own path survives when its name matches a parent -e copy", async () => {
+    parentFlags.extensionPaths = ["/parent/notify.ts"];
+    setupAgent({ extensions: ["/agent/notify.ts"] });
+    withExtensions({ "/parent/notify.ts": ["parent_notify"], "/agent/notify.ts": ["agent_notify"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("parent_notify");
+    expect(tools).toContain("agent_notify");
+  });
 });
 
 describe("agent-runner unknown built-in tools", () => {

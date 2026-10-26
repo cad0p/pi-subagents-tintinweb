@@ -654,6 +654,7 @@ export async function createChildSession(
   const childExtensionPaths = [...new Set([...parentExtensionPaths, ...(extensionsSpec?.paths ?? [])])];
   const additionalExtensionPaths = childExtensionPaths.length > 0 ? childExtensionPaths : undefined;
   const parentPaths = new Set(parentExtensionPaths);
+  const childPaths = new Set(childExtensionPaths);
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
@@ -673,7 +674,8 @@ export async function createChildSession(
             extensions: base.extensions.filter((e) => {
               if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
               const canons = extensionCanonicalNames(e.path);
-              if (!parentPaths.has(e.path) && canons.some((n) => parentNames.has(n))) return false; // parent's `-e` copy wins
+              // A discovered copy yields to the parent's `-e` copy. The agent's own paths are never dropped.
+              if (!childPaths.has(e.path) && canons.some((n) => parentNames.has(n))) return false;
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
             }),
