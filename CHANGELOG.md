@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 <!-- Add your curated release notes here. -->
 <!-- USER-EDITABLE SECTION END -->
 
+### 🚀 Features
+
+- *(reload)* Running subagents survive /reload (closes #90) ([#91](https://github.com/cad0p/pi-subagents-tintinweb/pull/91))
+
 ### 🐛 Bug Fixes
 
 - *(sessions)* Follow the parent's session dir, never inside the worktree (closes #86) ([#89](https://github.com/cad0p/pi-subagents-tintinweb/pull/89))
