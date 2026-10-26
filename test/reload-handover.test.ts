@@ -219,6 +219,30 @@ describe("AgentManager hand-over", () => {
     expect(manager.getRecord(child)).toBeUndefined();
   });
 
+  it("keeps an idle nested child under a running parent until the parent settles, then moves both", async () => {
+    const manager = track(new AgentManager());
+    const finish = controlledRun("parent");
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("child"));
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
+      description: "child",
+      parentAgentId: parent,
+    });
+    await vi.waitFor(() => expect(manager.getRecord(child)?.settled).toBe(true));
+
+    const handover = manager.beginDrain([], undefined);
+    const events: HandoverEvent[] = [];
+    handover.attach((event) => events.push(event));
+
+    expect(handover.idleItems()).toEqual([]);
+    expect(manager.getRecord(child)).toBeDefined();
+
+    finish();
+    await vi.waitFor(() => expect(events.some((event) => event.kind === "settled")).toBe(true));
+    const settled = events.find((event) => event.kind === "settled");
+    expect(settled?.kind === "settled" ? settled.items.map((item) => item.dto.id) : []).toEqual([parent, child]);
+  });
+
   it("keeps a record that a resume marks running before its settled flag clears", async () => {
     let resuming = false;
     let seen: { settled?: boolean; moved: string[] } | undefined;
@@ -241,6 +265,33 @@ describe("AgentManager hand-over", () => {
 
     expect(seen).toEqual({ settled: true, moved: [] });
     expect(manager.getRecord(idle)?.status).toBe("running");
+  });
+
+  it("keeps an idle parent while its nested child is resumed, before the child's settled flag clears", async () => {
+    let resuming = false;
+    let moved: string[] | undefined;
+    const manager: AgentManager = track(
+      new AgentManager(undefined, undefined, () => {
+        if (!resuming) return;
+        moved = manager.beginDrain([], undefined).idleItems().map((item) => item.dto.id);
+      }),
+    );
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("parent")).mockResolvedValueOnce(finishedRun("child"));
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    await vi.waitFor(() => expect(manager.getRecord(parent)?.settled).toBe(true));
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
+      description: "child",
+      parentAgentId: parent,
+    });
+    await vi.waitFor(() => expect(manager.getRecord(child)?.settled).toBe(true));
+
+    vi.mocked(resumeAgent).mockReturnValueOnce(new Promise<never>(() => {}));
+    resuming = true;
+    manager.resume(child, "again");
+    resuming = false;
+
+    expect(moved).toEqual([]);
+    expect(manager.getRecord(parent)).toBeDefined();
   });
 
   it("stops the old manager's cleanup interval once its last draining record leaves", async () => {
