@@ -392,6 +392,64 @@ describe("subagents across a real /reload (faux provider)", () => {
     }, { timeout: 10_000 });
   }, 20_000);
 
+  it("adopts settled runs one at a time: the second child reload waits for the first adoption", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    await root.prompt("spawn-now");
+    // A child session is attached once its run starts; the run stays running until the gate opens.
+    const children = await vi.waitFor(
+      () => {
+        const found = liveRegistry().listAgents().flatMap((row) => (row.session ? [row.session] : []));
+        expect(found).toHaveLength(2);
+        return found;
+      },
+      { timeout: 10_000 },
+    );
+
+    // Both runs settle while their adoptions' child reloads are held; any overlap of those reloads is a race.
+    const originalReload = AgentSession.prototype.reload;
+    let openGate: () => void = () => {};
+    const childGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let firstReached: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      firstReached = resolve;
+    });
+    const started: AgentSession[] = [];
+    let active = 0;
+    let overlapped = false;
+    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
+      if (this === root) return originalReload.call(this);
+      started.push(this);
+      active++;
+      if (active > 1) overlapped = true;
+      firstReached();
+      return childGate.then(() => originalReload.call(this)).finally(() => {
+        active--;
+      });
+    });
+
+    await reloadRoot(root);
+    release();
+    await reached;
+    await vi.waitFor(() => expect(children.every((child) => !child.isStreaming)).toBe(true), { timeout: 10_000 });
+    expect(started).toHaveLength(1);
+
+    openGate();
+    await vi.waitFor(() => expect(started).toHaveLength(2), { timeout: 10_000 });
+    await vi.waitFor(
+      () => {
+        const rows = liveRegistry().listAgents();
+        expect(rows).toHaveLength(2);
+        expect(rows.every((row) => row.status === "completed")).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    expect(overlapped).toBe(false);
+  }, 20_000);
+
   it("marks an idle subagent as error when its session fails to reload, and keeps its row", async () => {
     const root = session;
     if (!root) throw new Error("no session");
