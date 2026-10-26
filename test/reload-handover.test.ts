@@ -1,0 +1,247 @@
+/**
+ * reload-handover.test.ts — the hand-over unit: buffering until an activation
+ * attaches, the version filter on the published list, the DTO shape, and what
+ * the old manager moves (idle subtrees, queued specs, draining runs) when it
+ * shuts down for a reload. The manager's runner is mocked; sessions are fakes.
+ */
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentManager } from "../src/agent-manager.js";
+import {
+  type AgentDto,
+  type DrainingPool,
+  fromDto,
+  HANDOVER_KEY,
+  type HandoverEvent,
+  publishHandovers,
+  ReloadHandover,
+  takeHandovers,
+  toDto,
+  toSpawnData,
+} from "../src/reload-handover.js";
+import type { AgentRecord } from "../src/types.js";
+
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
+
+import { runAgent } from "../src/agent-runner.js";
+
+type RunResult = Awaited<ReturnType<typeof runAgent>>;
+
+const mockPi = {} as unknown as ExtensionAPI;
+const mockCtx = { cwd: "/tmp" } as unknown as ExtensionContext;
+
+const fakeSession = () =>
+  ({ dispose: vi.fn(), sessionId: "child", sessionManager: { getSessionFile: () => undefined } }) as unknown as AgentSession;
+
+const finishedRun = (text: string): RunResult =>
+  ({ responseText: text, session: fakeSession(), aborted: false, steered: false }) as unknown as RunResult;
+
+const dtoOf = (id: string): AgentDto => toDto({ id, status: "completed" } as unknown as AgentRecord);
+
+/** A run that stays in flight until the returned function is called. */
+function controlledRun(text: string): () => void {
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  vi.mocked(runAgent).mockImplementationOnce(async () => {
+    await gate;
+    return finishedRun(text);
+  });
+  return finish;
+}
+
+const stubPool: DrainingPool = { runningCount: () => 0, abortAll: () => 0, dispose: () => {}, listAgents: () => [] };
+
+const slotFreed: HandoverEvent = { kind: "slotFreed" };
+
+describe("ReloadHandover buffering", () => {
+  it("replays events buffered before attach in order, then delivers live events", () => {
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    handover.emit(slotFreed);
+    handover.emit({ kind: "usage", dto: dtoOf("u"), usage: { input: 1, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    const seen: HandoverEvent[] = [];
+    handover.attach((event) => seen.push(event));
+    expect(seen.map((e) => e.kind)).toEqual(["slotFreed", "usage"]);
+    handover.emit(slotFreed);
+    expect(seen).toHaveLength(3);
+  });
+
+  it("buffers again after detach, so an event is never lost between activations", () => {
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    const first: HandoverEvent[] = [];
+    handover.attach((event) => first.push(event));
+    handover.detach();
+    handover.emit(slotFreed);
+    expect(first).toHaveLength(0);
+    const second: HandoverEvent[] = [];
+    handover.attach((event) => second.push(event));
+    expect(second.map((e) => e.kind)).toEqual(["slotFreed"]);
+  });
+
+  it("hands out its items and queued specs once", () => {
+    const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], ["n1"], undefined, stubPool);
+    expect(handover.take().queued.map((q) => q.id)).toEqual(["q"]);
+    const again = handover.take();
+    expect(again.queued).toEqual([]);
+    expect(again.nudged).toEqual([]);
+  });
+});
+
+describe("published handovers", () => {
+  it("takes only the layout version it reads and keeps unknown layouts published", () => {
+    const sessionId = "session-version-filter";
+    const known = new ReloadHandover([], [], [], undefined, stubPool);
+    const future = Object.assign(new ReloadHandover([], [], [], undefined, stubPool), { version: 2 });
+    publishHandovers(sessionId, [known, future]);
+
+    expect(takeHandovers(sessionId)).toEqual([known]);
+    const store = (globalThis as Record<symbol, unknown>)[HANDOVER_KEY] as Map<string, ReloadHandover[]>;
+    expect(store.get(sessionId)).toEqual([future]);
+    expect(takeHandovers(sessionId)).toEqual([]);
+    publishHandovers(sessionId, []);
+  });
+});
+
+describe("DTO and spawn data", () => {
+  it("carries the record as plain data and leaves the live handles behind", () => {
+    const record = {
+      id: "a1",
+      type: "general-purpose",
+      description: "d",
+      status: "completed",
+      result: "r",
+      abortController: new AbortController(),
+      promise: Promise.resolve("r"),
+      outputCleanup: () => {},
+      session: fakeSession(),
+    } as unknown as AgentRecord;
+    const dto = toDto(record);
+    expect(dto).toMatchObject({ id: "a1", status: "completed", result: "r" });
+    expect(dto).not.toHaveProperty("session");
+    expect(dto).not.toHaveProperty("abortController");
+    expect(dto).not.toHaveProperty("promise");
+    expect(dto).not.toHaveProperty("outputCleanup");
+
+    const rebuilt = fromDto(dto, record.session);
+    expect(rebuilt.session).toBe(record.session);
+    expect(rebuilt.abortController).not.toBe(record.abortController);
+  });
+
+  it("drops the callbacks and the abort signal from spawn options", () => {
+    const data = toSpawnData({
+      description: "d",
+      signal: new AbortController().signal,
+      onToolActivity: () => {},
+      onTextDelta: () => {},
+    });
+    expect(data).toEqual({ description: "d" });
+  });
+});
+
+describe("AgentManager hand-over", () => {
+  const managers: AgentManager[] = [];
+  const track = (manager: AgentManager) => {
+    managers.push(manager);
+    return manager;
+  };
+
+  beforeEach(() => {
+    vi.mocked(runAgent).mockReset();
+  });
+
+  afterEach(() => {
+    for (const manager of managers.splice(0)) manager.dispose();
+  });
+
+  it("moves an idle record and keeps the record that is still running", async () => {
+    const manager = track(new AgentManager());
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    const idle = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
+    await vi.waitFor(() => expect(manager.getRecord(idle)?.settled).toBe(true));
+
+    const finish = controlledRun("busy");
+    const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const taken = manager.beginDrain([], undefined).take();
+
+    expect(taken.items.map((item) => item.dto.id)).toEqual([idle]);
+    expect(manager.getRecord(idle)).toBeUndefined();
+    expect(manager.getRecord(running)?.status).toBe("running");
+    finish();
+  });
+
+  it("moves queued spawns with their id and leaves them out of the old manager", () => {
+    const manager = track(new AgentManager(undefined, 1));
+    const finish = controlledRun("busy");
+    manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const queued = manager.spawn(mockPi, mockCtx, "general-purpose", "later", { description: "later", signal: new AbortController().signal });
+    expect(manager.getRecord(queued)?.status).toBe("queued");
+
+    const taken = manager.beginDrain([], undefined).take();
+
+    expect(taken.queued.map((spec) => spec.id)).toEqual([queued]);
+    expect(taken.queued[0]).toMatchObject({ type: "general-purpose", prompt: "later" });
+    expect(taken.queued[0].options).not.toHaveProperty("signal");
+    expect(manager.getRecord(queued)).toBeUndefined();
+    finish();
+  });
+
+  it("settles a draining run into the handover, not the old onComplete", async () => {
+    const onComplete = vi.fn();
+    const manager = track(new AgentManager(onComplete));
+    const finish = controlledRun("busy");
+    const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const handover = manager.beginDrain([], undefined);
+
+    finish();
+    await vi.waitFor(() => expect(handover.draining.runningCount()).toBe(0));
+
+    const events: HandoverEvent[] = [];
+    handover.attach((event) => events.push(event));
+    expect(events.map((e) => e.kind)).toEqual(["settled", "slotFreed"]);
+    const settled = events[0];
+    expect(settled.kind === "settled" && settled.items.map((item) => item.dto.id)).toEqual([running]);
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("counts draining runs against the new manager's maxConcurrent", async () => {
+    const old = track(new AgentManager(undefined, 1));
+    const finish = controlledRun("busy");
+    old.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const handover = old.beginDrain([], undefined);
+
+    const next = track(new AgentManager(undefined, 1));
+    next.setDrainingPools([handover.draining]);
+    const waiting = next.spawn(mockPi, mockCtx, "general-purpose", "waits", { description: "waits" });
+    expect(next.getRecord(waiting)?.status).toBe("queued");
+    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
+
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("waited"));
+    finish();
+    await vi.waitFor(() => expect(handover.draining.runningCount()).toBe(0));
+    next.setDrainingPools([]);
+    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2);
+  });
+
+  it("adopts a handed-over record as settled and notifies only when asked", async () => {
+    const old = track(new AgentManager());
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    const idle = old.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
+    await vi.waitFor(() => expect(old.getRecord(idle)?.settled).toBe(true));
+    const [item] = old.beginDrain([], undefined).take().items;
+
+    const onComplete = vi.fn();
+    const next = track(new AgentManager(onComplete));
+    const adopted = next.adopt(item, false);
+    expect(next.getRecord(idle)).toBe(adopted);
+    expect(adopted.settled).toBe(true);
+    expect(adopted.session).toBe(item.session);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    next.adopt({ dto: { ...item.dto, id: "other" } }, true);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
