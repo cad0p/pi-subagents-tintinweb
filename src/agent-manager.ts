@@ -761,17 +761,22 @@ export class AgentManager {
   }
 
   getRecord(id: string): AgentRecord | undefined {
-    return this.agents.get(id);
+    return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
   }
 
   listAgents(): AgentRecord[] {
-    return [...this.agents.values()].sort(
+    return [...this.agents.values(), ...this.drainingRecords()].sort(
       (a, b) => b.startedAt - a.startedAt,
     );
   }
 
+  /** Runs still held by draining activations. A row already adopted here is listed once, from this manager. */
+  private drainingRecords(): AgentRecord[] {
+    return this.drainingPools.flatMap((pool) => pool.listAgents()).filter((r) => !this.agents.has(r.id));
+  }
+
   abort(id: string): boolean {
-    const record = this.agents.get(id);
+    const record = this.getRecord(id);
     if (!record) return false;
 
     // Remove from queue if queued

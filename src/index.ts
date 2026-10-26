@@ -22,6 +22,7 @@ import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { publishImpl } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
@@ -633,11 +634,13 @@ export default function (pi: ExtensionAPI) {
       const record = manager.getRecord(id);
       return record?.parentAgentId ? undefined : record;
     },
-    listAgents: () => [...manager.listAgents(), ...held.flatMap((h) => h.draining.listAgents())],
+    listAgents: () => manager.listAgents(),
   };
   const isRoot = !inChildSessionContext();
   if (isRoot) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
+    // Children reloaded by the new code route their gate, onError and nested calls here.
+    publishImpl(() => ({ manager, pi }));
   }
 
   /**
@@ -1517,12 +1520,14 @@ Terse command-style prompts produce shallow, generic work.
         // The callback lazily reads record.outputFile (set right after spawn)
         // rather than closing over a value that doesn't exist yet.
         let id: string;
+        // Read now: a run can outlive a /reload, and the captured ctx is stale when onSessionCreated fires.
+        const sessionCwd = ctx.cwd;
         const origBgOnSession = bgCallbacks.onSessionCreated;
         bgCallbacks.onSessionCreated = (session: any) => {
           origBgOnSession(session);
           const rec = manager.getRecord(id);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, sessionCwd);
           }
         };
 

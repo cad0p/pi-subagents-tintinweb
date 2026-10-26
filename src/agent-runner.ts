@@ -26,6 +26,7 @@ import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
+import { routedExtensionError, routedRoot, routedScopeBlockReason } from "./impl-route.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
@@ -222,7 +223,7 @@ function toolNameMatcher(entries: readonly string[]): (name: string) => boolean 
 }
 
 /** Set once the child's tool scope is known; until then the gate admits everything. */
-type NestedCallGate = { allows?: (name: string) => boolean };
+export type NestedCallGate = { allows?: (name: string) => boolean };
 
 /** Name of the inline scope-gate extension; its loader path is `<inline:${SCOPE_GATE_NAME}>`. */
 const SCOPE_GATE_NAME = "pi-subagents-scope";
@@ -243,11 +244,11 @@ function scopeGateExtension(gate: NestedCallGate): InlineExtension {
     name: SCOPE_GATE_NAME,
     hidden: true,
     factory: (ext) => {
-      ext.on("tool_call", (event) =>
-        gate.allows?.(event.toolName) === false
-          ? { block: true, reason: `Tool "${event.toolName}" is not available to this subagent.` }
-          : undefined,
-      );
+      // Read per call through impl-route: a child reloaded by the new code runs the live gate.
+      ext.on("tool_call", (event) => {
+        const reason = routedScopeBlockReason(gate, event.toolName);
+        return reason === undefined ? undefined : { block: true, reason };
+      });
     },
   };
 }
@@ -581,10 +582,32 @@ export async function runAgent(
   // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
   const configCwd = options.configCwd ?? effectiveCwd;
 
-  const env = await detectEnv(options.pi, effectiveCwd);
-
+  // Snapshot every live parent handle before the first await. A /reload that
+  // lands during the prelude leaves the old ctx and pi stale, and a read after
+  // that throws (plan M1), so the rest of runAgent uses these locals only.
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
+  // The child inherits the parent's project-trust decision. pi's SettingsManager
+  // defaults to trusted, so without this a subagent in a project the user declined to
+  // trust would load its `.pi` extensions and settings, and pi's built-in MCP would
+  // start the stdio servers in its `.pi/mcp.json`.
+  const projectTrusted = ctx.isProjectTrusted();
+  // Tools the parent session currently declares. A `defaultActive: false` tool —
+  // pi's `codemode` and `tool_search`, and anything an extension registers dormant —
+  // is activated in the child only when the parent has it active or this agent names
+  // its extension. Otherwise every subagent would carry codemode's tool spec, and the
+  // capability that comes with it, for a user who never turned it on: "as in the main
+  // session" has to mean the main session's actual tool set, not every tool that
+  // happens to be loaded. Read per run: the parent's set changes with `--tools` and
+  // with whatever `tool_search` activated.
+  const parentActiveTools = new Set(options.pi.getActiveTools?.() ?? []);
+  const parentModel = ctx.model;
+  const parentModelRegistry = ctx.modelRegistry;
+  const parentScopedModels = ctx.scopedModels;
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
+
+  const env = await detectEnv(options.pi, effectiveCwd);
 
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = { worktree: options.worktree };
@@ -705,11 +728,6 @@ export async function runAgent(
           };
         };
 
-  // The child inherits the parent's project-trust decision. pi's SettingsManager
-  // defaults to trusted, so without this a subagent in a project the user declined to
-  // trust would load its `.pi` extensions and settings, and pi's built-in MCP would
-  // start the stdio servers in its `.pi/mcp.json`.
-  const projectTrusted = ctx.isProjectTrusted();
   const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
   // That trust covers the parent's project (`configCwd`), not a directory a spawn was
   // sent into. The session answers `ctx.isProjectTrusted()` for its own cwd, which
@@ -743,8 +761,13 @@ export async function runAgent(
     : undefined;
   const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
     ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
-        pi: options.pi,
+        // Getters: a child reloaded by the new code keeps these closures, so the live root is read per call.
+        get manager() {
+          return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).manager;
+        },
+        get pi() {
+          return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).pi;
+        },
         parentAgentId: nestedRuntime.parentAgentId,
         depth: nestedRuntime.depth,
         maxSubagentDepth: effectiveMaxDepth,
@@ -764,15 +787,6 @@ export async function runAgent(
   // Opt-in flip: when any `ext:` selector is present, extension tools become an
   // explicit allowlist — a loaded extension not named by a selector contributes
   // no tools (its handlers still ran), and `ext:foo/bar` narrows `foo` to `bar`.
-  // Tools the parent session currently declares. A `defaultActive: false` tool —
-  // pi's `codemode` and `tool_search`, and anything an extension registers dormant —
-  // is activated in the child only when the parent has it active or this agent names
-  // its extension. Otherwise every subagent would carry codemode's tool spec, and the
-  // capability that comes with it, for a user who never turned it on: "as in the main
-  // session" has to mean the main session's actual tool set, not every tool that
-  // happens to be loaded. Read per run: the parent's set changes with `--tools` and
-  // with whatever `tool_search` activated.
-  const parentActiveTools = new Set(options.pi.getActiveTools?.() ?? []);
   // Tools an `ext:` selector names explicitly. Naming an extension is the agent
   // saying it wants its tools, which is the same consent `--tools` gives pi.
   const explicitlySelected = new Set<string>();
@@ -958,7 +972,7 @@ export async function runAgent(
 
   // Resolve model: explicit option > config.model > parent model
   const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
+    parentModel, parentModelRegistry, agentConfig?.model,
   );
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
@@ -969,8 +983,8 @@ export async function runAgent(
   // fallback consumer can never bind — an empty scope is the honest value.
   const scopedModels = resolveScopedModels(
     options.isolated ? false : agentConfig?.scopedModels,
-    ctx.scopedModels,
-    ctx.modelRegistry,
+    parentScopedModels,
+    parentModelRegistry,
     (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
   );
   // An explicit list under isolation is silently unreachable — flag it the
@@ -1018,12 +1032,11 @@ export async function runAgent(
   // `sessionDir` setting or `--session <file>` when it opened the parent, so the
   // parent is asked rather than those sources being re-read here. A nested
   // agent's parent is its spawner, so its child follows the spawner's directory.
-  const parentSession = ctx.sessionManager.getSessionFile();
   const sessionManager = parentSession === undefined
     ? SessionManager.inMemory(effectiveCwd)
     : SessionManager.create(
         effectiveCwd,
-        configuredSessionDir ?? ctx.sessionManager.getSessionDir(),
+        configuredSessionDir ?? parentSessionDir,
         { parentSession },
       );
 
@@ -1032,7 +1045,7 @@ export async function runAgent(
   // is what createAgentSession needs to keep extension-registered providers
   // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
   const parentModelRuntime = (
-    ctx.modelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
+    parentModelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
   ).runtime;
   const sessionOpts: AgentSessionOptions = {
     cwd: effectiveCwd,
@@ -1080,12 +1093,7 @@ export async function runAgent(
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
   await session.bindExtensions({
-    onError: (err) => {
-      options.onToolActivity?.({
-        type: "end",
-        toolName: `extension-error:${err.extensionPath}`,
-      });
-    },
+    onError: (err) => routedExtensionError(err.extensionPath, options.onToolActivity),
   });
 
   options.onSessionCreated?.(session);
