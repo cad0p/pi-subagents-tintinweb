@@ -770,6 +770,11 @@ export class AgentManager {
     );
   }
 
+  /** True while a draining activation still holds the run, before it is adopted here. */
+  isDraining(id: string): boolean {
+    return this.drainingRecords().some((r) => r.id === id);
+  }
+
   /** Runs still held by draining activations. A row already adopted here is listed once, from this manager. */
   private drainingRecords(): AgentRecord[] {
     return this.drainingPools.flatMap((pool) => pool.listAgents()).filter((r) => !this.agents.has(r.id));

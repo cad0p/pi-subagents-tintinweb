@@ -22,7 +22,7 @@ import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { publishImpl } from "./impl-route.js";
+import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
@@ -79,8 +79,9 @@ function applyToolActivity(state: AgentActivity, activity: { type: "start" | "en
 /**
  * Create an AgentActivity state and spawn callbacks for tracking tool usage.
  * Used by the background spawn and resume paths to avoid duplication.
+ * `agentId` is read per event: a child reloaded by a newer activation reports to that activation's entry.
  */
-function createActivityTracker(maxTurns?: number) {
+function createActivityTracker(agentId: () => string | undefined, maxTurns?: number) {
   const state: AgentActivity = {
     activeTools: new Map(),
     toolUses: 0,
@@ -92,7 +93,8 @@ function createActivityTracker(maxTurns?: number) {
   };
 
   const callbacks = {
-    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => applyToolActivity(state, activity),
+    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) =>
+      routedToolActivity(agentId(), activity, (local) => applyToolActivity(state, local)),
     onTextDelta: (_delta: string, fullText: string) => {
       state.responseText = fullText;
     },
@@ -843,6 +845,24 @@ export default function (pi: ExtensionAPI) {
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
     manager.setDrainingPools(held.map((h) => h.draining));
+    if (held.length > 0) {
+      // A draining run has no activity entry in this activation: seed one so the widget and fleet show it.
+      widget.setUICtx(ctx.ui as UICtx);
+      fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+      for (const record of manager.listAgents()) {
+        if (record.status !== "running") continue;
+        agentActivity.set(record.id, {
+          activeTools: new Map(),
+          toolUses: record.toolUses,
+          turnCount: record.turnCount ?? 1,
+          maxTurns: record.effectiveMaxTurns,
+          responseText: "",
+          session: record.session,
+          lifetimeUsage: record.lifetimeUsage,
+        });
+      }
+      widget.ensureTimer();
+    }
     for (const h of held) {
       const taken = h.take();
       if (taken.unreported) pendingUsage.add(taken.unreported);
@@ -876,6 +896,8 @@ export default function (pi: ExtensionAPI) {
       }
     }
     manager.adopt(item, notify);
+    agentActivity.delete(item.dto.id);
+    widget.markFinished(item.dto.id);
   }
 
   /** A draining run settled, or reported usage: the reloaded activation takes it over. */
@@ -897,6 +919,8 @@ export default function (pi: ExtensionAPI) {
     }
     held = held.filter((h) => h.draining.runningCount() > 0);
     manager.setDrainingPools(held.map((h) => h.draining));
+    widget.update();
+    fleet.update();
   }
 
   // Live widget: show running agents above editor.
@@ -1442,7 +1466,7 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
         if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
-        const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(existing.effectiveMaxTurns);
+        const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(() => existing.id, existing.effectiveMaxTurns);
         const resumeStart = existing.session.messages.length;
         const record = manager.resume(params.resume, params.prompt, resumeCallbacks);
         if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
@@ -1523,7 +1547,7 @@ Terse command-style prompts produce shallow, generic work.
           tags: agentTags.length > 0 ? agentTags : undefined,
         };
 
-        const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+        const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(() => id, effectiveMaxTurns);
 
         // Wrap onSessionCreated to wire output file streaming.
         // The callback lazily reads record.outputFile (set right after spawn)

@@ -15,6 +15,7 @@ import {
   AgentSession,
   createAgentSession,
   DefaultResourceLoader,
+  type ExtensionUIContext,
   getAgentDir,
   initTheme,
   SessionManager,
@@ -95,6 +96,34 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
   return fauxAssistantMessage([fauxText("root-ok")]);
 }
 
+type WidgetFactory = (tui: unknown, theme: unknown) => { render(width: number): string[] };
+
+/** Widget content the root registers through its UI context, by widget key. */
+const widgets = new Map<string, WidgetFactory>();
+
+/** A UI context that records widget content and ignores the rest. */
+function recordingUi(): ExtensionUIContext {
+  return {
+    setWidget: (key: string, content: WidgetFactory | undefined) => {
+      if (content) widgets.set(key, content);
+      else widgets.delete(key);
+    },
+    setStatus: () => {},
+    onTerminalInput: () => () => {},
+    getEditorText: () => "",
+    notify: () => {},
+    custom: () => new Promise(() => {}),
+  } as unknown as ExtensionUIContext;
+}
+
+/** Renders a registered widget with a plain theme; "" when the widget is not registered. */
+function renderedWidget(key: string): string {
+  const factory = widgets.get(key);
+  if (!factory) return "";
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render(120).join("\n");
+}
+
 describe("subagents across a real /reload (faux provider)", () => {
   let tmp: string;
   let prevAgentDir: string | undefined;
@@ -119,6 +148,7 @@ describe("subagents across a real /reload (faux provider)", () => {
   beforeEach(async () => {
     initTheme("dark");
     childSignal = undefined;
+    widgets.clear();
     delete (globalThis as unknown as Record<symbol, unknown>)[IMPL_KEY];
     tmp = mkdtempSync(join(tmpdir(), "reload-e2e-"));
     prevAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -154,7 +184,7 @@ describe("subagents across a real /reload (faux provider)", () => {
       }),
     });
     // A reload fires session_start only for a bound session, as interactive and print mode bind theirs.
-    await created.session.bindExtensions({ shutdownHandler: () => {} });
+    await created.session.bindExtensions({ shutdownHandler: () => {}, uiContext: recordingUi() });
     session = created.session;
   });
 
@@ -192,6 +222,23 @@ describe("subagents across a real /reload (faux provider)", () => {
       },
       { timeout: 10_000 },
     );
+  }, 20_000);
+
+  it("lists a draining subagent as (draining) in the widget after /reload, and drops the marker once it settles", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+
+    await reloadRoot(root);
+    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("(draining)"), { timeout: 10_000 });
+
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    await vi.waitFor(() => expect(renderedWidget("agents")).not.toContain("(draining)"), { timeout: 10_000 });
+    expect(renderedWidget("agents")).toContain("reload agent");
   }, 20_000);
 
   it("moves an idle subagent to the reloaded root with its result", async () => {

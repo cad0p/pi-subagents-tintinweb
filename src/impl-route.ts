@@ -64,6 +64,12 @@ export function routedExtensionError(extensionPath: string, agentId: string | un
   (live ?? onToolActivity)?.({ type: "end", toolName: `extension-error:${extensionPath}` });
 }
 
+/** Routes a child's tool event to its live activity sink, else to the caller's. */
+export function routedToolActivity(agentId: string | undefined, activity: ToolActivity, fallback: ActivitySink): void {
+  const live = agentId === undefined ? undefined : liveImpl()?.activityOf(agentId);
+  (live ?? fallback)(activity);
+}
+
 /** The live root's manager and pi, or the caller's own when no root has published. */
 export function routedRoot(fallback: RootRoute): RootRoute {
   return liveImpl()?.root() ?? fallback;
