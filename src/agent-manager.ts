@@ -747,7 +747,7 @@ export class AgentManager {
    * method because they await delivery.
    */
   steer(id: string, message: string): boolean {
-    const record = this.agents.get(id);
+    const record = this.getRecord(id);
     if (!record) return false;
     if (record.status !== "running" && record.status !== "queued") return false;
     if (record.session) {

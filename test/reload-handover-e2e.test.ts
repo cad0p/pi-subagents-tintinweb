@@ -21,6 +21,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
@@ -55,6 +56,18 @@ function publishedRoot(): RootRoute {
   const published = (globalThis as unknown as Record<symbol, ImplV1 | undefined>)[IMPL_KEY];
   if (!published) throw new Error("no root route published on globalThis");
   return published.root();
+}
+
+/** Steer over the same bus a cross-extension caller uses (subagents:rpc:steer). */
+function steerOverBus(events: EventBus, agentId: string, message: string): Promise<RpcReply> {
+  const requestId = `steer-${agentId}`;
+  return new Promise((resolve) => {
+    const off = events.on(`subagents:rpc:steer:reply:${requestId}`, (reply) => {
+      off();
+      resolve(reply as RpcReply);
+    });
+    events.emit("subagents:rpc:steer", { requestId, agentId, message });
+  });
 }
 
 let release: () => void = () => {};
@@ -258,6 +271,26 @@ describe("subagents across a real /reload (faux provider)", () => {
     await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     expect(childSignal?.aborted).toBe(true);
     expect(draining?.abortController?.signal.aborted).toBe(true);
+  }, 20_000);
+
+  it("steers a draining subagent over the reloaded root's bus", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    await reloadRoot(root);
+    const after = liveRegistry();
+    const draining = after.listAgents().find((r) => r.status === "running");
+    if (!draining?.session) throw new Error("no draining session");
+    const steer = vi.spyOn(draining.session, "steer");
+    expect(await steerOverBus(publishedRoot().pi.events, draining.id, "STEER-NOTE")).toEqual({ success: true });
+    expect(steer).toHaveBeenCalledWith("STEER-NOTE");
+
+    release();
+    await vi.waitFor(
+      () => expect(after.listAgents().find((r) => r.id === draining.id)?.status).toBe("completed"),
+      { timeout: 10_000 },
+    );
   }, 20_000);
 
   it("publishes the root route that children reloaded by the new code reach", async () => {
