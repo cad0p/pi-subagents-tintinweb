@@ -457,6 +457,31 @@ describe("subagents across a real /reload (faux provider)", () => {
     );
   }, 20_000);
 
+  it("reports a draining subagent's usage once, through the reloaded root", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await reloadRoot(root);
+
+    const reported: Array<{ id: string; usage: { totalTokens: number } }> = [];
+    const off = publishedRoot().pi.events.on("subagents:usage", (event) => {
+      reported.push(event as { id: string; usage: { totalTokens: number } });
+    });
+    // The completion notice is not under test: keep it off the session that the test disposes.
+    vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    release();
+    // The run is adopted after its usage report: the adoption is the last step of its hand-over.
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(id)?.status).toBe("completed"), { timeout: 10_000 });
+    off();
+    // The adopted record carries the run's whole lifetime usage; the reports must add up to it, each delivered once.
+    const lifetime = publishedRoot().manager.getRecord(id)?.lifetimeUsage;
+    const total = (lifetime?.input ?? 0) + (lifetime?.output ?? 0) + (lifetime?.cacheRead ?? 0) + (lifetime?.cacheWrite ?? 0);
+    expect(total).toBeGreaterThan(0);
+    expect(reported.filter((event) => event.id === id).map((event) => event.usage.totalTokens)).toEqual([total]);
+  }, 20_000);
+
   it("publishes the root route that children reloaded by the new code reach", async () => {
     const root = session;
     if (!root) throw new Error("no session");

@@ -841,6 +841,8 @@ export default function (pi: ExtensionAPI) {
     // `/new` and `/fork`, where the process lives on and the next session starts
     // emitting `subagents:usage` again. The reason is carried so a listener can
     // tell a final flush from a mid-process one.
+    // A `reload` is a mid-process dispose: the process keeps running, and a run still draining moves to
+    // the reloaded activation (reload-handover.ts), which keeps reporting its usage on this bus.
     pi.events.emit("subagents:disposed", { reason: event.reason });
   });
 
