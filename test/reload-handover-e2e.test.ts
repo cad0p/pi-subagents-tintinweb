@@ -31,6 +31,7 @@ import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 const CHILD_TASK = "CHILD-TASK";
+const PARENT_TASK = "PARENT-TASK";
 const FAUX_MODEL = { id: "faux-1", contextWindow: 200_000 };
 
 type FauxRegistration = ReturnType<typeof registerFauxProvider>;
@@ -79,6 +80,16 @@ let childSignal: AbortSignal | undefined;
 let childToolStep: Promise<void> | undefined;
 /** The run a root turn resumes through the Agent tool when it is told "resume-now". */
 let resumeTarget = "";
+/** Holds a draining parent's first turn until the test has reloaded the root. */
+let parentGate: Promise<void> = Promise.resolve();
+let releaseParent: () => void = () => {};
+/** Holds the parent's steer call until the test has the nested child running. */
+let steerGate: Promise<void> = Promise.resolve();
+let releaseSteer: () => void = () => {};
+/** Set when the parent's last get_subagent_result output carries the nested child's answer. */
+let parentSawChild = false;
+/** Set once the parent has settled: its next run spawns the nested child. */
+let parentNests = false;
 
 // "spawn-now" makes the root call the Agent tool; the child (last message is its
 // CHILD-TASK prompt) waits on the gate; every other root turn just answers.
@@ -92,6 +103,42 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
       return childToolStep.then(() => fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]));
     }
     return gate.then(() => fauxAssistantMessage([fauxText("CHILD-DONE")]));
+  }
+  const parentTurn = context.messages.find((m) => m.role === "user");
+  if (parentTurn && JSON.stringify(parentTurn.content).includes(PARENT_TASK)) {
+    const results = context.messages.filter((m) => m.role === "toolResult");
+    if (results.length === 0 && !parentNests) {
+      return parentGate.then(() => fauxAssistantMessage([fauxText("PARENT-DONE")]));
+    }
+    if (results.length === 0) {
+      return fauxAssistantMessage([
+        fauxToolCall("Agent", {
+          description: "nested agent",
+          prompt: `${CHILD_TASK} nested`,
+          subagent_type: "general-purpose",
+        }),
+      ]);
+    }
+    const nestedId = /Agent ID: ([\w-]+)/.exec(JSON.stringify(results[0]?.content ?? ""))?.[1] ?? "";
+    if (results.length === 1) {
+      return steerGate.then(() =>
+        fauxAssistantMessage([fauxToolCall("steer_subagent", { agent_id: nestedId, message: "STEER-NOTE" })]),
+      );
+    }
+    if (results.length === 2) {
+      return fauxAssistantMessage([fauxToolCall("get_subagent_result", { agent_id: nestedId, wait: true })]);
+    }
+    parentSawChild = JSON.stringify(results[2]?.content ?? "").includes("CHILD-DONE");
+    return fauxAssistantMessage([fauxText("PARENT-FINISHED")]);
+  }
+  if (last?.role === "user" && text.includes("spawn-parent-now")) {
+    return fauxAssistantMessage([
+      fauxToolCall("Agent", {
+        description: "parent agent",
+        prompt: `${PARENT_TASK} work`,
+        subagent_type: "nester",
+      }),
+    ]);
   }
   if (last?.role === "user" && text.includes("bash-now")) {
     return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
@@ -181,6 +228,14 @@ describe("subagents across a real /reload (faux provider)", () => {
     childSignal = undefined;
     childToolStep = undefined;
     resumeTarget = "";
+    parentSawChild = false;
+    parentNests = false;
+    parentGate = new Promise<void>((resolve) => {
+      releaseParent = resolve;
+    });
+    steerGate = new Promise<void>((resolve) => {
+      releaseSteer = resolve;
+    });
     widgets.clear();
     delete (globalThis as unknown as Record<symbol, unknown>)[IMPL_KEY];
     tmp = mkdtempSync(join(tmpdir(), "reload-e2e-"));
@@ -689,6 +744,46 @@ describe("subagents across a real /reload (faux provider)", () => {
       () => expect(after.listAgents().find((r) => r.id === draining.id)?.status).toBe("completed"),
       { timeout: 10_000 },
     );
+  }, 20_000);
+
+  it("drives a nested spawn, get_subagent_result and steer from a draining parent", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    // Only a parent that lists general-purpose in allowed_subagents gets the Agent tool for its nested spawn.
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    await reloadRoot(root);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("running");
+
+    // The parent settles first: the new manager adopts the settled run, and the nested spawn comes from its resumed run.
+    vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    releaseParent();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    // Register the faux api again so the resumed run can stream.
+    faux = registerFauxProvider({ api: faux.api, provider: "faux", models: [FAUX_MODEL] });
+    faux.setResponses(scripted());
+    parentNests = true;
+    resumeTarget = parentId;
+    await root.prompt("resume-now");
+    const nestedRunning = () => liveRegistry().listAgents().find((r) => r.id !== parentId && r.status === "running");
+    await vi.waitFor(() => expect(nestedRunning()?.session).toBeDefined(), { timeout: 10_000 });
+    const nested = nestedRunning();
+    if (!nested?.session) throw new Error("no nested session");
+    const steer = vi.spyOn(nested.session, "steer");
+    releaseSteer();
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledWith("STEER-NOTE"), { timeout: 10_000 });
+
+    release();
+    await vi.waitFor(
+      () => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"),
+      { timeout: 10_000 },
+    );
+    expect(parentSawChild).toBe(true);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-FINISHED");
   }, 20_000);
 
   it("reports a draining subagent's usage once, through the reloaded root", async () => {
