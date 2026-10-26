@@ -28,7 +28,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers } from "./reload-handover.js";
+import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -739,7 +739,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
@@ -784,7 +784,10 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:ready", {});
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
-    if (event.reason === "reload" && isRoot) await adoptHandovers(ctx);
+    if (isRoot) {
+      await adoptHandovers(ctx);
+      stopStranded(ctx.sessionManager.getSessionId());
+    }
   });
 
   pi.on("session_before_switch", () => {
@@ -940,6 +943,18 @@ export default function (pi: ExtensionAPI) {
         retireDrained();
       })
       .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
+  }
+
+  /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
+  function stopStranded(sessionId: string): void {
+    for (const h of takeStrandedHandovers(sessionId)) {
+      h.detach();
+      const unreported = h.take().unreported;
+      if (unreported) pendingUsage.add(unreported);
+      for (const item of h.idleItems()) item.session?.dispose();
+      h.draining.abortAll();
+      h.draining.dispose();
+    }
   }
 
   /** Drops a draining pool once its last record has left it: a settled parent waits for its unwinding child to hand over. */

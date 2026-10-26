@@ -232,6 +232,7 @@ describe("subagents across a real /reload (faux provider)", () => {
   let tmp: string;
   let prevAgentDir: string | undefined;
   let session: AgentSession | undefined;
+  let other: AgentSession | undefined;
   let faux: FauxRegistration;
 
   function scripted() {
@@ -247,6 +248,37 @@ describe("subagents across a real /reload (faux provider)", () => {
     await root.reload();
     faux = registerFauxProvider({ api: faux.api, provider: "faux", models: [FAUX_MODEL] });
     faux.setResponses(scripted());
+  }
+
+  /** A bound root session on the test cwd with this extension loaded by path. Every call opens a new session id. */
+  async function startSession(): Promise<AgentSession> {
+    const agentDir = getAgentDir();
+    const loader = new DefaultResourceLoader({
+      cwd: tmp,
+      agentDir,
+      additionalExtensionPaths: [EXTENSION_PATH],
+      systemPromptOverride: () => "You are a test agent.",
+      appendSystemPromptOverride: () => [],
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+    const created = await createAgentSession({
+      cwd: tmp,
+      agentDir,
+      model: faux.getModel(),
+      modelRuntime: await createFauxModelRuntime(faux, join(tmp, "auth.json")),
+      resourceLoader: loader,
+      sessionManager: SessionManager.create(tmp, join(tmp, "sessions")),
+      settingsManager: SettingsManager.inMemory({
+        compaction: { enabled: false },
+        retry: { enabled: false },
+      }),
+    });
+    // A reload fires session_start only for a bound session, as interactive and print mode bind theirs.
+    await created.session.bindExtensions({ shutdownHandler: () => {}, uiContext: recordingUi() });
+    return created.session;
   }
 
   beforeEach(async () => {
@@ -275,38 +307,15 @@ describe("subagents across a real /reload (faux provider)", () => {
 
     faux = registerFauxProvider({ provider: "faux", models: [FAUX_MODEL] });
     faux.setResponses(scripted());
-    const agentDir = getAgentDir();
-    const loader = new DefaultResourceLoader({
-      cwd: tmp,
-      agentDir,
-      additionalExtensionPaths: [EXTENSION_PATH],
-      systemPromptOverride: () => "You are a test agent.",
-      appendSystemPromptOverride: () => [],
-      noPromptTemplates: true,
-      noThemes: true,
-      noContextFiles: true,
-    });
-    await loader.reload();
-    const created = await createAgentSession({
-      cwd: tmp,
-      agentDir,
-      model: faux.getModel(),
-      modelRuntime: await createFauxModelRuntime(faux, join(tmp, "auth.json")),
-      resourceLoader: loader,
-      sessionManager: SessionManager.create(tmp, join(tmp, "sessions")),
-      settingsManager: SettingsManager.inMemory({
-        compaction: { enabled: false },
-        retry: { enabled: false },
-      }),
-    });
-    // A reload fires session_start only for a bound session, as interactive and print mode bind theirs.
-    await created.session.bindExtensions({ shutdownHandler: () => {}, uiContext: recordingUi() });
-    session = created.session;
+    session = await startSession();
   });
 
   afterEach(async () => {
     release();
     vi.restoreAllMocks();
+    await other?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    other?.dispose();
+    other = undefined;
     // Quit the session before disposing it: dispose() invalidates the extension ctx without
     // session_shutdown, so a nudge armed by this test would fire into the next one.
     await session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -877,6 +886,20 @@ describe("subagents across a real /reload (faux provider)", () => {
     await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     expect(childSignal?.aborted).toBe(true);
     expect(draining?.abortController?.signal.aborted).toBe(true);
+  }, 20_000);
+
+  it("stops a run a reload handed over once a session starts that does not adopt it", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    // The reload's shutdown publishes the run, but no reloaded activation takes it over.
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+    expect(childSignal?.aborted).toBe(false);
+
+    other = await startSession();
+
+    await vi.waitFor(() => expect(childSignal?.aborted).toBe(true), { timeout: 10_000 });
   }, 20_000);
 
   it("steers a draining subagent over the reloaded root's bus", async () => {

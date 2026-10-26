@@ -185,3 +185,8 @@ export function takeHandovers(sessionId: string): ReloadHandover[] {
   else store().delete(sessionId);
   return list.filter((h) => h.version === HANDOVER_VERSION);
 }
+
+/** Takes the handovers published under any other session id: the session that published them has been replaced. */
+export function takeStrandedHandovers(sessionId: string): ReloadHandover[] {
+  return [...store().keys()].filter((id) => id !== sessionId).flatMap((id) => takeHandovers(id));
+}
