@@ -993,8 +993,15 @@ export async function runAgent(
       !disallowed?.(name) &&
       (toolNames.includes(name) || nestedToolNames.has(name) || scopedExtensionTools(loader.getExtensions()).has(name)));
 
-  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
-  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
+  // A relative `session_dir` resolves from the agent's cwd before worktree
+  // isolation, never from the isolation worktree (deleted at cleanup).
+  // `worktree.parentCwd` is that cwd: agent-manager sets it to the same
+  // `baseCwd` it uses for the worktree copy. Without a worktree it is unset and
+  // `effectiveCwd` is already the agent's cwd.
+  const configuredSessionDir = resolveConfiguredSessionDir(
+    agentConfig?.sessionDir,
+    options.worktree?.parentCwd ?? effectiveCwd,
+  );
   // A subagent session is ALWAYS written to disk while it runs: a crashed or
   // killed run must leave a transcript pi's /resume can recover. Retention
   // after the run settles is the manager's decision (`persist_session`), never a
@@ -1005,12 +1012,18 @@ export async function runAgent(
   // absence of a session file is the exact signal — an argv scan would miss the
   // SDK host and let an ephemeral session leave children on disk.
   // The same path is `parentSession`, which nests the child under its spawner.
+  //
+  // Without `session_dir`, the file goes in the parent session's own directory.
+  // pi already resolved `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, the
+  // `sessionDir` setting or `--session <file>` when it opened the parent, so the
+  // parent is asked rather than those sources being re-read here. A nested
+  // agent's parent is its spawner, so its child follows the spawner's directory.
   const parentSession = ctx.sessionManager.getSessionFile();
   const sessionManager = parentSession === undefined
     ? SessionManager.inMemory(effectiveCwd)
     : SessionManager.create(
         effectiveCwd,
-        configuredSessionDir ?? defaultSessionDir,
+        configuredSessionDir ?? ctx.sessionManager.getSessionDir(),
         { parentSession },
       );
 

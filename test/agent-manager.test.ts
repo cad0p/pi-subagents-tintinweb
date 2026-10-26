@@ -661,6 +661,9 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
       mockCtx, "general-purpose", "test",
       expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp" }),
     );
+    // parentCwd is the base a relative `session_dir` resolves from in the
+    // runner: the caller's cwd, never the copy.
+    expect(vi.mocked(runAgent).mock.lastCall![3].worktree).toEqual({ path: "/wt/copy/packages/api", parentCwd: "/" });
     expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
   });
 
@@ -685,6 +688,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     const opts = vi.mocked(runAgent).mock.lastCall![3];
     expect(opts.cwd).toBe("/wt/copy");
     expect(opts.configCwd).toBeUndefined();
+    expect(opts.worktree).toEqual({ path: "/wt/copy", parentCwd: "/tmp" });
   });
 
   it("relative cwd throws immediately; no orphan record", () => {
