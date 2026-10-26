@@ -506,6 +506,27 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(sent).not.toHaveBeenCalled();
   }, 20_000);
 
+  it("removes its own registry entry when the session quits", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const globals = globalThis as unknown as Record<symbol, unknown>;
+    expect(globals[MANAGER_KEY]).toBeDefined();
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    expect(globals[MANAGER_KEY]).toBeUndefined();
+  }, 20_000);
+
+  it("leaves another root's registry entry in place when this root quits", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const globals = globalThis as unknown as Record<symbol, unknown>;
+    // Another root claimed the slot after this one published: its entry must survive this root's shutdown.
+    const other = { listAgents: () => [] };
+    globals[MANAGER_KEY] = other;
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    expect(globals[MANAGER_KEY]).toBe(other);
+    delete globals[MANAGER_KEY];
+  }, 20_000);
+
   it("sends no completion notification once the session has quit", async () => {
     const root = session;
     if (!root) throw new Error("no session");
