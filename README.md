@@ -380,7 +380,7 @@ Resumed runs (`resume`) are exempt: a resume starts immediately, occupies a pool
 
 ## Session Persistence
 
-Every subagent run is written to a normal pi session file while it runs — default agents included — so a crashed, killed, or interrupted run leaves a transcript pi's `/resume` can recover. The child's session header records the parent session file as `parentSession`, so subagent sessions nest under the run that spawned them in pi's `/resume` picker.
+Every subagent run is written to a normal pi session file while it runs — default agents included — so a crashed, killed, or interrupted run leaves a transcript pi's `/resume` can recover. The child's session header records the parent session file as `parentSession`, so subagent sessions nest under the run that spawned them in pi's `/resume` picker. A worktree-isolated child records its worktree as its cwd, so under a custom session directory (`--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting) it shows only in `/resume`'s all-sessions scope ([#88](https://github.com/cad0p/pi-subagents-tintinweb/issues/88)).
 
 Retention is decided when the run settles, not when the session is created:
 
