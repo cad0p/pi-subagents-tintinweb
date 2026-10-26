@@ -85,13 +85,20 @@ describe("impl-route published root", () => {
     expect(routedScopeBlockReason(allowAll, "read")).toBe("routed");
   });
 
-  it("ignores a published layout it does not read and keeps the local rule", () => {
+  it("reads a later layout that keeps the v1 members and ignores its extra fields", () => {
     slot[IMPL_KEY] = {
       version: 2,
-      scopeBlockReason: () => "routed",
+      futureField: "ignored",
+      scopeBlockReason: () => "v2 rule",
       activityOf: () => undefined,
       root: () => rootWith("v2"),
     };
+    expect(routedScopeBlockReason(denyBash, "read")).toBe("v2 rule");
+    expect(routedRoot(rootWith("local")).manager).toEqual({ label: "v2" });
+  });
+
+  it("keeps the local rule when a published layout lacks a v1 member as a function", () => {
+    slot[IMPL_KEY] = { version: 2, scopeBlockReason: () => "v2 rule", activityOf: () => undefined, root: "not a function" };
     expect(routedScopeBlockReason(denyBash, "bash")).toBe('Tool "bash" is not available to this subagent.');
     expect(routedRoot(rootWith("local")).manager).toEqual({ label: "local" });
   });

@@ -93,15 +93,16 @@ describe("ReloadHandover buffering", () => {
 });
 
 describe("published handovers", () => {
-  it("takes only the layout version it reads and keeps unknown layouts published", () => {
+  it("takes any layout that carries the members it calls and keeps the others published", () => {
     const sessionId = "session-version-filter";
     const known = new ReloadHandover([], [], [], undefined, stubPool);
-    const future = Object.assign(new ReloadHandover([], [], [], undefined, stubPool), { version: 2 });
-    publishHandovers(sessionId, [known, future]);
+    const later = Object.assign(new ReloadHandover([], [], [], undefined, stubPool), { version: 2, futureField: true });
+    const unreadable = { version: 3, draining: stubPool, activity: new Map() } as unknown as ReloadHandover;
+    publishHandovers(sessionId, [known, later, unreadable]);
 
-    expect(takeHandovers(sessionId)).toEqual([known]);
+    expect(takeHandovers(sessionId)).toEqual([known, later]);
     const store = (globalThis as Record<symbol, unknown>)[HANDOVER_KEY] as Map<string, ReloadHandover[]>;
-    expect(store.get(sessionId)).toEqual([future]);
+    expect(store.get(sessionId)).toEqual([unreadable]);
     expect(takeHandovers(sessionId)).toEqual([]);
     publishHandovers(sessionId, []);
   });

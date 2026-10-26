@@ -148,6 +148,21 @@ describe("impl-route published rules reach a child built earlier", () => {
     await expect(dispatchToolCall(child, EXT_TOOL)).resolves.toMatchObject({ block: true, reason: "newer rule" });
   });
 
+  it("runs the rules of a later layout that keeps the v1 members", async () => {
+    const child = await buildChild();
+    await expect(dispatchToolCall(child, "not_this_agents_tool")).resolves.toMatchObject({ block: true, reason: LOCAL_BLOCK });
+
+    const later: Omit<ImplV1, "version"> & { version: number; futureField: string } = {
+      version: 2,
+      futureField: "ignored",
+      scopeBlockReason: (_gate, toolName) => (toolName === "not_this_agents_tool" ? "v2 rule" : undefined),
+      activityOf: () => undefined,
+      root: () => ROOT,
+    };
+    slot[IMPL_KEY] = later;
+    await expect(dispatchToolCall(child, "not_this_agents_tool")).resolves.toMatchObject({ block: true, reason: "v2 rule" });
+  });
+
   it("routes an extension error of a child built earlier to the published sink", async () => {
     const localSink = vi.fn();
     const child = await buildChild({ agentId: "child-1", onToolActivity: localSink });

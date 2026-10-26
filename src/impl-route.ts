@@ -14,10 +14,14 @@ import type { NestedAgentManager } from "./nested-tools.js";
 
 type ActivitySink = (activity: ToolActivity) => void;
 
-/** Permanent global key. Readers of every released version must keep working (see IMPL_VERSION). */
+/**
+ * Permanent global key. The v1 members of `ImplV1` (scopeBlockReason, activityOf, root) are permanent
+ * and may only be added to. A reader of any release accepts the value on this key whatever its version,
+ * as long as those members are functions, and ignores fields it does not know. Without them it keeps its own code.
+ */
 export const IMPL_KEY = Symbol.for("pi-subagents:impl");
 
-/** Layout version of `ImplV1`. A reader ignores any other version and keeps its own code. */
+/** Layout version this release publishes. Readers do not gate on it; see IMPL_KEY. */
 const IMPL_VERSION = 1;
 
 /** What nested children reach through the live root: its manager and its pi. */
@@ -35,7 +39,7 @@ export interface ImplV1 {
   root(): RootRoute;
 }
 
-type ImplHolder = typeof globalThis & { [IMPL_KEY]?: { version: number } };
+type ImplHolder = typeof globalThis & { [IMPL_KEY]?: unknown };
 
 function scopeBlockReason(gate: NestedCallGate, toolName: string): string | undefined {
   return gate.allows?.(toolName) === false ? `Tool "${toolName}" is not available to this subagent.` : undefined;
@@ -47,9 +51,25 @@ export function publishImpl(root: () => RootRoute, activityOf: (agentId: string)
   (globalThis as ImplHolder)[IMPL_KEY] = impl;
 }
 
-function liveImpl(): ImplV1 | undefined {
-  const published = (globalThis as ImplHolder)[IMPL_KEY];
-  return published?.version === IMPL_VERSION ? (published as ImplV1) : undefined;
+/** The members every reader calls. Feature-detected, so a newer layout that keeps them is read too. */
+type LiveImpl = Pick<ImplV1, "scopeBlockReason" | "activityOf" | "root">;
+
+function isLiveImpl(value: unknown): value is LiveImpl {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "scopeBlockReason" in value &&
+    typeof value.scopeBlockReason === "function" &&
+    "activityOf" in value &&
+    typeof value.activityOf === "function" &&
+    "root" in value &&
+    typeof value.root === "function"
+  );
+}
+
+function liveImpl(): LiveImpl | undefined {
+  const published: unknown = (globalThis as ImplHolder)[IMPL_KEY];
+  return isLiveImpl(published) ? published : undefined;
 }
 
 /** Scope rule for one tool call of a child. The local rule runs when no root has published. */

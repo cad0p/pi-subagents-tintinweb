@@ -15,10 +15,14 @@ import type { AgentRecord, SubagentType } from "./types.js";
 import type { AgentActivity } from "./ui/agent-widget.js";
 import type { LifetimeUsage } from "./usage.js";
 
-/** Permanent global key. Readers of every released version must keep working (see HANDOVER_VERSION). */
+/**
+ * Permanent global key. The members a reader calls on a published hand-over (see `isReadableHandover`) are
+ * permanent and may only be added to. A reader of any release takes a hand-over that carries them, whatever its
+ * version, and ignores fields it does not know. A hand-over without them stays published for a reader that knows it.
+ */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
-/** Layout version of `ReloadHandover`. A reader skips versions it does not know and never aborts them. */
+/** Layout version this release publishes. Readers do not gate on it; see HANDOVER_KEY. */
 export const HANDOVER_VERSION = 1;
 
 /** A record as plain data: everything except the live run handles. */
@@ -180,13 +184,37 @@ export function publishHandovers(sessionId: string, list: ReloadHandover[]): voi
   else store().delete(sessionId);
 }
 
-/** Takes the handovers this version reads; each is returned once. Other layouts stay published for a reader that knows them. */
+/** Members a reader calls on a hand-over. Permanent: a later layout may add members, never drop these. */
+const HANDOVER_METHODS = ["take", "takeNudged", "idleItems", "removeItem", "keepItems", "attach", "detach"];
+/** Members a reader calls on the draining pool of a hand-over. Permanent, as HANDOVER_METHODS. */
+const POOL_METHODS = ["runningCount", "abortAll", "dispose", "ownAgents"];
+
+function hasMethods(target: object, names: string[]): boolean {
+  const members = target as Record<string, unknown>;
+  return names.every((name) => name in target && typeof members[name] === "function");
+}
+
+/** A hand-over this release reads: it carries every member the reader calls, whatever its version. */
+function isReadableHandover(value: unknown): value is ReloadHandover {
+  if (typeof value !== "object" || value === null) return false;
+  return (
+    hasMethods(value, HANDOVER_METHODS) &&
+    "draining" in value &&
+    typeof value.draining === "object" &&
+    value.draining !== null &&
+    hasMethods(value.draining, POOL_METHODS) &&
+    "activity" in value &&
+    value.activity instanceof Map
+  );
+}
+
+/** Takes the handovers this release reads; each is returned once. Any other hand-over stays published for a reader that knows it. */
 export function takeHandovers(sessionId: string): ReloadHandover[] {
   const list = store().get(sessionId) ?? [];
-  const unknown = list.filter((h) => h.version !== HANDOVER_VERSION);
-  if (unknown.length > 0) store().set(sessionId, unknown);
+  const unreadable = list.filter((h) => !isReadableHandover(h));
+  if (unreadable.length > 0) store().set(sessionId, unreadable);
   else store().delete(sessionId);
-  return list.filter((h) => h.version === HANDOVER_VERSION);
+  return list.filter(isReadableHandover);
 }
 
 /** Takes the handovers published under any other session id: the session that published them has been replaced. */
