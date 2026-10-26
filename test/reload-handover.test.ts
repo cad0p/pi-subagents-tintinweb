@@ -156,6 +156,7 @@ describe("AgentManager hand-over", () => {
 
   afterEach(() => {
     for (const manager of managers.splice(0)) manager.dispose();
+    vi.restoreAllMocks();
   });
 
   it("moves an idle record and keeps the record that is still running", async () => {
@@ -196,6 +197,26 @@ describe("AgentManager hand-over", () => {
 
     expect(seen).toEqual({ settled: true, moved: [] });
     expect(manager.getRecord(idle)?.status).toBe("running");
+  });
+
+  it("stops the old manager's cleanup interval once its last draining record leaves", async () => {
+    const manager = track(new AgentManager());
+    const clear = vi.spyOn(globalThis, "clearInterval");
+    const finish = controlledRun("busy");
+    const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    manager.beginDrain([], undefined);
+
+    expect(clear).not.toHaveBeenCalled();
+    finish();
+    await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+    expect(manager.getRecord(running)).toBeUndefined();
+  });
+
+  it("stops the old manager's cleanup interval at the drain when it holds nothing", () => {
+    const clear = vi.spyOn(globalThis, "clearInterval");
+    track(new AgentManager()).beginDrain([], undefined);
+
+    expect(clear).toHaveBeenCalledTimes(1);
   });
 
   it("moves queued spawns with their id and leaves them out of the old manager", () => {

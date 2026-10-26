@@ -984,6 +984,8 @@ export class AgentManager {
       for (const member of group) this.agents.delete(member.id);
       groups.push(group.map((member) => ({ dto: toDto(member), session: member.session })));
     }
+    // Nothing left to sweep: stop the interval now instead of waiting for dispose().
+    if (this.agents.size === 0) clearInterval(this.cleanupInterval);
     return groups;
   }
 
