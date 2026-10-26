@@ -287,7 +287,7 @@ describe("the widget's model row", () => {
       invocation: { modelName: "haiku 4.5", modelId: "anthropic/claude-haiku-4-5", thinking: "low" },
     };
     const widget = new AgentWidget(
-      { listAgents: () => [record] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
+      { isDraining: () => false, listAgents: () => [record] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
       new Map(),
       () => "all",
       () => false,

@@ -10,6 +10,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -56,6 +57,7 @@ function makeManager(): NestedAgentManager {
       return id;
     },
     resume: vi.fn((id: string) => records.get(id)),
+    restoreSession: vi.fn(async () => ({}) as AgentSession),
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
   };
@@ -268,6 +270,15 @@ describe("nested Agent tool", () => {
     records.set("foreign", { id: "foreign", status: "completed", parentAgentId: "other" } as AgentRecord);
     const denied = await run(0, { resume: "foreign", subagent_type: "scout", description: "d", prompt: "more" });
     expect(textOf(denied)).toContain("not owned by this parent");
+  });
+
+  it("reports a resume whose session cannot be reopened instead of resuming the record", async () => {
+    records.set("child-2", { id: "child-2", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
+    vi.mocked(manager.restoreSession).mockResolvedValueOnce(undefined);
+    const result = await run(0, { resume: "child-2", subagent_type: "scout", description: "d", prompt: "more" });
+    expect(textOf(result)).toContain("no session could be reopened");
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(manager.resume).not.toHaveBeenCalled();
   });
 });
 

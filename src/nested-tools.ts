@@ -77,7 +77,10 @@ export interface NestedAgentManager {
     callbacks?: { onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void },
   ): AgentRecord | undefined;
   getRecord(id: string): AgentRecord | undefined;
+  /** True while a draining activation still holds the run; its children stay with it. */
+  isDraining(id: string): boolean;
   listAgents(): AgentRecord[];
+  restoreSession(id: string): Promise<AgentSession | undefined>;
 }
 
 export interface NestedToolContext {
@@ -168,6 +171,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         const existing = context.manager.getRecord(params.resume);
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
+        }
+        const reopened = await context.manager.restoreSession(params.resume);
+        if (!reopened) {
+          return textResult(`Failed to resume nested agent "${params.resume}" — no session could be reopened.`, true);
         }
         const resumed = context.manager.resume(params.resume, params.prompt, {
           onAssistantUsage: foldUsageIntoAncestors,

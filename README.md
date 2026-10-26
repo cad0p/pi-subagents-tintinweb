@@ -393,6 +393,14 @@ Shutdown keeps an in-flight run's file — a run killed mid-flight is the case t
 
 > **Migration — `persist_session` changed meaning.** It used to mean "persist this subagent at all" (without it, the run used an in-memory session and left nothing behind). It now means "retain this subagent's session file after it settles". An agent with `persist_session: false` — or no `persist_session` at all — now writes a session file *during* the run; that file is deleted when the agent record is removed, so completed runs still leave nothing behind unless pi crashes mid-run (which is the point). Agents with `persist_session: true` behave as before, plus the parent link.
 
+## Reload
+
+A `/reload` does not stop subagents. An agent that is mid-run finishes that run on the old code, then moves to the reloaded session. An idle agent (finished and kept for `resume`) moves at once, and a queued agent moves and starts on the new code. Nested children move with their top-level agent. Each moved child is then reloaded, so its extensions run the new code too. Child reloads happen only while the child is idle, so an in-flight call (an MCP tool, for example) is never cut. Completions, usage and slot releases from a draining agent reach the reloaded session, and `maxConcurrent` is one budget across the old and new sessions.
+
+**Bootstrap:** the first release with this code is a one-time exception. A session still on 0.22.0 has no hand-over to give, so the reload that installs it loses its subagents. Restart pi once after updating; every later reload keeps them.
+
+**Not yet:** if a child's reload fails, its record settles as `error` (`reload failed: ...`) and cannot be resumed.
+
 ## Model Scope
 
 **Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.

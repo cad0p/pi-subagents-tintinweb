@@ -379,7 +379,8 @@ export class FleetList {
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}  ${toSingleLine(record.description)}`;
+    const drainTag = this.manager.isDraining(record.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${drainTag}  ${toSingleLine(record.description)}`;
     const usage = this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage;
     const tokens = getLifetimeTotal(usage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished

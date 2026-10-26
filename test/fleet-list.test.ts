@@ -41,9 +41,10 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 /** Fake manager exposing only what FleetList touches. */
-function fakeManager(agents: AgentRecord[]): AgentManager {
+function fakeManager(agents: AgentRecord[], draining: string[] = []): AgentManager {
   return {
     listAgents: () => agents,
+    isDraining: (id: string) => draining.includes(id),
     abort: () => true,
     steer: vi.fn(() => true),
   } as unknown as AgentManager;
@@ -72,7 +73,7 @@ interface Harness {
   notifications: string[];
 }
 
-function harness(agents: AgentRecord[]): Harness {
+function harness(agents: AgentRecord[], draining: string[] = []): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
@@ -100,7 +101,7 @@ function harness(agents: AgentRecord[]): Harness {
     }) as FleetUICtx["custom"],
   };
 
-  const manager = fakeManager(agents);
+  const manager = fakeManager(agents, draining);
   const fleet = new FleetList(manager, new Map());
   fleet.setUICtx(ui);
   fleet.update();
@@ -229,7 +230,7 @@ describe("FleetList navigation", () => {
     try {
       const agents = [makeRecord({ id: "a1" })];
       const listAgents = vi.fn(() => agents);
-      const manager = { listAgents, abort: () => true } as unknown as AgentManager;
+      const manager = { listAgents, isDraining: () => false, abort: () => true } as unknown as AgentManager;
       const fleet = new FleetList(manager, new Map());
       fleet.setUICtx({
         setWidget: () => {}, onTerminalInput: () => () => {}, getEditorText: () => "",
@@ -312,6 +313,14 @@ describe("FleetList rendering", () => {
     expect(agentLine).toContain(getDisplayName("general-purpose"));
     expect(agentLine).toContain("↓ 13.1k tokens");
     expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
+  });
+
+  it("marks a running row as draining while the manager holds it in a draining pool", () => {
+    const agents = [makeRecord({ id: "a1", description: "draining one" })];
+    const draining = harness(agents, ["a1"]).render().find((l) => l.includes("draining one"));
+    expect(draining).toContain("(draining)");
+    const live = harness(agents).render().find((l) => l.includes("draining one"));
+    expect(live).not.toContain("(draining)");
   });
 
   it("orders agents earliest-launched first (top)", () => {

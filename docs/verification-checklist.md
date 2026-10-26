@@ -64,6 +64,32 @@ pi --no-extensions -e <pi-claude-bridge>/src/index.ts -e <repo>/src/index.ts \
   text cannot forge rows or leak into the terminal: display copies are
   sanitized, model-facing payloads are not.
 
+## Visual proof
+
+Required for every PR that changes what a pi session shows or how it behaves
+over time (rendering, FleetView, notifications, spawn/steer/resume/reload
+flows). A test passing is not proof of what the user sees.
+
+- Run the scenario in a real pi session inside tmux, with the branch build
+  loaded as in the manual TUI checks above.
+- Capture the TUI **before** and **after** the change, from the real renderer,
+  with the scrollback included so the whole flow is visible, not only the last
+  screen:
+
+  ```bash
+  tmux capture-pane -p -e -S - -t <session> > before.ansi   # -e keeps colors
+  tmux capture-pane -p -S - -t <session> > before.txt       # plain text for the PR body
+  ```
+
+  "Before" is the same scenario on `main` (or the released build); "after" is
+  the branch. For a flow over time (a reload, a completion arriving), capture
+  at each step.
+- Put the plain-text captures in the PR body under Evidence, in fenced blocks,
+  each preceded by the exact commands that produced it (pi invocation, keys
+  sent, prompts typed). Trim unrelated scrollback, never edit captured lines.
+- Say what the reader should see in each capture (the row, the marker, the
+  notification), so a reviewer can check it without re-running.
+
 ## Session-level checks
 
 Run these when the change touches session data, rendering, or persistence:

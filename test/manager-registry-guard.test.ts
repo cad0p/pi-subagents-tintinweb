@@ -19,6 +19,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
+import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
 import { MANAGER_KEY, textOf } from "./helpers/subagents-harness.js";
 
@@ -87,7 +88,7 @@ describe("Symbol.for manager registry across activations", () => {
 
     // A child agent session re-activates the extension in-process.
     const child = makePi();
-    subagentsExtension(child.pi);
+    runInChildSessionContext(() => subagentsExtension(child.pi));
 
     // Registry still points at the root's entry (child did not clobber it) …
     expect((globalThis as any)[MANAGER_KEY]).toBe(rootEntry);

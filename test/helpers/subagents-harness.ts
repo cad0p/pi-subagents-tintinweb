@@ -18,6 +18,7 @@
  * semantics, so they are not extracted.
  */
 import { vi } from "vitest";
+import { runInChildSessionContext } from "../../src/child-context.js";
 import subagentsExtension from "../../src/index.js";
 
 /** Symbol under which `src/index.ts` publishes the manager handle on
@@ -62,7 +63,7 @@ export function makeRootAndChild() {
   const root = makePi();
   subagentsExtension(root.pi);
   const child = makePi();
-  subagentsExtension(child.pi);
+  runInChildSessionContext(() => subagentsExtension(child.pi));
   return { root, child };
 }
 

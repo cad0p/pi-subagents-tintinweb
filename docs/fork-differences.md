@@ -24,6 +24,8 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **`reportUsage` and `showCost` default to on.** Upstream ships both off. A session total that omits the delegated work is wrong about what the session cost, and having to find two toggles to stop being wrong is the wrong default — especially because `/agents → Settings` writes project scope only, so turning them on in one repo follows you nowhere. Both remain settings: `reportUsage` still moves numbers a statusline may already be reading, which is the one legitimate reason to leave it off. `showModel` stays off in both, because its cost is a narrow terminal row, not a wrong number.
 
+**Reload hand-over.** A `/reload` does not stop subagents. The old activation hands running and finished agents to the new one (`src/reload-handover.ts`), and the manager registry is owned by the root activation by role, not by whichever activation loaded first. A port that aborts or disposes agents on `reload` is a regression.
+
 ## Deliberately not ported
 
 Each of these exists upstream and is not coming here without a new decision.

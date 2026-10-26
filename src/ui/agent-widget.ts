@@ -433,6 +433,7 @@ export class AgentWidget {
       const name = toSingleLine(getDisplayName(a.type));
       const modeLabel = getPromptModeLabel(a.type);
       const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
+      const drainTag = this.manager.isDraining(a.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
       const elapsed = formatMs(Date.now() - a.startedAt);
 
       const bg = this.agentActivity.get(a.id);
@@ -466,7 +467,7 @@ export class AgentWidget {
       const activity = toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}${drainTag}  ${theme.fg("muted", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }

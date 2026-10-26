@@ -129,7 +129,7 @@ describe("the widget's running row", () => {
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: COST },
     };
     const widget = new AgentWidget(
-      { listAgents: () => [record] } as unknown as Parameters<typeof AgentWidget>[0],
+      { isDraining: () => false, listAgents: () => [record] } as unknown as Parameters<typeof AgentWidget>[0],
       new Map(),
       () => "all",
       () => showCost,

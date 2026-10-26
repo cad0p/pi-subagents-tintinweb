@@ -30,7 +30,7 @@ import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 import { addUsage, type LifetimeUsage } from "../src/usage.js";
-import { MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { childCtx, MANAGER_KEY, makePi, makeRootAndChild, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 /** A tool result as this extension returns it: pi's `usage` rides alongside. */
 type ToolResult = { content: { type: string; text: string }[]; details?: unknown; usage?: Usage };
@@ -423,6 +423,18 @@ describe("reporting subagent usage back to the parent session", () => {
       // treat this as final.
       const disposed = pi.events.emit.mock.calls.find((c) => c[0] === "subagents:disposed");
       expect(disposed?.[1]).toEqual({ reason: "quit" });
+    });
+
+    it("announces subagents:disposed only from the root activation", async () => {
+      // A child session re-activates this extension in-process. Its shutdown is not
+      // the process's final flush, so only the root activation announces disposal.
+      const { root, child } = makeRootAndChild();
+
+      await child.lifecycle.get("session_shutdown")?.({ reason: "reload" }, childCtx("child-session"));
+      expect(child.pi.events.emit).not.toHaveBeenCalledWith("subagents:disposed", expect.anything());
+
+      await root.lifecycle.get("session_shutdown")?.({ reason: "quit" }, spawnCtx(cwd));
+      expect(root.pi.events.emit).toHaveBeenCalledWith("subagents:disposed", { reason: "quit" });
     });
   });
 });

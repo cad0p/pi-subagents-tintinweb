@@ -93,20 +93,27 @@ describe("AgentWidget", () => {
 
   // "all" (and the no-policy constructor default) shows every agent.
   it("shows agents in 'all' mode (and by default)", () => {
-    const manager = { listAgents: () => [makeRecord("agent")] };
+    const manager = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
     expect(renderLines(manager, "agent")).toContain("agent description");
     expect(renderLines(manager, "agent", () => "all")).toContain("agent description");
   });
 
   // "off" hides the widget entirely.
   it("renders nothing in 'off' mode", () => {
-    const manager = { listAgents: () => [makeRecord("agent")] };
+    const manager = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
     expect(renderLines(manager, "agent", () => "off")).toBe("");
+  });
+
+  it("marks a running row as draining only while the manager holds it in a draining pool", () => {
+    const draining = { isDraining: () => true, listAgents: () => [makeRecord("agent")] };
+    expect(renderLines(draining, "agent", () => "all")).toContain("(draining)");
+    const live = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
+    expect(renderLines(live, "agent", () => "all")).not.toContain("(draining)");
   });
 
   it("keeps showing a resumed run's completion after the finished latch was set", () => {
     const manager = {
-      listAgents: () => [{ ...makeRecord("agent"), status: "completed", completedAt: Date.now() }],
+      isDraining: () => false, listAgents: () => [{ ...makeRecord("agent"), status: "completed", completedAt: Date.now() }],
     };
     const widget = new AgentWidget(manager as any, new Map());
     let factory: any;
@@ -136,7 +143,7 @@ describe("AgentWidget", () => {
     // call site would otherwise mask by piping the result through toSingleLine.
     expect(describeActivity(new Map(), "x\u001b[2Jy")).toBe("xy");
 
-    const manager = { listAgents: () => [makeRecord("agent")] };
+    const manager = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
     const activity = makeActivity();
     activity.responseText = "x\u001b[2Jy\u001b]8;;https://evil.example\u0007link";
     const lines = renderLines(manager, "agent", () => "all", activity);
@@ -153,7 +160,7 @@ describe("AgentWidget", () => {
     const text = "a".repeat(59) + "😀tail";
     expect(describeActivity(new Map(), text)).toBe("a".repeat(59) + "…");
 
-    const manager = { listAgents: () => [makeRecord("agent")] };
+    const manager = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
     const activity = makeActivity();
     activity.responseText = text;
     const lines = renderLines(manager, "agent", () => "all", activity);
@@ -165,7 +172,7 @@ describe("AgentWidget", () => {
   it("strips terminal controls from record descriptions and errors", () => {
     const control = "\u001b]52;c;aGFjaw==\u0007\u001b[2J";
     const running = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("running"),
         description: `desc${control}tail`,
       }],
@@ -177,7 +184,7 @@ describe("AgentWidget", () => {
     expect(runningLines).toContain("desctail");
 
     const finished = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),
@@ -195,7 +202,7 @@ describe("AgentWidget", () => {
 
   it("collapses newlines and tabs in the record description on running and finished rows", () => {
     const running = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("multiline"),
         description: "line one\nline two\tend",
       }],
@@ -203,7 +210,7 @@ describe("AgentWidget", () => {
     expect(renderLines(running, "multiline", () => "all")).toContain("line one line two end");
 
     const finished = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("multiline-finished"),
         status: "error",
         completedAt: Date.now(),
@@ -229,14 +236,14 @@ describe("AgentWidget", () => {
       registerAgents(loadCustomAgents(dir));
 
       const running = {
-        listAgents: () => [{ ...makeRecord("running"), type: "evil" }],
+        isDraining: () => false, listAgents: () => [{ ...makeRecord("running"), type: "evil" }],
       };
       const runningLines = renderLines(running, "running", () => "all");
       expect(runningLines).not.toContain(control);
       expect(runningLines).toContain("danger");
 
       const finished = {
-        listAgents: () => [{
+        isDraining: () => false, listAgents: () => [{
           ...makeRecord("finished"),
           type: "evil",
           status: "completed",
@@ -254,12 +261,12 @@ describe("AgentWidget", () => {
 
   it("tolerates non-string record descriptions and errors", () => {
     const running = {
-      listAgents: () => [{ ...makeRecord("running"), description: 42 }],
+      isDraining: () => false, listAgents: () => [{ ...makeRecord("running"), description: 42 }],
     };
     expect(renderLines(running, "running", () => "all")).not.toContain("42");
 
     const finished = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),
@@ -275,7 +282,7 @@ describe("AgentWidget", () => {
 
   it("collapses a newline in the tool activity line", () => {
     const running = {
-      listAgents: () => [{ ...makeRecord("running"), type: "general-purpose" }],
+      isDraining: () => false, listAgents: () => [{ ...makeRecord("running"), type: "general-purpose" }],
     };
     const activity = {
       ...makeActivity(),
@@ -288,7 +295,7 @@ describe("AgentWidget", () => {
 
   it("truncates the error preview without splitting a surrogate pair", () => {
     const finished = {
-      listAgents: () => [{
+      isDraining: () => false, listAgents: () => [{
         ...makeRecord("finished"),
         status: "error",
         completedAt: Date.now(),

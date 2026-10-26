@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { ChildSessionSettings } from "./agent-runner.js";
 import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -115,6 +116,10 @@ export interface AgentRecord {
   startedAt: number;
   completedAt?: number;
   session?: AgentSession;
+  /** Session file kept after `session` is dropped, so a failed reload can reopen the child. */
+  sessionFile?: string;
+  /** Resolved inputs the child was built from; `resume` rebuilds its session from them. */
+  childSettings?: ChildSessionSettings;
   /** Resolved `persist_session` for this run, captured at spawn so the removal
    *  path never re-resolves the agent registry. A resume reuses the record and
    *  therefore its first run's decision. */
@@ -130,6 +135,9 @@ export interface AgentRecord {
    *  `true`. Resuming keys on `=== false` so a record that never ran is not
    *  blocked. */
   settled?: boolean;
+  /** Whether a completion was already announced for this run. A hand-over carries it so the adopting
+   *  activation does not announce a run the old activation reported; a resume clears it for its new run. */
+  notified?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */

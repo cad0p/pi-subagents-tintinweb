@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -10,7 +10,7 @@ import type { AgentConfig, AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn(actual.createChildSession) };
 });
 
 vi.mock("../src/worktree.js", () => ({
@@ -22,7 +22,7 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
+import { createChildSession, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
@@ -268,6 +268,39 @@ describe("AgentManager — cleanup timer", () => {
     manager = new AgentManager();
 
     expect((manager as any).cleanupInterval.hasRef()).toBe(false);
+  });
+});
+
+describe("AgentManager — restoreSession", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("disposes a reopened session whose record was evicted during the reopen", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    // A settled record that lost its live session, as a failed reload leaves it.
+    record.session = undefined;
+    record.sessionFile = join(tmpdir(), `restore-evicted-${id}.jsonl`);
+    record.childSettings = { effectiveCwd: tmpdir() } as NonNullable<AgentRecord["childSettings"]>;
+
+    let finishReopen!: (session: AgentSession) => void;
+    vi.mocked(createChildSession).mockReturnValueOnce(new Promise<AgentSession>((resolve) => {
+      finishReopen = resolve;
+    }));
+    const restored = manager.restoreSession(id);
+    // Eviction lands while the reopen is still in flight.
+    manager.clearCompleted();
+    const reopened = mockSession();
+    finishReopen(reopened);
+
+    await expect(restored).resolves.toBeUndefined();
+    expect(reopened.dispose).toHaveBeenCalledOnce();
   });
 });
 
