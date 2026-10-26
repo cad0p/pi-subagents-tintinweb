@@ -26,7 +26,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 
 type RunResult = Awaited<ReturnType<typeof runAgent>>;
 
@@ -173,6 +173,30 @@ describe("AgentManager hand-over", () => {
     finish();
   });
 
+  it("keeps a record that a resume marks running before its settled flag clears", async () => {
+    let resuming = false;
+    let seen: { settled?: boolean; moved: string[] } | undefined;
+    const manager: AgentManager = track(
+      new AgentManager(undefined, undefined, (record) => {
+        if (!resuming) return;
+        const settled = record.settled;
+        const moved = manager.beginDrain([], undefined).take().items.map((item) => item.dto.id);
+        seen = { settled, moved };
+      }),
+    );
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    const idle = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
+    await vi.waitFor(() => expect(manager.getRecord(idle)?.settled).toBe(true));
+
+    vi.mocked(resumeAgent).mockReturnValueOnce(new Promise<never>(() => {}));
+    resuming = true;
+    manager.resume(idle, "again");
+    resuming = false;
+
+    expect(seen).toEqual({ settled: true, moved: [] });
+    expect(manager.getRecord(idle)?.status).toBe("running");
+  });
+
   it("moves queued spawns with their id and leaves them out of the old manager", () => {
     const manager = track(new AgentManager(undefined, 1));
     const finish = controlledRun("busy");
@@ -243,5 +267,35 @@ describe("AgentManager hand-over", () => {
 
     next.adopt({ dto: { ...item.dto, id: "other" } }, true);
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists, finds and aborts a draining record through the new manager", async () => {
+    const old = track(new AgentManager());
+    const finish = controlledRun("busy");
+    const busy = old.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const handover = old.beginDrain([], undefined);
+
+    const next = track(new AgentManager());
+    next.setDrainingPools([handover.draining]);
+    expect(next.listAgents().map((r) => r.id)).toEqual([busy]);
+    expect(next.getRecord(busy)?.status).toBe("running");
+
+    expect(next.abort(busy)).toBe(true);
+    expect(next.getRecord(busy)?.status).toBe("stopped");
+    finish();
+  });
+
+  it("lists an adopted record once when its draining pool still holds it", async () => {
+    const old = track(new AgentManager());
+    const finish = controlledRun("busy");
+    const busy = old.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const handover = old.beginDrain([], undefined);
+
+    const next = track(new AgentManager());
+    next.setDrainingPools([handover.draining]);
+    const adopted = next.adopt({ dto: dtoOf(busy) }, false);
+    expect(next.listAgents()).toEqual([adopted]);
+    expect(next.getRecord(busy)).toBe(adopted);
+    finish();
   });
 });
