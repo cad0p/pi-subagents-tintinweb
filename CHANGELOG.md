@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(sessions)* Follow the parent's session dir, never inside the worktree (closes #86) ([#89](https://github.com/cad0p/pi-subagents-tintinweb/pull/89))
+- *(subagents)* Children follow the parent's --no-extensions and -e (closes #92) ([#94](https://github.com/cad0p/pi-subagents-tintinweb/pull/94))
 
 
 ## [0.22.0] - 2026-10-21
