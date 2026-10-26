@@ -6,7 +6,7 @@
  * lands while it runs. Only the faux provider is scripted; the reload, the
  * hand-over and the child session are the real code paths.
  */
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,6 +103,15 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
         description: "reload agent",
         prompt: "again",
         subagent_type: "general-purpose",
+      }),
+    ]);
+  }
+  if (last?.role === "user" && text.includes("spawn-recorder")) {
+    return fauxAssistantMessage([
+      fauxToolCall("Agent", {
+        description: "reload agent",
+        prompt: `${CHILD_TASK} work`,
+        subagent_type: "recorder",
       }),
     ]);
   }
@@ -248,6 +257,26 @@ describe("subagents across a real /reload (faux provider)", () => {
     );
   }, 20_000);
 
+  it("hands the draining run's AgentSession to the reloaded root's viewer", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    const before = publishedRoot().manager.getRecord(id)?.session;
+    expect(before).toBeDefined();
+
+    await reloadRoot(root);
+
+    expect(publishedRoot().manager.getRecord(id)?.session).toBe(before);
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    // Adoption after the run settles rebuilds the record from its hand-over item: the viewer keeps the same session.
+    expect(publishedRoot().manager.getRecord(id)?.session).toBe(before);
+  }, 20_000);
+
   it("lists a draining subagent as (draining) in the widget after /reload, and drops the marker once it settles", async () => {
     const root = session;
     if (!root) throw new Error("no session");
@@ -338,6 +367,43 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
+  }, 20_000);
+
+  it("gives a reloaded child extension session_shutdown and session_start with reason reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const eventLog = join(tmp, "child-events.jsonl");
+    const recorder = join(tmp, "recorder-ext.ts");
+    writeFileSync(
+      recorder,
+      [
+        'import { appendFileSync } from "node:fs";',
+        "export default function (pi) {",
+        '  for (const name of ["session_start", "session_shutdown"]) {',
+        `    pi.on(name, (event) => appendFileSync(${JSON.stringify(eventLog)}, JSON.stringify({ event: name, reason: event.reason }) + "\\n"));`,
+        "  }",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(
+      join(tmp, "agents", "recorder.md"),
+      `---\ndescription: records extension events\nextensions: ${recorder}\n---\nYou record events.\n`,
+    );
+    await root.prompt("spawn-recorder");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    await reloadRoot(root);
+    release();
+    // The running child is adopted when it settles: its session reloads inside the hand-over.
+    const reloadEvents = () =>
+      readFileSync(eventLog, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { event: string; reason?: string })
+        .filter((entry) => entry.reason === "reload")
+        .map((entry) => entry.event);
+    await vi.waitFor(() => expect(reloadEvents()).toEqual(["session_shutdown", "session_start"]), { timeout: 10_000 });
   }, 20_000);
 
   it("moves an idle subagent to the reloaded root with its result", async () => {
