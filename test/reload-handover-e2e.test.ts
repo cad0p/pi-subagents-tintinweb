@@ -90,6 +90,8 @@ let releaseSteer: () => void = () => {};
 let parentSawChild = false;
 /** Set once the parent has settled: its next run spawns the nested child. */
 let parentNests = false;
+/** The nested child a resumed parent turn reopens through the Agent tool when it is told "again". */
+let nestedResumeTarget = "";
 
 // "spawn-now" makes the root call the Agent tool; the child (last message is its
 // CHILD-TASK prompt) waits on the gate; every other root turn just answers.
@@ -106,6 +108,16 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
   }
   const parentTurn = context.messages.find((m) => m.role === "user");
   if (parentTurn && JSON.stringify(parentTurn.content).includes(PARENT_TASK)) {
+    if (last?.role === "user" && nestedResumeTarget && text.includes("again")) {
+      return fauxAssistantMessage([
+        fauxToolCall("Agent", {
+          resume: nestedResumeTarget,
+          description: "nested reload agent",
+          prompt: "again",
+          subagent_type: "general-purpose",
+        }),
+      ]);
+    }
     const results = context.messages.filter((m) => m.role === "toolResult");
     if (results.length === 0 && !parentNests) {
       return parentGate.then(() => fauxAssistantMessage([fauxText("PARENT-DONE")]));
@@ -228,6 +240,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     childSignal = undefined;
     childToolStep = undefined;
     resumeTarget = "";
+    nestedResumeTarget = "";
     parentSawChild = false;
     parentNests = false;
     parentGate = new Promise<void>((resolve) => {
@@ -712,6 +725,126 @@ describe("subagents across a real /reload (faux provider)", () => {
     const transcript = JSON.stringify(reopened?.messages);
     expect(transcript).toContain(CHILD_TASK);
     expect(transcript).toContain("after-reload");
+  }, 20_000);
+
+  /** Runs an idle subagent to completion and returns its id. */
+  async function spawnIdleChild(root: AgentSession) {
+    release();
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    return id;
+  }
+
+  /** Fails a completed subagent's reload inside the next /reload. Returns its session file and its transcript before the failure. */
+  async function reloadFailsForChild(root: AgentSession, id: string) {
+    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
+    if (!child?.sessionFile) throw new Error("no child session file");
+    const { sessionFile } = child;
+    const before = structuredClone(child.messages);
+
+    const invalidate = child.extensionRunner.invalidate.bind(child.extensionRunner);
+    vi.spyOn(child.extensionRunner, "invalidate").mockImplementationOnce(() => {
+      invalidate();
+      throw new Error("child boom");
+    });
+    await reloadRoot(root);
+
+    const row = liveRegistry().listAgents().find((r) => r.id === id);
+    expect(row?.status).toBe("error");
+    expect(row?.session).toBeUndefined();
+    expect(existsSync(sessionFile)).toBe(true);
+    return { sessionFile, before };
+  }
+
+  it("resumes a failed-reload subagent from its session file through the Agent tool", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const id = await spawnIdleChild(root);
+    const { before } = await reloadFailsForChild(root, id);
+
+    // Hold the resumed run open so the test observes it running before it completes.
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    resumeTarget = id;
+    await root.prompt("resume-now");
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("running"), {
+      timeout: 10_000,
+    });
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    const messages = liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages ?? [];
+    expect(messages.slice(0, before.length)).toEqual(before);
+    expect(JSON.stringify(messages.slice(before.length))).toContain("again");
+  }, 20_000);
+
+  it("shares one reopen when a failed-reload subagent is restored twice at once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const id = await spawnIdleChild(root);
+    const { before } = await reloadFailsForChild(root, id);
+
+    const manager = publishedRoot().manager;
+    const [first, second] = await Promise.all([manager.restoreSession(id), manager.restoreSession(id)]);
+    expect(first).toBeDefined();
+    expect(second).toBe(first);
+    expect(manager.resume(id, "after-reload")).toBeDefined();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    const messages = liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages ?? [];
+    expect(messages.slice(0, before.length)).toEqual(before);
+    expect(JSON.stringify(messages.slice(before.length))).toContain("after-reload");
+  }, 20_000);
+
+  it("removes a failed-reload subagent's session file when its record is cleared", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const id = await spawnIdleChild(root);
+    const { sessionFile } = await reloadFailsForChild(root, id);
+
+    const manager = publishedRoot().manager;
+    manager.clearCompleted();
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(existsSync(sessionFile)).toBe(false);
+  }, 20_000);
+
+  it("resumes a failed-reload nested subagent through its parent's Agent tool", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    releaseSteer();
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const nestedRow = () => liveRegistry().listAgents().find((r) => r.id !== parentId);
+    await vi.waitFor(() => expect(nestedRow()?.session).toBeDefined(), { timeout: 10_000 });
+    const nestedId = nestedRow()?.id ?? "";
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === nestedId)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    const { before } = await reloadFailsForChild(root, nestedId);
+
+    nestedResumeTarget = nestedId;
+    resumeTarget = parentId;
+    await root.prompt("resume-now");
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === nestedId)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    const messages = liveRegistry().listAgents().find((r) => r.id === nestedId)?.session?.messages ?? [];
+    expect(messages.slice(0, before.length)).toEqual(before);
+    expect(JSON.stringify(messages.slice(before.length))).toContain("again");
   }, 20_000);
 
   it("stops a draining subagent when the session quits after a reload", async () => {
