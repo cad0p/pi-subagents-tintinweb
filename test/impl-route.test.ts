@@ -16,6 +16,7 @@ import {
   routedManagerFor,
   routedRoot,
   routedScopeBlockReason,
+  routedToolActivity,
 } from "../src/impl-route.js";
 import type { NestedAgentManager } from "../src/nested-tools.js";
 
@@ -116,5 +117,21 @@ describe("impl-route published root", () => {
     expect(local).toEqual([]);
     routedExtensionError("/ext/c.ts", "gone", (activity) => local.push(activity.toolName));
     expect(local).toEqual(["extension-error:/ext/c.ts"]);
+  });
+
+  it("routes a child's tool activity to its live sink and falls back when none is live", () => {
+    const live: string[] = [];
+    const local: string[] = [];
+    slot[IMPL_KEY] = {
+      version: 1,
+      scopeBlockReason: () => undefined,
+      activityOf: (agentId: string) => (agentId === "a1" ? (activity) => live.push(activity.toolName) : undefined),
+      root: () => rootWith("live"),
+    };
+    routedToolActivity("a1", { type: "start", toolName: "read" }, (activity) => local.push(activity.toolName));
+    routedToolActivity("gone", { type: "start", toolName: "grep" }, (activity) => local.push(activity.toolName));
+    routedToolActivity(undefined, { type: "end", toolName: "ls" }, (activity) => local.push(activity.toolName));
+    expect(live).toEqual(["read"]);
+    expect(local).toEqual(["grep", "ls"]);
   });
 });

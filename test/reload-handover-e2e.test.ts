@@ -75,15 +75,36 @@ function steerOverBus(events: EventBus, agentId: string, message: string): Promi
 let release: () => void = () => {};
 let gate: Promise<void> = Promise.resolve();
 let childSignal: AbortSignal | undefined;
+/** When set, the child's first turn waits on it and then runs a bash tool call before its gated answer. */
+let childToolStep: Promise<void> | undefined;
+/** The run a root turn resumes through the Agent tool when it is told "resume-now". */
+let resumeTarget = "";
 
 // "spawn-now" makes the root call the Agent tool; the child (last message is its
 // CHILD-TASK prompt) waits on the gate; every other root turn just answers.
 function respond(context: { messages: Array<{ role: string; content: unknown }> }, options?: { signal?: AbortSignal }) {
   const last = context.messages[context.messages.length - 1];
   const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? "");
-  if (last?.role === "user" && text.includes(CHILD_TASK)) {
+  const child = context.messages.some((m) => m.role === "user" && JSON.stringify(m.content).includes(CHILD_TASK));
+  if (child) {
     childSignal = options?.signal;
+    if (childToolStep && last?.role === "user") {
+      return childToolStep.then(() => fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]));
+    }
     return gate.then(() => fauxAssistantMessage([fauxText("CHILD-DONE")]));
+  }
+  if (last?.role === "user" && text.includes("bash-now")) {
+    return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
+  }
+  if (last?.role === "user" && text.includes("resume-now")) {
+    return fauxAssistantMessage([
+      fauxToolCall("Agent", {
+        resume: resumeTarget,
+        description: "reload agent",
+        prompt: "again",
+        subagent_type: "general-purpose",
+      }),
+    ]);
   }
   if (last?.role === "user" && text.includes("spawn-now")) {
     return fauxAssistantMessage([
@@ -149,6 +170,8 @@ describe("subagents across a real /reload (faux provider)", () => {
   beforeEach(async () => {
     initTheme("dark");
     childSignal = undefined;
+    childToolStep = undefined;
+    resumeTarget = "";
     widgets.clear();
     delete (globalThis as unknown as Record<symbol, unknown>)[IMPL_KEY];
     tmp = mkdtempSync(join(tmpdir(), "reload-e2e-"));
@@ -240,6 +263,81 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
     await vi.waitFor(() => expect(renderedWidget("agents")).not.toContain("(draining)"), { timeout: 10_000 });
     expect(renderedWidget("agents")).toContain("reload agent");
+  }, 20_000);
+
+  it("counts a tool call a reloaded child makes in its widget row", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    let runTool: () => void = () => {};
+    childToolStep = new Promise<void>((resolve) => {
+      runTool = resolve;
+    });
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    await reloadRoot(root);
+
+    runTool();
+    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("1 tool use"), { timeout: 10_000 });
+
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.status === "completed")).toBeDefined(), {
+      timeout: 10_000,
+    });
+  }, 20_000);
+
+  it("drops an idle subagent's finished row once the reloaded root takes a turn", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    // The completion notice is not under test: keep it off the session that the reload replaces.
+    vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    release();
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    // Three times the 200 ms nudge hold (NUDGE_HOLD_MS): the nudge fires before the reload, so the hand-over
+    // carries no pending nudge and only the adoption can mark the row finished.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    await reloadRoot(root);
+    // Shown as soon as reload() returns: retireDrained renders the adopted row, no widget timer tick is needed.
+    expect(renderedWidget("agents")).toContain("reload agent");
+
+    await root.prompt("bash-now");
+    await vi.waitFor(() => expect(renderedWidget("agents")).not.toContain("reload agent"), { timeout: 10_000 });
+  }, 20_000);
+
+  it("counts a tool call a resumed child makes after /reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    release();
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    // The resumed run stays open across the reload: its tool call goes through the tracker of the replaced activation.
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let runTool: () => void = () => {};
+    childToolStep = new Promise<void>((resolve) => {
+      runTool = resolve;
+    });
+    resumeTarget = id;
+    await root.prompt("resume-now");
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("running"), {
+      timeout: 10_000,
+    });
+
+    await reloadRoot(root);
+    runTool();
+    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("1 tool use"), { timeout: 10_000 });
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
   }, 20_000);
 
   it("moves an idle subagent to the reloaded root with its result", async () => {
