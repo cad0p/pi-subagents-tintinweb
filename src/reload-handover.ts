@@ -12,6 +12,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
 import type { AgentRecord, SubagentType } from "./types.js";
+import type { AgentActivity } from "./ui/agent-widget.js";
 import type { LifetimeUsage } from "./usage.js";
 
 /** Permanent global key. Readers of every released version must keep working (see HANDOVER_VERSION). */
@@ -72,6 +73,8 @@ export class ReloadHandover {
     nudged: string[],
     unreported: LifetimeUsage | undefined,
     readonly draining: DrainingPool,
+    /** The draining runs' live activity at hand-over, so their rows keep the running tool and counts. */
+    readonly activity: ReadonlyMap<string, AgentActivity> = new Map(),
   ) {
     this.items = items;
     this.queued = queued;

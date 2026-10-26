@@ -813,7 +813,7 @@ export default function (pi: ExtensionAPI) {
       widget.dispose();
       if (isRoot) {
         for (const h of held) h.detach();
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(nudged, pendingUsage.takeLifetime())]);
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(nudged, pendingUsage.takeLifetime(), new Map(agentActivity))]);
         held = [];
       }
     } else {
@@ -857,12 +857,13 @@ export default function (pi: ExtensionAPI) {
     held = takeHandovers(ctx.sessionManager.getSessionId());
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
-      // A draining run has no activity entry in this activation: seed one so the widget and fleet show it.
+      // A draining run has no activity entry in this activation: take the one it had at the hand-over, or seed one.
       widget.setUICtx(ctx.ui as UICtx);
       fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+      const carried = new Map(held.flatMap((h) => [...h.activity]));
       for (const record of manager.listAgents()) {
         if (record.status !== "running") continue;
-        agentActivity.set(record.id, {
+        agentActivity.set(record.id, carried.get(record.id) ?? {
           activeTools: new Map(),
           toolUses: record.toolUses,
           turnCount: record.turnCount ?? 1,

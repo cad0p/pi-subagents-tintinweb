@@ -89,6 +89,8 @@ let gate: Promise<void> = Promise.resolve();
 let childSignal: AbortSignal | undefined;
 /** When set, the child's first turn waits on it and then runs a bash tool call before its gated answer. */
 let childToolStep: Promise<void> | undefined;
+/** When set, the child's second turn runs this bash command and waits on it before its gated answer. */
+let childHeldCommand: string | undefined;
 /** The run a root turn resumes through the Agent tool when it is told "resume-now". */
 let resumeTarget = "";
 /** Holds a draining parent's first turn until the test has reloaded the root. */
@@ -116,6 +118,9 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
     childSignal = options?.signal;
     if (childToolStep && last?.role === "user") {
       return childToolStep.then(() => fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]));
+    }
+    if (childHeldCommand && last?.role === "toolResult" && context.messages.filter((m) => m.role === "toolResult").length === 1) {
+      return fauxAssistantMessage([fauxToolCall("bash", { command: childHeldCommand })]);
     }
     return gate.then(() => fauxAssistantMessage([fauxText("CHILD-DONE")]));
   }
@@ -285,6 +290,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     initTheme("dark");
     childSignal = undefined;
     childToolStep = undefined;
+    childHeldCommand = undefined;
     resumeTarget = "";
     nestedResumeTarget = "";
     parentSawChild = false;
@@ -403,6 +409,31 @@ describe("subagents across a real /reload (faux provider)", () => {
     runTool();
     await vi.waitFor(() => expect(renderedWidget("agents")).toContain("1 tool use"), { timeout: 10_000 });
 
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.status === "completed")).toBeDefined(), {
+      timeout: 10_000,
+    });
+  }, 20_000);
+
+  it("keeps a reloaded draining row's running command and tool count", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const gateFile = join(tmp, "held-tool-go");
+    // The first call finishes at once; the second runs until the test creates the gate file (bounded at 10 s).
+    childToolStep = Promise.resolve();
+    childHeldCommand = `for i in $(seq 200); do [ -f ${gateFile} ] && break; sleep 0.05; done`;
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("running command"), { timeout: 10_000 });
+    expect(renderedWidget("agents")).toContain("1 tool use");
+
+    await reloadRoot(root);
+    expect(renderedWidget("agents")).toContain("(draining)");
+    expect(renderedWidget("agents")).toContain("running command");
+    expect(renderedWidget("agents")).not.toContain("thinking");
+    expect(renderedWidget("agents")).toContain("1 tool use");
+
+    writeFileSync(gateFile, "");
+    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("2 tool uses"), { timeout: 10_000 });
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.status === "completed")).toBeDefined(), {
       timeout: 10_000,
