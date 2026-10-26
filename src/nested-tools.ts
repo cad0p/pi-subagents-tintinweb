@@ -170,7 +170,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        await context.manager.restoreSession(params.resume);
+        const reopened = await context.manager.restoreSession(params.resume);
+        if (!reopened) {
+          return textResult(`Failed to resume nested agent "${params.resume}" — no session could be reopened.`, true);
+        }
         const resumed = context.manager.resume(params.resume, params.prompt, {
           onAssistantUsage: foldUsageIntoAncestors,
         });
