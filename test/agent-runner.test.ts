@@ -129,7 +129,7 @@ const extensionFiles = vi.hoisted(() => ({
   discovered: new Map<string, MockExtension>(),
 }));
 // The parent's extension flags (#92), mutated per test and reset in beforeEach.
-const parentFlags = vi.hoisted(() => ({ noExtensions: false, extensionPaths: [] as string[] }));
+const parentFlags = vi.hoisted(() => ({ noExtensions: false, noMcp: false, extensionPaths: [] as string[] }));
 vi.mock("../src/parent-cli.js", () => ({ parentExtensionFlags: parentFlags }));
 
 vi.mock("../src/env.js", () => ({
@@ -230,6 +230,7 @@ beforeEach(() => {
   extensionFiles.cli.clear();
   extensionFiles.discovered.clear();
   parentFlags.noExtensions = false;
+  parentFlags.noMcp = false;
   parentFlags.extensionPaths = [];
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
 });
@@ -1219,23 +1220,14 @@ describe("agent-runner pi built-ins, project trust and tool scope", () => {
     await runAgent(ctx, "Explore", "go", { pi });
     expect(latestLoaderOpts().disabledBuiltinExtensions).toBeUndefined();
 
-    process.argv.push("--no-mcp");
-    try {
-      await runAgent(ctx, "Explore", "go", { pi });
-    } finally {
-      process.argv.pop();
-    }
+    parentFlags.noMcp = true;
+    await runAgent(ctx, "Explore", "go", { pi });
     expect(latestLoaderOpts().disabledBuiltinExtensions).toEqual(["mcp"]);
 
-    for (const flag of ["--no-extensions", "-ne"]) {
-      process.argv.push(flag);
-      try {
-        await runAgent(ctx, "Explore", "go", { pi });
-      } finally {
-        process.argv.pop();
-      }
-      expect(latestLoaderOpts().disabledBuiltinExtensions).toEqual(["codemode", "tool-search", "mcp"]);
-    }
+    parentFlags.noMcp = false;
+    parentFlags.noExtensions = true;
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(latestLoaderOpts().disabledBuiltinExtensions).toEqual(["codemode", "tool-search", "mcp"]);
   });
 
   it("the scope gate admits the agent's own tools and blocks an unknown name", async () => {

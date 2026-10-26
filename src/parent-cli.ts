@@ -7,6 +7,8 @@ import { parseArgs } from "@earendil-works/pi-coding-agent";
 export type ParentExtensionFlags = {
   /** `--no-extensions` / `-ne` on the parent. */
   noExtensions: boolean;
+  /** `--no-mcp` on the parent. */
+  noMcp: boolean;
   /** `-e` / `--extension` values: local paths made absolute, package sources unchanged. */
   extensionPaths: string[];
 };
@@ -41,6 +43,7 @@ export function resolveParentFlags(argv: string[], cwd: string): ParentExtension
   const parsed = parseArgs(argv);
   return {
     noExtensions: parsed.noExtensions === true,
+    noMcp: parsed.noMcp === true,
     extensionPaths: (parsed.extensions ?? []).map((value) => (isLocalPath(value) ? resolveLocalPath(value, cwd) : value)),
   };
 }
@@ -49,6 +52,6 @@ export function resolveParentFlags(argv: string[], cwd: string): ParentExtension
  * The parent process's extension flags, read once when this module loads. pi loads
  * this extension in its own process, so `process.argv` is pi's CLI. The rule: the host
  * process must be pi's CLI. An embedder that passes its own argv must not carry pi's
- * flags (`-e`, `-ne`), or children inherit them.
+ * flags (`-e`, `-ne`, `--no-mcp`), or children inherit them.
  */
 export const parentExtensionFlags: ParentExtensionFlags = resolveParentFlags(process.argv.slice(2), process.cwd());

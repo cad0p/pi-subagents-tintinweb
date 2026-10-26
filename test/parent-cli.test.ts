@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 // Set before the static import below: parent-cli reads process.argv once, at load.
 const savedArgv = vi.hoisted(() => {
   const saved = process.argv;
-  process.argv = [...saved.slice(0, 2), "-ne", "-e", "rel-ext.ts", "--extension", "npm:some-pkg"];
+  process.argv = [...saved.slice(0, 2), "-ne", "-e", "rel-ext.ts", "--extension", "npm:some-pkg", "--no-mcp"];
   return saved;
 });
 
@@ -19,12 +19,24 @@ const CWD = "/work/project";
 
 describe("resolveParentFlags", () => {
   it("reports no flags for an argv without them", () => {
-    expect(resolveParentFlags([], CWD)).toEqual({ noExtensions: false, extensionPaths: [] });
+    expect(resolveParentFlags([], CWD)).toEqual({ noExtensions: false, noMcp: false, extensionPaths: [] });
   });
 
   it("reads --no-extensions and -ne", () => {
     expect(resolveParentFlags(["--no-extensions"], CWD).noExtensions).toBe(true);
     expect(resolveParentFlags(["-ne"], CWD).noExtensions).toBe(true);
+  });
+
+  it("reads --no-mcp", () => {
+    expect(resolveParentFlags(["--no-mcp"], CWD).noMcp).toBe(true);
+  });
+
+  it("reads flags only before --, as pi's parser does", () => {
+    expect(resolveParentFlags(["--", "-ne", "-e", "x.ts", "--no-mcp"], CWD)).toEqual({
+      noExtensions: false,
+      noMcp: false,
+      extensionPaths: [],
+    });
   });
 
   it("resolves a relative -e against the given cwd, not the process cwd", () => {
@@ -62,7 +74,11 @@ describe("resolveParentFlags", () => {
   });
 
   it("reads a host-style argv as carrying no pi flags", () => {
-    expect(resolveParentFlags(["serve", "--port", "3000"], CWD)).toEqual({ noExtensions: false, extensionPaths: [] });
+    expect(resolveParentFlags(["serve", "--port", "3000"], CWD)).toEqual({
+      noExtensions: false,
+      noMcp: false,
+      extensionPaths: [],
+    });
   });
 });
 
@@ -70,6 +86,7 @@ describe("parentExtensionFlags", () => {
   it("is computed from process.argv at module load, relative to the process cwd", () => {
     expect(parentExtensionFlags).toEqual({
       noExtensions: true,
+      noMcp: true,
       extensionPaths: [resolve(process.cwd(), "rel-ext.ts"), "npm:some-pkg"],
     });
   });

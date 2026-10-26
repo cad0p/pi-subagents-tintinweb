@@ -816,9 +816,9 @@ export async function createChildSession(
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.
-    disabledBuiltinExtensions: process.argv.some((a) => a === "--no-extensions" || a === "-ne")
+    disabledBuiltinExtensions: parentExtensionFlags.noExtensions
       ? ["codemode", "tool-search", "mcp"]
-      : process.argv.includes("--no-mcp")
+      : parentExtensionFlags.noMcp
         ? ["mcp"]
         : undefined,
     cwd: configCwd,
