@@ -356,11 +356,11 @@ describe("AgentManager hand-over", () => {
 
     const next = track(new AgentManager(undefined, 1));
     next.setDrainingPools([handover.draining]);
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("waited"));
     const waiting = next.spawn(mockPi, mockCtx, "general-purpose", "waits", { description: "waits" });
     expect(next.getRecord(waiting)?.status).toBe("queued");
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
 
-    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("waited"));
     finish();
     await vi.waitFor(() => expect(handover.draining.runningCount()).toBe(0));
     next.setDrainingPools([]);
