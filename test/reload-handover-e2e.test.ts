@@ -276,9 +276,12 @@ describe("subagents across a real /reload (faux provider)", () => {
     session = created.session;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     release();
     vi.restoreAllMocks();
+    // Quit the session before disposing it: dispose() invalidates the extension ctx without
+    // session_shutdown, so a nudge armed by this test would fire into the next one.
+    await session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     session?.dispose();
     session = undefined;
     if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
