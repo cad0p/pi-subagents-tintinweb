@@ -843,7 +843,8 @@ export default function (pi: ExtensionAPI) {
     // tell a final flush from a mid-process one.
     // A `reload` is a mid-process dispose: the process keeps running, and a run still draining moves to
     // the reloaded activation (reload-handover.ts), which keeps reporting its usage on this bus.
-    pi.events.emit("subagents:disposed", { reason: event.reason });
+    // Root only: a child session's shutdown is not the process's final flush.
+    if (isRoot) pi.events.emit("subagents:disposed", { reason: event.reason });
   });
 
   // ---- Reload hand-over (root activation; see reload-handover.ts) ----
