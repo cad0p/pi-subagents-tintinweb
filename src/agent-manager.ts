@@ -517,6 +517,17 @@ export class AgentManager {
     record.promise = promise;
   }
 
+  /**
+   * Announces a settled run to the completion surface, once per run. A hand-over carries `notified`, so the
+   * activation that adopts a settled subtree does not announce a parent the old activation already reported.
+   * Skipped while no surface is wired: a draining manager has none after `beginDrain`, and the adopter announces then.
+   */
+  private notifyCompleted(record: AgentRecord): void {
+    if (!this.onComplete || record.notified) return;
+    record.notified = true;
+    try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
+  }
+
   /** Shared completion tail: release the slot, stop orphaned children, flush the transcript, notify, drain. */
   private afterRun(record: AgentRecord): void {
     if (occupiesPoolSlot(record)) this.runningBackground--;
@@ -528,7 +539,7 @@ export class AgentManager {
     this.abortOwnedChildren(record.id);
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
-    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    this.notifyCompleted(record);
     // A drain escape must not reject an already-fulfilled run promise or strand
     // `settled` — a stuck `settled = false` would refuse every later resume and
     // leave the queued records behind the freed slot unstarted.
@@ -564,7 +575,7 @@ export class AgentManager {
     if (baseCwd) {
       this.reclaimWorktree(record, baseCwd);
     }
-    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+    this.notifyCompleted(record);
     record.settled = true;
   }
 
@@ -624,7 +635,7 @@ export class AgentManager {
         // A throwing onStart can follow worktree creation: reclaim the copy
         // and its registration (best-effort, like the run handlers' cleanup).
         this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
-        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        this.notifyCompleted(record);
       }
     }
   }
@@ -684,6 +695,8 @@ export class AgentManager {
       Object.assign(record, prior);
       return undefined;
     }
+    // A resumed run is a new run: it is announced when it settles, whatever the prior run announced.
+    record.notified = false;
     // A started listener can stop the record synchronously; settle it through
     // the stopped tail instead of starting — and counting — a run that was
     // already stopped.
@@ -1003,7 +1016,7 @@ export class AgentManager {
     const record = fromDto(item.dto, item.session);
     record.settled = true;
     this.agents.set(record.id, record);
-    if (notify) this.onComplete?.(record);
+    if (notify) this.notifyCompleted(record);
     return record;
   }
 

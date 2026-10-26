@@ -135,6 +135,9 @@ export interface AgentRecord {
    *  `true`. Resuming keys on `=== false` so a record that never ran is not
    *  blocked. */
   settled?: boolean;
+  /** Whether a completion was already announced for this run. A hand-over carries it so the adopting
+   *  activation does not announce a run the old activation reported; a resume clears it for its new run. */
+  notified?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */

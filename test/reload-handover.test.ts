@@ -433,4 +433,66 @@ describe("AgentManager hand-over", () => {
     expect(third.getRecord(busy)?.status).toBe("running");
     finish();
   });
+
+  it("adopts a record even when the completion surface throws", () => {
+    const manager = track(
+      new AgentManager(() => {
+        throw new Error("surface");
+      }),
+    );
+    expect(() => manager.adopt({ dto: dtoOf("late") }, true)).not.toThrow();
+    expect(manager.getRecord("late")?.settled).toBe(true);
+  });
+
+  it("announces a parent once across two reloads when hand-overs move it with its nested child", async () => {
+    const announced = vi.fn();
+    const first = track(new AgentManager(announced));
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("parent"));
+    const parent = first.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    await vi.waitFor(() => expect(first.getRecord(parent)?.settled).toBe(true));
+    expect(announced).toHaveBeenCalledTimes(1);
+
+    const finish = controlledRun("child");
+    const child = first.spawn(mockPi, mockCtx, "general-purpose", "child", {
+      description: "child",
+      parentAgentId: parent,
+    });
+    const firstHandover = first.beginDrain([], undefined);
+    const events: HandoverEvent[] = [];
+    firstHandover.attach((event) => events.push(event));
+    finish();
+    await vi.waitFor(() => expect(events.some((event) => event.kind === "settled")).toBe(true));
+    const settled = events.find((event) => event.kind === "settled");
+    const items = settled?.kind === "settled" ? settled.items : [];
+    expect(items.map((item) => item.dto.id)).toEqual([parent, child]);
+
+    const reannounced = vi.fn();
+    const second = track(new AgentManager(reannounced));
+    second.adopt(items[0], true);
+    second.adopt(items[1], false);
+    const idle = second.beginDrain([], undefined).idleItems();
+    expect(idle.map((item) => item.dto.id)).toEqual([parent, child]);
+
+    const third = track(new AgentManager(reannounced));
+    third.adopt(idle[0], true);
+    expect(reannounced).not.toHaveBeenCalled();
+  });
+
+  it("announces a resumed run again after a hand-over carried its earlier announcement", async () => {
+    const announced = vi.fn();
+    const first = track(new AgentManager(announced));
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    const idle = first.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
+    await vi.waitFor(() => expect(first.getRecord(idle)?.settled).toBe(true));
+    expect(announced).toHaveBeenCalledTimes(1);
+
+    const [item] = first.beginDrain([], undefined).idleItems();
+    const reannounced = vi.fn();
+    const next = track(new AgentManager(reannounced));
+    next.adopt(item, false);
+
+    vi.mocked(resumeAgent).mockResolvedValueOnce(finishedRun("again"));
+    next.resume(idle, "again");
+    await vi.waitFor(() => expect(reannounced).toHaveBeenCalledTimes(1));
+  });
 });
