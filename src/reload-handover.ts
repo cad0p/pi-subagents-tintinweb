@@ -62,6 +62,11 @@ export interface DrainingPool {
   ownAgents(): AgentRecord[];
 }
 
+/** Disposes the sessions of the given items: a hand-over that is stopped holds no one to adopt them. */
+function disposeItems(items: HandoverItem[]): void {
+  for (const item of items) item.session?.dispose();
+}
+
 export class ReloadHandover {
   readonly version = HANDOVER_VERSION;
   private pending: HandoverEvent[] = [];
@@ -70,6 +75,7 @@ export class ReloadHandover {
   private queued: QueuedSpec[];
   private nudged: string[];
   private unreported?: LifetimeUsage;
+  private stopped = false;
 
   constructor(
     items: HandoverItem[],
@@ -111,14 +117,17 @@ export class ReloadHandover {
     this.items = this.items.filter((held) => held !== item);
   }
 
-  /** Puts back items whose adoption a shutdown cut short. */
+  /** Puts back items whose adoption a shutdown cut short. A stopped hand-over disposes them instead. */
   keepItems(items: HandoverItem[]): void {
-    this.items = [...this.items, ...items];
+    if (this.stopped) disposeItems(items);
+    else this.items = [...this.items, ...items];
   }
 
-  /** Delivers an event now, or buffers it while no activation is attached. */
+  /** Delivers an event now, or buffers it while no activation is attached. A stopped hand-over disposes what it is given. */
   emit(event: HandoverEvent): void {
-    if (this.listener) this.listener(event);
+    if (this.stopped) {
+      if (event.kind === "settled") disposeItems(event.items);
+    } else if (this.listener) this.listener(event);
     else this.pending.push(event);
   }
 
@@ -131,6 +140,16 @@ export class ReloadHandover {
   /** Stops delivery to the activation that is shutting down; later events buffer again. */
   detach(): void {
     this.listener = undefined;
+  }
+
+  /** Ends the hand-over for good: no activation will adopt what it holds. Disposes the sessions it holds and any it is given later. */
+  stop(): void {
+    this.detach();
+    this.stopped = true;
+    const held = [...this.items];
+    for (const event of this.pending.splice(0)) if (event.kind === "settled") held.push(...event.items);
+    this.items = [];
+    disposeItems(held);
   }
 }
 
@@ -185,7 +204,7 @@ export function publishHandovers(sessionId: string, list: ReloadHandover[]): voi
 }
 
 /** Members a reader calls on a hand-over. Permanent: a later layout may add members, never drop these. */
-const HANDOVER_METHODS = ["take", "takeNudged", "idleItems", "removeItem", "keepItems", "attach", "detach"];
+const HANDOVER_METHODS = ["take", "takeNudged", "idleItems", "removeItem", "keepItems", "attach", "detach", "stop"];
 /** Members a reader calls on the draining pool of a hand-over. Permanent, as HANDOVER_METHODS. */
 const POOL_METHODS = ["runningCount", "abortAll", "dispose", "ownAgents"];
 

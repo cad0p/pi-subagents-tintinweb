@@ -967,6 +967,39 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(draining?.abortController?.signal.aborted).toBe(true);
   }, 20_000);
 
+  it("disposes an idle subagent's session when the session quits while its adoption is held", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const id = await spawnIdleChild(root);
+    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
+    if (!child) throw new Error("no child session");
+    const dispose = vi.spyOn(child, "dispose");
+
+    // The child's reload is held inside the new activation's adoption, so the quit lands mid-adoption.
+    const originalReload = AgentSession.prototype.reload;
+    let openGate: () => void = () => {};
+    const childGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let childReached: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      childReached = resolve;
+    });
+    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
+      if (this === root) return originalReload.call(this);
+      childReached();
+      return childGate.then(() => originalReload.call(this));
+    });
+
+    const firstReload = reloadRoot(root);
+    await reached;
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+    openGate();
+    await firstReload;
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
   it("stops a run a reload handed over once a session starts that does not adopt it", async () => {
     const root = session;
     if (!root) throw new Error("no session");

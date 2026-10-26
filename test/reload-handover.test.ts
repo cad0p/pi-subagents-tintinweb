@@ -90,6 +90,37 @@ describe("ReloadHandover buffering", () => {
     expect(handover.takeNudged()).toEqual(["n1"]);
     expect(handover.takeNudged()).toEqual([]);
   });
+
+  it("keeps the idle sessions it holds on detach, for the next activation", () => {
+    const idle = fakeSession();
+    const handover = new ReloadHandover([{ dto: dtoOf("i"), session: idle }], [], [], undefined, stubPool);
+    handover.detach();
+    expect(handover.idleItems()).toHaveLength(1);
+    expect(idle.dispose).not.toHaveBeenCalled();
+  });
+
+  it("disposes the idle and buffered sessions it holds when stopped", () => {
+    const idle = fakeSession();
+    const buffered = fakeSession();
+    const handover = new ReloadHandover([{ dto: dtoOf("i"), session: idle }], [], [], undefined, stubPool);
+    handover.emit({ kind: "settled", items: [{ dto: dtoOf("b"), session: buffered }] });
+    handover.stop();
+    expect(idle.dispose).toHaveBeenCalledTimes(1);
+    expect(buffered.dispose).toHaveBeenCalledTimes(1);
+    expect(handover.idleItems()).toEqual([]);
+  });
+
+  it("disposes a settled run or a kept item it is given after stop", () => {
+    const late = fakeSession();
+    const kept = fakeSession();
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    handover.stop();
+    handover.emit({ kind: "settled", items: [{ dto: dtoOf("l"), session: late }] });
+    handover.keepItems([{ dto: dtoOf("k"), session: kept }]);
+    expect(late.dispose).toHaveBeenCalledTimes(1);
+    expect(kept.dispose).toHaveBeenCalledTimes(1);
+    expect(handover.idleItems()).toEqual([]);
+  });
 });
 
 describe("published handovers", () => {

@@ -818,7 +818,7 @@ export default function (pi: ExtensionAPI) {
       }
     } else {
       for (const h of held) {
-        h.detach();
+        h.stop();
         h.draining.abortAll();
         h.draining.dispose();
       }
@@ -949,10 +949,9 @@ export default function (pi: ExtensionAPI) {
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
-      h.detach();
       const unreported = h.take().unreported;
       if (unreported) pendingUsage.add(unreported);
-      for (const item of h.idleItems()) item.session?.dispose();
+      h.stop();
       h.draining.abortAll();
       h.draining.dispose();
     }
