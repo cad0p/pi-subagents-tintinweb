@@ -177,7 +177,7 @@ type ResumeCallbacks = Pick<
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
-  private reopening = new Map<string, Promise<AgentSession>>();
+  private reopening = new Map<string, Promise<AgentSession | undefined>>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -755,12 +755,20 @@ export class AgentManager {
     let reopen = this.reopening.get(id);
     if (!reopen) {
       const sessionManager = SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd);
-      reopen = createChildSession(childSettings, sessionManager, { agentId: id }).finally(() => this.reopening.delete(id));
+      // Checked inside the shared promise so a session reopened for an evicted record is disposed once.
+      reopen = createChildSession(childSettings, sessionManager, { agentId: id })
+        .then((session) => {
+          if (this.agents.get(id) !== record) {
+            session.dispose();
+            return undefined;
+          }
+          record.session = session;
+          return session;
+        })
+        .finally(() => this.reopening.delete(id));
       this.reopening.set(id, reopen);
     }
-    const session = await reopen;
-    record.session = session;
-    return session;
+    return reopen;
   }
 
   /**
