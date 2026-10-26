@@ -87,6 +87,9 @@ function spawnOverBus(events: EventBus, requestId: string, prompt: string, optio
 let release: () => void = () => {};
 let gate: Promise<void> = Promise.resolve();
 let childSignal: AbortSignal | undefined;
+/** Resolves once the nested child's provider call is in flight, so an abort reaches a streaming child. */
+let childStarted: Promise<void> = Promise.resolve();
+let markChildStarted: () => void = () => {};
 /** When set, the child's first turn waits on it and then runs a bash tool call before its gated answer. */
 let childToolStep: Promise<void> | undefined;
 /** When set, the child's second turn runs this bash command and waits on it before its gated answer. */
@@ -105,8 +108,21 @@ let parentSawChild = false;
 let parentNests = false;
 /** Set when the parent ends its turn right after spawning the nested child, leaving that child running. */
 let parentLeavesChild = false;
+/** Set when the parent's first turn, once released, spawns its nested child while the parent still drains. */
+let parentSpawnsOnRelease = false;
 /** The nested child a resumed parent turn reopens through the Agent tool when it is told "again". */
 let nestedResumeTarget = "";
+
+/** The nested child a parent turn spawns through the Agent tool. */
+function nestedSpawn() {
+  return fauxAssistantMessage([
+    fauxToolCall("Agent", {
+      description: "nested agent",
+      prompt: `${CHILD_TASK} nested`,
+      subagent_type: "general-purpose",
+    }),
+  ]);
+}
 
 // "spawn-now" makes the root call the Agent tool; the child (last message is its
 // CHILD-TASK prompt) waits on the gate; every other root turn just answers.
@@ -116,6 +132,7 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
   const child = context.messages.some((m) => m.role === "user" && JSON.stringify(m.content).includes(CHILD_TASK));
   if (child) {
     childSignal = options?.signal;
+    markChildStarted();
     if (childToolStep && last?.role === "user") {
       return childToolStep.then(() => fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]));
     }
@@ -137,20 +154,17 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
       ]);
     }
     const results = context.messages.filter((m) => m.role === "toolResult");
+    if (results.length === 0 && parentSpawnsOnRelease) return parentGate.then(() => nestedSpawn());
     if (results.length === 0 && !parentNests) {
       return parentGate.then(() => fauxAssistantMessage([fauxText("PARENT-DONE")]));
     }
-    if (results.length === 0) {
-      return fauxAssistantMessage([
-        fauxToolCall("Agent", {
-          description: "nested agent",
-          prompt: `${CHILD_TASK} nested`,
-          subagent_type: "general-purpose",
-        }),
-      ]);
-    }
+    if (results.length === 0) return nestedSpawn();
     const nestedId = /Agent ID: ([\w-]+)/.exec(JSON.stringify(results[0]?.content ?? ""))?.[1] ?? "";
-    if (results.length === 1 && parentLeavesChild) return fauxAssistantMessage([fauxText("PARENT-LEFT")]);
+    if (results.length === 1 && parentLeavesChild) {
+      // A parent that leaves a child it spawned while draining waits until that child is streaming.
+      const started = parentSpawnsOnRelease ? childStarted : Promise.resolve();
+      return started.then(() => fauxAssistantMessage([fauxText("PARENT-LEFT")]));
+    }
     if (results.length === 1) {
       return steerGate.then(() =>
         fauxAssistantMessage([fauxToolCall("steer_subagent", { agent_id: nestedId, message: "STEER-NOTE" })]),
@@ -296,6 +310,10 @@ describe("subagents across a real /reload (faux provider)", () => {
     parentSawChild = false;
     parentNests = false;
     parentLeavesChild = false;
+    parentSpawnsOnRelease = false;
+    childStarted = new Promise<void>((resolve) => {
+      markChildStarted = resolve;
+    });
     parentGate = new Promise<void>((resolve) => {
       releaseParent = resolve;
     });
@@ -1021,6 +1039,34 @@ describe("subagents across a real /reload (faux provider)", () => {
     );
     expect(parentSawChild).toBe(true);
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-FINISHED");
+  }, 20_000);
+
+  it("keeps a nested child spawned while its parent drains with the parent through settle and resume", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentSpawnsOnRelease = true;
+    parentLeavesChild = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    await reloadRoot(root);
+    // The parent is still draining when its nested spawn runs: the child must stay in the draining manager.
+    releaseParent();
+    await childStarted;
+    const childId = draining.listAgents().find((r) => r.parentAgentId === parentId)?.id ?? "";
+    expect(childId).not.toBe("");
+    // The parent settles in the old manager, which aborts the child it spawned while the child streams.
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(childSignal?.aborted).toBe(true), { timeout: 10_000 });
+    // The child unwinds, the subtree moves to the live root together, and the settled child resumes there.
+    release();
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.settled).toBe(true), { timeout: 10_000 });
+    faux = registerFauxProvider({ api: faux.api, provider: "faux", models: [FAUX_MODEL] });
+    faux.setResponses(scripted());
+    expect(publishedRoot().manager.resume(childId, "again")).toBeDefined();
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.result).toContain("CHILD-DONE"), { timeout: 10_000 });
   }, 20_000);
 
   it("keeps a completed parent's session and hands it over once its unwinding nested child settles", async () => {

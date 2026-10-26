@@ -49,8 +49,12 @@ describe("impl-route fallback", () => {
 });
 
 describe("impl-route manager ownership", () => {
-  const ownerOf = (ids: string[], label: string): NestedAgentManager =>
-    ({ label, getRecord: (id: string) => (ids.includes(id) ? { id } : undefined) }) as unknown as NestedAgentManager;
+  const ownerOf = (ids: string[], label: string, draining: string[] = []): NestedAgentManager =>
+    ({
+      label,
+      getRecord: (id: string) => (ids.includes(id) || draining.includes(id) ? { id } : undefined),
+      isDraining: (id: string) => draining.includes(id),
+    }) as unknown as NestedAgentManager;
   const creatorRoute = (manager: NestedAgentManager): RootRoute => ({ manager, pi: {} as ExtensionAPI });
 
   it("keeps a parent on its creating manager when no root has published", () => {
@@ -63,6 +67,13 @@ describe("impl-route manager ownership", () => {
     const live = ownerOf(["parent"], "live");
     slot[IMPL_KEY] = { version: 1, scopeBlockReason: () => undefined, activityOf: () => undefined, root: () => creatorRoute(live) };
     expect(routedManagerFor(creatorRoute(creator), "parent")).toBe(live);
+  });
+
+  it("keeps a parent a draining activation still holds on its creating manager, even when the live root lists it", () => {
+    const creator = ownerOf(["parent"], "creator");
+    const live = ownerOf([], "live", ["parent"]);
+    slot[IMPL_KEY] = { version: 1, scopeBlockReason: () => undefined, activityOf: () => undefined, root: () => creatorRoute(live) };
+    expect(routedManagerFor(creatorRoute(creator), "parent")).toBe(creator);
   });
 
   it("keeps a draining parent on its creating manager when the live root does not know it", () => {

@@ -77,6 +77,8 @@ export interface NestedAgentManager {
     callbacks?: { onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void },
   ): AgentRecord | undefined;
   getRecord(id: string): AgentRecord | undefined;
+  /** True while a draining activation still holds the run; its children stay with it. */
+  isDraining(id: string): boolean;
   listAgents(): AgentRecord[];
   restoreSession(id: string): Promise<AgentSession | undefined>;
 }

@@ -95,8 +95,12 @@ export function routedRoot(fallback: RootRoute): RootRoute {
   return liveImpl()?.root() ?? fallback;
 }
 
-/** The manager that owns a parent: the live root when it knows the parent, else the one that created it. */
+/**
+ * The manager that owns a parent: the live root when it owns the parent outright, else the one that created it.
+ * A parent that a draining activation still holds stays with that activation, so its children are aborted,
+ * moved and resumed with it.
+ */
 export function routedManagerFor(fallback: RootRoute, parentAgentId: string): NestedAgentManager {
-  const root = routedRoot(fallback);
-  return root.manager.getRecord(parentAgentId) ? root.manager : fallback.manager;
+  const root = routedRoot(fallback).manager;
+  return root.getRecord(parentAgentId) && !root.isDraining(parentAgentId) ? root : fallback.manager;
 }
