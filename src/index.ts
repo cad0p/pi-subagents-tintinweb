@@ -940,14 +940,14 @@ export default function (pi: ExtensionAPI) {
       .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
   }
 
-  /** Drops a draining pool once its last run has settled; its idle subtrees have already moved. */
+  /** Drops a draining pool once its last record has left it: a settled parent waits for its unwinding child to hand over. */
   function retireDrained(): void {
     for (const h of held) {
-      if (h.draining.runningCount() > 0) continue;
+      if (h.draining.ownAgents().length > 0) continue;
       h.detach();
       h.draining.dispose();
     }
-    held = held.filter((h) => h.draining.runningCount() > 0);
+    held = held.filter((h) => h.draining.ownAgents().length > 0);
     manager.setDrainingPools(held.map((h) => h.draining));
     widget.update();
     fleet.update();

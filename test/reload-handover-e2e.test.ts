@@ -90,6 +90,8 @@ let releaseSteer: () => void = () => {};
 let parentSawChild = false;
 /** Set once the parent has settled: its next run spawns the nested child. */
 let parentNests = false;
+/** Set when the parent ends its turn right after spawning the nested child, leaving that child running. */
+let parentLeavesChild = false;
 /** The nested child a resumed parent turn reopens through the Agent tool when it is told "again". */
 let nestedResumeTarget = "";
 
@@ -132,6 +134,7 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
       ]);
     }
     const nestedId = /Agent ID: ([\w-]+)/.exec(JSON.stringify(results[0]?.content ?? ""))?.[1] ?? "";
+    if (results.length === 1 && parentLeavesChild) return fauxAssistantMessage([fauxText("PARENT-LEFT")]);
     if (results.length === 1) {
       return steerGate.then(() =>
         fauxAssistantMessage([fauxToolCall("steer_subagent", { agent_id: nestedId, message: "STEER-NOTE" })]),
@@ -243,6 +246,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     nestedResumeTarget = "";
     parentSawChild = false;
     parentNests = false;
+    parentLeavesChild = false;
     parentGate = new Promise<void>((resolve) => {
       releaseParent = resolve;
     });
@@ -922,6 +926,43 @@ describe("subagents across a real /reload (faux provider)", () => {
     );
     expect(parentSawChild).toBe(true);
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-FINISHED");
+  }, 20_000);
+
+  it("keeps a completed parent's session and hands it over once its unwinding nested child settles", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    const reported: Array<{ id: string; usage: { totalTokens: number } }> = [];
+    const off = publishedRoot().pi.events.on("subagents:usage", (event) => {
+      reported.push(event as { id: string; usage: { totalTokens: number } });
+    });
+    parentNests = true;
+    parentLeavesChild = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    // The parent completes while its nested child runs: its completion tail aborts the child, which stays unsettled behind the gate.
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
+    expect(publishedRoot().manager.listAgents().find((r) => r.parentAgentId === parentId)?.settled).toBe(false);
+    const parentFile = publishedRoot().manager.getRecord(parentId)?.sessionFile ?? "";
+    expect(existsSync(parentFile)).toBe(true);
+
+    await reloadRoot(root);
+    // The old manager cannot retire while its child is unwinding, so the parent's session file survives the reload.
+    expect(existsSync(parentFile)).toBe(true);
+
+    release();
+    await vi.waitFor(
+      () => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"),
+      { timeout: 10_000 },
+    );
+    off();
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
+    const lifetime = publishedRoot().manager.getRecord(parentId)?.lifetimeUsage;
+    const total = (lifetime?.input ?? 0) + (lifetime?.output ?? 0) + (lifetime?.cacheRead ?? 0) + (lifetime?.cacheWrite ?? 0);
+    expect(total).toBeGreaterThan(0);
+    const reportedTotal = reported.filter((event) => event.id === parentId).reduce((sum, event) => sum + event.usage.totalTokens, 0);
+    expect(reportedTotal).toBe(total);
   }, 20_000);
 
   it("reports a draining subagent's usage once, through the reloaded root", async () => {
