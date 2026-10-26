@@ -75,6 +75,17 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
       return this.systemPrompt;
     }
   },
+  // The loader's package manager resolves `-e` sources to files (#92): a registered source maps to
+  // its files; an absolute path maps to itself.
+  DefaultPackageManager: class {
+    async resolveExtensionSources(sources: string[]) {
+      return {
+        extensions: sources.flatMap((source) =>
+          (resolvedSources.get(source) ?? (source.startsWith("/") ? [source] : [])).map((path) => ({ path, enabled: true })),
+        ),
+      };
+    }
+  },
   getAgentDir,
   SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
   SettingsManager: { create: settingsManagerCreate },
@@ -108,6 +119,8 @@ vi.mock("../src/agent-types.js", () => ({
   getBuiltinToolSnippets: vi.fn(() => ({ read: "Read a file" })),
 }));
 
+// Extension files the mock package manager resolves `-e` sources to (#92), keyed by source.
+const resolvedSources = vi.hoisted(() => new Map<string, string[]>());
 // The parent's extension flags (#92), mutated per test and reset in beforeEach.
 const parentFlags = vi.hoisted(() => ({ noExtensions: false, extensionPaths: [] as string[] }));
 vi.mock("../src/parent-cli.js", () => ({ parentExtensionFlags: parentFlags }));
@@ -206,6 +219,7 @@ beforeEach(() => {
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   ctx.isProjectTrusted.mockClear();
+  resolvedSources.clear();
   parentFlags.noExtensions = false;
   parentFlags.extensionPaths = [];
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
@@ -1953,6 +1967,47 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
     const tools = lastToolsPassed();
     expect(tools).toContain("steer_tool");
     expect(tools).not.toContain("steer_installed");
+  });
+
+  it("a parent -e directory package drops the discovered copy of its entry, by package name", async () => {
+    const pkgDir = mkdtempSync(join(tmpdir(), "pi-probe-"));
+    try {
+      mkdirSync(join(pkgDir, "src"));
+      writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "pi-probe", pi: { extensions: ["./src/index.ts"] } }));
+      const entry = join(pkgDir, "src", "index.ts");
+      writeFileSync(entry, "");
+      resolvedSources.set(pkgDir, [entry]);
+      parentFlags.extensionPaths = [pkgDir];
+      setupAgent({ extensions: true });
+      withExtensions({ [entry]: ["probe_tool"], "/discovered/pi-probe/index.ts": ["probe_discovered"] });
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+
+      await runAgent(ctx, "Explore", "go", { pi });
+
+      const tools = lastToolsPassed();
+      expect(tools).toContain("probe_tool");
+      expect(tools).not.toContain("probe_discovered");
+    } finally {
+      rmSync(pkgDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a parent -e npm: source drops the discovered copy of the same package", async () => {
+    // pi resolves an npm source to its install entry, never to the raw `npm:` string.
+    const npmEntry = "/mock/agent-dir/npm/node_modules/pi-probe/index.ts";
+    resolvedSources.set("npm:pi-probe", [npmEntry]);
+    parentFlags.extensionPaths = ["npm:pi-probe"];
+    setupAgent({ extensions: true });
+    withExtensions({ [npmEntry]: ["probe_tool"], "/discovered/pi-probe/index.ts": ["probe_discovered"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("probe_tool");
+    expect(tools).not.toContain("probe_discovered");
   });
 
   it("parent -e without -ne: discovered extensions still load beside the -e path, as in pi", async () => {
