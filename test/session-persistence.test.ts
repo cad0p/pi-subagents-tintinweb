@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,7 +21,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   return { ...actual, createAgentSession };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { type RunOptions, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig } from "../src/types.js";
 
@@ -58,17 +58,25 @@ function fakeSession(sessionManager: SessionManager, onPrompt: () => void) {
   return session;
 }
 
+function headerOf(file: string): { type: string; cwd: string; parentSession?: string } {
+  return JSON.parse(readFileSync(file, "utf-8").split("\n")[0]);
+}
+
 describe("subagent session persistence (real SessionManager)", () => {
   let root: string;
   let sessionDir: string;
+  let worktree: string;
+  let parent: SessionManager;
   let parentSessionFile: string;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-session-"));
     sessionDir = join(root, "sessions");
+    worktree = join(root, "worktree");
     mkdirSync(sessionDir, { recursive: true });
+    mkdirSync(worktree);
     // A real parent session, so the child's header points at a file that exists.
-    const parent = SessionManager.create(root, sessionDir);
+    parent = SessionManager.create(root, sessionDir);
     parent.appendMessage({ role: "user", content: [{ type: "text", text: "parent" }], timestamp: Date.now() });
     parentSessionFile = parent.getSessionFile()!;
     createAgentSession.mockReset();
@@ -76,6 +84,7 @@ describe("subagent session persistence (real SessionManager)", () => {
 
   afterEach(() => {
     registerAgents(new Map());
+    vi.unstubAllEnvs();
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -100,18 +109,22 @@ describe("subagent session persistence (real SessionManager)", () => {
     );
   }
 
+  // The parent is the real session manager, so the child's default directory is
+  // whatever pi opened the parent in.
   const ctx = () => ({
     cwd: root,
     model: undefined,
     modelRegistry: { find: () => undefined, getAvailable: () => [], getAll: () => [] },
     getSystemPrompt: () => "parent prompt",
     isProjectTrusted: () => true,
-    sessionManager: { getSessionFile: () => parentSessionFile },
+    sessionManager: parent,
     scopedModels: [],
   }) as unknown as ExtensionContext;
 
   /** Run the agent and report whether its file already existed mid-run. */
-  async function run(): Promise<{ sessionManager: SessionManager; fileExistedDuringRun: boolean }> {
+  async function run(
+    runOptions: Omit<RunOptions, "pi"> = {},
+  ): Promise<{ sessionManager: SessionManager; fileExistedDuringRun: boolean }> {
     let sessionManager!: SessionManager;
     let fileExistedDuringRun = false;
     createAgentSession.mockImplementation(async (options: { sessionManager: SessionManager }) => {
@@ -123,7 +136,7 @@ describe("subagent session persistence (real SessionManager)", () => {
       return { session };
     });
 
-    await runAgent(ctx(), "persisted", "go", { pi });
+    await runAgent(ctx(), "persisted", "go", { pi, ...runOptions });
 
     return { sessionManager, fileExistedDuringRun };
   }
@@ -155,9 +168,43 @@ describe("subagent session persistence (real SessionManager)", () => {
     registerAgent();
     const { sessionManager } = await run();
 
-    const header = JSON.parse(readFileSync(sessionManager.getSessionFile()!, "utf-8").split("\n")[0]);
+    const header = headerOf(sessionManager.getSessionFile()!);
     expect(header.type).toBe("session");
     expect(header.parentSession).toBe(parentSessionFile);
+  });
+
+  it("follows the parent's custom session dir when session_dir is omitted, not PI_CODING_AGENT_SESSION_DIR", async () => {
+    const envDir = join(root, "env-sessions");
+    vi.stubEnv("PI_CODING_AGENT_SESSION_DIR", envDir);
+    registerAgent({ sessionDir: undefined });
+
+    const { sessionManager } = await run();
+
+    expect(dirname(sessionManager.getSessionFile()!)).toBe(sessionDir);
+    expect(childFiles()).toHaveLength(1);
+    expect(existsSync(envDir)).toBe(false);
+  });
+
+  it("keeps a worktree child beside the parent, with the worktree as its header cwd", async () => {
+    registerAgent({ sessionDir: undefined });
+
+    const { sessionManager } = await run({ cwd: worktree, worktree: { path: worktree, parentCwd: root } });
+
+    const file = sessionManager.getSessionFile()!;
+    expect(dirname(file)).toBe(sessionDir);
+    expect(childFiles()).toHaveLength(1);
+    expect(headerOf(file).cwd).toBe(worktree);
+  });
+
+  it("resolves a relative session_dir from the parent project, so the file survives the worktree's removal", async () => {
+    registerAgent({ sessionDir: ".sessions", persistSession: true });
+
+    const { sessionManager } = await run({ cwd: worktree, worktree: { path: worktree, parentCwd: root } });
+
+    const file = sessionManager.getSessionFile()!;
+    expect(dirname(file)).toBe(join(root, ".sessions"));
+    rmSync(worktree, { recursive: true, force: true });
+    expect(existsSync(file)).toBe(true);
   });
 
   it("runs in memory when the host session has no file", async () => {

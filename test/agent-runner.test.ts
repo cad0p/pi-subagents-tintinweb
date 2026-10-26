@@ -170,7 +170,11 @@ const ctx = {
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
   isProjectTrusted: vi.fn(() => true),
-  sessionManager: { getBranch: vi.fn(() => []), getSessionFile: vi.fn(() => undefined as string | undefined) },
+  sessionManager: {
+    getBranch: vi.fn(() => []),
+    getSessionFile: vi.fn(() => undefined as string | undefined),
+    getSessionDir: vi.fn(() => "/sessions"),
+  },
   scopedModels: [],
 } as any;
 
@@ -186,6 +190,8 @@ beforeEach(() => {
   ctx.sessionManager.getSessionFile.mockReset();
   // A normal host session has a file; the ephemeral case opts out per test.
   ctx.sessionManager.getSessionFile.mockReturnValue("/sessions/parent.jsonl");
+  ctx.sessionManager.getSessionDir.mockReset();
+  ctx.sessionManager.getSessionDir.mockReturnValue("/sessions");
   settingsManagerGetSessionDir.mockReset();
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
@@ -232,7 +238,7 @@ describe("agent-runner final output capture", () => {
     }));
     expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir", { projectTrusted: true });
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", undefined, { parentSession: "/sessions/parent.jsonl" });
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/sessions", { parentSession: "/sessions/parent.jsonl" });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
@@ -830,7 +836,7 @@ describe("agent-runner session persistence", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, { parentSession: "/sessions/parent.jsonl" });
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/sessions", { parentSession: "/sessions/parent.jsonl" });
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       sessionManager: { kind: "persistent-session-manager" },
     }));
@@ -844,7 +850,7 @@ describe("agent-runner session persistence", () => {
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, { parentSession: "/sessions/parent.jsonl" });
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/sessions", { parentSession: "/sessions/parent.jsonl" });
   });
 
   it("falls back to an in-memory session when the host session has no file", async () => {
@@ -856,6 +862,7 @@ describe("agent-runner session persistence", () => {
 
     expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
     expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(ctx.sessionManager.getSessionDir).not.toHaveBeenCalled();
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       sessionManager: { kind: "memory-session-manager" },
     }));
@@ -868,19 +875,53 @@ describe("agent-runner session persistence", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", undefined, {
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/sessions", {
       parentSession: "/sessions/parent.jsonl",
     });
   });
 
-  it("uses pi's normal persistent session location when the settings manager names one", async () => {
-    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+  it("uses the parent session's directory, not the settings or env sessionDir", async () => {
+    settingsManagerGetSessionDir.mockReturnValue("/settings/pi/sessions");
+    vi.stubEnv("PI_CODING_AGENT_SESSION_DIR", "/env/pi/sessions");
+    try {
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+
+      await runAgent(ctx, "Explore", "go", { pi });
+
+      expect(ctx.sessionManager.getSessionDir).toHaveBeenCalledTimes(1);
+      expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/sessions", { parentSession: "/sessions/parent.jsonl" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("resolves a relative session_dir against worktree.parentCwd, never the isolation worktree", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ sessionDir: ".sessions" }));
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "go", { pi });
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      cwd: "/repo/.pi-worktrees/abc",
+      worktree: { path: "/repo/.pi-worktrees/abc", parentCwd: "/repo" },
+    });
 
-    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions", { parentSession: "/sessions/parent.jsonl" });
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/repo/.pi-worktrees/abc", "/repo/.sessions", {
+      parentSession: "/sessions/parent.jsonl",
+    });
+  });
+
+  it("resolves a relative session_dir against the run cwd when there is no worktree", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ sessionDir: ".sessions" }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/work/sub" });
+
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/work/sub", "/work/sub/.sessions", {
+      parentSession: "/sessions/parent.jsonl",
+    });
   });
 
   it("uses a frontmatter sessionDir when one is configured", async () => {
