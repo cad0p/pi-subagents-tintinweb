@@ -905,8 +905,12 @@ export default function (pi: ExtensionAPI) {
         await runInChildSessionContext(() => session.reload());
       } catch (err) {
         item.dto.status = "error";
-        // The session stays: its file holds the transcript and `resume` continues on it.
         item.dto.error = `reload failed: ${err instanceof Error ? err.message : String(err)}`;
+        // Drop the broken session only where a file holds the transcript; `resume` reopens the child from it.
+        if (item.dto.sessionFile) {
+          session.dispose();
+          item.session = undefined;
+        }
       }
     }
     if (shutDown) return false;
@@ -1487,13 +1491,14 @@ Terse command-style prompts produce shallow, generic work.
         // Running (including the start prologue, where `settled` may still hold
         // the prior run's `true`), queued, or winding down — starting now would
         // race the previous run's settle handler. A queued record has no session
-        // yet, so the active check precedes the session check.
+        // yet, so the active check precedes the restore below.
         if (existing.status === "running" || existing.status === "queued" || existing.settled === false) {
           return textResult(`Agent "${params.resume}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`);
         }
-        if (!existing.session) return textResult(`Agent "${params.resume}" has no active session to resume.`);
+        const liveSession = await manager.restoreSession(params.resume);
+        if (!liveSession) return textResult(`Agent "${params.resume}" has no active session to resume.`);
         const { state: resumeState, callbacks: resumeCallbacks } = createActivityTracker(() => existing.id, existing.effectiveMaxTurns);
-        const resumeStart = existing.session.messages.length;
+        const resumeStart = liveSession.messages.length;
         const record = manager.resume(params.resume, params.prompt, resumeCallbacks);
         if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
         // Only once the resume is accepted — a refused resume must not drop the
@@ -1501,7 +1506,7 @@ Terse command-style prompts produce shallow, generic work.
         cancelNudge(params.resume);
         // The session already exists, so onSessionCreated never fires for a resume;
         // seed it here so the widget/viewer can render the context-fill (NN%).
-        resumeState.session = existing.session;
+        resumeState.session = liveSession;
         agentActivity.set(record.id, resumeState);
         if (record.outputFile && record.session) {
           record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, ctx.cwd, resumeStart);

@@ -450,7 +450,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(overlapped).toBe(false);
   }, 20_000);
 
-  it("marks an idle subagent as error when its session fails to reload, and keeps its row", async () => {
+  it("rebuilds an idle subagent from its session file when its reload fails inside pi's reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     release();
@@ -459,23 +459,35 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
+    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
+    if (!child?.sessionFile) throw new Error("no child session file");
+    const { sessionFile, sessionId } = child;
+    const activeTools = child.getActiveToolNames();
 
-    const originalReload = AgentSession.prototype.reload;
-    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
-      return this === root ? originalReload.call(this) : Promise.reject(new Error("child boom"));
+    // Throw inside the real reload, right after pi invalidated the child's runner (agent-session.js reload()).
+    const invalidate = child.extensionRunner.invalidate.bind(child.extensionRunner);
+    vi.spyOn(child.extensionRunner, "invalidate").mockImplementationOnce(() => {
+      invalidate();
+      throw new Error("child boom");
     });
     await reloadRoot(root);
 
     const row = liveRegistry().listAgents().find((r) => r.id === id);
     expect(row?.status).toBe("error");
     expect(row?.error).toContain("reload failed: child boom");
-    // The session is kept, so the row resumes on the same transcript.
-    expect(row?.session).toBeDefined();
+    // The broken session is disposed and dropped; its file keeps the transcript.
+    expect(row?.session).toBeUndefined();
+    expect(existsSync(sessionFile)).toBe(true);
+
+    expect(await publishedRoot().manager.restoreSession(id)).toBeDefined();
     expect(publishedRoot().manager.resume(id, "after-reload")).toBeDefined();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const transcript = JSON.stringify(liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages);
+    const reopened = liveRegistry().listAgents().find((r) => r.id === id)?.session;
+    expect(reopened?.sessionId).toBe(sessionId);
+    expect(reopened?.getActiveToolNames()).toEqual(activeTools);
+    const transcript = JSON.stringify(reopened?.messages);
     expect(transcript).toContain(CHILD_TASK);
     expect(transcript).toContain("after-reload");
   }, 20_000);

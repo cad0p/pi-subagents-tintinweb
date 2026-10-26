@@ -395,6 +395,8 @@ export interface RunOptions {
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
+  /** Called with the resolved child settings before its session is built, so a failed reload can rebuild it. */
+  onChildSettings?: (settings: ChildSessionSettings) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
@@ -558,7 +560,7 @@ type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>
  * Resolved inputs of a child session. Plain data: the same settings build the
  * same session again, without the spawn context.
  */
-interface ChildSessionSettings {
+export interface ChildSessionSettings {
   type: SubagentType;
   agentConfig: AgentConfig | undefined;
   effectiveCwd: string;
@@ -582,7 +584,7 @@ interface ChildSessionSettings {
  * Builds and binds a child session from its resolved settings: the resource
  * loader, the tool allowlist and the session. The caller owns sessionManager.
  */
-async function createChildSession(
+export async function createChildSession(
   settings: ChildSessionSettings,
   sessionManager: SessionManager,
   options: Pick<RunOptions, "agentId" | "onToolActivity">,
@@ -1170,6 +1172,7 @@ export async function runAgent(
     scopedModels,
     parentModelRuntime,
   };
+  options.onChildSettings?.(settings);
   const session = await createChildSession(settings, sessionManager, options);
 
   options.onSessionCreated?.(session);

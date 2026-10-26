@@ -78,6 +78,7 @@ export interface NestedAgentManager {
   ): AgentRecord | undefined;
   getRecord(id: string): AgentRecord | undefined;
   listAgents(): AgentRecord[];
+  restoreSession(id: string): Promise<AgentSession | undefined>;
 }
 
 export interface NestedToolContext {
@@ -169,6 +170,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
+        await context.manager.restoreSession(params.resume);
         const resumed = context.manager.resume(params.resume, params.prompt, {
           onAssistantUsage: foldUsageIntoAncestors,
         });

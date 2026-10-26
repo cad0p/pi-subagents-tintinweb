@@ -56,6 +56,7 @@ function makeManager(): NestedAgentManager {
       return id;
     },
     resume: vi.fn((id: string) => records.get(id)),
+    restoreSession: vi.fn(async () => undefined),
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
   };

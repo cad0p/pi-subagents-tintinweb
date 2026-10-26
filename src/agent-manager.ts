@@ -14,8 +14,8 @@ import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { type AgentSession, type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createChildSession, getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { describeModel } from "./model-resolver.js";
 import {
@@ -176,6 +176,8 @@ type ResumeCallbacks = Pick<
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
+  /** In-flight reopens by agent id, so concurrent restores share one session. */
+  private reopening = new Map<string, Promise<AgentSession>>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -413,9 +415,13 @@ export class AgentManager {
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
       },
+      onChildSettings: (settings) => {
+        record.childSettings = settings;
+      },
       onSessionCreated: (session) => {
         record.session = session;
         record.sessionId = session.sessionId;
+        record.sessionFile = session.sessionManager.getSessionFile();
         // The model and thinking level are only knowable once pi has resolved
         // its defaults and clamped the level to what the model supports. Writing
         // them back here makes the record authoritative, so every surface reads
@@ -736,6 +742,28 @@ export class AgentManager {
   }
 
   /**
+   * Rebuild a record's session from its session file when the live session was
+   * dropped (a reload failed during adoption). Concurrent callers share one
+   * reopen, so two AgentSessions never write the same file.
+   */
+  async restoreSession(id: string): Promise<AgentSession | undefined> {
+    const record = this.agents.get(id);
+    if (!record) return undefined;
+    if (record.session) return record.session;
+    const { sessionFile, childSettings } = record;
+    if (!sessionFile || !childSettings) return undefined;
+    let reopen = this.reopening.get(id);
+    if (!reopen) {
+      const sessionManager = SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd);
+      reopen = createChildSession(childSettings, sessionManager, { agentId: id }).finally(() => this.reopening.delete(id));
+      this.reopening.set(id, reopen);
+    }
+    const session = await reopen;
+    record.session = session;
+    return session;
+  }
+
+  /**
    * Send a steering message to an agent from the UI (mirrors the steer_subagent
    * tool). A live session delivers it now — it interrupts the agent after its
    * current tool execution and appears as a user message. If the session isn't
@@ -820,7 +848,7 @@ export class AgentManager {
     // Read from the session, not a copy taken at creation: pi moves the file on
     // `ctx.newSession()`/`fork()`, and deleting the path it started with would
     // leak the one it actually wrote.
-    const sessionFile = record.session?.sessionManager.getSessionFile();
+    const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
