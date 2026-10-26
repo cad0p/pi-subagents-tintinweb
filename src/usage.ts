@@ -106,11 +106,17 @@ export class PendingUsagePool {
    * result untouched rather than attaching a zero.
    */
   drain(): Usage | undefined {
+    const taken = this.takeLifetime();
+    return taken && toReportedUsage(taken);
+  }
+
+  /** Take the raw accumulated delta, resetting the pool. Lets a reloading activation hand it to its successor. */
+  takeLifetime(): LifetimeUsage | undefined {
     if (!this.dirty) return undefined;
-    const drained = toReportedUsage(this.pending);
+    const taken = this.pending;
     this.pending = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
     this.dirty = false;
-    return drained;
+    return taken;
   }
 }
 

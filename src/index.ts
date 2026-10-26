@@ -19,7 +19,7 @@ import { AgentManager, type SpawnOptions } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
-import { inChildSessionContext } from "./child-context.js";
+import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
@@ -27,6 +27,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -348,6 +349,8 @@ export default function (pi: ExtensionAPI) {
    * and drained onto the next tool result this extension returns.
    */
   const pendingUsage = new PendingUsagePool();
+  // Handovers from an older activation that a reload left draining; their runs still count against maxConcurrent.
+  let held: ReloadHandover[] = [];
 
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them before
@@ -593,8 +596,8 @@ export default function (pi: ExtensionAPI) {
   // extension in the same process (session.bindExtensions in agent-runner.ts),
   // and unconditionally overwriting would point the registry at a short-lived
   // child manager — and the child's shutdown would then delete the root
-  // session's entry. The first activation (the root session) wins; child
-  // activations leave it alone.
+  // session's entry. The root activation claims it by role and overwrites the
+  // entry a reload left behind; child activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
   // Every caller-supplied spawn that reaches the manager from outside the Agent
   // tool goes through here, so `fallbackSubagent` gates cross-extension callers
@@ -630,10 +633,10 @@ export default function (pi: ExtensionAPI) {
       const record = manager.getRecord(id);
       return record?.parentAgentId ? undefined : record;
     },
-    listAgents: () => manager.listAgents(),
+    listAgents: () => [...manager.listAgents(), ...held.flatMap((h) => h.draining.listAgents())],
   };
-  const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
-  if (ownsManagerRegistry) {
+  const isRoot = !inChildSessionContext();
+  if (isRoot) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
   }
 
@@ -718,7 +721,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
@@ -763,6 +766,7 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:ready", {});
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
+    if (event.reason === "reload" && isRoot) await adoptHandovers(ctx);
   });
 
   pi.on("session_before_switch", () => {
@@ -772,7 +776,7 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async (event) => {
+  pi.on("session_shutdown", async (event, ctx) => {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -780,19 +784,34 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubSteer();
     rpcHandle = undefined;
     currentCtx = undefined;
-    // Only release the global slot if this activation claimed it — a child
-    // session's shutdown must not delete the root session's registry entry.
-    if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
-      delete (globalThis as any)[MANAGER_KEY];
-    }
     scheduler.stop();
-    manager.abortAll();
+    const nudged = [...pendingNudges.keys(), ...parkedNudges.keys()];
+    if (event.reason === "reload") {
+      // Nothing is aborted: runs still going move to the reloaded activation (reload-handover.ts).
+      widget.dispose();
+      if (isRoot) {
+        for (const h of held) h.detach();
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(nudged, pendingUsage.takeLifetime())]);
+        held = [];
+      }
+    } else {
+      for (const h of held) {
+        h.detach();
+        h.draining.abortAll();
+        h.draining.dispose();
+      }
+      held = [];
+      // Only the root activation owns the registry entry; a child's shutdown must not delete it.
+      if (isRoot && (globalThis as any)[MANAGER_KEY] === registryEntry) delete (globalThis as any)[MANAGER_KEY];
+      manager.abortAll();
+      manager.dispose();
+    }
+    // After the abort: a completion the abort settles arms a nudge, and the shutdown must clear it.
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     parkedNudges.clear();
     mainTurnActive = false;
     fleet.dispose();
-    manager.dispose();
     // Every agent is stopped and every child session has shut down, so no more
     // `subagents:usage` can arrive from THIS session. A ledger flushing in its
     // own `session_shutdown` may have run before this handler aborted the agents
@@ -805,6 +824,68 @@ export default function (pi: ExtensionAPI) {
     // tell a final flush from a mid-process one.
     pi.events.emit("subagents:disposed", { reason: event.reason });
   });
+
+  // ---- Reload hand-over (root activation; see reload-handover.ts) ----
+  // Every handover is taken before any is attached: a pool retired during the
+  // replay would otherwise drop items that were not taken yet.
+  async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
+    held = takeHandovers(ctx.sessionManager.getSessionId());
+    manager.setDrainingPools(held.map((h) => h.draining));
+    for (const h of held) {
+      const taken = h.take();
+      if (taken.unreported) pendingUsage.add(taken.unreported);
+      for (const spec of taken.queued) {
+        try {
+          spawnTopLevel(pi, ctx, spec.type, spec.prompt, { ...spec.options, id: spec.id });
+        } catch (err) {
+          console.warn(`[pi-subagents] Could not restart queued agent ${spec.id} after reload:`, err);
+        }
+      }
+      for (const item of taken.items) await adoptItem(item, false);
+      for (const id of taken.nudged) {
+        const record = manager.getRecord(id);
+        if (record) sendIndividualNudge(record);
+      }
+    }
+    for (const h of held) h.attach((event) => void onHandoverEvent(event));
+    retireDrained();
+  }
+
+  /** Adopts one handed-over record. A child session is reloaded so its extensions run the new code. */
+  async function adoptItem(item: HandoverItem, notify: boolean): Promise<void> {
+    const session = item.session;
+    if (session) {
+      try {
+        await runInChildSessionContext(() => session.reload());
+      } catch (err) {
+        item.dto.status = "error";
+        item.dto.error = `reload failed: ${err instanceof Error ? err.message : String(err)}`;
+        item.session = undefined;
+      }
+    }
+    manager.adopt(item, notify);
+  }
+
+  /** A draining run settled, or reported usage: the reloaded activation takes it over. */
+  async function onHandoverEvent(event: HandoverEvent): Promise<void> {
+    if (event.kind === "settled") {
+      for (const [i, item] of event.items.entries()) await adoptItem(item, i === 0);
+    } else if (event.kind === "usage") {
+      manager.replayUsage(fromDto(event.dto), event.usage);
+    }
+    retireDrained();
+  }
+
+  /** Drops a draining pool once its last run has settled; its idle subtrees have already moved. */
+  function retireDrained(): void {
+    for (const h of held) {
+      if (h.draining.runningCount() > 0) continue;
+      h.detach();
+      h.draining.dispose();
+    }
+    held = held.filter((h) => h.draining.runningCount() > 0);
+    manager.setDrainingPools(held.map((h) => h.draining));
+  }
 
   // Live widget: show running agents above editor.
   // widgetMode (default "all") selects what the widget shows: "all" = every
@@ -1668,7 +1749,7 @@ Terse command-style prompts produce shallow, generic work.
   // Register only in child (subagent-session) activations: the first
   // in-process activation is the root (main) session, where the main agent
   // must not see this tool.
-  if (!ownsManagerRegistry) {
+  if (!isRoot) {
     pi.registerTool(defineTool({
       name: "checkpoint",
       label: "Checkpoint",

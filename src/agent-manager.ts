@@ -18,6 +18,15 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { describeModel } from "./model-resolver.js";
+import {
+  type DrainingPool,
+  fromDto,
+  type HandoverItem,
+  type QueuedSpec,
+  ReloadHandover,
+  toDto,
+  toSpawnData,
+} from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -92,6 +101,8 @@ interface SpawnArgs {
 }
 
 export interface SpawnOptions {
+  /** Fixed id: a queued spawn re-spawned after a reload keeps its id. */
+  id?: string;
   description: string;
   model?: Model<any>;
   maxTurns?: number;
@@ -180,6 +191,10 @@ export class AgentManager {
   private queue: { id: string; args: SpawnArgs }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
+  /** Pools of older activations whose runs still count against `maxConcurrent`. */
+  private drainingPools: DrainingPool[] = [];
+  /** Set once this activation shuts down for a reload: its draining runs settle into it. */
+  private handover?: ReloadHandover;
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -227,7 +242,7 @@ export class AgentManager {
     // can fix and retry; the RPC layer converts throws into error envelopes.
     assertValidSpawnCwd(options.cwd);
 
-    const id = randomUUID().slice(0, 17);
+    const id = options.id ?? randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
@@ -260,7 +275,7 @@ export class AgentManager {
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (occupiesPoolSlot(record) && !options.bypassQueue && this.poolFull()) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
@@ -512,6 +527,7 @@ export class AgentManager {
     // leave the queued records behind the freed slot unstarted.
     try { this.drainQueue(); } catch { /* keep the completion tail failure-safe */ }
     record.settled = true;
+    this.releaseSettled();
   }
 
   /**
@@ -582,7 +598,7 @@ export class AgentManager {
 
   /** Start queued agents up to the concurrency limit. */
   private drainQueue() {
-    while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
+    while (this.queue.length > 0 && !this.poolFull()) {
       const next = this.queue.shift()!;
       const record = this.agents.get(next.id);
       if (record?.status !== "queued") continue;
@@ -885,6 +901,91 @@ export class AgentManager {
       if (pending.length === 0) break;
       await Promise.allSettled(pending);
     }
+  }
+
+  /** This manager's runs and those of the draining activations share `maxConcurrent`. */
+  private poolFull(): boolean {
+    const draining = this.drainingPools.reduce((sum, pool) => sum + pool.runningCount(), 0);
+    return this.runningBackground + draining >= this.maxConcurrent;
+  }
+
+  runningCount(): number {
+    return this.runningBackground;
+  }
+
+  /** Counts the runs of older draining activations against this manager's slots. */
+  setDrainingPools(pools: DrainingPool[]): void {
+    this.drainingPools = pools;
+    this.drainQueue();
+  }
+
+  /**
+   * Hands this manager over to a reloading activation. Queued spawns and idle
+   * subtrees leave now as data; a subtree with a live run stays here and reports
+   * through the handover when it settles. Nothing is aborted or disposed.
+   */
+  beginDrain(nudged: string[], unreported: LifetimeUsage | undefined): ReloadHandover {
+    const queued: QueuedSpec[] = [];
+    for (const { id, args } of this.queue) {
+      if (this.agents.get(id)?.status !== "queued") continue;
+      queued.push({ id, type: args.type, prompt: args.prompt, options: toSpawnData(args.options) });
+      this.agents.delete(id);
+    }
+    this.queue = [];
+    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this);
+    this.handover = handover;
+    this.onStart = undefined;
+    this.onCompact = undefined;
+    this.onComplete = undefined;
+    this.onSteered = undefined;
+    this.onUsage = (record, usage) => handover.emit({ kind: "usage", dto: toDto(record), usage });
+    return handover;
+  }
+
+  /** Feeds a usage report that a draining run emitted during the reload into this manager's usage hook. */
+  replayUsage(record: AgentRecord, usage: LifetimeUsage): void {
+    this.onUsage?.(record, usage);
+  }
+
+  /** Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining. */
+  adopt(item: HandoverItem, notify: boolean): AgentRecord {
+    const record = fromDto(item.dto, item.session);
+    record.settled = true;
+    this.agents.set(record.id, record);
+    if (notify) this.onComplete?.(record);
+    return record;
+  }
+
+  /** A draining run settled: moves the subtrees that became idle and frees its slot. */
+  private releaseSettled(): void {
+    if (!this.handover) return;
+    for (const items of this.moveIdle()) this.handover.emit({ kind: "settled", items });
+    this.handover.emit({ kind: "slotFreed" });
+  }
+
+  /** Removes every top-level subtree with no live run from this manager, parents first. */
+  private moveIdle(): HandoverItem[][] {
+    const groups: HandoverItem[][] = [];
+    for (const record of [...this.agents.values()]) {
+      if (!this.agents.has(record.id)) continue;
+      if (record.parentAgentId !== undefined && this.agents.has(record.parentAgentId)) continue;
+      const group = this.subtree(record);
+      if (group.some((member) => member.status === "queued" || member.status === "running" || member.settled === false)) continue;
+      for (const member of group) this.agents.delete(member.id);
+      groups.push(group.map((member) => ({ dto: toDto(member), session: member.session })));
+    }
+    return groups;
+  }
+
+  /** A record and its nested descendants, parents first. */
+  private subtree(root: AgentRecord): AgentRecord[] {
+    const members = [root];
+    for (const member of members) {
+      for (const record of this.agents.values()) {
+        if (record.parentAgentId === member.id) members.push(record);
+      }
+    }
+    return members;
   }
 
   dispose() {

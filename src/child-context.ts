@@ -25,6 +25,6 @@ export function inChildSessionContext(): boolean {
 }
 
 /** Run `fn` (resource loading / session construction) as a subagent session. */
-export function runInChildSessionContext<T>(fn: () => Promise<T>): Promise<T> {
+export function runInChildSessionContext<T>(fn: () => T): T {
   return childSessionContext.run(true, fn);
 }
