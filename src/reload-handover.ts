@@ -78,14 +78,34 @@ export class ReloadHandover {
     this.unreported = unreported;
   }
 
-  /** Hands out the idle items, queued specs, pending nudges and unreported usage; each is returned once. */
-  take(): { items: HandoverItem[]; queued: QueuedSpec[]; nudged: string[]; unreported?: LifetimeUsage } {
-    const taken = { items: this.items, queued: this.queued, nudged: this.nudged, unreported: this.unreported };
-    this.items = [];
+  /** Hands out the queued specs and unreported usage; each is returned once. Idle items and nudges wait for their own accessors. */
+  take(): { queued: QueuedSpec[]; unreported?: LifetimeUsage } {
+    const taken = { queued: this.queued, unreported: this.unreported };
     this.queued = [];
-    this.nudged = [];
     this.unreported = undefined;
     return taken;
+  }
+
+  /** Hands out the pending nudges; each is returned once. */
+  takeNudged(): string[] {
+    const taken = this.nudged;
+    this.nudged = [];
+    return taken;
+  }
+
+  /** The idle items, each held until the new activation adopts it. */
+  idleItems(): HandoverItem[] {
+    return [...this.items];
+  }
+
+  /** Drops an item once it is adopted. */
+  removeItem(item: HandoverItem): void {
+    this.items = this.items.filter((held) => held !== item);
+  }
+
+  /** Puts back items whose adoption a shutdown cut short. */
+  keepItems(items: HandoverItem[]): void {
+    this.items = [...this.items, ...items];
   }
 
   /** Delivers an event now, or buffers it while no activation is attached. */

@@ -357,6 +357,10 @@ export default function (pi: ExtensionAPI) {
   const pendingUsage = new PendingUsagePool();
   // Handovers from an older activation that a reload left draining; their runs still count against maxConcurrent.
   let held: ReloadHandover[] = [];
+  // Set once this activation's session shuts down: no adoption may land in its draining manager after that.
+  let shutDown = false;
+  // Hand-over events are adopted one at a time, in arrival order.
+  let handoverQueue: Promise<void> = Promise.resolve();
 
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them before
@@ -791,6 +795,7 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async (event, ctx) => {
+    shutDown = true;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -873,18 +878,25 @@ export default function (pi: ExtensionAPI) {
           console.warn(`[pi-subagents] Could not restart queued agent ${spec.id} after reload:`, err);
         }
       }
-      for (const item of taken.items) await adoptItem(item, false);
-      for (const id of taken.nudged) {
+      for (const item of h.idleItems()) {
+        if (!(await adoptItem(item, false))) return;
+        h.removeItem(item);
+      }
+      for (const id of h.takeNudged()) {
         const record = manager.getRecord(id);
         if (record) sendIndividualNudge(record);
       }
     }
-    for (const h of held) h.attach((event) => void onHandoverEvent(event));
+    for (const h of held) h.attach((event) => onHandoverEvent(h, event));
     retireDrained();
   }
 
-  /** Adopts one handed-over record. A child session is reloaded so its extensions run the new code. */
-  async function adoptItem(item: HandoverItem, notify: boolean): Promise<void> {
+  /**
+   * Adopts one handed-over record. A child session is reloaded so its extensions run the new code.
+   * Returns false once this activation has begun to shut down: the record stays in the hand-over for the next one.
+   */
+  async function adoptItem(item: HandoverItem, notify: boolean): Promise<boolean> {
+    if (shutDown) return false;
     const session = item.session;
     if (session) {
       try {
@@ -895,19 +907,31 @@ export default function (pi: ExtensionAPI) {
         item.dto.error = `reload failed: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    if (shutDown) return false;
     manager.adopt(item, notify);
     agentActivity.delete(item.dto.id);
     widget.markFinished(item.dto.id);
+    return true;
   }
 
   /** A draining run settled, or reported usage: the reloaded activation takes it over. */
-  async function onHandoverEvent(event: HandoverEvent): Promise<void> {
-    if (event.kind === "settled") {
-      for (const [i, item] of event.items.entries()) await adoptItem(item, i === 0);
-    } else if (event.kind === "usage") {
-      manager.replayUsage(fromDto(event.dto), event.usage);
-    }
-    retireDrained();
+  function onHandoverEvent(h: ReloadHandover, event: HandoverEvent): void {
+    handoverQueue = handoverQueue
+      .then(async () => {
+        if (event.kind === "settled") {
+          for (const [i, item] of event.items.entries()) {
+            if (!(await adoptItem(item, i === 0))) {
+              // The items already left the old manager: they go back into the hand-over for the next activation.
+              h.keepItems(event.items.slice(i));
+              return;
+            }
+          }
+        } else if (event.kind === "usage") {
+          manager.replayUsage(fromDto(event.dto), event.usage);
+        }
+        retireDrained();
+      })
+      .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
   }
 
   /** Drops a draining pool once its last run has settled; its idle subtrees have already moved. */

@@ -6,7 +6,7 @@
  * lands while it runs. Only the faux provider is scripted; the reload, the
  * hand-over and the child session are the real code paths.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
+import { publishHandovers, takeHandovers } from "../src/reload-handover.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
@@ -177,7 +178,7 @@ describe("subagents across a real /reload (faux provider)", () => {
       model: faux.getModel(),
       modelRuntime: await createFauxModelRuntime(faux, join(tmp, "auth.json")),
       resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(tmp),
+      sessionManager: SessionManager.create(tmp, join(tmp, "sessions")),
       settingsManager: SettingsManager.inMemory({
         compaction: { enabled: false },
         retry: { enabled: false },
@@ -273,6 +274,122 @@ describe("subagents across a real /reload (faux provider)", () => {
       { timeout: 10_000 },
     );
     expect(liveRegistry().listAgents().filter((row) => row.id === id)).toHaveLength(1);
+  }, 20_000);
+
+  it("keeps idle subagents in the hand-over when a second /reload lands during their adoption", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    release();
+    await root.prompt("spawn-now");
+    await root.prompt("spawn-now");
+    const ids = liveRegistry().listAgents().map((row) => row.id);
+    expect(ids).toHaveLength(2);
+    await vi.waitFor(() => expect(liveRegistry().listAgents().every((row) => row.status === "completed")).toBe(true), {
+      timeout: 10_000,
+    });
+    const files = liveRegistry().listAgents().map((row) => row.session?.sessionManager.getSessionFile() ?? "");
+    expect(files.every((file) => existsSync(file))).toBe(true);
+
+    // The first idle child's reload is held, so the second /reload lands mid-adoption.
+    const originalReload = AgentSession.prototype.reload;
+    let openGate: () => void = () => {};
+    const childGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let childReached: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      childReached = resolve;
+    });
+    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
+      if (this === root) return originalReload.call(this);
+      childReached();
+      return childGate.then(() => originalReload.call(this));
+    });
+
+    const firstReload = reloadRoot(root);
+    await reached;
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+    openGate();
+    await firstReload;
+
+    const sid = root.sessionManager.getSessionId();
+    const published = takeHandovers(sid);
+    expect(published.flatMap((h) => h.idleItems().map((item) => item.dto.id)).sort()).toEqual([...ids].sort());
+    // The next activation takes the hand-over back. A second reloadRoot would shut this activation down again.
+    publishHandovers(sid, published);
+    expect(files.every((file) => existsSync(file))).toBe(true);
+  }, 20_000);
+
+  it("reloads an adopted idle subagent once per later /reload while a draining run holds the hand-over", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    release();
+    await root.prompt("spawn-now");
+    const idle = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === idle)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+
+    // A second run waits on a closed gate, so the hand-over stays held after the idle subagent is adopted.
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await root.prompt("spawn-now");
+    const running = liveRegistry().listAgents().find((r) => r.id !== idle)?.id ?? "";
+    expect(liveRegistry().listAgents().find((r) => r.id === running)?.status).toBe("running");
+
+    const originalReload = AgentSession.prototype.reload;
+    const childReloads: AgentSession[] = [];
+    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
+      if (this !== root) childReloads.push(this);
+      return originalReload.call(this);
+    });
+
+    await reloadRoot(root);
+    expect(childReloads).toHaveLength(1);
+    await reloadRoot(root);
+    expect(childReloads).toHaveLength(2);
+
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === running)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+  }, 20_000);
+
+  it("keeps a settled subagent in the hand-over when a second /reload lands during its adoption", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await reloadRoot(root);
+
+    // The draining run settles while its adoption's child reload is held; a second /reload lands mid-adoption.
+    const originalReload = AgentSession.prototype.reload;
+    let openGate: () => void = () => {};
+    const childGate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    let childReached: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      childReached = resolve;
+    });
+    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
+      if (this === root) return originalReload.call(this);
+      childReached();
+      return childGate.then(() => originalReload.call(this));
+    });
+    release();
+    await reached;
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+    openGate();
+
+    // The extension module is re-imported on reload, so its ReloadHandover is not this file's class: poll the store.
+    const sid = root.sessionManager.getSessionId();
+    await vi.waitFor(() => {
+      const published = takeHandovers(sid);
+      publishHandovers(sid, published);
+      expect(published.flatMap((h) => h.idleItems().map((item) => item.dto.id))).toEqual([id]);
+    }, { timeout: 10_000 });
   }, 20_000);
 
   it("marks an idle subagent as error when its session fails to reload, and keeps its row", async () => {

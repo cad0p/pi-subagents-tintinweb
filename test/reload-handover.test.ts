@@ -82,12 +82,13 @@ describe("ReloadHandover buffering", () => {
     expect(second.map((e) => e.kind)).toEqual(["slotFreed"]);
   });
 
-  it("hands out its items and queued specs once", () => {
+  it("hands out its queued specs and nudges once", () => {
     const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], ["n1"], undefined, stubPool);
     expect(handover.take().queued.map((q) => q.id)).toEqual(["q"]);
     const again = handover.take();
     expect(again.queued).toEqual([]);
-    expect(again.nudged).toEqual([]);
+    expect(handover.takeNudged()).toEqual(["n1"]);
+    expect(handover.takeNudged()).toEqual([]);
   });
 });
 
@@ -165,9 +166,9 @@ describe("AgentManager hand-over", () => {
 
     const finish = controlledRun("busy");
     const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
-    const taken = manager.beginDrain([], undefined).take();
+    const handover = manager.beginDrain([], undefined);
 
-    expect(taken.items.map((item) => item.dto.id)).toEqual([idle]);
+    expect(handover.idleItems().map((item) => item.dto.id)).toEqual([idle]);
     expect(manager.getRecord(idle)).toBeUndefined();
     expect(manager.getRecord(running)?.status).toBe("running");
     finish();
@@ -180,7 +181,7 @@ describe("AgentManager hand-over", () => {
       new AgentManager(undefined, undefined, (record) => {
         if (!resuming) return;
         const settled = record.settled;
-        const moved = manager.beginDrain([], undefined).take().items.map((item) => item.dto.id);
+        const moved = manager.beginDrain([], undefined).idleItems().map((item) => item.dto.id);
         seen = { settled, moved };
       }),
     );
@@ -255,7 +256,7 @@ describe("AgentManager hand-over", () => {
     vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
     const idle = old.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
     await vi.waitFor(() => expect(old.getRecord(idle)?.settled).toBe(true));
-    const [item] = old.beginDrain([], undefined).take().items;
+    const [item] = old.beginDrain([], undefined).idleItems();
 
     const onComplete = vi.fn();
     const next = track(new AgentManager(onComplete));
