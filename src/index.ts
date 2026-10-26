@@ -28,7 +28,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers } from "./reload-handover.js";
+import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -877,7 +877,8 @@ export default function (pi: ExtensionAPI) {
         try {
           spawnTopLevel(pi, ctx, spec.type, spec.prompt, { ...spec.options, id: spec.id });
         } catch (err) {
-          console.warn(`[pi-subagents] Could not restart queued agent ${spec.id} after reload:`, err);
+          // The spec cannot start here (e.g. its cwd is gone): report it as a failed run rather than dropping it.
+          manager.adopt({ dto: failedSpecDto(spec, err) }, true);
         }
       }
       for (const item of h.idleItems()) {

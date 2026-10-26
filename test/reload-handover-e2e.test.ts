@@ -73,6 +73,17 @@ function steerOverBus(events: EventBus, agentId: string, message: string): Promi
   });
 }
 
+/** Spawn over the same bus a cross-extension caller uses (subagents:rpc:spawn). */
+function spawnOverBus(events: EventBus, requestId: string, prompt: string, options: Record<string, unknown>): Promise<RpcReply<{ id: string }>> {
+  return new Promise((resolve) => {
+    const off = events.on(`subagents:rpc:spawn:reply:${requestId}`, (reply) => {
+      off();
+      resolve(reply as RpcReply<{ id: string }>);
+    });
+    events.emit("subagents:rpc:spawn", { requestId, type: "general-purpose", prompt, options });
+  });
+}
+
 let release: () => void = () => {};
 let gate: Promise<void> = Promise.resolve();
 let childSignal: AbortSignal | undefined;
@@ -963,6 +974,41 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(total).toBeGreaterThan(0);
     const reportedTotal = reported.filter((event) => event.id === parentId).reduce((sum, event) => sum + event.usage.totalTokens, 0);
     expect(reportedTotal).toBe(total);
+  }, 20_000);
+
+  it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const events = publishedRoot().pi.events;
+    // Four running children fill the default pool, so the next spawn queues.
+    for (let i = 0; i < 4; i++) {
+      const filled = await spawnOverBus(events, `fill-${i}`, `${CHILD_TASK} fill ${i}`, { description: `fill ${i}` });
+      if (!filled.success) throw new Error(filled.error);
+    }
+    const cwd = mkdtempSync(join(tmp, "queued-cwd-"));
+    const queued = await spawnOverBus(events, "queued", `${CHILD_TASK} queued`, { description: "queued", cwd });
+    if (!queued.success) throw new Error(queued.error);
+    const queuedId = queued.data?.id ?? "";
+    expect(publishedRoot().manager.getRecord(queuedId)?.status).toBe("queued");
+    // The queued spec keeps its cwd: the directory is gone when the reloaded activation re-spawns it.
+    rmSync(cwd, { recursive: true, force: true });
+
+    await reloadRoot(root);
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+
+    await vi.waitFor(
+      () => expect(liveRegistry().listAgents().find((r) => r.id === queuedId)?.status).toBe("error"),
+      { timeout: 10_000 },
+    );
+    expect(liveRegistry().listAgents().find((r) => r.id === queuedId)?.error).toContain("does not exist");
+    await vi.waitFor(
+      () =>
+        expect(sent).toHaveBeenCalledWith(
+          expect.objectContaining({ customType: "subagent-notification", content: expect.stringContaining(queuedId) }),
+          expect.anything(),
+        ),
+      { timeout: 10_000 },
+    );
   }, 20_000);
 
   it("reports a draining subagent's usage once, through the reloaded root", async () => {

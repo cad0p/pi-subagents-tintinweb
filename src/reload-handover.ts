@@ -144,6 +144,24 @@ export function fromDto(dto: AgentDto, session?: AgentSession): AgentRecord {
   return { ...dto, session, abortController: new AbortController(), promise: Promise.resolve(dto.result ?? "") };
 }
 
+/** Error record for a queued spec the new activation cannot start (e.g. its cwd is gone), so the failure is reported. */
+export function failedSpecDto(spec: QueuedSpec, err: unknown): AgentDto {
+  const now = Date.now();
+  return {
+    id: spec.id,
+    type: spec.type,
+    description: spec.options.description,
+    status: "error",
+    error: err instanceof Error ? err.message : String(err),
+    toolUses: 0,
+    startedAt: now,
+    completedAt: now,
+    turnCount: 0,
+    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+    compactionCount: 0,
+  };
+}
+
 type HandoverStore = Map<string, ReloadHandover[]>;
 
 /** Lives on globalThis: extension modules are re-imported on reload, a module-level Map would be lost. */
