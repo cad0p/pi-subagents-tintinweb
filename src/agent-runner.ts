@@ -30,6 +30,7 @@ import { routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockRea
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
+import { parentExtensionFlags } from "./parent-cli.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
@@ -647,21 +648,32 @@ export async function createChildSession(
   // It's only needed when we're neither loading everything without excludes
   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  // #92: the child follows the parent's CLI `-e` paths unless the agent says
+  // `extensions: false`. Identical paths dedupe, as pi's own merge does.
+  const parentExtensionPaths = noExtensions ? [] : parentExtensionFlags.extensionPaths;
+  const childExtensionPaths = [...new Set([...parentExtensionPaths, ...(extensionsSpec?.paths ?? [])])];
+  const additionalExtensionPaths = childExtensionPaths.length > 0 ? childExtensionPaths : undefined;
+  const parentPaths = new Set(parentExtensionPaths);
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
   let discoveredNames: Set<string> | undefined;
+  // #92: with a parent `-e` path, the override also runs for inherit-all agents, so the
+  // discovered copy of an extension the parent loaded with `-e` is dropped (the `-e` copy stays).
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
-    noExtensions || (loadAll && !hasExcludes)
+    noExtensions || (loadAll && !hasExcludes && parentPaths.size === 0)
       ? undefined
       : (base) => {
           discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
+          const parentNames = new Set(
+            base.extensions.filter((e) => parentPaths.has(e.path)).flatMap((e) => extensionCanonicalNames(e.path)),
+          );
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
               if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
               const canons = extensionCanonicalNames(e.path);
+              if (!parentPaths.has(e.path) && canons.some((n) => parentNames.has(n))) return false; // parent's `-e` copy wins
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
             }),
@@ -791,7 +803,8 @@ export async function createChildSession(
         : undefined,
     cwd: configCwd,
     agentDir,
-    noExtensions,
+    // #92: under the parent's `-ne` the loader loads only the `-e` paths, as pi's CLI does.
+    noExtensions: noExtensions || parentExtensionFlags.noExtensions,
     additionalExtensionPaths,
     extensionsOverride,
     noSkills,
