@@ -14,10 +14,12 @@ import {
   createCodemodeExtension,
   createMcpExtension,
   createToolSearchExtension,
+  DefaultPackageManager,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
   type InlineExtension,
+  type PackageManager,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -30,6 +32,7 @@ import { routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockRea
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
+import { parentExtensionFlags } from "./parent-cli.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
@@ -127,6 +130,17 @@ export function extensionCanonicalNames(extPath: string): string[] {
   const canonical = extensionCanonicalName(extPath);
   const pkg = extensionPackageName(extPath);
   return pkg && pkg !== canonical ? [canonical, pkg] : [canonical];
+}
+
+/**
+ * The files pi's loader resolves extension `sources` to under `additionalExtensionPaths`
+ * (`temporary`, as pi's `reload()` resolves them): an npm or git source to its install entry,
+ * a directory package to each manifest entry, a local file to itself. No sources, no pi call.
+ */
+async function resolveExtensionFiles(packageManager: PackageManager, sources: string[]): Promise<Set<string>> {
+  if (sources.length === 0) return new Set();
+  const resolved = await packageManager.resolveExtensionSources(sources, { temporary: true });
+  return new Set(resolved.extensions.filter((r) => r.enabled).map((r) => r.path));
 }
 
 /**
@@ -647,28 +661,46 @@ export async function createChildSession(
   // It's only needed when we're neither loading everything without excludes
   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  // #92: the child follows the parent's CLI `-e` paths unless the agent says
+  // `extensions: false`. Identical paths dedupe, as pi's own merge does.
+  const parentExtensionPaths = noExtensions ? [] : parentExtensionFlags.extensionPaths;
+  const childExtensionPaths = [...new Set([...parentExtensionPaths, ...(extensionsSpec?.paths ?? [])])];
+  const additionalExtensionPaths = childExtensionPaths.length > 0 ? childExtensionPaths : undefined;
+  // Same inputs as the loader's own package manager, so the sources resolve as pi resolves them.
+  const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
+  const packageManager = new DefaultPackageManager({ cwd: configCwd, agentDir, settingsManager });
+  const parentFiles = await resolveExtensionFiles(packageManager, parentExtensionPaths);
+  const agentFiles = await resolveExtensionFiles(packageManager, extensionsSpec?.paths ?? []);
+  const ownFiles = new Set([...parentFiles, ...agentFiles]);
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
   let discoveredNames: Set<string> | undefined;
+  // #92: with a parent `-e` file, the override also runs for inherit-all agents, so the discovered
+  // copy of an extension the parent loaded with `-e` is dropped. Pi dedupes by realpath only; dropping
+  // by canonical name is this fork's rule.
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
-    noExtensions || (loadAll && !hasExcludes)
+    noExtensions || (loadAll && !hasExcludes && parentFiles.size === 0)
       ? undefined
       : (base) => {
           discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
+          const parentNames = new Set(
+            base.extensions.filter((e) => parentFiles.has(e.path)).flatMap((e) => extensionCanonicalNames(e.path)),
+          );
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
               if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
               const canons = extensionCanonicalNames(e.path);
+              // A discovered copy yields to a loaded parent `-e` extension of the same name. Files the parent
+              // or the agent names are never dropped.
+              if (!ownFiles.has(e.path) && canons.some((n) => parentNames.has(n))) return false;
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
             }),
           };
         };
 
-  const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
   // That trust covers the parent's project (`configCwd`), not a directory a spawn was
   // sent into. The session answers `ctx.isProjectTrusted()` for its own cwd, which
   // pi's MCP uses to read `<cwd>/.pi/mcp.json` — so a cross-directory session keeps the
@@ -784,14 +816,15 @@ export async function createChildSession(
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.
-    disabledBuiltinExtensions: process.argv.some((a) => a === "--no-extensions" || a === "-ne")
+    disabledBuiltinExtensions: parentExtensionFlags.noExtensions
       ? ["codemode", "tool-search", "mcp"]
-      : process.argv.includes("--no-mcp")
+      : parentExtensionFlags.noMcp
         ? ["mcp"]
         : undefined,
     cwd: configCwd,
     agentDir,
-    noExtensions,
+    // #92: under the parent's `-ne` the loader loads only the `-e` paths, as pi's CLI does.
+    noExtensions: noExtensions || parentExtensionFlags.noExtensions,
     additionalExtensionPaths,
     extensionsOverride,
     noSkills,

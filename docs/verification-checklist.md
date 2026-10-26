@@ -41,14 +41,20 @@ Run these in a live pi session with the extension installed from the branch, and
 note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
-Maintainer reference setup: `claude-bridge/claude-haiku-5-5` at thinking
-`xhigh`; fall back to `opencode-go/deepseek-v4.1-flash` at `max` when the bridge
-is unavailable. Load the branch build instead of the installed package so the two
-don't collide:
+Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
+`xhigh`; fall back to `opencode-go/deepseek-v4.1-flash` at `max` when Anthropic
+is unavailable. `--no-extensions` drops discovered extensions, so pass the global
+ones explicitly with `-e` (the global `system-prompt.ts` is required for native
+Anthropic). Add the branch build with `-e <repo>/src/index.ts`, so the two don't
+collide. Subagents spawned from the session follow the same `-e` flags (#92).
 
 ```bash
-pi --no-extensions -e <pi-claude-bridge>/src/index.ts -e <repo>/src/index.ts \
-  --provider claude-bridge --model claude-haiku-5-5 --thinking xhigh
+pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
+  -e <repo>/src/index.ts --provider anthropic --model claude-haiku-5-5 --thinking xhigh
+
+# fallback
+pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
+  -e <repo>/src/index.ts --provider opencode-go --model deepseek-v4.1-flash --thinking max
 ```
 
 - Exercise the changed surface end to end in a real session — spawn, steer,

@@ -283,6 +283,12 @@ A few rules the examples don't make obvious:
 - Plain `tools:` typos fail loudly: `tools: reed, grep` fires `tools-error:…` instead of silently producing an under-tooled agent.
 - `exclude_extensions:` wins over `extensions:` and over `ext:` selectors — an excluded extension never loads and a `tools: ext:` entry can't pull it back. Plain names only (no paths, no `*`); a name matching nothing fires an `extension-error:…` warning.
 - `exclude_extensions:` is **not a sandbox**: excluded extensions' factory code still executes once during loading. Exclusion suppresses their tools and their bound lifecycle hooks (`pi.on` handlers like `session_start` only fire for extensions bound to the session), but not other load-time side effects — a factory that subscribes directly to the shared `pi.events` bus stays live. Don't rely on it to contain an untrusted extension.
+- Subagents follow the parent's CLI extension flags (#92). A child loads the parent's `-e` extensions. Under the parent's `--no-extensions` (`-ne`) it loads only those `-e` paths, not the discovered set. `extensions: false` on an agent opts out of both. The agent's own `extensions:` paths are added to the parent's `-e` paths.
+- A discovered copy of an extension that the parent loaded with `-e` is dropped in the child in favor of the `-e` copy. This is the fork's rule, not pi's: pi dedupes by realpath only. The match is by canonical name, so an unrelated extension with the same path-derived name (for example another `src/index.ts`) can be dropped too.
+- Under the parent's `-ne`, an allowlisted discovered extension no longer loads in children. Name it with a parent `-e` path instead.
+- The parent's flags (`-e`, `-ne`, `--no-mcp`) come from the pi process argv, read once at load with pi's own parser (a flag after `--` is a message, not a flag). The host process must be pi's CLI: an SDK embedder must not put pi flags in its own argv, or its children inherit them.
+- Each child resolves the parent's `-e` sources again per spawn. `npm:` sources cost an existence check and a version check, and unpinned `git:` sources refresh on every spawn. Pi's resolution is unchanged.
+- `--no-extensions` keeps all three built-ins out of subagents, even when the parent passed `-e builtin:X`.
 - Array and string forms are equivalent: `[a, b]` == `"a, b"`.
 
 ## Tools
