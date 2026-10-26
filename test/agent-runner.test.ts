@@ -37,10 +37,9 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   createCodemodeExtension: () => () => {},
   createMcpExtension: () => () => {},
   createToolSearchExtension: () => () => {},
-  // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
-  // (an unknown path becomes an error row, mirroring a failed load), then runs
-  // extensionsOverride over the result, then reads the system prompt override —
-  // the order pi's own reload() uses.
+  // Mock loader simulates pi-mono's reload(): the additionalExtensionPaths (`-e`) load first, the
+  // discovered set follows unless noExtensions, then extensionsOverride runs over the result, then the
+  // system prompt override is read — the order pi's own reload() uses.
   DefaultResourceLoader: class {
     opts: any;
     systemPrompt: string | undefined;
@@ -50,17 +49,19 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
 
     async reload() {
-      // Mirror pi's loader (resource-loader.js:401-409): `noExtensions: true` drops the
-      // discovered set and keeps only the additionalExtensionPaths. Tests pre-register
-      // the extensions a path should resolve to; an unregistered path yields nothing.
-      if (this.opts.noExtensions) {
-        const cliPaths = new Set<string>(this.opts.additionalExtensionPaths ?? []);
-        loaderExtensionsRef.current = {
-          extensions: loaderExtensionsRef.current.extensions.filter((e) => cliPaths.has(e.path)),
-          errors: [],
-          runtime: {},
-        };
+      // Mirror pi's reload() (resource-loader.js ~L389-409): each additional path resolves to its files and
+      // loads from the CLI set (or the discovered set, if only that holds it). The discovered set is appended
+      // unless `noExtensions`. pi's mergePaths keeps the first of each path. An unregistered path yields nothing.
+      const additional = resolveSources(this.opts.additionalExtensionPaths ?? []).flatMap((path) => {
+        const loaded = extensionFiles.cli.get(path) ?? extensionFiles.discovered.get(path);
+        return loaded ? [loaded] : [];
+      });
+      const discovered = this.opts.noExtensions ? [] : [...extensionFiles.discovered.values()];
+      const byPath = new Map<string, MockExtension>();
+      for (const extension of [...additional, ...discovered]) {
+        if (!byPath.has(extension.path)) byPath.set(extension.path, extension);
       }
+      loaderExtensionsRef.current = { extensions: [...byPath.values()], errors: [], runtime: {} };
       if (this.opts.extensionsOverride) {
         loaderExtensionsRef.current = this.opts.extensionsOverride(loaderExtensionsRef.current);
       }
@@ -75,15 +76,10 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
       return this.systemPrompt;
     }
   },
-  // The loader's package manager resolves `-e` sources to files (#92): a registered source maps to
-  // its files; an absolute path maps to itself.
+  // The loader's package manager resolves `-e` sources to files (#92), as pi's package manager does.
   DefaultPackageManager: class {
     async resolveExtensionSources(sources: string[]) {
-      return {
-        extensions: sources.flatMap((source) =>
-          (resolvedSources.get(source) ?? (source.startsWith("/") ? [source] : [])).map((path) => ({ path, enabled: true })),
-        ),
-      };
+      return { extensions: resolveSources(sources).map((path) => ({ path, enabled: true })) };
     }
   },
   getAgentDir,
@@ -119,8 +115,19 @@ vi.mock("../src/agent-types.js", () => ({
   getBuiltinToolSnippets: vi.fn(() => ({ read: "Read a file" })),
 }));
 
-// Extension files the mock package manager resolves `-e` sources to (#92), keyed by source.
+// Extension files a source resolves to (#92), keyed by source. The mock package manager and loader resolve
+// through `resolveSources`: a registered source yields these files, an absolute path yields itself, anything else nothing.
 const resolvedSources = vi.hoisted(() => new Map<string, string[]>());
+const resolveSources = vi.hoisted(() => (sources: string[]): string[] =>
+  sources.flatMap((source) => resolvedSources.get(source) ?? (source.startsWith("/") ? [source] : [])),
+);
+type MockExtension = { path: string; tools: Map<string, unknown> };
+// The extensions the mock loader can load, keyed by path (#92). `cli` holds what pi's CLI hands the loader as
+// additionalExtensionPaths (`-e`); `discovered` holds the default-discovered set.
+const extensionFiles = vi.hoisted(() => ({
+  cli: new Map<string, MockExtension>(),
+  discovered: new Map<string, MockExtension>(),
+}));
 // The parent's extension flags (#92), mutated per test and reset in beforeEach.
 const parentFlags = vi.hoisted(() => ({ noExtensions: false, extensionPaths: [] as string[] }));
 vi.mock("../src/parent-cli.js", () => ({ parentExtensionFlags: parentFlags }));
@@ -220,6 +227,8 @@ beforeEach(() => {
   settingsManagerCreate.mockClear();
   ctx.isProjectTrusted.mockClear();
   resolvedSources.clear();
+  extensionFiles.cli.clear();
+  extensionFiles.discovered.clear();
   parentFlags.noExtensions = false;
   parentFlags.extensionPaths = [];
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
@@ -822,22 +831,31 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * Register extensions for the mock loader, keyed by extension path → its tools.
+ * Register extensions in a mock loader set, keyed by extension path → its tools.
  * A tool is either its name (registered with pi's defaults) or a definition
  * fragment, for the exposure and snippet fields the runner reads.
  */
-function withExtensions(spec: Record<string, Array<string | MockToolDefinition>>) {
-  loaderExtensionsRef.current = {
-    extensions: Object.entries(spec).map(([path, tools]) => ({
+function registerExtensions(files: Map<string, MockExtension>, spec: Record<string, Array<string | MockToolDefinition>>) {
+  files.clear();
+  for (const [path, tools] of Object.entries(spec)) {
+    files.set(path, {
       path,
       tools: new Map(tools.map((t) => {
         const definition = typeof t === "string" ? { name: t } : t;
         return [definition.name, { definition, sourceInfo: {} }];
       })),
-    })),
-    errors: [],
-    runtime: {},
-  };
+    });
+  }
+}
+
+/** Extensions the default discovery finds. */
+function withExtensions(spec: Record<string, Array<string | MockToolDefinition>>) {
+  registerExtensions(extensionFiles.discovered, spec);
+}
+
+/** Extensions pi's CLI hands the loader as `additionalExtensionPaths` (`-e`): they load under `-ne` too. */
+function withCliExtensions(spec: Record<string, Array<string | MockToolDefinition>>) {
+  registerExtensions(extensionFiles.cli, spec);
 }
 
 function lastToolsPassed(): string[] {
@@ -1248,8 +1266,10 @@ describe("agent-runner pi built-ins, project trust and tool scope", () => {
     const handler = scopeGateHandler();
     expect(handler({ toolName: "mcp__srv__lookup" })).toMatchObject({ block: true });
 
-    // The server connects: its tool now belongs to an in-scope extension.
-    withExtensions({ "/ext/mcp.ts": ["mcp__srv__lookup"] });
+    // The server connects: its tool registers into the live tool map of the loaded extension, which the
+    // gate reads on every call (pi's MCP writes there too).
+    const mcp = loaderExtensionsRef.current.extensions.find((e) => e.path === "/ext/mcp.ts");
+    mcp?.tools.set("mcp__srv__lookup", { definition: { name: "mcp__srv__lookup" }, sourceInfo: {} });
     expect(handler({ toolName: "mcp__srv__lookup" })).toBeUndefined();
     expect(lastToolsPassed()).not.toContain("mcp__srv__lookup");
   });
@@ -1604,8 +1624,8 @@ describe("agent-runner extension allowlist", () => {
 
   it("an absolute path is added to additionalExtensionPaths and its extension survives", async () => {
     setupArrayAgent(["/abs/foo.ts"]);
-    // Pre-register the path so the mock loader treats it as a successful load.
-    withExtensions({ "/abs/foo.ts": ["foo_tool"] });
+    // Pre-register the path as an additional (CLI) extension so the mock loader loads it.
+    withCliExtensions({ "/abs/foo.ts": ["foo_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1617,10 +1637,8 @@ describe("agent-runner extension allowlist", () => {
 
   it("['*', path] keeps all defaults plus the extra path", async () => {
     setupArrayAgent(["*", "/abs/foo.ts"]);
-    withExtensions({
-      "/ext/default.ts": ["default_tool"],
-      "/abs/foo.ts": ["foo_tool"],
-    });
+    withExtensions({ "/ext/default.ts": ["default_tool"] });
+    withCliExtensions({ "/abs/foo.ts": ["foo_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1635,11 +1653,8 @@ describe("agent-runner extension allowlist", () => {
     // Changelog: `["mcp", "/abs/foo.ts"]` is *just* those two. Distinct from
     // `['*', path]` (all defaults + path) and `['mcp']` (name only).
     setupArrayAgent(["mcp", "/abs/foo.ts"]);
-    withExtensions({
-      "/ext/mcp.ts": ["mcp_tool"],
-      "/abs/foo.ts": ["foo_tool"],
-      "/ext/other.ts": ["other_tool"],
-    });
+    withExtensions({ "/ext/mcp.ts": ["mcp_tool"], "/ext/other.ts": ["other_tool"] });
+    withCliExtensions({ "/abs/foo.ts": ["foo_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1903,7 +1918,8 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
     parentFlags.noExtensions = true;
     parentFlags.extensionPaths = ["/abs/x.ts"];
     setupAgent({ extensions: true });
-    withExtensions({ "/abs/x.ts": ["x_tool"], "/installed/disc.ts": ["disc_tool"] });
+    withCliExtensions({ "/abs/x.ts": ["x_tool"] });
+    withExtensions({ "/installed/disc.ts": ["disc_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1923,7 +1939,7 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
     parentFlags.noExtensions = true;
     parentFlags.extensionPaths = ["/abs/notify.ts", "/abs/keep.ts"];
     setupAgent({ extensions: true, excludeExtensions: ["notify"] });
-    withExtensions({ "/abs/notify.ts": ["notify_send"], "/abs/keep.ts": ["keep_tool"] });
+    withCliExtensions({ "/abs/notify.ts": ["notify_send"], "/abs/keep.ts": ["keep_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
     const onToolActivity = vi.fn();
@@ -1941,7 +1957,8 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
     parentFlags.noExtensions = true;
     parentFlags.extensionPaths = ["/abs/x.ts"];
     setupAgent({ extensions: ["x"] });
-    withExtensions({ "/abs/x.ts": ["x_tool"], "/ext/y.ts": ["y_tool"] });
+    withCliExtensions({ "/abs/x.ts": ["x_tool"] });
+    withExtensions({ "/ext/y.ts": ["y_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -1955,15 +1972,14 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
   it("a parent -e copy wins over an installed copy of the same extension (no duplicate)", async () => {
     parentFlags.extensionPaths = ["/work/pi-steering/index.ts"];
     setupAgent({ extensions: true });
-    withExtensions({
-      "/work/pi-steering/index.ts": ["steer_tool"],
-      "/installed/pi-steering/index.ts": ["steer_installed"],
-    });
+    withCliExtensions({ "/work/pi-steering/index.ts": ["steer_tool"] });
+    withExtensions({ "/installed/pi-steering/index.ts": ["steer_installed"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
 
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/work/pi-steering/index.ts"]);
     const tools = lastToolsPassed();
     expect(tools).toContain("steer_tool");
     expect(tools).not.toContain("steer_installed");
@@ -1979,12 +1995,14 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
       resolvedSources.set(pkgDir, [entry]);
       parentFlags.extensionPaths = [pkgDir];
       setupAgent({ extensions: true });
-      withExtensions({ [entry]: ["probe_tool"], "/discovered/pi-probe/index.ts": ["probe_discovered"] });
+      withCliExtensions({ [entry]: ["probe_tool"] });
+      withExtensions({ "/discovered/pi-probe/index.ts": ["probe_discovered"] });
       const { session } = createSession("OK");
       createAgentSession.mockResolvedValue({ session });
 
       await runAgent(ctx, "Explore", "go", { pi });
 
+      expect(lastLoaderOpts().additionalExtensionPaths).toEqual([pkgDir]);
       const tools = lastToolsPassed();
       expect(tools).toContain("probe_tool");
       expect(tools).not.toContain("probe_discovered");
@@ -1999,12 +2017,14 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
     resolvedSources.set("npm:pi-probe", [npmEntry]);
     parentFlags.extensionPaths = ["npm:pi-probe"];
     setupAgent({ extensions: true });
-    withExtensions({ [npmEntry]: ["probe_tool"], "/discovered/pi-probe/index.ts": ["probe_discovered"] });
+    withCliExtensions({ [npmEntry]: ["probe_tool"] });
+    withExtensions({ "/discovered/pi-probe/index.ts": ["probe_discovered"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
 
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["npm:pi-probe"]);
     const tools = lastToolsPassed();
     expect(tools).toContain("probe_tool");
     expect(tools).not.toContain("probe_discovered");
@@ -2013,13 +2033,15 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
   it("parent -e without -ne: discovered extensions still load beside the -e path, as in pi", async () => {
     parentFlags.extensionPaths = ["/abs/x.ts"];
     setupAgent({ extensions: true });
-    withExtensions({ "/abs/x.ts": ["x_tool"], "/installed/disc.ts": ["disc_tool"] });
+    withCliExtensions({ "/abs/x.ts": ["x_tool"] });
+    withExtensions({ "/installed/disc.ts": ["disc_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
 
     expect(lastLoaderOpts().noExtensions).toBe(false);
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/abs/x.ts"]);
     const tools = lastToolsPassed();
     expect(tools).toContain("x_tool");
     expect(tools).toContain("disc_tool");
@@ -2028,7 +2050,7 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
   it("extensions: false gives the child no parent extensions, under -ne or not", async () => {
     parentFlags.extensionPaths = ["/abs/x.ts"];
     setupAgent({ extensions: false });
-    withExtensions({ "/abs/x.ts": ["x_tool"] });
+    withCliExtensions({ "/abs/x.ts": ["x_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
@@ -2041,21 +2063,22 @@ describe("agent-runner follows the parent's extension flags (#92)", () => {
   });
 
   it("agent extension paths follow the parent's -e paths, duplicates removed", async () => {
-    parentFlags.extensionPaths = ["/abs/x.ts"];
-    setupAgent({ extensions: ["/abs/x.ts", "/abs/y.ts"] });
-    withExtensions({ "/abs/x.ts": ["x_tool"], "/abs/y.ts": ["y_tool"] });
+    // /parent/x.ts is in the parent's -e list only: the agent list alone cannot produce the expected result.
+    parentFlags.extensionPaths = ["/parent/x.ts", "/abs/dup.ts"];
+    setupAgent({ extensions: ["/abs/dup.ts", "/abs/y.ts"] });
+    withCliExtensions({ "/parent/x.ts": ["x_tool"], "/abs/dup.ts": ["dup_tool"], "/abs/y.ts": ["y_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/abs/x.ts", "/abs/y.ts"]);
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/parent/x.ts", "/abs/dup.ts", "/abs/y.ts"]);
   });
 
   it("an agent's own path survives when its name matches a parent -e copy", async () => {
     parentFlags.extensionPaths = ["/parent/notify.ts"];
     setupAgent({ extensions: ["/agent/notify.ts"] });
-    withExtensions({ "/parent/notify.ts": ["parent_notify"], "/agent/notify.ts": ["agent_notify"] });
+    withCliExtensions({ "/parent/notify.ts": ["parent_notify"], "/agent/notify.ts": ["agent_notify"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
