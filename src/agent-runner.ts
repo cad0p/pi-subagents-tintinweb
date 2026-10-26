@@ -552,120 +552,60 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
-export async function runAgent(
-  ctx: ExtensionContext,
-  type: SubagentType,
-  prompt: string,
-  options: RunOptions,
-): Promise<RunResult> {
-  const resolvedConfig = options.agentConfig;
-  const agentConfig = resolvedConfig ?? getAgentConfig(type);
-  // Every derived field comes from the same config: a nested spawn resolves the
-  // agent from its branch's config root, and re-deriving tools or extension
-  // policy from the process-global registry would run a different agent than the
-  // one the caller validated (all built-ins, general-purpose's extensions).
-  const config = resolvedConfig
-    ? {
-        displayName: resolvedConfig.displayName ?? resolvedConfig.name,
-        description: resolvedConfig.description,
-        builtinToolNames: resolvedConfig.builtinToolNames ?? [...BUILTIN_TOOL_NAMES],
-        extensions: resolvedConfig.extensions,
-        excludeExtensions: resolvedConfig.excludeExtensions,
-        skills: resolvedConfig.skills,
-        promptMode: resolvedConfig.promptMode,
-      }
-    : getConfig(type);
+type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
 
-  // Resolve working directory: worktree override > parent cwd
-  const effectiveCwd = options.cwd ?? ctx.cwd;
-  // Filesystem work happens in effectiveCwd; config discovery in configCwd.
-  // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
-  const configCwd = options.configCwd ?? effectiveCwd;
+/**
+ * Resolved inputs of a child session. Plain data: the same settings build the
+ * same session again, without the spawn context.
+ */
+interface ChildSessionSettings {
+  type: SubagentType;
+  agentConfig: AgentConfig | undefined;
+  effectiveCwd: string;
+  configCwd: string;
+  projectTrusted: boolean;
+  extensions: AgentConfig["extensions"];
+  excludeExtensions: string[] | undefined;
+  extSelectors: string[];
+  noSkills: boolean;
+  systemPrompt: string;
+  toolNames: string[];
+  parentActiveTools: Set<string>;
+  nestedTools: ToolDefinition[];
+  model: AgentSessionOptions["model"];
+  thinkingLevel: ThinkingLevel | undefined;
+  scopedModels: ScopedModel[];
+  parentModelRuntime: AgentSessionOptions["modelRuntime"];
+}
 
-  // Snapshot every live parent handle before the first await. A /reload that
-  // lands during the prelude leaves the old ctx and pi stale, and a read after
-  // that throws (plan M1), so the rest of runAgent uses these locals only.
-  // Get parent system prompt for append-mode agents
-  const parentSystemPrompt = ctx.getSystemPrompt();
-  // The child inherits the parent's project-trust decision. pi's SettingsManager
-  // defaults to trusted, so without this a subagent in a project the user declined to
-  // trust would load its `.pi` extensions and settings, and pi's built-in MCP would
-  // start the stdio servers in its `.pi/mcp.json`.
-  const projectTrusted = ctx.isProjectTrusted();
-  // Tools the parent session currently declares. A `defaultActive: false` tool —
-  // pi's `codemode` and `tool_search`, and anything an extension registers dormant —
-  // is activated in the child only when the parent has it active or this agent names
-  // its extension. Otherwise every subagent would carry codemode's tool spec, and the
-  // capability that comes with it, for a user who never turned it on: "as in the main
-  // session" has to mean the main session's actual tool set, not every tool that
-  // happens to be loaded. Read per run: the parent's set changes with `--tools` and
-  // with whatever `tool_search` activated.
-  const parentActiveTools = new Set(options.pi.getActiveTools?.() ?? []);
-  const parentModel = ctx.model;
-  const parentModelRegistry = ctx.modelRegistry;
-  const parentScopedModels = ctx.scopedModels;
-  const parentSession = ctx.sessionManager.getSessionFile();
-  const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
-
-  const env = await detectEnv(options.pi, effectiveCwd);
-
-  // Build prompt extras (memory, skill preloading)
-  const extras: PromptExtras = { worktree: options.worktree };
-
-  // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
-  // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
-  // isolation is an intentional override, not a misconfiguration.
-  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
-
-  // Skill preloading: when skills is string[], preload their content into prompt
-  if (Array.isArray(skills)) {
-    const loaded = preloadSkills(skills, configCwd);
-    if (loaded.length > 0) {
-      extras.skillBlocks = loaded;
-    }
-  }
-
-  let toolNames = resolvedConfig ? [...config.builtinToolNames] : getToolNamesForType(type);
-
-  // Persistent memory: detect write capability and branch accordingly.
-  // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
-  if (agentConfig?.memory) {
-    const existingNames = new Set(toolNames);
-    const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
-    const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
-    const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
-
-    if (hasWriteTools) {
-      // Read-write memory: add any missing memory tool names (read/write/edit)
-      const extraNames = getMemoryToolNames(existingNames);
-      if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
-    } else {
-      // Read-only memory: only add read tool name, use read-only prompt
-      const extraNames = getReadOnlyMemoryToolNames(existingNames);
-      if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
-    }
-  }
-
-  // Build system prompt from agent config
-  let systemPrompt: string;
-  if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
-  } else {
-    // Unknown type fallback: spread the canonical general-purpose config (defensive —
-    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
-    const fallback = DEFAULT_AGENTS.get("general-purpose");
-    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
-    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
-  }
-
-  // When skills is string[], we've already preloaded them into the prompt.
-  // Still pass noSkills: true since we don't need the skill loader to load them again.
-  const noSkills = skills === false || Array.isArray(skills);
-
+/**
+ * Builds and binds a child session from its resolved settings: the resource
+ * loader, the tool allowlist and the session. The caller owns sessionManager.
+ */
+async function createChildSession(
+  settings: ChildSessionSettings,
+  sessionManager: SessionManager,
+  options: Pick<RunOptions, "agentId" | "onToolActivity">,
+): Promise<AgentSession> {
+  const {
+    type,
+    agentConfig,
+    effectiveCwd,
+    configCwd,
+    projectTrusted,
+    extensions,
+    excludeExtensions,
+    extSelectors,
+    noSkills,
+    systemPrompt,
+    toolNames,
+    parentActiveTools,
+    nestedTools,
+    model,
+    thinkingLevel,
+    scopedModels,
+    parentModelRuntime,
+  } = settings;
   const agentDir = getAgentDir();
 
   // Extension loading:
@@ -685,9 +625,7 @@ export async function runAgent(
   // the LLM. They do NOT control loading — `extensions:` is the sole authority for
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
   // is an orphan and warns after reload. `isolated` means no extension tools at all.
-  const { extNames, narrowing } = parseExtSelectors(
-    options.isolated ? [] : (agentConfig?.extSelectors ?? []),
-  );
+  const { extNames, narrowing } = parseExtSelectors(extSelectors);
   const noExtensions = extensions === false;
   const disallowed = agentConfig?.disallowedTools?.length
     ? toolNameMatcher(agentConfig.disallowedTools)
@@ -742,40 +680,6 @@ export async function runAgent(
         });
   const nestedCallGate: NestedCallGate = {};
 
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents`, the manager handed down a nestedRuntime, and this
-  // agent sits below the branch cap. Their names collide with EXCLUDED_TOOL_NAMES
-  // by design, so the scoping below re-admits them explicitly.
-  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  // A per-agent cap may only tighten the inherited one — an agent can never
-  // grant itself more nesting room than the project allows.
-  const effectiveMaxDepth = agentConfig?.maxSubagentDepth === undefined
-    ? inheritedMaxDepth
-    : Math.min(inheritedMaxDepth, agentConfig.maxSubagentDepth);
-  // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than four tools whose
-  // every call is an error. This is also what makes maxSubagentDepth 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
-    ? createNestedSubagentTools({
-        // Getters: a child reloaded by the new code keeps these closures, so the live root is read per call.
-        // A parent still held by a draining pool keeps its nested calls on that pool's manager.
-        get manager() {
-          return routedManagerFor({ manager: nestedRuntime.manager, pi: options.pi }, nestedRuntime.parentAgentId);
-        },
-        get pi() {
-          return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).pi;
-        },
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
-        configCwd,
-      })
-    : [];
   const nestedToolNames = new Set(nestedTools.map((tool) => tool.name));
 
   // Extension-registered tools the subagent may use, keyed by name, read from the
@@ -971,32 +875,6 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    parentModel, parentModelRegistry, agentConfig?.model,
-  );
-
-  // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
-
-  // Child-session model scope: agent frontmatter override, else inherit the
-  // parent's resolved scope. Isolated agents load no extensions, so the
-  // fallback consumer can never bind — an empty scope is the honest value.
-  const scopedModels = resolveScopedModels(
-    options.isolated ? false : agentConfig?.scopedModels,
-    parentScopedModels,
-    parentModelRegistry,
-    (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
-  );
-  // An explicit list under isolation is silently unreachable — flag it the
-  // same way the loader flags contradictory extensions:/exclude_extensions:.
-  if (options.isolated && Array.isArray(agentConfig?.scopedModels)) {
-    options.onToolActivity?.({
-      type: "end",
-      toolName: `scoped-models-error:scoped_models has no effect for agent "${type}" — isolated agents load no extensions`,
-    });
-  }
-
   const extensionTools = scopedExtensionTools(loader.getExtensions());
   const allowedTools = scopedToolNames(extensionTools);
   const declaredTools = declarableTools(extensionTools);
@@ -1008,46 +886,6 @@ export async function runAgent(
       !disallowed?.(name) &&
       (toolNames.includes(name) || nestedToolNames.has(name) || scopedExtensionTools(loader.getExtensions()).has(name)));
 
-  // A relative `session_dir` resolves from the agent's cwd before worktree
-  // isolation, never from the isolation worktree (deleted at cleanup).
-  // `worktree.parentCwd` is that cwd: agent-manager sets it to the same
-  // `baseCwd` it uses for the worktree copy. Without a worktree it is unset and
-  // `effectiveCwd` is already the agent's cwd.
-  const configuredSessionDir = resolveConfiguredSessionDir(
-    agentConfig?.sessionDir,
-    options.worktree?.parentCwd ?? effectiveCwd,
-  );
-  // A subagent session is ALWAYS written to disk while it runs: a crashed or
-  // killed run must leave a transcript pi's /resume can recover. Retention
-  // after the run settles is the manager's decision (`persist_session`), never a
-  // creation-time one.
-  //
-  // The exception is a host session that is itself in-memory: pi's own
-  // `--no-session`, or any SDK host that built `SessionManager.inMemory`. Its
-  // absence of a session file is the exact signal — an argv scan would miss the
-  // SDK host and let an ephemeral session leave children on disk.
-  // The same path is `parentSession`, which nests the child under its spawner.
-  //
-  // Without `session_dir`, the file goes in the parent session's own directory.
-  // pi already resolved `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, the
-  // `sessionDir` setting or `--session <file>` when it opened the parent, so the
-  // parent is asked rather than those sources being re-read here. A nested
-  // agent's parent is its spawner, so its child follows the spawner's directory.
-  const sessionManager = parentSession === undefined
-    ? SessionManager.inMemory(effectiveCwd)
-    : SessionManager.create(
-        effectiveCwd,
-        configuredSessionDir ?? parentSessionDir,
-        { parentSession },
-      );
-
-  type AgentSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
-  // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
-  // is what createAgentSession needs to keep extension-registered providers
-  // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
-  const parentModelRuntime = (
-    parentModelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
-  ).runtime;
   const sessionOpts: AgentSessionOptions = {
     cwd: effectiveCwd,
     agentDir,
@@ -1096,6 +934,243 @@ export async function runAgent(
   await session.bindExtensions({
     onError: (err) => routedExtensionError(err.extensionPath, options.agentId, options.onToolActivity),
   });
+
+  return session;
+}
+
+export async function runAgent(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  prompt: string,
+  options: RunOptions,
+): Promise<RunResult> {
+  const resolvedConfig = options.agentConfig;
+  const agentConfig = resolvedConfig ?? getAgentConfig(type);
+  // Every derived field comes from the same config: a nested spawn resolves the
+  // agent from its branch's config root, and re-deriving tools or extension
+  // policy from the process-global registry would run a different agent than the
+  // one the caller validated (all built-ins, general-purpose's extensions).
+  const config = resolvedConfig
+    ? {
+        displayName: resolvedConfig.displayName ?? resolvedConfig.name,
+        description: resolvedConfig.description,
+        builtinToolNames: resolvedConfig.builtinToolNames ?? [...BUILTIN_TOOL_NAMES],
+        extensions: resolvedConfig.extensions,
+        excludeExtensions: resolvedConfig.excludeExtensions,
+        skills: resolvedConfig.skills,
+        promptMode: resolvedConfig.promptMode,
+      }
+    : getConfig(type);
+
+  // Resolve working directory: worktree override > parent cwd
+  const effectiveCwd = options.cwd ?? ctx.cwd;
+  // Filesystem work happens in effectiveCwd; config discovery in configCwd.
+  // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
+  const configCwd = options.configCwd ?? effectiveCwd;
+
+  // Snapshot every live parent handle before the first await. A /reload that
+  // lands during the prelude leaves the old ctx and pi stale, and a read after
+  // that throws (plan M1), so the rest of runAgent uses these locals only.
+  // Get parent system prompt for append-mode agents
+  const parentSystemPrompt = ctx.getSystemPrompt();
+  // The child inherits the parent's project-trust decision. pi's SettingsManager
+  // defaults to trusted, so without this a subagent in a project the user declined to
+  // trust would load its `.pi` extensions and settings, and pi's built-in MCP would
+  // start the stdio servers in its `.pi/mcp.json`.
+  const projectTrusted = ctx.isProjectTrusted();
+  // Tools the parent session currently declares. A `defaultActive: false` tool —
+  // pi's `codemode` and `tool_search`, and anything an extension registers dormant —
+  // is activated in the child only when the parent has it active or this agent names
+  // its extension. Otherwise every subagent would carry codemode's tool spec, and the
+  // capability that comes with it, for a user who never turned it on: "as in the main
+  // session" has to mean the main session's actual tool set, not every tool that
+  // happens to be loaded. Read per run: the parent's set changes with `--tools` and
+  // with whatever `tool_search` activated.
+  const parentActiveTools = new Set(options.pi.getActiveTools?.() ?? []);
+  const parentModel = ctx.model;
+  const parentModelRegistry = ctx.modelRegistry;
+  const parentScopedModels = ctx.scopedModels;
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
+
+  const env = await detectEnv(options.pi, effectiveCwd);
+
+  // Build prompt extras (memory, skill preloading)
+  const extras: PromptExtras = { worktree: options.worktree };
+
+  // Resolve extensions/skills: isolated overrides to false
+  const extensions = options.isolated ? false : config.extensions;
+  // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
+  // isolation is an intentional override, not a misconfiguration.
+  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
+  const skills = options.isolated ? false : config.skills;
+
+  // Skill preloading: when skills is string[], preload their content into prompt
+  if (Array.isArray(skills)) {
+    const loaded = preloadSkills(skills, configCwd);
+    if (loaded.length > 0) {
+      extras.skillBlocks = loaded;
+    }
+  }
+
+  let toolNames = resolvedConfig ? [...config.builtinToolNames] : getToolNamesForType(type);
+
+  // Persistent memory: detect write capability and branch accordingly.
+  // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
+  if (agentConfig?.memory) {
+    const existingNames = new Set(toolNames);
+    const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
+    const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
+    const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
+
+    if (hasWriteTools) {
+      // Read-write memory: add any missing memory tool names (read/write/edit)
+      const extraNames = getMemoryToolNames(existingNames);
+      if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
+      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
+    } else {
+      // Read-only memory: only add read tool name, use read-only prompt
+      const extraNames = getReadOnlyMemoryToolNames(existingNames);
+      if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
+      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
+    }
+  }
+
+  // Build system prompt from agent config
+  let systemPrompt: string;
+  if (agentConfig) {
+    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
+  } else {
+    // Unknown type fallback: spread the canonical general-purpose config (defensive —
+    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
+    const fallback = DEFAULT_AGENTS.get("general-purpose");
+    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
+    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
+  }
+
+  // When skills is string[], we've already preloaded them into the prompt.
+  // Still pass noSkills: true since we don't need the skill loader to load them again.
+  const noSkills = skills === false || Array.isArray(skills);
+
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents`, the manager handed down a nestedRuntime, and this
+  // agent sits below the branch cap. Their names collide with EXCLUDED_TOOL_NAMES
+  // by design, so the scoping below re-admits them explicitly.
+  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // A per-agent cap may only tighten the inherited one — an agent can never
+  // grant itself more nesting room than the project allows.
+  const effectiveMaxDepth = agentConfig?.maxSubagentDepth === undefined
+    ? inheritedMaxDepth
+    : Math.min(inheritedMaxDepth, agentConfig.maxSubagentDepth);
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than four tools whose
+  // every call is an error. This is also what makes maxSubagentDepth 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
+    ? createNestedSubagentTools({
+        // Getters: a child reloaded by the new code keeps these closures, so the live root is read per call.
+        // A parent still held by a draining pool keeps its nested calls on that pool's manager.
+        get manager() {
+          return routedManagerFor({ manager: nestedRuntime.manager, pi: options.pi }, nestedRuntime.parentAgentId);
+        },
+        get pi() {
+          return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).pi;
+        },
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  // Resolve model: explicit option > config.model > parent model
+  const model = options.model ?? resolveDefaultModel(
+    parentModel, parentModelRegistry, agentConfig?.model,
+  );
+
+  // Resolve thinking level: explicit option > agent config > undefined (inherit)
+  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+
+  // Child-session model scope: agent frontmatter override, else inherit the
+  // parent's resolved scope. Isolated agents load no extensions, so the
+  // fallback consumer can never bind — an empty scope is the honest value.
+  const scopedModels = resolveScopedModels(
+    options.isolated ? false : agentConfig?.scopedModels,
+    parentScopedModels,
+    parentModelRegistry,
+    (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
+  );
+  // An explicit list under isolation is silently unreachable — flag it the
+  // same way the loader flags contradictory extensions:/exclude_extensions:.
+  if (options.isolated && Array.isArray(agentConfig?.scopedModels)) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `scoped-models-error:scoped_models has no effect for agent "${type}" — isolated agents load no extensions`,
+    });
+  }
+
+  // A relative `session_dir` resolves from the agent's cwd before worktree
+  // isolation, never from the isolation worktree (deleted at cleanup).
+  // `worktree.parentCwd` is that cwd: agent-manager sets it to the same
+  // `baseCwd` it uses for the worktree copy. Without a worktree it is unset and
+  // `effectiveCwd` is already the agent's cwd.
+  const configuredSessionDir = resolveConfiguredSessionDir(
+    agentConfig?.sessionDir,
+    options.worktree?.parentCwd ?? effectiveCwd,
+  );
+  // A subagent session is ALWAYS written to disk while it runs: a crashed or
+  // killed run must leave a transcript pi's /resume can recover. Retention
+  // after the run settles is the manager's decision (`persist_session`), never a
+  // creation-time one.
+  //
+  // The exception is a host session that is itself in-memory: pi's own
+  // `--no-session`, or any SDK host that built `SessionManager.inMemory`. Its
+  // absence of a session file is the exact signal — an argv scan would miss the
+  // SDK host and let an ephemeral session leave children on disk.
+  // The same path is `parentSession`, which nests the child under its spawner.
+  //
+  // Without `session_dir`, the file goes in the parent session's own directory.
+  // pi already resolved `--session-dir`, `PI_CODING_AGENT_SESSION_DIR`, the
+  // `sessionDir` setting or `--session <file>` when it opened the parent, so the
+  // parent is asked rather than those sources being re-read here. A nested
+  // agent's parent is its spawner, so its child follows the spawner's directory.
+  const sessionManager = parentSession === undefined
+    ? SessionManager.inMemory(effectiveCwd)
+    : SessionManager.create(
+        effectiveCwd,
+        configuredSessionDir ?? parentSessionDir,
+        { parentSession },
+      );
+
+  // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
+  // is what createAgentSession needs to keep extension-registered providers
+  // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
+  const parentModelRuntime = (
+    parentModelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
+  ).runtime;
+  const settings: ChildSessionSettings = {
+    type,
+    agentConfig,
+    effectiveCwd,
+    configCwd,
+    projectTrusted,
+    extensions,
+    excludeExtensions,
+    extSelectors: options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    noSkills,
+    systemPrompt,
+    toolNames,
+    parentActiveTools,
+    nestedTools,
+    model,
+    thinkingLevel,
+    scopedModels,
+    parentModelRuntime,
+  };
+  const session = await createChildSession(settings, sessionManager, options);
 
   options.onSessionCreated?.(session);
 
