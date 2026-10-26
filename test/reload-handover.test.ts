@@ -54,7 +54,7 @@ function controlledRun(text: string): () => void {
   return finish;
 }
 
-const stubPool: DrainingPool = { runningCount: () => 0, abortAll: () => 0, dispose: () => {}, listAgents: () => [] };
+const stubPool: DrainingPool = { runningCount: () => 0, abortAll: () => 0, dispose: () => {}, ownAgents: () => [] };
 
 const slotFreed: HandoverEvent = { kind: "slotFreed" };
 
@@ -413,6 +413,23 @@ describe("AgentManager hand-over", () => {
     const adopted = next.adopt({ dto: dtoOf(busy) }, false);
     expect(next.listAgents()).toEqual([adopted]);
     expect(next.getRecord(busy)).toBe(adopted);
+    finish();
+  });
+
+  it("lists a draining run once after a second hand-over", () => {
+    const first = track(new AgentManager());
+    const finish = controlledRun("busy");
+    const busy = first.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const firstHandover = first.beginDrain([], undefined);
+
+    const second = track(new AgentManager());
+    second.setDrainingPools([firstHandover.draining]);
+    const secondHandover = second.beginDrain([], undefined);
+
+    const third = track(new AgentManager());
+    third.setDrainingPools([firstHandover.draining, secondHandover.draining]);
+    expect(third.listAgents().map((r) => r.id)).toEqual([busy]);
+    expect(third.getRecord(busy)?.status).toBe("running");
     finish();
   });
 });

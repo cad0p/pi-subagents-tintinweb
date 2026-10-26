@@ -53,7 +53,8 @@ export interface DrainingPool {
   runningCount(): number;
   abortAll(): number;
   dispose(): void;
-  listAgents(): AgentRecord[];
+  /** This pool's own records only: older pools it was handed over from are listed by their own entries. */
+  ownAgents(): AgentRecord[];
 }
 
 export class ReloadHandover {

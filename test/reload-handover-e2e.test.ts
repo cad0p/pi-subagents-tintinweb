@@ -502,6 +502,8 @@ describe("subagents across a real /reload (faux provider)", () => {
 
     await reloadRoot(root);
     await reloadRoot(root);
+    // Still draining: the run is listed once in the registry, not once per reloaded activation holding it.
+    expect(liveRegistry().listAgents().filter((row) => row.id === id)).toHaveLength(1);
 
     release();
     await vi.waitFor(

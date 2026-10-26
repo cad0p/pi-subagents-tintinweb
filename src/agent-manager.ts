@@ -793,7 +793,7 @@ export class AgentManager {
   }
 
   listAgents(): AgentRecord[] {
-    return [...this.agents.values(), ...this.drainingRecords()].sort(
+    return [...this.ownAgents(), ...this.drainingRecords()].sort(
       (a, b) => b.startedAt - a.startedAt,
     );
   }
@@ -803,9 +803,13 @@ export class AgentManager {
     return this.drainingRecords().some((r) => r.id === id);
   }
 
+  ownAgents(): AgentRecord[] {
+    return [...this.agents.values()];
+  }
+
   /** Runs still held by draining activations. A row already adopted here is listed once, from this manager. */
   private drainingRecords(): AgentRecord[] {
-    return this.drainingPools.flatMap((pool) => pool.listAgents()).filter((r) => !this.agents.has(r.id));
+    return this.drainingPools.flatMap((pool) => pool.ownAgents()).filter((r) => !this.agents.has(r.id));
   }
 
   abort(id: string): boolean {
