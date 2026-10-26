@@ -495,6 +495,36 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
   }, 20_000);
 
+  it("keeps a resumed child's own tool count across /reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    release();
+    childToolStep = Promise.resolve();
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    // The spawn made one tool call and the resume makes one more: the record counts both (2), the resumed row counts its own (1).
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    resumeTarget = id;
+    await root.prompt("resume-now");
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.toolUses).toBe(2), { timeout: 10_000 });
+    expect(renderedWidget("agents")).not.toContain("2 tool uses");
+
+    await reloadRoot(root);
+    expect(renderedWidget("agents")).toContain("(draining)");
+    expect(renderedWidget("agents")).toContain("1 tool use");
+    expect(renderedWidget("agents")).not.toContain("2 tool uses");
+
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+  }, 20_000);
+
   it("gives a reloaded child extension session_shutdown and session_start with reason reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
