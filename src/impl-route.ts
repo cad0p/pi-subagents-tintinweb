@@ -12,6 +12,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { NestedCallGate, ToolActivity } from "./agent-runner.js";
 import type { NestedAgentManager } from "./nested-tools.js";
 
+type ActivitySink = (activity: ToolActivity) => void;
+
 /** Permanent global key. Readers of every released version must keep working (see IMPL_VERSION). */
 export const IMPL_KEY = Symbol.for("pi-subagents:impl");
 
@@ -28,7 +30,8 @@ export interface RootRoute {
 export interface ImplV1 {
   version: 1;
   scopeBlockReason(gate: NestedCallGate, toolName: string): string | undefined;
-  reportExtensionError(extensionPath: string, onToolActivity?: (activity: ToolActivity) => void): void;
+  /** The live activity sink of a child by id, or undefined when the child has no record here. */
+  activityOf(agentId: string): ActivitySink | undefined;
   root(): RootRoute;
 }
 
@@ -38,13 +41,9 @@ function scopeBlockReason(gate: NestedCallGate, toolName: string): string | unde
   return gate.allows?.(toolName) === false ? `Tool "${toolName}" is not available to this subagent.` : undefined;
 }
 
-function reportExtensionError(extensionPath: string, onToolActivity?: (activity: ToolActivity) => void): void {
-  onToolActivity?.({ type: "end", toolName: `extension-error:${extensionPath}` });
-}
-
 /** Called by the root activation. Child activations never publish. */
-export function publishImpl(root: () => RootRoute): void {
-  const impl: ImplV1 = { version: IMPL_VERSION, scopeBlockReason, reportExtensionError, root };
+export function publishImpl(root: () => RootRoute, activityOf: (agentId: string) => ActivitySink | undefined): void {
+  const impl: ImplV1 = { version: IMPL_VERSION, scopeBlockReason, activityOf, root };
   (globalThis as ImplHolder)[IMPL_KEY] = impl;
 }
 
@@ -59,14 +58,19 @@ export function routedScopeBlockReason(gate: NestedCallGate, toolName: string): 
   return impl ? impl.scopeBlockReason(gate, toolName) : scopeBlockReason(gate, toolName);
 }
 
-/** Reports a failed extension binding of a child. */
-export function routedExtensionError(extensionPath: string, onToolActivity?: (activity: ToolActivity) => void): void {
-  const impl = liveImpl();
-  if (impl) impl.reportExtensionError(extensionPath, onToolActivity);
-  else reportExtensionError(extensionPath, onToolActivity);
+/** Reports a failed extension binding of a child to its live activity sink, else to the caller's. */
+export function routedExtensionError(extensionPath: string, agentId: string | undefined, onToolActivity?: ActivitySink): void {
+  const live = agentId === undefined ? undefined : liveImpl()?.activityOf(agentId);
+  (live ?? onToolActivity)?.({ type: "end", toolName: `extension-error:${extensionPath}` });
 }
 
 /** The live root's manager and pi, or the caller's own when no root has published. */
 export function routedRoot(fallback: RootRoute): RootRoute {
   return liveImpl()?.root() ?? fallback;
+}
+
+/** The manager that owns a parent: the live root when it knows the parent, else the one that created it. */
+export function routedManagerFor(fallback: RootRoute, parentAgentId: string): NestedAgentManager {
+  const root = routedRoot(fallback);
+  return root.manager.getRecord(parentAgentId) ? root.manager : fallback.manager;
 }

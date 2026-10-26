@@ -64,6 +64,18 @@ function textResult<D>(msg: string, details?: D) {
   return { content: [{ type: "text" as const, text: msg }], details };
 }
 
+/** Folds one tool event into an agent's activity state. Shared by the spawn callbacks and the live sink of a reloaded child. */
+function applyToolActivity(state: AgentActivity, activity: { type: "start" | "end"; toolName: string }): void {
+  if (activity.type === "start") {
+    state.activeTools.set(activity.toolName + "_" + Date.now(), activity.toolName);
+  } else {
+    for (const [key, name] of state.activeTools) {
+      if (name === activity.toolName) { state.activeTools.delete(key); break; }
+    }
+    state.toolUses++;
+  }
+}
+
 /**
  * Create an AgentActivity state and spawn callbacks for tracking tool usage.
  * Used by the background spawn and resume paths to avoid duplication.
@@ -80,16 +92,7 @@ function createActivityTracker(maxTurns?: number) {
   };
 
   const callbacks = {
-    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => {
-      if (activity.type === "start") {
-        state.activeTools.set(activity.toolName + "_" + Date.now(), activity.toolName);
-      } else {
-        for (const [key, name] of state.activeTools) {
-          if (name === activity.toolName) { state.activeTools.delete(key); break; }
-        }
-        state.toolUses++;
-      }
-    },
+    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => applyToolActivity(state, activity),
     onTextDelta: (_delta: string, fullText: string) => {
       state.responseText = fullText;
     },
@@ -640,7 +643,13 @@ export default function (pi: ExtensionAPI) {
   if (isRoot) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
     // Children reloaded by the new code route their gate, onError and nested calls here.
-    publishImpl(() => ({ manager, pi }));
+    publishImpl(
+      () => ({ manager, pi }),
+      (agentId) => {
+        const state = agentActivity.get(agentId);
+        return state ? (activity) => applyToolActivity(state, activity) : undefined;
+      },
+    );
   }
 
   /**
@@ -862,8 +871,8 @@ export default function (pi: ExtensionAPI) {
         await runInChildSessionContext(() => session.reload());
       } catch (err) {
         item.dto.status = "error";
+        // The session stays: its file holds the transcript and `resume` continues on it.
         item.dto.error = `reload failed: ${err instanceof Error ? err.message : String(err)}`;
-        item.session = undefined;
       }
     }
     manager.adopt(item, notify);

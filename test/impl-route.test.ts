@@ -13,6 +13,7 @@ import {
   publishImpl,
   type RootRoute,
   routedExtensionError,
+  routedManagerFor,
   routedRoot,
   routedScopeBlockReason,
 } from "../src/impl-route.js";
@@ -38,11 +39,36 @@ describe("impl-route fallback", () => {
 
   it("reports extension errors locally and returns the caller's root", () => {
     const seen: string[] = [];
-    routedExtensionError("/ext/a.ts", (activity) => seen.push(activity.toolName ?? ""));
+    routedExtensionError("/ext/a.ts", undefined, (activity) => seen.push(activity.toolName ?? ""));
     expect(seen).toEqual(["extension-error:/ext/a.ts"]);
 
     const fallback = rootWith("local");
     expect(routedRoot(fallback)).toBe(fallback);
+  });
+});
+
+describe("impl-route manager ownership", () => {
+  const ownerOf = (ids: string[], label: string): NestedAgentManager =>
+    ({ label, getRecord: (id: string) => (ids.includes(id) ? { id } : undefined) }) as unknown as NestedAgentManager;
+  const creatorRoute = (manager: NestedAgentManager): RootRoute => ({ manager, pi: {} as ExtensionAPI });
+
+  it("keeps a parent on its creating manager when no root has published", () => {
+    const creator = ownerOf(["parent"], "creator");
+    expect(routedManagerFor(creatorRoute(creator), "parent")).toBe(creator);
+  });
+
+  it("routes a parent the live root knows to the live root", () => {
+    const creator = ownerOf(["parent"], "creator");
+    const live = ownerOf(["parent"], "live");
+    slot[IMPL_KEY] = { version: 1, scopeBlockReason: () => undefined, activityOf: () => undefined, root: () => creatorRoute(live) };
+    expect(routedManagerFor(creatorRoute(creator), "parent")).toBe(live);
+  });
+
+  it("keeps a draining parent on its creating manager when the live root does not know it", () => {
+    const creator = ownerOf(["draining"], "creator");
+    const live = ownerOf([], "live");
+    slot[IMPL_KEY] = { version: 1, scopeBlockReason: () => undefined, activityOf: () => undefined, root: () => creatorRoute(live) };
+    expect(routedManagerFor(creatorRoute(creator), "draining")).toBe(creator);
   });
 });
 
@@ -51,7 +77,7 @@ describe("impl-route published root", () => {
     const published: ImplV1 = {
       version: 1,
       scopeBlockReason: () => "routed",
-      reportExtensionError: () => {},
+      activityOf: () => undefined,
       root: () => rootWith("live"),
     };
     slot[IMPL_KEY] = published;
@@ -62,7 +88,7 @@ describe("impl-route published root", () => {
     slot[IMPL_KEY] = {
       version: 2,
       scopeBlockReason: () => "routed",
-      reportExtensionError: () => {},
+      activityOf: () => undefined,
       root: () => rootWith("v2"),
     };
     expect(routedScopeBlockReason(denyBash, "bash")).toBe('Tool "bash" is not available to this subagent.');
@@ -70,21 +96,25 @@ describe("impl-route published root", () => {
   });
 
   it("replaces the earlier publication when a later activation publishes", () => {
-    publishImpl(() => rootWith("first"));
-    publishImpl(() => rootWith("second"));
+    publishImpl(() => rootWith("first"), () => undefined);
+    publishImpl(() => rootWith("second"), () => undefined);
     expect(routedRoot(rootWith("local")).manager).toEqual({ label: "second" });
   });
 
   it("routes nested tool access and extension errors through the published root", () => {
-    const seen: string[] = [];
+    const live: string[] = [];
+    const local: string[] = [];
     slot[IMPL_KEY] = {
       version: 1,
       scopeBlockReason: () => undefined,
-      reportExtensionError: (path: string) => seen.push(path),
+      activityOf: (agentId: string) => (agentId === "a1" ? (activity) => live.push(activity.toolName) : undefined),
       root: () => rootWith("live"),
     };
     expect(routedRoot(rootWith("local")).manager).toEqual({ label: "live" });
-    routedExtensionError("/ext/b.ts");
-    expect(seen).toEqual(["/ext/b.ts"]);
+    routedExtensionError("/ext/b.ts", "a1", (activity) => local.push(activity.toolName));
+    expect(live).toEqual(["extension-error:/ext/b.ts"]);
+    expect(local).toEqual([]);
+    routedExtensionError("/ext/c.ts", "gone", (activity) => local.push(activity.toolName));
+    expect(local).toEqual(["extension-error:/ext/c.ts"]);
   });
 });

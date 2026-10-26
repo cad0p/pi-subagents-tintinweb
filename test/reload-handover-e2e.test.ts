@@ -37,7 +37,7 @@ interface AgentRow {
   status: string;
   result?: string;
   error?: string;
-  session?: unknown;
+  session?: AgentSession;
   abortController?: AbortController;
 }
 
@@ -234,7 +234,15 @@ describe("subagents across a real /reload (faux provider)", () => {
     const row = liveRegistry().listAgents().find((r) => r.id === id);
     expect(row?.status).toBe("error");
     expect(row?.error).toContain("reload failed: child boom");
-    expect(row?.session).toBeUndefined();
+    // The session is kept, so the row resumes on the same transcript.
+    expect(row?.session).toBeDefined();
+    expect(publishedRoot().manager.resume(id, "after-reload")).toBeDefined();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
+    const transcript = JSON.stringify(liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages);
+    expect(transcript).toContain(CHILD_TASK);
+    expect(transcript).toContain("after-reload");
   }, 20_000);
 
   it("stops a draining subagent when the session quits after a reload", async () => {

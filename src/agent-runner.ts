@@ -26,7 +26,7 @@ import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
-import { routedExtensionError, routedRoot, routedScopeBlockReason } from "./impl-route.js";
+import { routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockReason } from "./impl-route.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
@@ -762,8 +762,9 @@ export async function runAgent(
   const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
     ? createNestedSubagentTools({
         // Getters: a child reloaded by the new code keeps these closures, so the live root is read per call.
+        // A parent still held by a draining pool keeps its nested calls on that pool's manager.
         get manager() {
-          return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).manager;
+          return routedManagerFor({ manager: nestedRuntime.manager, pi: options.pi }, nestedRuntime.parentAgentId);
         },
         get pi() {
           return routedRoot({ manager: nestedRuntime.manager, pi: options.pi }).pi;
@@ -1093,7 +1094,7 @@ export async function runAgent(
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
   await session.bindExtensions({
-    onError: (err) => routedExtensionError(err.extensionPath, options.onToolActivity),
+    onError: (err) => routedExtensionError(err.extensionPath, options.agentId, options.onToolActivity),
   });
 
   options.onSessionCreated?.(session);
