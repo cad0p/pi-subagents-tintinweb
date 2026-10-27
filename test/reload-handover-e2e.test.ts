@@ -22,6 +22,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listSubagentWork } from "../src/background-work.js";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
 import { HANDOVER_KEY, type HandoverEvent, publishHandovers, type ReloadHandover, takeHandovers } from "../src/reload-handover.js";
@@ -30,6 +31,9 @@ import { registerFauxProvider } from "./helpers/pi-ai.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
 const EXTENSION_PATH = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+const SETTLED_HOLD_EXT = fileURLToPath(new URL("./fixtures/agent-settled-hold-ext.mjs", import.meta.url));
+/** Set to a promise to hold the next agent_settled event until it resolves (see fixtures/agent-settled-hold-ext.mjs). */
+const SETTLED_HOLD = Symbol.for("pi-subagents-test.agentSettledHold");
 const CHILD_TASK = "CHILD-TASK";
 const PARENT_TASK = "PARENT-TASK";
 const FAUX_MODEL = { id: "faux-1", contextWindow: 200_000 };
@@ -146,6 +150,9 @@ let resumeTarget = "";
 /** Holds a draining parent's first turn until the test has reloaded the root. */
 let parentGate: Promise<void> = Promise.resolve();
 let releaseParent: () => void = () => {};
+/** Holds the parent's turn once its child has started, so a result queued meanwhile is steered into a streaming parent. */
+let parentHold: Promise<void> = Promise.resolve();
+let releaseParentHold: () => void = () => {};
 /** Holds the parent's steer call until the test has the nested child running. */
 let steerGate: Promise<void> = Promise.resolve();
 let releaseSteer: () => void = () => {};
@@ -207,7 +214,7 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
     if (results.length === 1 && parentLeavesChild) {
       // A parent that leaves a child it spawned while draining waits until that child is streaming.
       const started = parentSpawnsOnRelease ? childStarted : Promise.resolve();
-      return started.then(() => fauxAssistantMessage([fauxText("PARENT-LEFT")]));
+      return started.then(() => parentHold).then(() => fauxAssistantMessage([fauxText("PARENT-LEFT")]));
     }
     if (results.length === 1) {
       return steerGate.then(() =>
@@ -366,6 +373,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     steerGate = new Promise<void>((resolve) => {
       releaseSteer = resolve;
     });
+    parentHold = Promise.resolve();
     widgets.clear();
     delete (globalThis as unknown as Record<symbol, unknown>)[IMPL_KEY];
     tmp = mkdtempSync(join(tmpdir(), "reload-e2e-"));
@@ -1222,6 +1230,425 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.status).toBe("completed"), { timeout: 10_000 });
     expect(announced()).toHaveLength(1);
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
+  }, 20_000);
+
+  it("hands a nested result still held in its batch across /reload to the parent once, never the main session", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const toParent = vi.spyOn(parentSession, "sendCustomMessage");
+    const queueNested = draining.deliverNested.bind(draining);
+    // The reload starts in the same step that queues the child's result, so the hold window is open at hand-over.
+    let reloading: Promise<void> = Promise.resolve();
+    const queued = vi.spyOn(draining, "deliverNested").mockImplementation((child, content) => {
+      queueNested(child, content);
+      reloading = reloadRoot(root);
+    });
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(queued).toHaveBeenCalled(), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    // The parent's own completion reaches the main session after the window closes, so a stray child nudge would have landed.
+    await vi.waitFor(() => expect(sent.mock.calls.some(([m]) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(parentId))).toBe(true), { timeout: 10_000 });
+    const naming = (calls: Array<[{ customType: string; content: unknown }, ...unknown[]]>) =>
+      calls.filter(([m]) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId));
+    expect(naming(toParent.mock.calls)).toHaveLength(1);
+    expect(naming(sent.mock.calls)).toHaveLength(0);
+  }, 20_000);
+
+  it("hands a nested result whose wake was sent but never observed across /reload to the parent once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first batch wake leaves the session but its message_start never reaches this activation: the reload starts in that step.
+    let reloading: Promise<void> = Promise.resolve();
+    let swallowed = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!swallowed && message.customType === "subagent-notification") {
+        swallowed = true;
+        reloading = reloadRoot(root);
+        return Promise.resolve();
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(swallowed).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.resultDelivered).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(observed.filter((message) => JSON.stringify(message).includes(childId))).toHaveLength(1);
+    expect(sent.mock.calls.filter(([message]) => JSON.stringify(message).includes(childId))).toHaveLength(0);
+  }, 20_000);
+
+  it("retries a kept nested result whose wake is refused after the reload, and delivers it once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The reload takes the kept child, then the first wake is refused: the old activation's failure must send it again.
+    let reloading: Promise<void> = Promise.resolve();
+    let refused = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!refused && message.customType === "subagent-notification") {
+        refused = true;
+        reloading = reloadRoot(root);
+        return reloading.then(() => Promise.reject(new Error("wake refused")));
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const starts: Array<{ customType?: string; content: unknown }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") starts.push(event.message);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(refused).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const child = queued.mock.calls[0]?.[0];
+    if (!child) throw new Error("no child record");
+    const childId = child.id;
+    expect(taken.mock.results[0]?.value).toEqual([]);
+    // The retry reaches the streaming parent through the old activation; the old listener observes it when the parent's turn ends.
+    await vi.waitFor(() => expect(observed.filter((m) => JSON.stringify(m).includes(childId))).toHaveLength(1), { timeout: 10_000 });
+    releaseParentHold();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId))).toHaveLength(1);
+    expect(child.resultDelivered).toBe(true);
+  }, 20_000);
+
+  it("hands a nested result whose wake is refused after the take across /reload to the parent once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first batch wake is refused only after the reload has taken the child: the old activation's failure finds nothing in flight.
+    let reloading: Promise<void> = Promise.resolve();
+    let refused = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!refused && message.customType === "subagent-notification") {
+        refused = true;
+        reloading = reloadRoot(root);
+        return reloading.then(() => Promise.reject(new Error("wake refused")));
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(refused).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.resultDelivered).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(observed.filter((message) => JSON.stringify(message).includes(childId))).toHaveLength(1);
+    // The old activation's failure finds the child taken: it does not hand the child on again, so it stays the one deliverNested call.
+    expect(queued.mock.calls.filter(([record]) => record.id === childId)).toHaveLength(1);
+  }, 20_000);
+
+  it("keeps a kept wake's listener from matching a wake the new activation sends to the same parent", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first wake is queued on the streaming parent and stays unobserved across the reload, so its old listener stays subscribed.
+    let reloading: Promise<void> = Promise.resolve();
+    let reloaded = false;
+    let secondSent = false;
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      const sent = sendToParent(message, options);
+      if (!reloaded && message.customType === "subagent-notification") {
+        reloaded = true;
+        reloading = reloadRoot(root);
+      }
+      if (JSON.stringify(message).includes("second result")) secondSent = true;
+      return sent;
+    });
+    // Subscribed before any wake, so it runs ahead of the wake listeners on every message_start.
+    const probe: { second?: { resultDelivered: boolean } } = {};
+    const starts: Array<{ text: string; secondDelivered?: boolean }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") {
+        starts.push({ text: JSON.stringify(event.message), secondDelivered: probe.second?.resultDelivered });
+      }
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    release();
+    await vi.waitFor(() => expect(reloaded).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const child = queued.mock.calls[0]?.[0];
+    if (!child) throw new Error("no child record");
+    // A second child's batch, held by the new activation, is sent to the same parent while the first wake is unobserved. A counter
+    // restarted by the reload would give both wakes the same batch id, so the first wake's old listener would match the second.
+    const second = { ...child, id: "nested-second", resultDelivered: false };
+    probe.second = second;
+    publishedRoot().manager.deliverNested(second, "second result");
+    await vi.waitFor(() => expect(secondSent).toBe(true), { timeout: 10_000 });
+    expect(child.resultDelivered).not.toBe(true);
+    releaseParentHold();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(child.resultDelivered).toBe(true);
+    expect(second.resultDelivered).toBe(true);
+    expect(starts.filter((s) => s.text.includes(child.id))).toHaveLength(1);
+    expect(starts.filter((s) => s.text.includes("second result"))).toHaveLength(1);
+    // The second child is not delivered before its own wake starts: the first wake's listener must not match the second wake.
+    expect(starts.find((s) => s.text.includes("second result"))?.secondDelivered).toBe(false);
+  }, 20_000);
+
+  it("delivers a nested result once when its wake is deferred behind the parent's agent_settled across /reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), `---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\nextensions: ${SETTLED_HOLD_EXT}\n---\nYou delegate.\n`);
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    let releaseSettled: () => void = () => {};
+    (globalThis as unknown as Record<symbol, unknown>)[SETTLED_HOLD] = new Promise<void>((resolve) => {
+      releaseSettled = resolve;
+    });
+    releaseParentHold();
+    // The parent's turn ends; its agent_settled is held, so the parent is not streaming while the child settles.
+    await vi.waitFor(() => expect((globalThis as unknown as Record<symbol, unknown>)[SETTLED_HOLD]).toBeUndefined(), { timeout: 10_000 });
+    expect(parentSession.isStreaming).toBe(false);
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    let reloading: Promise<void> = Promise.resolve();
+    let reloaded = false;
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      const sent = sendToParent(message, options);
+      if (!reloaded && message.customType === "subagent-notification") {
+        reloaded = true;
+        // A /reload lands after pi has accepted the wake, as in practice, not inside the send call.
+        reloading = sent.then(() => new Promise<void>((resolve) => setTimeout(resolve, 0))).then(() => reloadRoot(root));
+      }
+      return sent;
+    });
+    const starts: Array<{ customType?: string; content: unknown }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") starts.push(event.message);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    release();
+    await vi.waitFor(() => expect(reloaded).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    // Let any nudge the new activation makes flush while the parent's settle is still held.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const notices = () => starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId));
+    expect(notices()).toHaveLength(0);
+
+    releaseSettled();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(notices()).toHaveLength(1);
+  }, 20_000);
+
+  it("delivers a nested result once when its wake was queued on a streaming parent across /reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    // The parent's turn stays open until released, so the child's wake is steered into a streaming parent's queue.
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The reload starts in the step that queues the wake: the wake is in pi's queue, not yet delivered.
+    let reloading: Promise<void> = Promise.resolve();
+    let reloaded = false;
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      const sent = sendToParent(message, options);
+      if (!reloaded && message.customType === "subagent-notification") {
+        reloaded = true;
+        reloading = reloadRoot(root);
+      }
+      return sent;
+    });
+    const starts: Array<{ customType?: string; content: unknown }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") starts.push(event.message);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(reloaded).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    // The wake is queued on the shared, streaming session: the old activation's listener still observes it, so no nudge.
+    expect(taken.mock.results[0]?.value).toEqual([]);
+    const child = draining.getRecord(childId);
+    if (!child) throw new Error("no child record");
+    // Until this activation's listener observes the queued wake, the old manager holds the child in flight: its parent's pull
+    // answers "already delivered", and the background-work provider still lists it.
+    const sid = child.spawnerSessionId ?? "";
+    const listed = () => listSubagentWork(draining, { sessionId: sid, sessionIds: [sid], nowMs: Date.now() }).map((item) => item.id);
+    expect(draining.resultReachedParent(child)).toBe(true);
+    expect(listed()).toContain(childId);
+
+    releaseParentHold();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId))).toHaveLength(1);
+    expect(child.resultDelivered).toBe(true);
+    expect(listed()).not.toContain(childId);
+    expect(draining.resultReachedParent(child)).toBe(false);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result ?? "").not.toContain("not delivered");
+  }, 20_000);
+
+  it("delivers a nested result once when its wake starts a run on an idle parent across /reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The wake starts a run on the idle parent; the reload lands while that run is still preparing, before its message_start.
+    let reloading: Promise<void> = Promise.resolve();
+    let reloaded = false;
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      const sent = sendToParent(message, options);
+      if (!reloaded && message.customType === "subagent-notification") {
+        reloaded = true;
+        reloading = reloadRoot(root);
+      }
+      return sent;
+    });
+    const starts: Array<{ customType?: string; content: unknown }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") starts.push(event.message);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(reloaded).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    // pi's reload() resets api providers while the wake's run is still preparing, so the parent's own turn can error. The
+    // assertion is on the child's notification, so wait for the parent to leave its running state rather than to complete.
+    await vi.waitFor(() => expect(["running", "queued"]).not.toContain(liveRegistry().listAgents().find((r) => r.id === parentId)?.status), { timeout: 10_000 });
+    expect(starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId))).toHaveLength(1);
+    expect(taken.mock.results[0]?.value).toEqual([]);
   }, 20_000);
 
   it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {

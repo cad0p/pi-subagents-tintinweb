@@ -162,6 +162,9 @@ export interface AgentRecord {
    *  (nudge/pull) and `agent-manager.ts` (parent settle). Read by the pi-background-work provider, which
    *  lists a record until this is true. A resume clears it for the new run. */
   resultDelivered?: boolean;
+  /** Set when the owning parent refused this child's nested result after NESTED_SEND_ATTEMPTS sends. The child stays pullable,
+   *  its parent's finish names it, and the parent does not wait on it. A resume clears it. */
+  nestedStalled?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
   /** Input parked while a teardown runs (`transition`); handed over as one resume when it ends. */

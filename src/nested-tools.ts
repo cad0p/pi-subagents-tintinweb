@@ -22,7 +22,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { type ResumeCallbacks } from "./agent-manager.js";
-import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
+import { agentNotFoundResponse, agentReportResponse, alreadyDeliveredResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -74,6 +74,8 @@ export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
   deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome>;
   getRecord(id: string): AgentRecord | undefined;
+  /** True when a settled child's result is already in its parent's context (sent batch or delivered). */
+  resultReachedParent(child: AgentRecord): boolean;
   /** True while a draining activation still holds the run; its children stay with it. */
   isDraining(id: string): boolean;
   listAgents(): AgentRecord[];
@@ -305,6 +307,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
       if (!isOwnedRecord(record, context.parentAgentId)) return agentNotFoundResponse(params.agent_id);
+      if (context.manager.resultReachedParent(record)) return alreadyDeliveredResponse(params.agent_id);
       consumeResult(record);
       return agentReportResponse(record);
     },

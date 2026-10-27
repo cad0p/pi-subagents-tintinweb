@@ -380,7 +380,7 @@ describe("turn-gated completion notifications", () => {
     }
   });
 
-  it("two mid-turn completions park two nudges and release both at the next boundary", async () => {
+  it("two mid-turn completions in one window park as one batch and release it at the next boundary", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     vi.useFakeTimers();
@@ -388,20 +388,64 @@ describe("turn-gated completion notifications", () => {
     lifecycle.get("turn_start")({}, ctx());
     await spawnCompleting(tools, "first task");
     await spawnCompleting(tools, "second task");
-    await vi.advanceTimersByTimeAsync(1000); // hold expires mid-turn → both nudges parked
+    await vi.advanceTimersByTimeAsync(1000); // window expires mid-turn → one batch parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     lifecycle.get("tool_execution_end")({}, ctx());
 
-    expect(pi.sendMessage).toHaveBeenCalledTimes(2);
-    for (const call of pi.sendMessage.mock.calls) {
-      expect(call[0].customType).toBe("subagent-notification");
-      expect(call[0].content).not.toContain("Background agent group completed");
-      expect(call[1]).toEqual({ deliverAs: "steer", triggerTurn: true });
-    }
-    const contents = pi.sendMessage.mock.calls.map((call: any[]) => call[0].content as string).join("\n");
-    expect(contents).toContain("**✓ Subagent completed: first task**");
-    expect(contents).toContain("**✓ Subagent completed: second task**");
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [payload, options] = pi.sendMessage.mock.calls[0];
+    expect(payload.customType).toBe("subagent-notification");
+    expect(payload.content).not.toContain("Background agent group completed");
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(payload.content).toContain("**✓ Subagent completed: first task**");
+    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+  });
+
+  it("two completions in one window send one notification with both (#83)", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    await spawnCompleting(tools, "first task");
+    await spawnCompleting(tools, "second task");
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.content).toContain("**✓ Subagent completed: first task**");
+    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+  });
+
+  it("a pull during the window drops that child from the batch; the rest still sends (#83)", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    const firstId = await spawnCompleting(tools, "first task");
+    await spawnCompleting(tools, "second task");
+    await vi.advanceTimersByTimeAsync(100); // both runs settle (decide runs on setImmediate), inside the window
+    const pulled = await tools.get("get_subagent_result").execute("tc-gsr", { agent_id: firstId }, undefined, undefined, ctx());
+    expect(textOf(pulled)).toContain("THE-RESULT-PAYLOAD");
+    await vi.advanceTimersByTimeAsync(300);
+
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [payload] = pi.sendMessage.mock.calls[0];
+    expect(payload.content).not.toContain("first task");
+    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+  });
+
+  it("a pull during the window of a lone completion sends nothing (#83)", async () => {
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    vi.useFakeTimers();
+
+    const id = await spawnCompleting(tools);
+    await vi.advanceTimersByTimeAsync(100); // settles (decide runs on setImmediate), inside the window
+    await tools.get("get_subagent_result").execute("tc-gsr", { agent_id: id }, undefined, undefined, ctx());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -1796,11 +1840,12 @@ describe("agents command terminal surfaces", () => {
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
 
       // The failed start never executed a turn: its completion report must not
-      // claim one.
+      // claim one. The blocker settles in the same batch, so isolate the generator's block.
       const reportOf = () =>
         pi.sendMessage.mock.calls
           .map(([payload]: [any]) => String(payload.content))
-          .find((content: string) => content.includes("Generate gen-nopromise agent"));
+          .flatMap((content: string) => content.split("\n\n**"))
+          .find((block: string) => block.includes("Generate gen-nopromise agent"));
       await vi.waitFor(() => expect(reportOf()).toBeDefined());
       expect(reportOf()).not.toContain("↻");
     } finally {

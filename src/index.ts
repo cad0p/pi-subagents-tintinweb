@@ -16,7 +16,7 @@ import { sessionKey } from "@cad0p/pi-background-work";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { AgentManager, type SpawnOptions } from "./agent-manager.js";
+import { AgentManager, NUDGE_HOLD_MS, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -216,10 +216,6 @@ export function effectiveFailurePreviewCap(value: number): number {
   return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
 
-/** Grace window between an agent settling and its completion notification being
- *  sent, so a parent that pulls the result first can still cancel the nudge. */
-export const NUDGE_HOLD_MS = 200;
-
 /** Max turns for the AI-generation wizard run. Exported for the wizard tests,
  *  which tell the generator run apart from other spawns by this value. */
 export const WIZARD_MAX_TURNS = 5;
@@ -379,51 +375,52 @@ export default function (pi: ExtensionAPI) {
   // the agent loop drains right after such a boundary — before the parent's
   // next LLM call — so the notification lands at the next possible moment
   // instead of only when the whole turn ends. turn_end remains the fallback
-  // release point (then delivered as a new turn, as before). Consumption
-  // (resultConsumed + cancelNudge) cancels the nudge at any point before
-  // firing; the send closures re-check it at fire time.
-  const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
-  const parkedNudges = new Map<string, () => void>();
+  // release point (then delivered as a new turn, as before). Results that
+  // settle within NUDGE_HOLD_MS of the open batch's first settle share one
+  // message. Consumption (resultConsumed + cancelNudge) drops the record from
+  // the batch at any point before it is sent; the send re-checks it.
+  /** The open batch of top-level completions. A parked batch waits for the next main-session message boundary. */
+  interface NudgeBatch {
+    records: Map<string, AgentRecord>;
+    timer?: ReturnType<typeof setTimeout>;
+    parked: boolean;
+  }
+  let nudgeBatch: NudgeBatch | undefined;
   /** Poll interval while the wizard waits for a queued generator to start. The
    *  wizard is interactive, so it re-checks the record until it leaves `queued`
    *  (or is stopped) instead of blocking on a promise that does not exist yet. */
   const WIZARD_QUEUE_POLL_MS = 100;
   let mainTurnActive = false;
 
-  function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
-    cancelNudge(key);
-    if (mainTurnActive) {
-      parkedNudges.set(key, send);
-      return;
+  /** Queue a settled top-level record into the open batch. The window is fixed at the batch's first record, not trailing. */
+  function scheduleNudge(record: AgentRecord) {
+    if (!nudgeBatch) {
+      nudgeBatch = { records: new Map(), parked: mainTurnActive };
+      if (!mainTurnActive) armNudgeWindow(nudgeBatch);
     }
-    pendingNudges.set(key, setTimeout(() => {
-      pendingNudges.delete(key);
-      // A new turn may have started inside the grace window — re-park.
-      if (mainTurnActive) {
-        parkedNudges.set(key, send);
-        return;
-      }
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
-    }, delay));
+    nudgeBatch.records.set(record.id, record);
   }
 
-  function cancelNudge(key: string) {
-    parkedNudges.delete(key);
-    const timer = pendingNudges.get(key);
-    if (timer != null) {
-      clearTimeout(timer);
-      pendingNudges.delete(key);
-    }
+  function armNudgeWindow(batch: NudgeBatch) {
+    batch.timer = setTimeout(() => {
+      batch.timer = undefined;
+      // A new turn may have started inside the window: park until its next message boundary.
+      if (mainTurnActive) batch.parked = true;
+      else emitNudgeBatch();
+    }, NUDGE_HOLD_MS);
   }
 
-  /** Fire all parked nudges now (mid-turn release at a message boundary). */
+  /** Drop a record from the open batch (a pull, or a run that resumed). An emptied batch sends nothing. */
+  function cancelNudge(id: string) {
+    const batch = nudgeBatch;
+    if (!batch?.records.delete(id) || batch.records.size > 0) return;
+    clearTimeout(batch.timer);
+    nudgeBatch = undefined;
+  }
+
+  /** Send the parked batch now (mid-turn release at a message boundary). */
   function releaseParkedNudges() {
-    if (parkedNudges.size === 0) return;
-    const parked = [...parkedNudges];
-    parkedNudges.clear();
-    for (const [, send] of parked) {
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
-    }
+    if (nudgeBatch?.parked) emitNudgeBatch();
   }
 
   // Turn-aware gating for the nudge scheduler (see comment above): park while
@@ -440,28 +437,35 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_end", () => { releaseParkedNudges(); });
   pi.on("turn_end", () => {
     mainTurnActive = false;
-    const parked = [...parkedNudges];
-    parkedNudges.clear();
-    for (const [key, send] of parked) scheduleNudge(key, send);
+    if (nudgeBatch?.parked) {
+      nudgeBatch.parked = false;
+      armNudgeWindow(nudgeBatch);
+    }
   });
 
   // ---- Completion notification ----
-  function emitIndividualNudge(record: AgentRecord) {
-    if (record.resultConsumed) return;  // re-check at send time
+  /** Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them. */
+  function emitNudgeBatch() {
+    const batch = nudgeBatch;
+    nudgeBatch = undefined;
+    if (!batch) return;
+    clearTimeout(batch.timer);
+    const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
+    if (records.length === 0) return;
 
     try {
       pi.sendMessage({
         customType: "subagent-notification",
-        content: formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost),
+        content: records.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost)).join("\n\n"),
         display: true,
       }, { deliverAs: "steer", triggerTurn: true });
     } catch (err) {
-      // Nudge release paths swallow throws; surface the drop with the agent id.
-      console.warn(`[pi-subagents] failed to send completion notification for ${record.id}: ${err instanceof Error ? err.message : String(err)}`);
+      // Nudge release paths swallow throws; surface the drop with the agent ids.
+      console.warn(`[pi-subagents] failed to send completion notification for ${records.map((record) => record.id).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       // Delivered even when the send threw: a retry could duplicate the notification, and the
-      // pi-subagents background-work provider must not list the record forever.
-      record.resultDelivered = true;
+      // pi-subagents background-work provider must not list the records forever.
+      for (const record of records) record.resultDelivered = true;
     }
   }
 
@@ -469,7 +473,7 @@ export default function (pi: ExtensionAPI) {
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
-    scheduleNudge(record.id, () => emitIndividualNudge(record));
+    scheduleNudge(record);
     widget.update();
   }
 
@@ -850,13 +854,15 @@ export default function (pi: ExtensionAPI) {
     rpcHandle = undefined;
     currentCtx = undefined;
     scheduler.stop();
-    const nudged = [...pendingNudges.keys(), ...parkedNudges.keys()].map((id) => ({ id, target: manager.getRecord(id)?.parentAgentId }));
+    const nudged = [...(nudgeBatch?.records.keys() ?? [])].map((id) => ({ id, target: manager.getRecord(id)?.parentAgentId }));
     if (event.reason === "reload") {
       // Nothing is aborted: runs still going move to the reloaded activation (reload-handover.ts).
       widget.dispose();
       if (isRoot) {
         for (const h of held) h.detach();
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(nudged, pendingUsage.takeLifetime(), new Map(agentActivity))]);
+        // Nested results still waiting in a batch ride the hand-over as targeted nudges, so the new activation delivers them.
+        const handoverNudges = [...nudged, ...manager.takeNestedPending()];
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, pendingUsage.takeLifetime(), new Map(agentActivity))]);
         held = [];
       }
     } else {
@@ -872,9 +878,8 @@ export default function (pi: ExtensionAPI) {
       await manager.dispose(isRoot);
     }
     // After the abort: a completion the abort settles arms a nudge, and the shutdown must clear it.
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
-    parkedNudges.clear();
+    clearTimeout(nudgeBatch?.timer);
+    nudgeBatch = undefined;
     mainTurnActive = false;
     fleet.dispose();
     // Every agent is stopped and every child session has shut down, so no more
@@ -952,7 +957,9 @@ export default function (pi: ExtensionAPI) {
       // A nested child's result is a wake on its parent, never a nudge on the main session.
       for (const { id, target } of pending) {
         const record = manager.getRecord(id);
-        if (record && !target) sendIndividualNudge(record);
+        if (!record) continue;
+        if (target) manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+        else sendIndividualNudge(record);
       }
     }
     for (const h of held) h.attach((event) => onHandoverEvent(h, event));

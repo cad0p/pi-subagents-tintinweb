@@ -169,6 +169,7 @@ describe("get_subagent_result output shapes", () => {
       getRecord: (id: string) => (id === record.id ? record : undefined),
       isDraining: () => false,
       listAgents: () => [record],
+      resultReachedParent: () => false,
     } satisfies NestedAgentManager;
     const tool = createNestedSubagentTools({
       manager,

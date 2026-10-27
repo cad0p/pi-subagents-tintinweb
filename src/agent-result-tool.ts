@@ -61,3 +61,15 @@ export function agentReportResponse(record: AgentRecord) {
     isError: record.status === "error",
   };
 }
+
+/**
+ * The pull answer for a nested result the parent already holds in a subagent-notification, so the
+ * parent does not read it twice. Not an error: the result is in the parent's context, not in this response.
+ */
+export function alreadyDeliveredResponse(agentId: string) {
+  return {
+    content: [{ type: "text" as const, text: `Agent "${agentId}" finished and its result was already delivered in a subagent-notification. It is not repeated.` }],
+    details: undefined,
+    isError: false,
+  };
+}

@@ -2,10 +2,13 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentManager, setQuietMs } from "../src/agent-manager.js";
+import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
+import { consumeResult } from "../src/agent-result-tool.js";
 import { registerAgents } from "../src/agent-types.js";
+import { listSubagentWork } from "../src/background-work.js";
 import { toDto } from "../src/reload-handover.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 
@@ -876,21 +879,29 @@ describe("AgentManager — abort() state machine", () => {
 });
 
 type Internals = {
+  agents: Map<string, AgentRecord>;
   lives: Map<string, { lastRun?: unknown; tick?: unknown }>;
   waking: Map<string, string | undefined>;
   decide(record: AgentRecord, life: unknown): void;
 };
 const internals = (m: AgentManager) => m as unknown as Internals;
 
-/** A session the test drives: `emit` reaches its subscribers. Its run settles only when the test settles it. */
+/**
+ * A session the test drives. `emit` walks the live listener array as pi's `_emit` does, so an unsubscribe during an emit
+ * skips the listener after it. Its run settles only when the test settles it.
+ */
 const liveSession = () => {
-  const listeners = new Set<(event: unknown) => void>();
+  const listeners: ((event: unknown) => void)[] = [];
   return {
     ...mockSession(),
     subscribe: (listener: (event: unknown) => void) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
+      listeners.push(listener);
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
     },
+    listenerCount: () => listeners.length,
     emit: (event: unknown) => {
       for (const listener of listeners) listener(event);
     },
@@ -898,6 +909,12 @@ const liveSession = () => {
     steer: vi.fn(() => Promise.resolve()),
     sendCustomMessage: vi.fn(() => Promise.resolve()),
   };
+};
+
+/** Raises the `message_start` the session emits for the last custom message the fork sent. */
+const observeLastCustom = (session: ReturnType<typeof liveSession>) => {
+  const [message] = session.sendCustomMessage.mock.lastCall as unknown as [{ customType: string; content: string; details: unknown }];
+  session.emit({ type: "message_start", message: { role: "custom", ...message } });
 };
 
 /** Spawns a child that hosts `session` and never settles on its own. */
@@ -1088,7 +1105,7 @@ describe("AgentManager — deliver()", () => {
       depth: 2,
     });
 
-    (manager as unknown as { abortOwnedChildren(id: string): void }).abortOwnedChildren("parent-x");
+    (manager as unknown as { abortOwnedChildren(parent: AgentRecord): void }).abortOwnedChildren({ id: "parent-x" } as AgentRecord);
     await manager.getRecord(running)!.promise?.catch(() => {});
 
     expect(manager.getRecord(running)!.ownerAborted).toBe(true);
@@ -1407,9 +1424,25 @@ describe("AgentManager — finish waits for idle and pending work", () => {
     await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
     const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(child, "child result");
+    await vi.waitFor(() => expect(session.sendCustomMessage).toHaveBeenCalledTimes(1));
     expect(child.resultDelivered).toBe(false);
-    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    observeLastCustom(session);
     expect(child.resultDelivered).toBe(true);
+  });
+
+  it("sends a nested result as the subagent-notification message, never as a prompt", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const parentId = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
+    const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "/reload");
+    await vi.waitFor(() => expect(session.sendCustomMessage).toHaveBeenCalledTimes(1));
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ customType: "subagent-notification", content: "/reload", display: true, details: { batch: expect.any(String) } }),
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+    expect(session.prompt).not.toHaveBeenCalled();
   });
 
   it("finishes a settled session only after a second quiet observation", async () => {
@@ -1512,7 +1545,7 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
     const { id, record, endLoop } = await streamingRun();
     const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(child, "child result");
-    expect(internals(manager).waking.has(id)).toBe(true);
+    await vi.waitFor(() => expect(internals(manager).waking.has(id)).toBe(true));
     manager.abort(id);
     endLoop();
     expect(await settlesWithin(record.promise, 1000)).toBe("settled");
@@ -1543,10 +1576,140 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
     const { id, record, session, endLoop } = await streamingRun();
     const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(child, "child result");
-    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    await vi.waitFor(() => expect(internals(manager).waking.has(id)).toBe(true));
+    observeLastCustom(session);
     expect(child.resultDelivered).toBe(true);
     endLoop();
     expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+  });
+});
+
+describe("AgentManager — nested results batch per parent (#83)", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    vi.useRealTimers();
+  });
+
+  /** A settled nested child of `parentId`. */
+  const nestedChild = (parentId: string) => ({ parentAgentId: parentId, resultDelivered: false, status: "completed" }) as unknown as AgentRecord;
+
+  /** A hosted parent, then fake timers so the window is driven by `vi.advanceTimersByTime`. */
+  const parentWithSession = async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    return { id, session };
+  };
+
+  it("sends results that settle within the window as one message, and a pulled result from a later window sends nothing", async () => {
+    const { id, session } = await parentWithSession();
+    const first = nestedChild(id);
+    const second = nestedChild(id);
+    manager.deliverNested(first, "first");
+    vi.advanceTimersByTime(100);
+    manager.deliverNested(second, "second");
+    expect(session.sendCustomMessage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(100);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ customType: "subagent-notification", content: "first\n\nsecond" }),
+      expect.anything(),
+    );
+    observeLastCustom(session);
+    expect([first.resultDelivered, second.resultDelivered]).toEqual([true, true]);
+    const third = nestedChild(id);
+    manager.deliverNested(third, "third");
+    expect(consumeResult(third)).toBe(true);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS * 2);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing when a pull empties the open window", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    vi.advanceTimersByTime(50);
+    expect(consumeResult(child)).toBe(true);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).not.toHaveBeenCalled();
+  });
+
+  it("flushes an open window at once when the parent's decide runs, and the parent stays live", async () => {
+    const { id, session } = await parentWithSession();
+    manager.deliverNested(nestedChild(id), "child result");
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(manager.getRecord(id)?.status).toBe("running");
+    expect(internals(manager).lives.has(id)).toBe(true);
+  });
+
+  it("holds a window that closes while an earlier wake is unobserved, then sends it once that wake is observed", async () => {
+    const { id, session } = await parentWithSession();
+    manager.deliverNested(nestedChild(id), "first");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    manager.deliverNested(nestedChild(id), "second");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    observeLastCustom(session);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(2);
+    expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "second" }), expect.anything());
+  });
+
+  it("a pull during the window removes that result from the batch", async () => {
+    const { id, session } = await parentWithSession();
+    const first = nestedChild(id);
+    const second = nestedChild(id);
+    manager.deliverNested(first, "first");
+    manager.deliverNested(second, "second");
+    expect(consumeResult(second)).toBe(true);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "first" }), expect.anything());
+  });
+
+  it("a result reads as reached the parent only while its sent batch is unobserved, and is not consumed", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    expect(manager.resultReachedParent(child)).toBe(false);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.resultReachedParent(child)).toBe(true);
+    observeLastCustom(session);
+    expect(manager.resultReachedParent(child)).toBe(false);
+    expect(child.resultConsumed).toBeUndefined();
+  });
+
+  it("a child result sent from inside the parent's agent_settled listener wakes the parent, which stays live until that wake runs", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    const settled = { type: "agent_settled" };
+    session.subscribe((event) => {
+      if (event === settled) manager.deliverNested(child, "late child");
+    });
+    session.emit(settled);
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "late child" }), expect.anything());
+    expect(manager.getRecord(id)?.status).toBe("running");
+    expect(internals(manager).lives.has(id)).toBe(true);
+    observeLastCustom(session);
+    expect(child.resultDelivered).toBe(true);
+    expect(internals(manager).waking.has(id)).toBe(false);
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("a result text starting with /reload is delivered as a message and runs no command", async () => {
+    const { id, session } = await parentWithSession();
+    manager.deliverNested(nestedChild(id), "/reload now");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "/reload now" }), expect.anything());
+    expect(session.prompt).not.toHaveBeenCalled();
   });
 });
 
@@ -2239,6 +2402,56 @@ describe("AgentManager — nested children", () => {
     const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
     expect(manager.getRecord(sibling)!.status).toBe("queued");
   });
+
+  it("an owner-aborted child is never delivered, and the parent result names it", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    hangingRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", { description: "child", parentAgentId: parent, depth: 2 });
+    const deliver = vi.spyOn(manager, "deliver");
+    await manager.getRecord(parent)!.promise;
+    await manager.getRecord(child)!.promise?.catch(() => {});
+    manager.deliverNested(manager.getRecord(child)!, "stopped result");
+    expect(manager.getRecord(child)!.ownerAborted).toBe(true);
+    expect(deliver).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(manager.getRecord(parent)!.result).toContain("stopped with parent: " + child));
+  });
+
+  it("a result for a settled nested parent resumes it once; the resumed finish is its one notification", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    await manager.getRecord(parent)!.promise;
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "resumed" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(late, "late result");
+    await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(2));
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "late result", expect.anything());
+  });
+
+  it("a resumed settled parent folds its turns' usage into its ancestors, as a live nested run's does", async () => {
+    manager = new AgentManager();
+    hangingRun();
+    const grand = manager.spawn(mockPi, mockCtx, "general-purpose", "g", { description: "grand" });
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent", parentAgentId: grand, depth: 2 });
+    await manager.getRecord(parent)!.promise;
+    vi.mocked(resumeAgent).mockClear().mockImplementation(async (_session, _prompt, opts) => {
+      opts?.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      return { text: "resumed" };
+    });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(late, "late result");
+    await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
+    expect(manager.getRecord(grand)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+  });
 });
 
 describe("AgentManager — dispose() prunes worktrees only when asked (F5a)", () => {
@@ -2249,5 +2462,136 @@ describe("AgentManager — dispose() prunes worktrees only when asked (F5a)", ()
     expect(pruneWorktrees).not.toHaveBeenCalled();
     await manager.dispose(true);
     expect(pruneWorktrees).toHaveBeenCalledWith(process.cwd());
+  });
+});
+
+describe("AgentManager — PR119 r1 findings", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    vi.useRealTimers();
+  });
+  const nestedChild = (parentId: string, id = "c1") => ({ id, parentAgentId: parentId, resultDelivered: false, status: "completed" }) as unknown as AgentRecord;
+  const parentWithSession = async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    return { id, session };
+  };
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r));
+  };
+
+  it("a soft-limit settle names a batch sent but never observed in the parent's result", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    manager.getRecord(id)!.turnBudget = { turns: 1, softLimitReached: true };
+    settleRun(manager, id);
+    await flush();
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(manager.getRecord(id)?.settled).toBe(true);
+    expect(manager.resultReachedParent(child)).toBe(false);
+    expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+  });
+
+  it("a stop names a debounced child result in the parent's result", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    manager.abort(id);
+    settleRun(manager, id);
+    await flush();
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.getRecord(id)?.settled).toBe(true);
+    expect(session.sendCustomMessage).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("a rejected batch send does not leave its children reading as reached by the parent", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    session.sendCustomMessage.mockImplementationOnce(() => Promise.reject(new Error("boom")));
+    manager.deliverNested(child, "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    await flush();
+    expect(manager.resultReachedParent(child)).toBe(false);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(2);
+    expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "child result" }), expect.anything());
+    expect(manager.resultReachedParent(child)).toBe(true);
+  });
+
+  it("a wake's observation does not make the listener after it miss the message_start", async () => {
+    const { id, session } = await parentWithSession();
+    const before = session.listenerCount();
+    manager.deliverNested(nestedChild(id), "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    const seen: string[] = [];
+    session.subscribe((event) => seen.push((event as { type: string }).type));
+    observeLastCustom(session);
+    await flush();
+    expect(seen).toEqual(["message_start"]);
+    expect(session.listenerCount()).toBe(before + 1);
+  });
+
+  it("a nested result the settled parent refuses is logged and stays pullable", async () => {
+    const { id } = await parentWithSession();
+    manager.getRecord(id)!.session = undefined;
+    const deliver = vi.spyOn(manager, "deliver").mockResolvedValueOnce(false);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    await flush();
+    expect(deliver).toHaveBeenCalledWith(id, "child result", expect.anything());
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("refused nested result(s) c1"));
+    expect(child.resultDelivered).toBe(false);
+    expect(manager.resultReachedParent(child)).toBe(false);
+    deliver.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("a batch sent but not yet observed is handed over on reload", async () => {
+    const { id } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.takeNestedPending().map((entry) => entry.id)).toContain("c1");
+  });
+
+  it("a nested send that keeps failing stops after NESTED_SEND_ATTEMPTS; the parent settles and its result names the child", async () => {
+    const { id, session } = await parentWithSession();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const child = nestedChild(id);
+    child.spawnerSessionId = manager.getRecord(id)!.sessionId;
+    internals(manager).agents.set(child.id, child);
+    const unregister = registerBackgroundWorkProvider({
+      name: "pr119-r2-stall",
+      listActiveWork: (context) => listSubagentWork({ listAgents: () => manager.listAgents() }, context),
+    });
+    setQuietMs(0);
+    try {
+      session.sendCustomMessage.mockImplementation(() => Promise.reject(new Error("boom")));
+      manager.deliverNested(child, "child result");
+      for (let i = 0; i < 6; i++) {
+        vi.advanceTimersByTime(NUDGE_HOLD_MS);
+        await flush();
+      }
+      expect(session.sendCustomMessage.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(warn.mock.calls.filter(([msg]) => String(msg).includes("refused nested result(s) c1"))).toHaveLength(1);
+      expect(child.resultDelivered).toBe(false);
+      settleRun(manager, id);
+      settleRun(manager, id);
+      await flush();
+      expect(manager.getRecord(id)?.settled).toBe(true);
+      expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+    } finally {
+      setQuietMs(20);
+      unregister();
+      warn.mockRestore();
+    }
   });
 });

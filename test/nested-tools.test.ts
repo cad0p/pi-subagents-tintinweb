@@ -56,6 +56,7 @@ function makeManager(): NestedAgentManager {
       return id;
     },
     deliver: vi.fn(async () => "delivered" as const),
+    resultReachedParent: () => false,
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
   };
@@ -302,6 +303,13 @@ describe("nested result / steer / checkpoint tools", () => {
     const foreign = await run(1, { agent_id: "foreign" });
     expect(textOf(foreign)).toBe(`Agent not found: "foreign". It may have been cleaned up.`);
     expect((foreign as { isError?: boolean }).isError).toBe(true);
+  });
+
+  it("answers already delivered, without repeating the report, for a result the parent holds", async () => {
+    records.set("child-1", { id: "child-1", type: "scout", description: "d", status: "completed", result: "done", toolUses: 2, startedAt: Date.now() - 1000, completedAt: Date.now(), parentAgentId: "parent-1", lifetimeUsage: { input: 1, output: 2, cacheWrite: 0 }, compactionCount: 0 } as AgentRecord);
+    manager.resultReachedParent = () => true;
+    expect(textOf(await run(1, { agent_id: "child-1" }))).toContain("already delivered");
+    expect(records.get("child-1")!.resultConsumed).toBeUndefined();
   });
 
   it("SendMessage hands the message to manager.deliver and reports the outcome", async () => {
