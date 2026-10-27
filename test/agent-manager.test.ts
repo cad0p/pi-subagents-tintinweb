@@ -2168,6 +2168,29 @@ describe("AgentManager — session file retention", () => {
     }
   });
 
+  it("evicts after evictAfterMinutes: 1 and deletes the file", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      manager.setEvictAfterMinutes(1);
+      const { session, file } = sessionWithFile();
+      const { id, resolve } = spawnPending("general-purpose", session);
+      resolve(done(session));
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
+      manager.getRecord(id)!.resultDelivered = true;
+
+      vi.advanceTimersByTime(3 * 60_000);
+
+      expect(manager.getRecord(id)).toBeUndefined();
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps an undelivered record past the grace window, listed as background work, and evicts it once delivered", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
