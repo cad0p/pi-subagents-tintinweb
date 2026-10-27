@@ -127,6 +127,10 @@ export interface AgentRecord {
   interruptedAt?: number;
   /** Interrupted settles in a row for this run, including this crash (the crash-loop guard's count). */
   crashCount?: number;
+  /** Directory the run executed in (its worktree for an isolated run). A recovered run restores it when it still exists. */
+  runCwd?: string;
+  /** Directory the run loaded its agent config from. */
+  configCwd?: string;
   /** Live child session. Set while the record runs or is torn down; cleared at settle. */
   session?: AgentSession;
   /** Session file kept after `session` is dropped, so a failed reload can reopen the child. */

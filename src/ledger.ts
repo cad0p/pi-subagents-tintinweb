@@ -7,7 +7,7 @@
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { type OwnerHost, type OwnerStamp, ownerAlive } from "./owner-identity.js";
-import type { AgentRecord } from "./types.js";
+import type { AgentRecord, ThinkingLevel } from "./types.js";
 
 export const LEDGER_VERSION = 1;
 
@@ -23,7 +23,10 @@ export interface SpawnedLedgerEntry {
   worktree?: AgentRecord["worktree"];
   persistSession: boolean;
   model?: string;
-  thinking?: string;
+  thinking?: ThinkingLevel;
+  runCwd?: string;
+  configCwd?: string;
+  isolated?: boolean;
   spawnedAt: number;
   ownerPid: number;
   bootId?: string;
@@ -51,7 +54,10 @@ export function spawnedEntry(record: AgentRecord, sessionFile: string, owner: Ow
     worktree: record.worktree,
     persistSession: record.persistSession === true,
     model: record.invocation?.modelId,
-    thinking: record.invocation?.requestedThinking ?? record.invocation?.thinking,
+    thinking: record.childSettings?.thinkingLevel,
+    runCwd: record.childSettings?.effectiveCwd,
+    configCwd: record.childSettings?.configCwd,
+    isolated: record.invocation?.isolated,
     spawnedAt: record.startedAt,
     ownerPid: owner.pid,
     bootId: owner.bootId,
@@ -108,6 +114,8 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
     startedAt: spawned.spawnedAt, completedAt: now, interruptedAt: now,
     sessionFile: spawned.sessionFile, persistSession: spawned.persistSession,
     parentAgentId: spawned.parentId, cwd: spawned.cwd, worktree: spawned.worktree,
+    runCwd: spawned.runCwd, configCwd: spawned.configCwd,
+    invocation: { modelId: spawned.model, requestedThinking: spawned.thinking, isolated: spawned.isolated },
     settled: true, crashCount,
   };
 }

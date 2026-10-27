@@ -1213,12 +1213,11 @@ export async function createChildSession(
   return session;
 }
 
-export async function runAgent(
-  ctx: ExtensionContext,
-  type: SubagentType,
-  prompt: string,
-  options: RunOptions,
-): Promise<RunResult> {
+/**
+ * Resolves what a child session is built from (agent config, cwd, model, tools, prompt) without creating
+ * the session. A recovered run rebuilds the same settings in a new process through this.
+ */
+export async function resolveChildSettings(ctx: ExtensionContext, type: SubagentType, options: RunOptions): Promise<ChildSessionSettings> {
   const resolvedConfig = options.agentConfig;
   const agentConfig = resolvedConfig ?? getAgentConfig(type);
   // Every derived field comes from the same config: a nested spawn resolves the
@@ -1265,8 +1264,6 @@ export async function runAgent(
   const parentModel = ctx.model;
   const parentModelRegistry = ctx.modelRegistry;
   const parentScopedModels = ctx.scopedModels;
-  const parentSession = ctx.sessionManager.getSessionFile();
-  const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
 
   const env = await detectEnv(options.pi, effectiveCwd);
 
@@ -1387,6 +1384,44 @@ export async function runAgent(
     });
   }
 
+  // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
+  // is what createAgentSession needs to keep extension-registered providers
+  // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
+  const parentModelRuntime = (
+    parentModelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
+  ).runtime;
+  const settings: ChildSessionSettings = {
+    type,
+    agentConfig,
+    effectiveCwd,
+    configCwd,
+    projectTrusted,
+    extensions,
+    excludeExtensions,
+    extSelectors: options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    noSkills,
+    systemPrompt,
+    toolNames,
+    parentActiveTools,
+    nestedTools,
+    model,
+    thinkingLevel,
+    scopedModels,
+    parentModelRuntime,
+  };
+  return settings;
+}
+
+export async function runAgent(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  prompt: string,
+  options: RunOptions,
+): Promise<RunResult> {
+  const parentSession = ctx.sessionManager.getSessionFile();
+  const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
+  const settings = await resolveChildSettings(ctx, type, options);
+  const { effectiveCwd, agentConfig } = settings;
   // A relative `session_dir` resolves from the agent's cwd before worktree
   // isolation, never from the isolation worktree (deleted at cleanup).
   // `worktree.parentCwd` is that cwd: agent-manager sets it to the same
@@ -1419,32 +1454,6 @@ export async function runAgent(
         configuredSessionDir ?? parentSessionDir,
         { parentSession },
       );
-
-  // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
-  // is what createAgentSession needs to keep extension-registered providers
-  // (test/e2e/isolated-provider.e2e.test.ts guards the private `.runtime` reach).
-  const parentModelRuntime = (
-    parentModelRegistry as unknown as { runtime?: AgentSessionOptions["modelRuntime"] }
-  ).runtime;
-  const settings: ChildSessionSettings = {
-    type,
-    agentConfig,
-    effectiveCwd,
-    configCwd,
-    projectTrusted,
-    extensions,
-    excludeExtensions,
-    extSelectors: options.isolated ? [] : (agentConfig?.extSelectors ?? []),
-    noSkills,
-    systemPrompt,
-    toolNames,
-    parentActiveTools,
-    nestedTools,
-    model,
-    thinkingLevel,
-    scopedModels,
-    parentModelRuntime,
-  };
   options.onChildSettings?.(settings);
   const session = await createChildSession(settings, sessionManager, options);
 

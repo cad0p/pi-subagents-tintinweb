@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rmSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { type BackgroundWorkPolicy, listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   attachSessionLifecycle,
+  type ChildSessionSettings,
   createChildSession,
   getDefaultMaxTurns,
   normalizeMaxTurns,
@@ -341,12 +342,21 @@ export type ResumeCallbacks = Pick<
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
 
+/** The prefix a resumed interrupted run carries; names the worktree's fate when it is gone (its run then uses the parent cwd). */
+function crashNote(record: AgentRecord, text: string): string {
+  const when = new Date(record.interruptedAt ?? record.startedAt).toISOString();
+  const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
+  return `You were interrupted by a crash at ${when}; a command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
+}
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
   private reopening = new Map<string, Promise<AgentSession | undefined>>();
   /** Where each record's ledger entries go: the session file of the run that spawned it (see writeLedger). */
   private ledgerWriters = new Map<string, LedgerWriter>();
+  /** Supplied by the extension: re-derives the child settings of a recovered record, which has none until its run starts. */
+  resolveSettings?: (record: AgentRecord) => Promise<ChildSessionSettings>;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -1599,28 +1609,39 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record || record.transition) return undefined;
     if (record.session) return record.session;
-    const { sessionFile, childSettings, memoryEntries } = record;
-    if (!childSettings || (!sessionFile && !memoryEntries)) return undefined;
+    const { sessionFile, memoryEntries } = record;
+    if (!sessionFile && !memoryEntries) return undefined;
     let reopen = this.reopening.get(id);
     if (!reopen) {
-      const sessionManager = sessionFile
-        ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
-        : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
-      // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
-      reopen = createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
-        .then(async (session) => {
-          if (this.agents.get(id) !== record) {
-            await teardownChildSession(session);
-            return undefined;
-          }
-          bindSession(record, session, attachSessionLifecycle(session));
-          this.reportCrashedChildren(id, session.sessionManager);
-          return session;
+      // Settings are resolved inside the shared promise, so concurrent callers share one resolution and one reopen.
+      reopen = this.childSettingsOf(record)
+        .then((childSettings) => {
+          if (!childSettings) return undefined;
+          const sessionManager = sessionFile
+            ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
+            : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
+          // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
+          return createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
+            .then(async (session) => {
+              if (this.agents.get(id) !== record) {
+                await teardownChildSession(session);
+                return undefined;
+              }
+              bindSession(record, session, attachSessionLifecycle(session));
+              this.reportCrashedChildren(id, session.sessionManager);
+              return session;
+            });
         })
         .finally(() => this.reopening.delete(id));
       this.reopening.set(id, reopen);
     }
     return reopen;
+  }
+
+  /** The settings a child is built from: the ones its run recorded, else re-derived for a recovered record. */
+  private async childSettingsOf(record: AgentRecord): Promise<ChildSessionSettings | undefined> {
+    if (!record.childSettings && this.resolveSettings) record.childSettings = await this.resolveSettings(record);
+    return record.childSettings;
   }
 
   /**
@@ -1687,7 +1708,8 @@ export class AgentManager {
     if (!reopened || !current) return false;
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
-    return this.resume(id, text, callbacks) ? "resumed" : false;
+    const prompt = current.status === "interrupted" ? crashNote(current, text) : text;
+    return this.resume(id, prompt, callbacks) ? "resumed" : false;
   }
 
   /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */

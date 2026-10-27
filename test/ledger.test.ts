@@ -14,6 +14,7 @@ const record = {
   startedAt: 1000,
   invocation: { modelId: "faux/model", requestedThinking: "high", thinking: "medium" },
   worktree: { path: "/wt", branch: "b", baseSha: "abc", workPath: "/wt/work" },
+  childSettings: { thinkingLevel: "high", effectiveCwd: "/wt/work", configCwd: "/repo" },
 } as unknown as AgentRecord;
 
 describe("ledger entries", () => {
@@ -31,7 +32,9 @@ describe("ledger entries", () => {
       persistSession: true,
       model: "faux/model",
       thinking: "high",
-      spawnedAt: 1000,
+      runCwd: "/wt/work",
+       configCwd: "/repo",
+       spawnedAt: 1000,
       ownerPid: 42,
       bootId: "boot",
       ownerStartTime: "99",

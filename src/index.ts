@@ -18,7 +18,7 @@ import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, S
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
-import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
+import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -661,6 +661,8 @@ export default function (pi: ExtensionAPI) {
     pi.events.emit("subagents:steered", { id: record.id, message });
   });
 
+  manager.resolveSettings = recoveredSettings;
+
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
   //
@@ -1049,6 +1051,35 @@ export default function (pi: ExtensionAPI) {
         retireDrained();
       })
       .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
+  }
+
+  /**
+   * Re-derives the settings of a recovered run from what its ledger entries kept. A worktree that is gone
+   * runs in the parent's cwd (the crash note says so); a missing agent type cannot resume.
+   */
+  async function recoveredSettings(record: AgentRecord): Promise<ChildSessionSettings> {
+    const ctx = currentCtx;
+    if (!ctx) throw new Error(`Cannot resume "${record.description}": no session is active.`);
+    if (!getAgentConfig(record.type)) {
+      throw new Error(`Agent type "${record.type}" is no longer defined; the interrupted run cannot resume.`);
+    }
+    const modelId = record.invocation?.modelId ?? "";
+    const slash = modelId.indexOf("/");
+    const model = slash > 0 ? ctx.modelRegistry.find(modelId.slice(0, slash), modelId.slice(slash + 1)) : undefined;
+    const requested = record.invocation?.requestedThinking;
+    const parentCwd = record.cwd ?? ctx.cwd;
+    const cwd = record.runCwd && existsSync(record.runCwd) ? record.runCwd : parentCwd;
+    return resolveChildSettings(ctx, record.type, {
+      pi,
+      agentId: record.id,
+      parentAgentId: record.parentAgentId,
+      model,
+      isolated: record.invocation?.isolated,
+      thinkingLevel: requested === "off" ? undefined : requested,
+      cwd,
+      configCwd: record.configCwd && existsSync(record.configCwd) ? record.configCwd : cwd,
+      worktree: record.worktree && existsSync(record.worktree.path) ? { path: record.worktree.path, parentCwd } : undefined,
+    });
   }
 
   /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
