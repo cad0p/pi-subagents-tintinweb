@@ -132,6 +132,7 @@ function getStatusWord(status: string, limitReason?: "time"): string {
     case "completed": return "completed";
     case "error": return "error";
     case "stopped": return "stopped";
+    case "interrupted": return "interrupted";
     case "aborted": return "aborted";
     case "steered": return "wrapped up (turn limit)";
     default: return sanitizeHeaderText(String(status)) || "unknown";
@@ -145,6 +146,7 @@ function getStatusGlyph(status: string): string {
     case "steered": return "✓";
     case "error":
     case "stopped":
+    case "interrupted":
     case "aborted": return "✗";
     default: return "○";
   }
@@ -231,7 +233,7 @@ function failurePreviewCap(settings: SubagentsSettings): number {
 
 /** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
-  const isFailure = record.status === "error" || record.status === "stopped";
+  const isFailure = record.status === "error" || record.status === "stopped" || record.status === "interrupted";
   // Terminal-safety strip only: markdown structure and XML-ish text pass
   // through untouched, while escape/control bytes (OSC clipboard writes and
   // links, CSI screen clears, C0/C1, invisible format characters) never reach
@@ -281,7 +283,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
   let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason)}: ${description}**`;
-  const errorText = record.error && (record.status === "error" || record.status === "stopped")
+  const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
     ? sanitizeHeaderText(String(record.error))
     : "";
   const errorPreview = headerPreview(errorText);
@@ -533,7 +535,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     // Emit lifecycle event based on terminal status
-    const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+    const isError = record.status === "error" || record.status === "stopped" || record.status === "interrupted" || record.status === "aborted";
     const eventData = buildEventData(record);
     if (isError) {
       pi.events.emit("subagents:failed", eventData);

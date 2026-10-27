@@ -116,7 +116,8 @@ export interface AgentRecord {
   id: string;
   type: SubagentType;
   description: string;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+  /** `interrupted`: a run cut short by a crash and rebuilt from the ledger. A final, resumable status that behaves like `stopped`. */
+  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "interrupted";
   result?: string;
   error?: string;
   toolUses: number;

@@ -26,6 +26,8 @@ export function getStatusNote(status: string, limitReason?: "time", capMinutes?:
   switch (status) {
     case "stopped":
       return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
+    case "interrupted":
+      return " (INTERRUPTED by a crash before completion — output is partial; the task was NOT finished)";
     case "aborted":
       return " (aborted — hit the turn limit before completion; output may be incomplete)";
     case "steered":

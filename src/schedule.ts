@@ -396,7 +396,7 @@ export class SubagentScheduler {
         record.promise
           .then(() => {
             const r = manager.getRecord(agentId);
-            const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
+            const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped" || r?.status === "interrupted";
             finalize(failed ? "error" : "success");
           })
           .catch(() => finalize("error"));
