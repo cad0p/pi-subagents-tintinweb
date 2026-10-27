@@ -470,6 +470,27 @@ describe("AgentManager hand-over", () => {
     expect(emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
   });
 
+  it("refuses to reopen an adopted record until its old live session is torn down", async () => {
+    let finishAbort: () => void = () => {};
+    const abort = vi.fn(() => new Promise<void>((resolve) => { finishAbort = resolve; }));
+    const dispose = vi.fn();
+    const session = {
+      isStreaming: false,
+      abort,
+      extensionRunner: { emit: vi.fn(async () => {}) },
+      dispose,
+      getSessionStats: () => ({}),
+      sessionManager: { getSessionFile: () => "/tmp/adopted.jsonl", getHeader: () => undefined, getEntries: () => [] },
+    };
+    const next = track(new AgentManager());
+    const adopted = next.adopt({ dto: { ...dtoOf("late"), sessionFile: "/tmp/adopted.jsonl" }, session: session as unknown as AgentSession }, false);
+    expect(adopted.transition).toBe("teardown");
+    expect(await next.restoreSession(adopted.id)).toBeUndefined();
+    finishAbort();
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(adopted.transition).toBeUndefined());
+  });
+
   it("lists, finds and aborts a draining record through the new manager", async () => {
     const old = track(new AgentManager());
     const finish = controlledRun("busy");

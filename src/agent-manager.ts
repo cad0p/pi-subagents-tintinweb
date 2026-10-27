@@ -597,13 +597,16 @@ export class AgentManager {
     // burn tokens unseen. Runs on every settle path, which is what also covers
     // a resumed turn: grandchildren follow transitively, each through its own
     // settle tail.
-    this.abortOwnedChildren(record.id);
+    // Each step is failure-safe: a throw here would strand `transition` and `settled = false` forever.
+    try { this.abortOwnedChildren(record.id); } catch { /* keep the completion tail failure-safe */ }
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     const session = record.session;
     if (session) {
-      record.sessionSnapshot = snapshotSession(session);
-      record.memoryEntries = captureMemoryEntries(session);
+      try {
+        record.sessionSnapshot = snapshotSession(session);
+        record.memoryEntries = captureMemoryEntries(session);
+      } catch { /* the file keeps the transcript; the snapshot is best effort */ }
     }
     this.notifyCompleted(record);
     // A drain escape must not reject an already-fulfilled run promise or strand
@@ -743,7 +746,7 @@ export class AgentManager {
    */
   resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
-    if (!record?.session) return undefined;
+    if (!record?.session || record.transition) return undefined;
     // A record in the start prologue is already `running` while `settled` may
     // still hold the prior run's `true`, so the running arm is load-bearing.
     // A queued record has no session yet and is refused by the queued arm.
@@ -1130,7 +1133,11 @@ export class AgentManager {
     if (session) {
       if (!record.sessionFile) record.memoryEntries ??= captureMemoryEntries(session);
       record.sessionSnapshot ??= snapshotSession(session);
-      void teardownChildSession(session);
+      // Refuse a reopen until the old session is gone, so two sessions never write one file.
+      record.transition = "teardown";
+      void teardownChildSession(session).finally(() => {
+        record.transition = undefined;
+      });
     }
     record.settled = true;
     this.agents.set(record.id, record);
