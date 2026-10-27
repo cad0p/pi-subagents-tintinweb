@@ -40,7 +40,7 @@ function runsUntilAborted(): void {
   vi.mocked(runAgent).mockImplementation(
     (_ctx, _type, _prompt, opts) =>
       new Promise((done) => {
-        opts.signal.addEventListener(
+        opts.signal!.addEventListener(
           "abort",
           () => done({ responseText: "", session: childStub(), aborted: true, steered: false } as unknown as Awaited<ReturnType<typeof runAgent>>),
           { once: true },
@@ -326,7 +326,9 @@ describe("slot gate — provider requests", () => {
     type ProviderHook = (event: unknown, ctx: ExtensionContext) => Promise<void>;
     const hooks: ProviderHook[] = [];
     const ext = { on: (_name: string, handler: ProviderHook) => hooks.push(handler) } as unknown as ExtensionAPI;
-    slotGateExtension(c).factory(ext);
+    const gate = slotGateExtension(c);
+    if (typeof gate === "function") throw new Error("slotGateExtension returns the inline object form");
+    gate.factory(ext);
     const hook = hooks[0]!;
 
     const idleCtx = { isIdle: () => true, signal: new AbortController().signal } as unknown as ExtensionContext;

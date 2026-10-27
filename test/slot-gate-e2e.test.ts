@@ -56,10 +56,11 @@ function oneShot() {
 
 /** Settles with `p`, or with undefined after 10 s, so a stuck run fails the test instead of hanging the worker. */
 function withinLimit<T>(p: Promise<T>): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let giveUp!: () => void;
   const limit = new Promise<undefined>((resolve) => {
-    timer = setTimeout(resolve, 10_000);
+    giveUp = () => resolve(undefined);
   });
+  const timer = setTimeout(giveUp, 10_000);
   return Promise.race([p, limit]).finally(() => clearTimeout(timer));
 }
 
