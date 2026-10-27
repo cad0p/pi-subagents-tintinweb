@@ -10,7 +10,7 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Background-only spawning.** The `Agent` tool always launches a background run and returns an id. There is no foreground mode, no `run_in_background` parameter, no `backgroundByDefault` setting, and no Ctrl+B handoff. Upstream keeps a foreground path and made background the default behind a setting; this fork removed the second path instead, because two spawn modes doubled every lifecycle, notification and cancellation decision.
 
-**`get_subagent_result` shape.** The result report is this fork's: the turn counter (in the running report), the latest checkpoint, the checkpoint-history and transcript paths, and the status note. There is no `verbose` parameter — the report is always the report. The top-level tool takes only `agent_id` and cannot wait: `Agent` returns an id and the parent is notified on completion. Waiting exists only on the nested twin (`wait: true`), where a child has no notification path of its own.
+**`get_subagent_result` shape.** The result report is this fork's: the turn counter (in the running report), the latest checkpoint, the checkpoint-history and transcript paths, and the status note. There is no `verbose` parameter — the report is always the report. The top-level tool takes only `agent_id` and cannot wait: `Agent` returns an id and the parent is notified on completion. The nested twin does not wait either: a nested child's result reaches its parent as the main session's `subagent-notification`, so the parent is woken rather than blocked.
 
 **`checkpoint`.** A separate tool a subagent calls at milestones to record a progress note — what it just did, what it is doing next — which the parent sees in the result report. It is not a resume marker: resume replays the session. Upstream has no equivalent.
 
@@ -18,13 +18,13 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Parent-mirrored built-in activation.** Subagents load pi's built-in extensions (`codemode`, `tool-search`, `mcp`), but a `defaultActive: false` tool is declared in the child only when the parent session has it active or the agent names its extension with `ext:`. "As in the main session" means the main session's actual tool set, not everything that happens to be loaded.
 
-**Nested delegation is background-only.** `allowed_subagents` gives an agent its own `Agent`/`get_subagent_result`/`SendMessage`/`checkpoint` tools; `max_subagent_depth` caps the tree. A nested child returns an id like any other spawn and does not take a `maxConcurrent` slot. Upstream's nested spawns can run inline.
+**Nested delegation is background-only.** `allowed_subagents` gives an agent its own `Agent`/`get_subagent_result`/`SendMessage`/`checkpoint` tools; `max_subagent_depth` caps the tree. A nested child returns an id like any other spawn and takes a `maxConcurrent` slot like any other agent, queuing behind a full pool. Upstream's nested spawns can run inline.
 
-**Usage and cost surfaces.** `reportUsage`, `showCost` and `showModel`, plus the `subagents:usage` / `subagents:disposed` events and `subagents:rpc:consume` / `rpc:steer`, are ports — but the *set* of surfaces is this fork's: markdown notifications instead of an XML envelope, and a per-agent nudge instead of a grouped one, so there is no batch cost total.
+**Usage and cost surfaces.** `reportUsage`, `showCost` and `showModel`, plus the `subagents:usage` / `subagents:disposed` events and `subagents:rpc:consume` / `rpc:steer`, are ports — but the *set* of surfaces is this fork's: markdown notifications instead of an XML envelope, and completions that settle within the same window share one message, each keeping its own stats, so there is no batch cost total.
 
 **`reportUsage` and `showCost` default to on.** Upstream ships both off. A session total that omits the delegated work is wrong about what the session cost, and having to find two toggles to stop being wrong is the wrong default — especially because `/agents → Settings` writes project scope only, so turning them on in one repo follows you nowhere. Both remain settings: `reportUsage` still moves numbers a statusline may already be reading, which is the one legitimate reason to leave it off. `showModel` stays off in both, because its cost is a narrow terminal row, not a wrong number.
 
-**Reload hand-over.** A `/reload` does not stop subagents. The old activation hands running and finished agents to the new one (`src/reload-handover.ts`), and the manager registry is owned by the root activation by role, not by whichever activation loaded first. A port that aborts or disposes agents on `reload` is a regression.
+**Reload hand-over.** A `/reload` does not stop subagents. The old activation hands running and finished agents to the new one (`src/reload-handover.ts`), hands a nested result still held in its batch to its parent once, and the manager registry is owned by the root activation by role, not by whichever activation loaded first. A port that aborts or disposes agents on `reload` is a regression.
 
 ## Deliberately not ported
 
@@ -38,7 +38,7 @@ Each of these exists upstream and is not coming here without a new decision.
 
 **Fullscreen conversation observer.** Upstream's viewer is pi's `ScrollView` plus markdown theme; this fork's viewer is still the custom transcript format (`[User]`/`[Assistant]`/`[Tool: name]`/`[Result]`).
 
-**Join modes and outbox delivery.** Upstream can group concurrent completions into one notification and hold them in an outbox. Here every agent's completion is its own markdown message, delivered through pi's steering queue.
+**Join modes and outbox delivery.** Upstream can group concurrent completions into one notification and hold them in an outbox. Here a completion is a markdown message delivered through pi's steering queue; completions that settle within the same 200 ms window share one message (nested results per parent, main-session completions together).
 
 **`name:` as identity.** An agent is identified by its type. Upstream lets the *caller* name a spawn (`name:` on the `Agent` tool), making it addressable as `@name`; that goes with the mention machinery. Also not ported: per-agent colors.
 
