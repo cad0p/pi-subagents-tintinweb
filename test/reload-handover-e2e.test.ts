@@ -1416,6 +1416,70 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(queued.mock.calls.filter(([record]) => record.id === childId)).toHaveLength(1);
   }, 20_000);
 
+  it("keeps a kept wake's listener from matching a wake the new activation sends to the same parent", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first wake is queued on the streaming parent and stays unobserved across the reload, so its old listener stays subscribed.
+    let reloading: Promise<void> = Promise.resolve();
+    let reloaded = false;
+    let secondSent = false;
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      const sent = sendToParent(message, options);
+      if (!reloaded && message.customType === "subagent-notification") {
+        reloaded = true;
+        reloading = reloadRoot(root);
+      }
+      if (JSON.stringify(message).includes("second result")) secondSent = true;
+      return sent;
+    });
+    // Subscribed before any wake, so it runs ahead of the wake listeners on every message_start.
+    const probe: { second?: { resultDelivered: boolean } } = {};
+    const starts: Array<{ text: string; secondDelivered?: boolean }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") {
+        starts.push({ text: JSON.stringify(event.message), secondDelivered: probe.second?.resultDelivered });
+      }
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    release();
+    await vi.waitFor(() => expect(reloaded).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const child = queued.mock.calls[0]?.[0];
+    if (!child) throw new Error("no child record");
+    // A second child's batch, held by the new activation, is sent to the same parent while the first wake is unobserved. A counter
+    // restarted by the reload would give both wakes the same batch id, so the first wake's old listener would match the second.
+    const second = { ...child, id: "nested-second", resultDelivered: false };
+    probe.second = second;
+    publishedRoot().manager.deliverNested(second, "second result");
+    await vi.waitFor(() => expect(secondSent).toBe(true), { timeout: 10_000 });
+    expect(child.resultDelivered).not.toBe(true);
+    releaseParentHold();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(child.resultDelivered).toBe(true);
+    expect(second.resultDelivered).toBe(true);
+    expect(starts.filter((s) => s.text.includes(child.id))).toHaveLength(1);
+    expect(starts.filter((s) => s.text.includes("second result"))).toHaveLength(1);
+    // The second child is not delivered before its own wake starts: the first wake's listener must not match the second wake.
+    expect(starts.find((s) => s.text.includes("second result"))?.secondDelivered).toBe(false);
+  }, 20_000);
+
   it("delivers a nested result once when its wake was queued on a streaming parent across /reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
