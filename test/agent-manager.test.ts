@@ -2,11 +2,13 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
 import { registerAgents } from "../src/agent-types.js";
+import { listSubagentWork } from "../src/background-work.js";
 import { toDto } from "../src/reload-handover.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 
@@ -877,6 +879,7 @@ describe("AgentManager — abort() state machine", () => {
 });
 
 type Internals = {
+  agents: Map<string, AgentRecord>;
   lives: Map<string, { lastRun?: unknown; tick?: unknown }>;
   waking: Map<string, string | undefined>;
   decide(record: AgentRecord, life: unknown): void;
@@ -2557,5 +2560,38 @@ describe("AgentManager — PR119 r1 findings", () => {
     manager.deliverNested(child, "child result");
     vi.advanceTimersByTime(NUDGE_HOLD_MS);
     expect(manager.takeNestedPending().map((entry) => entry.id)).toContain("c1");
+  });
+
+  it("a nested send that keeps failing stops after NESTED_SEND_ATTEMPTS; the parent settles and its result names the child", async () => {
+    const { id, session } = await parentWithSession();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const child = nestedChild(id);
+    child.spawnerSessionId = manager.getRecord(id)!.sessionId;
+    internals(manager).agents.set(child.id, child);
+    const unregister = registerBackgroundWorkProvider({
+      name: "pr119-r2-stall",
+      listActiveWork: (context) => listSubagentWork({ listAgents: () => manager.listAgents() }, context),
+    });
+    setQuietMs(0);
+    try {
+      session.sendCustomMessage.mockImplementation(() => Promise.reject(new Error("boom")));
+      manager.deliverNested(child, "child result");
+      for (let i = 0; i < 6; i++) {
+        vi.advanceTimersByTime(NUDGE_HOLD_MS);
+        await flush();
+      }
+      expect(session.sendCustomMessage.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(warn.mock.calls.filter(([msg]) => String(msg).includes("refused nested result(s) c1"))).toHaveLength(1);
+      expect(child.resultDelivered).toBe(false);
+      settleRun(manager, id);
+      settleRun(manager, id);
+      await flush();
+      expect(manager.getRecord(id)?.settled).toBe(true);
+      expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+    } finally {
+      setQuietMs(20);
+      unregister();
+      warn.mockRestore();
+    }
   });
 });

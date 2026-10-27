@@ -67,6 +67,8 @@ const NOTIFICATION_TYPE = "subagent-notification";
 
 /** Grace window between an agent settling and its completion notification being sent, so a parent that pulls the result first can still cancel the nudge. Nested results settling in it share one message. */
 export const NUDGE_HOLD_MS = 200;
+/** Failed sends of one parent's nested batch before its nested results stop being sent: they stay pullable and are named at its finish. */
+export const NESTED_SEND_ATTEMPTS = 3;
 
 /** A parent's nested results waiting for its window to close. The window opens at the first settle and sends one message. */
 interface NestedBatch {
@@ -367,6 +369,8 @@ export class AgentManager {
   private nestedBatches = new Map<string, NestedBatch>();
   /** Child records whose result is in a sent nested batch that the parent has not yet observed. */
   private nestedInFlight = new Set<AgentRecord>();
+  /** Consecutive failed nested sends per parent. Reset by an observed send and when the parent finishes. */
+  private nestedSendFailures = new Map<string, number>();
   /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
   private capTimers = new Map<
     string,
@@ -1026,11 +1030,17 @@ export class AgentManager {
       this.resumeNested(parentId, entries);
       return;
     }
+    // A parent whose nested sends keep failing takes no more: its children stay pullable and its finish names them.
+    if ((this.nestedSendFailures.get(parentId) ?? 0) >= NESTED_SEND_ATTEMPTS) {
+      for (const entry of entries) entry.child.nestedStalled = true;
+      return;
+    }
     for (const entry of entries) this.nestedInFlight.add(entry.child);
     this.wake(parent, session, entries.map((entry) => entry.content).join("\n\n"), {
       customType: NOTIFICATION_TYPE,
       display: true,
       delivered: () => {
+        this.nestedSendFailures.delete(parentId);
         // A child the parent's finish already named left the in-flight set: it is not delivered by this observation.
         for (const entry of entries) {
           if (!this.nestedInFlight.delete(entry.child)) continue;
@@ -1039,9 +1049,17 @@ export class AgentManager {
       },
       failed: () => {
         // A send that never reached the parent: its children go back to a batch, unless the parent's finish named them.
-        for (const entry of entries) {
-          if (this.nestedInFlight.delete(entry.child)) this.deliverNested(entry.child, entry.content);
+        const live = entries.filter((entry) => this.nestedInFlight.delete(entry.child));
+        if (live.length === 0) return;
+        const failures = (this.nestedSendFailures.get(parentId) ?? 0) + 1;
+        this.nestedSendFailures.set(parentId, failures);
+        if (failures < NESTED_SEND_ATTEMPTS) {
+          for (const entry of live) this.deliverNested(entry.child, entry.content);
+          return;
         }
+        for (const entry of live) entry.child.nestedStalled = true;
+        const ids = live.map((entry) => entry.child.id).join(", ");
+        console.warn(`[pi-subagents] ${parentId} refused nested result(s) ${ids} after ${failures} sends; they stay pullable`);
       },
     });
   }
@@ -1108,14 +1126,16 @@ export class AgentManager {
     return timer;
   }
 
-  /** Background work the session's providers still report. A provider that throws holds nothing open. */
+  /** Background work the session's providers still report. A provider that throws holds nothing open, and a nested result its parent refused (`nestedStalled`) does not hold the parent open. */
   private pendingWork(session: AgentSession): string[] {
     const sessionIds = sessionIdentityForms(session.sessionManager);
     const context = { sessionId: sessionIds[0] ?? "", sessionIds, nowMs: Date.now() };
     const items: string[] = [];
     for (const provider of listBackgroundWorkProviders()) {
       try {
-        for (const work of provider.listActiveWork(context)) items.push(work.id);
+        for (const work of provider.listActiveWork(context)) {
+          if (!this.getRecord(work.id)?.nestedStalled) items.push(work.id);
+        }
       } catch {
         // Same as snapshotSession: a provider that throws reports nothing for this check.
       }
@@ -1132,6 +1152,7 @@ export class AgentManager {
     record.waiting = undefined;
     const unsent = this.waking.get(record.id);
     this.waking.delete(record.id);
+    this.nestedSendFailures.delete(record.id);
     const notes = [this.dropUndelivered(record, unsent), this.nameUnobservedNested(record.id)].filter(Boolean);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
     const text = notes.length > 0 ? [finished, ...notes].join("\n\n") : finished;
@@ -1142,7 +1163,8 @@ export class AgentManager {
   /**
    * Names the nested results a finishing parent never got to deliver: those still debounced in its batch and those in a batch
    * sent but not yet observed. Each leaves its batch or the in-flight set, so nothing delivers it later and a late observation
-   * does not mark it delivered; it stays pullable. Returns a note naming them for the result, or "" when none.
+   * does not mark it delivered; it stays pullable. A child whose result the parent refused after NESTED_SEND_ATTEMPTS sends is
+   * named too. Returns a note naming them for the result, or "" when none.
    */
   private nameUnobservedNested(parentId: string): string {
     const ids: string[] = [];
@@ -1158,6 +1180,9 @@ export class AgentManager {
       if (child.parentAgentId !== parentId) continue;
       this.nestedInFlight.delete(child);
       ids.push(child.id);
+    }
+    for (const child of this.listAgents()) {
+      if (child.parentAgentId === parentId && child.nestedStalled && !child.resultDelivered) ids.push(child.id);
     }
     return ids.length > 0 ? `Nested results not delivered because the agent finished first: ${ids.join(", ")}.` : "";
   }
@@ -1446,6 +1471,7 @@ export class AgentManager {
     // onStart: a refused resume returns before this line and keeps the prior run's delivered flag.
     record.notified = false;
     record.resultDelivered = false;
+    record.nestedStalled = false;
     // A started listener can stop the record synchronously; settle it through
     // the stopped tail instead of starting — and counting — a run that was
     // already stopped.
