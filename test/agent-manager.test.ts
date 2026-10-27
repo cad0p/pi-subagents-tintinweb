@@ -2144,10 +2144,10 @@ describe("AgentManager — nested children", () => {
   });
 
   it("does not leak a concurrency slot when a nested child is resumed", async () => {
-    // A nested child is outside the maxConcurrent pool, so its resume must not
-    // take a slot: the increment is unconditional but the release is gated on
-    // occupiesPoolSlot, and an unmatched increment queues every later top-level
-    // spawn forever.
+    // A nested child is a pool member like any run. Its resume takes no slot
+    // synchronously and counts from its first provider request; the run that
+    // settles must release what it took, or an unmatched increment queues every
+    // later spawn forever.
     manager = new AgentManager(undefined, 1);
     resolvedRun();
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
@@ -2217,7 +2217,7 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(grandchild)!.status).toBe("stopped");
   });
 
-  it("does not queue nested children behind the parent's own concurrency slot", () => {
+  it("queues a nested child behind a full pool and returns at once", () => {
     manager = new AgentManager(undefined, 1);
     hangingRun();
 
@@ -2225,15 +2225,17 @@ describe("AgentManager — nested children", () => {
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
     expect(manager.getRecord(parent)!.status).toBe("running");
 
-    // Its children run immediately — queueing them would deadlock the parent.
+    // The nested child is a pool member: it queues instead of running past maxConcurrent.
+    // The spawn itself returns, so the parent's turn can end and release its slot.
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", {
       description: "child",
       parentAgentId: parent,
       depth: 2,
     });
-    expect(manager.getRecord(child)!.status).toBe("running");
+    expect(manager.getRecord(child)!.status).toBe("queued");
+    expect(manager.runningCount()).toBe(1);
 
-    // A second top-level spawn still queues, so the pool is not bypassed.
+    // A second top-level spawn queues behind it too, so the pool is not bypassed.
     const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
     expect(manager.getRecord(sibling)!.status).toBe("queued");
   });

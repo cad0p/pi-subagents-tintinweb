@@ -166,3 +166,122 @@ describe.each(SCENARIOS)("slot gate on resume: $name", ({ childType }) => {
     expect(run?.responseText).toBe("parent done");
   });
 });
+
+describe("nested child at maxConcurrent 1", () => {
+  let cwd = "";
+  let run: PrintModeRun | undefined;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "slot-gate-nested-e2e-"));
+    mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
+    writeFileSync(
+      join(cwd, ".pi", "agents", "nester.md"),
+      "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n",
+    );
+  });
+
+  afterEach(async () => {
+    await run?.dispose();
+    run = undefined;
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("the nester's turn ends at its nested spawn, the inner child is admitted then, and the nester is woken to finish", async () => {
+    const events: string[] = [];
+    const innerDone = () => liveRecord("inner")?.status === "completed";
+    let peak = 0;
+    const sample = setInterval(() => {
+      peak = Math.max(peak, rootRoute()?.manager.runningCount() ?? 0);
+    }, 1);
+    try {
+      // P-TASK is the top-level prompt, NEST-TASK the nester's own prompt. The inner child never sees NEST-TASK.
+      run = await runPrintMode({
+        prompt: "P-TASK. Delegate.",
+        cwd,
+        persistSession: true,
+        awaitPayload: true,
+        hold: false,
+        respond: (context) => {
+          if (mentions(context, "P-TASK")) {
+            if (mentions(context, "NEST-TASK")) return "parent done";
+            return agentCall({ description: "nester", subagent_type: "nester", prompt: "NEST-TASK. Delegate." });
+          }
+          if (mentions(context, "NEST-TASK")) {
+            if (!mentions(context, "INNER-TASK")) {
+              return agentCall({ description: "inner", subagent_type: "general-purpose", prompt: "INNER-TASK. Work." });
+            }
+            // The turn ends at the spawn; the wake comes once the inner child has settled.
+            return innerDone() ? "nester done" : "waiting for inner";
+          }
+          events.push("I:sent");
+          return "inner reply";
+        },
+      });
+      // print mode returns when the top turn ends; the nester runs on in the background.
+      await waitForSettle(() => {
+        expect(liveRecord("nester")?.status).toBe("completed");
+      });
+    } finally {
+      clearInterval(sample);
+    }
+    expect(run.responseText).toBe("parent done");
+    expect(events).toEqual(["I:sent"]);
+    expect(peak).toBe(1);
+    expect(rootRoute()?.manager.runningCount()).toBe(0);
+  });
+
+  it("a nested child resumed while a sibling holds the slot waits at the gate, and is recorded only after release", async () => {
+    const events: string[] = [];
+    const holdB = oneShot();
+    const pending = runPrintMode({
+      prompt: "P-TASK. Delegate.",
+      cwd,
+      persistSession: true,
+      awaitPayload: true,
+      hold: false,
+      respond: async (context) => {
+        if (mentions(context, "P-TASK")) {
+          if (!mentions(context, "NEST-TASK")) {
+            return agentCall({ description: "nester", subagent_type: "nester", prompt: "NEST-TASK. Delegate." });
+          }
+          // B starts only after the nester has finished, so the nested child is resumed while B holds the only slot.
+          if (!mentions(context, "B-TASK")) {
+            await waitForSettle(() => {
+              expect(liveRecord("nester")?.status).toBe("completed");
+            });
+            return agentCall({ description: "b-child", subagent_type: "general-purpose", prompt: "B-TASK. Work." });
+          }
+          return "parent done";
+        }
+        if (mentions(context, "NEST-TASK")) {
+          if (mentions(context, "A-TASK")) return "nester done";
+          return agentCall({ description: "a-child", subagent_type: "general-purpose", prompt: "A-TASK. Work." });
+        }
+        return childReply(context, events, holdB.released);
+      },
+    });
+    let resumed: Promise<unknown> | undefined;
+    try {
+      await waitForSettle(() => {
+        expect(events).toContain("B:sent");
+      });
+      resumed = rootRoute()?.manager.deliver(String(liveRecord("a-child")?.id), "A-AGAIN. Again.");
+      await waitForSettle(() => {
+        expect(liveRecord("a-child")?.gated).toBe(true);
+      });
+      expect(events).not.toContain("A:2");
+
+      holdB.open();
+      await waitForSettle(() => {
+        expect(events).toContain("A:2");
+      });
+      expect(events.indexOf("B:returned")).toBeLessThan(events.indexOf("A:2"));
+    } finally {
+      holdB.open();
+      await withinLimit(resumed ?? Promise.resolve());
+      run = await pending.catch(() => undefined);
+    }
+    expect(run?.responseText).toBe("parent done");
+  });
+});

@@ -399,7 +399,7 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
-  /** Id of the agent that spawned this one. Undefined for a pool member, which holds a manager concurrency slot. */
+  /** Id of the agent that spawned this one; undefined for a top-level agent. A nested child holds a pool slot like any other run. */
   parentAgentId?: string;
   model?: Model<any>;
   maxTurns?: number;
@@ -1052,9 +1052,7 @@ export async function createChildSession(
       // Under `noExtensions` the static allowlist gates the registry itself.
       ...(noExtensions ? [] : [scopeGateExtension(nestedCallGate)]),
       // Outside the `noExtensions` check: pi loads inline factories under `extensions: false` too.
-      ...(options.agentId !== undefined && options.parentAgentId === undefined
-        ? [slotGateExtension(options.agentId)]
-        : []),
+      ...(options.agentId !== undefined ? [slotGateExtension(options.agentId)] : []),
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.

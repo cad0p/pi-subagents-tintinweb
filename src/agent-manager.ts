@@ -3,7 +3,9 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
- * Nested children are exempt from that pool — see `occupiesPoolSlot`.
+ * Nested children are pool members too. Nothing blocks on a child: a parent that spawns one ends its turn,
+ * is woken when the child settles, and waits holding no slot. The provider gate holds only requests; the main
+ * session is never counted (see `occupiesPoolSlot`).
  * Resumes take no slot at spawn: their first provider request waits at the
  * gate like any other run's, so the pool limit counts every sending run.
  */
@@ -152,16 +154,15 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
 }
 
 /**
- * Whether a record occupies one of the `maxConcurrent` background slots.
- * Nested children don't: their parent already holds a slot, so counting (and
- * therefore queueing) them would deadlock a parent that waits on its own child.
+ * Whether a record occupies one of the `maxConcurrent` slots. Every run does, nested children included. A parent
+ * holds its slot for its turn; it ends that turn to wait (`decide` releases the slot when it parks), so a child
+ * queued behind a full pool is admitted then. The main session is not a pool member and never has a record here.
  *
- * Note this bounds nothing horizontally — the depth cap limits how DEEP nesting
- * goes, not how WIDE. A parent's only limit on concurrent children is that each
- * spawn costs it a turn, which is unbounded when max turns is unlimited.
+ * The depth cap limits how DEEP nesting goes, not how WIDE: a parent may queue any number of children, each spawn
+ * costing it one Agent call in its turn.
  */
-function occupiesPoolSlot(record: Pick<AgentRecord, "parentAgentId">): boolean {
-  return record.parentAgentId === undefined;
+function occupiesPoolSlot(_record: Pick<AgentRecord, "parentAgentId">): boolean {
+  return true;
 }
 
 interface SpawnArgs {
@@ -1170,23 +1171,28 @@ export class AgentManager {
       }
       const record = this.agents.get(next.id);
       if (record?.status !== "queued") continue;
-      try {
-        this.startAgent(next.id, record, next.args);
-      } catch (err) {
-        // Only pre-increment throws reach here (cwd re-validation, worktree
-        // creation, onStart) — the counter needs no rollback. Surface the failure
-        // on the record so the user/agent can see it via /agents, then keep draining.
-        record.status = "error";
-        record.error = err instanceof Error ? err.message : String(err);
-        record.completedAt = Date.now();
-        // No turn ever executed — zero the run-local counter so the completion
-        // report cannot claim the presumed first turn.
-        record.turnCount = 0;
-        // A throwing onStart can follow worktree creation: reclaim the copy
-        // and its registration (best-effort, like the run handlers' cleanup).
-        this.reclaimWorktree(record, next.args.options.cwd ?? next.args.ctx.cwd);
-        this.notifyCompleted(record);
-      }
+      this.startQueued(next.id, record, next.args);
+    }
+  }
+
+  /** Starts a queued spawn. A throw parks on the record as an error, so the FIFO keeps draining. */
+  private startQueued(id: string, record: AgentRecord, args: SpawnArgs): void {
+    try {
+      this.startAgent(id, record, args);
+    } catch (err) {
+      // Only pre-increment throws reach here (cwd re-validation, worktree
+      // creation, onStart) — the counter needs no rollback. Surface the failure
+      // on the record so the user/agent can see it via /agents, then keep draining.
+      record.status = "error";
+      record.error = err instanceof Error ? err.message : String(err);
+      record.completedAt = Date.now();
+      // No turn ever executed — zero the run-local counter so the completion
+      // report cannot claim the presumed first turn.
+      record.turnCount = 0;
+      // A throwing onStart can follow worktree creation: reclaim the copy
+      // and its registration (best-effort, like the run handlers' cleanup).
+      this.reclaimWorktree(record, args.options.cwd ?? args.ctx.cwd);
+      this.notifyCompleted(record);
     }
   }
 
@@ -1667,23 +1673,32 @@ export class AgentManager {
   }
 
   /**
-   * Hands this manager over to a reloading activation. Queued spawns and idle
-   * subtrees leave now as data; a subtree with a live run stays here and reports
-   * through the handover when it settles. Nothing is aborted or disposed.
+   * Hands this manager over to a reloading activation. Queued top-level spawns and
+   * idle subtrees leave now as data. A queued nested child starts here instead: its
+   * parent stays with it, and its slot is handed over with the holders, so the pool
+   * may briefly exceed maxConcurrent until it settles. A subtree with a live run stays
+   * here and reports through the handover when it settles. Nothing is aborted or disposed.
    */
   beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
     const gated: GateEntry[] = [];
+    const nested: { id: string; record: AgentRecord; args: SpawnArgs }[] = [];
     for (const entry of this.slotFifo) {
       if (entry.kind === "gate") {
         gated.push(entry);
         continue;
       }
-      if (this.agents.get(entry.id)?.status !== "queued") continue;
+      const record = this.agents.get(entry.id);
+      if (record?.status !== "queued") continue;
+      if (record.parentAgentId !== undefined) {
+        nested.push({ id: entry.id, record, args: entry.args });
+        continue;
+      }
       queued.push({ id: entry.id, type: entry.args.type, prompt: entry.args.prompt, options: toSpawnData(entry.args.options) });
       this.agents.delete(entry.id);
     }
     this.slotFifo = [];
+    for (const { id, record, args } of nested) this.startQueued(id, record, args);
     const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders);
     this.handover = handover;
     this.onStart = undefined;
