@@ -62,6 +62,14 @@ export function setQuietMs(ms: number): void {
 
 /** Custom message type of the fork's own wakes: queued input, held input, nested results, the continue notice. */
 const WAKE_TYPE = "pi-subagents-wake";
+/** The custom message that carries a finished run's result to its parent or to the main session. */
+const NOTIFICATION_TYPE = "subagent-notification";
+let wakeSeq = 0;
+
+/** The batch id a fork-sent custom message carries in `details`, or undefined. */
+function batchOf(details: unknown): string | undefined {
+  return typeof details === "object" && details !== null && "batch" in details && typeof details.batch === "string" ? details.batch : undefined;
+}
 
 /** Longest a delivered prompt may stay unreported before its preflight stops counting against finish (a deferred re-run that throws never reports). */
 const PREFLIGHT_TIMEOUT_MS = 30_000;
@@ -920,18 +928,24 @@ export class AgentManager {
     record: AgentRecord,
     session: AgentSession,
     content: string,
-    { delivered, input = false }: { delivered?: () => void; input?: boolean } = {},
+    {
+      delivered,
+      input = false,
+      customType = WAKE_TYPE,
+      display = false,
+      batch = `${record.id}:${++wakeSeq}`,
+    }: { delivered?: () => void; input?: boolean; customType?: string; display?: boolean; batch?: string } = {},
   ): void {
     this.waking.set(record.id, input ? content : undefined);
     const off = session.subscribe((event) => {
       if (event.type !== "message_start" || event.message.role !== "custom") return;
-      if (event.message.customType !== WAKE_TYPE || event.message.content !== content) return;
+      if (event.message.customType !== customType || batchOf(event.message.details) !== batch) return;
       off();
       this.waking.delete(record.id);
       delivered?.();
     });
     session
-      .sendCustomMessage({ customType: WAKE_TYPE, content, display: false }, { triggerTurn: true, deliverAs: "steer" })
+      .sendCustomMessage({ customType, content, display, details: { batch } }, { triggerTurn: true, deliverAs: "steer" })
       .catch((err: unknown) => {
         off();
         this.waking.delete(record.id);
@@ -948,6 +962,8 @@ export class AgentManager {
     const session = parent?.session;
     if (!parent || !session) return;
     this.wake(parent, session, content, {
+      customType: NOTIFICATION_TYPE,
+      display: true,
       delivered: () => {
         child.resultDelivered = true;
       },

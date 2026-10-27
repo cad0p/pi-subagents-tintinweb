@@ -900,6 +900,12 @@ const liveSession = () => {
   };
 };
 
+/** Raises the `message_start` the session emits for the last custom message the fork sent. */
+const observeLastCustom = (session: ReturnType<typeof liveSession>) => {
+  const [message] = session.sendCustomMessage.mock.lastCall as unknown as [{ customType: string; content: string; details: unknown }];
+  session.emit({ type: "message_start", message: { role: "custom", ...message } });
+};
+
 /** Spawns a child that hosts `session` and never settles on its own. */
 const spawnHosted = (m: AgentManager, session: unknown) => {
   vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
@@ -1408,8 +1414,22 @@ describe("AgentManager — finish waits for idle and pending work", () => {
     const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(child, "child result");
     expect(child.resultDelivered).toBe(false);
-    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    observeLastCustom(session);
     expect(child.resultDelivered).toBe(true);
+  });
+
+  it("sends a nested result as the subagent-notification message, never as a prompt", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const parentId = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
+    const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "/reload");
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ customType: "subagent-notification", content: "/reload", display: true, details: { batch: expect.any(String) } }),
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+    expect(session.prompt).not.toHaveBeenCalled();
   });
 
   it("finishes a settled session only after a second quiet observation", async () => {
@@ -1543,7 +1563,7 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
     const { id, record, session, endLoop } = await streamingRun();
     const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(child, "child result");
-    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    observeLastCustom(session);
     expect(child.resultDelivered).toBe(true);
     endLoop();
     expect(await settlesWithin(record.promise, 1000)).toBe("settled");
