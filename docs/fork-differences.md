@@ -18,7 +18,7 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Parent-mirrored built-in activation.** Subagents load pi's built-in extensions (`codemode`, `tool-search`, `mcp`), but a `defaultActive: false` tool is declared in the child only when the parent session has it active or the agent names its extension with `ext:`. "As in the main session" means the main session's actual tool set, not everything that happens to be loaded.
 
-**Nested delegation is background-only.** `allowed_subagents` gives an agent its own `Agent`/`get_subagent_result`/`steer_subagent`/`checkpoint` tools; `max_subagent_depth` caps the tree. A nested child returns an id like any other spawn and does not take a `maxConcurrent` slot. Upstream's nested spawns can run inline.
+**Nested delegation is background-only.** `allowed_subagents` gives an agent its own `Agent`/`get_subagent_result`/`SendMessage`/`checkpoint` tools; `max_subagent_depth` caps the tree. A nested child returns an id like any other spawn and does not take a `maxConcurrent` slot. Upstream's nested spawns can run inline.
 
 **Usage and cost surfaces.** `reportUsage`, `showCost` and `showModel`, plus the `subagents:usage` / `subagents:disposed` events and `subagents:rpc:consume` / `rpc:steer`, are ports — but the *set* of surfaces is this fork's: markdown notifications instead of an XML envelope, and a per-agent nudge instead of a grouped one, so there is no batch cost total.
 
@@ -50,4 +50,4 @@ Each of these exists upstream and is not coming here without a new decision.
 
 - **pi peer floor: `>=1.0.4`** for `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui`. `reportUsage` relies on pi folding `AgentToolResult.usage` into `getSessionStats()` (pi 0.81.0), so the floor is comfortably above the release that introduced it.
 - **Settings are a flat list** in `/agents → Settings`, mirroring upstream's shape, and persist in `subagents.json` (global and project).
-- **Tool names and calling conventions stay Claude Code-compatible** (`Agent`, `get_subagent_result`, `steer_subagent`) on purpose, even where this fork's semantics differ from upstream's.
+- **Tool names and calling conventions stay Claude Code-compatible** (`Agent`, `get_subagent_result`, `SendMessage`) on purpose, even where this fork's semantics differ from upstream's.

@@ -382,6 +382,19 @@ describe("agent-runner abort-signal forwarding", () => {
   });
 });
 
+describe("agent-runner resumed max_turns budget", () => {
+  it("resumeAgent applies the max_turns it is given, so a resumed run gets a fresh soft limit", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) l({ type: "turn_end" });
+    });
+
+    await resumeAgent(session as any, "go", { maxTurns: 1 });
+
+    expect(session.steer).toHaveBeenCalledWith(expect.stringContaining("turn limit"));
+  });
+});
+
 // #144 — a failed FINAL assistant turn (stopReason "error") must surface as
 // `failure`; how the turn STOPPED decides, never whether it produced text.
 describe("agent-runner failed-final-turn detection (#144)", () => {
@@ -1058,7 +1071,7 @@ describe("agent-runner master tool allowlist", () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     withExtensions({
-      "/ext/evil.ts": ["Agent", "get_subagent_result", "steer_subagent", "ok_ext"],
+      "/ext/evil.ts": ["Agent", "get_subagent_result", "SendMessage", "ok_ext"],
     });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -1068,7 +1081,7 @@ describe("agent-runner master tool allowlist", () => {
     const tools = lastToolsPassed();
     expect(tools).not.toContain("Agent");
     expect(tools).not.toContain("get_subagent_result");
-    expect(tools).not.toContain("steer_subagent");
+    expect(tools).not.toContain("SendMessage");
     expect(tools).toContain("ok_ext");
   });
 

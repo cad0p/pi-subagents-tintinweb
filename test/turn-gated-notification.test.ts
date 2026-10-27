@@ -263,13 +263,12 @@ describe("turn-gated completion notifications", () => {
     // Resume before the armed nudge fires; the resumed run is held open.
     let resolveResume!: (v: { text: string }) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "first task", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, ctx(),
     );
-    expect(textOf(resume)).toContain("Agent resumed in background.");
-
+    expect(textOf(resume)).toContain("resumed it with the message");
     // A resume cancels the prior run's still-armed nudge — no stale notification.
     await vi.advanceTimersByTimeAsync(1000);
     expect(pi.sendMessage).not.toHaveBeenCalled();
@@ -306,12 +305,12 @@ describe("turn-gated completion notifications", () => {
     pi.events.emit.mockImplementation((event: string) => {
       if (event === "subagents:started") throw new Error("stale extension context");
     });
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "first task", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, ctx(),
     );
-    expect(textOf(resume)).toBe(`Failed to resume agent "${id}".`);
+    expect(textOf(resume)).toContain(`Agent ${id} did not take the message`);
     expect(resumeAgent).not.toHaveBeenCalled();
 
     // The refusal must not cancel the prior run's still-armed nudge.
@@ -661,7 +660,7 @@ describe("Agent result rendering", () => {
     }
   });
 
-  it("resolves and scope-checks the model only for fresh spawns — a resume mirrors the record", async () => {
+  it("resolves and scope-checks the model only for fresh spawns", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-resume-scope-"));
     const previousCwd = process.cwd();
     try {
@@ -711,9 +710,9 @@ describe("Agent result rendering", () => {
 
       vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
-      const resume = await tools.get("Agent").execute(
+      await tools.get("SendMessage").execute(
         "tc-resume",
-        { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+        { to: id, message: "more" },
         undefined, undefined, c,
       );
 
@@ -723,11 +722,6 @@ describe("Agent result rendering", () => {
         .map(([msg]: [string]) => msg)
         .filter((msg: string) => msg.includes("out-of-scope"));
       expect(warnings).toHaveLength(0);
-      // ...and the row mirrors the resumed record's resolved invocation.
-      expect(resume.details).toMatchObject({
-        modelName: "tagged model",
-        tags: ["max turns: 3"],
-      });
       await record.promise;
     } finally {
       process.chdir(previousCwd);
@@ -940,71 +934,6 @@ describe("Agent result rendering", () => {
       expect(textOf(spawn)).toContain("Agent ID:");
       expect(textOf(spawn)).toContain("started in background.");
       expect(c.ui.notify).toHaveBeenCalledWith(expect.stringContaining("out-of-scope model"), "warning");
-    } finally {
-      process.chdir(previousCwd);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("resumes an invocation-less record with its own max turns, not the call's", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-resume-noinv-"));
-    const previousCwd = process.cwd();
-    try {
-      mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
-      writeFileSync(
-        join(dir, ".pi", "agents", "tagged.md"),
-        '---\ndescription: tagged agent\nmodel: "scope/tagged-model"\nmax_turns: 3\n---\n\nbody\n',
-        "utf-8",
-      );
-      process.chdir(dir);
-
-      hostedRun(fakeChild(), "ok");
-      const { pi, tools } = makePi();
-      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
-      subagentsExtension(pi);
-      const c = {
-        ...ctx(),
-        cwd: dir,
-        model: { provider: "parent", id: "parent-model", name: "Parent" },
-        modelRegistry: {
-          find: vi.fn((provider: string, modelId: string) =>
-            provider === "scope" && modelId === "tagged-model"
-              ? { provider: "scope", id: "tagged-model", name: "Tagged Model" }
-              : undefined),
-          getAvailable: vi.fn(() => [{ provider: "scope", id: "tagged-model", name: "Tagged Model" }]),
-        },
-      };
-
-      // The record's cap comes from the spawn call; the resume call's type
-      // pins a different one in its frontmatter.
-      const spawn = await tools.get("Agent").execute(
-        "tc-spawn",
-        { prompt: "go", description: "d", subagent_type: "general-purpose", max_turns: 5 },
-        undefined, undefined, c,
-      );
-      const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
-      const handle = (globalThis as Record<symbol, any>)[MANAGER_KEY];
-      const record = handle.getRecord(id);
-      await record.promise;
-      expect(record.effectiveMaxTurns).toBe(5);
-      // A record whose invocation snapshot was never captured
-      // (RPC/scheduler/wizard spawns) is resumed through a differing type.
-      record.invocation = undefined;
-
-      vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
-      vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
-      const resume = await tools.get("Agent").execute(
-        "tc-resume",
-        { prompt: "more", description: "d2", subagent_type: "tagged", resume: id },
-        undefined, undefined, c,
-      );
-
-      // The row keeps the record's own cap (and mode label) and does not
-      // advertise the resume call's model or strategy settings, none of which
-      // the resume applies.
-      expect(resume.details?.modelName).toBeUndefined();
-      expect(resume.details?.tags).toEqual(["twin", "max turns: 5"]);
-      await record.promise;
     } finally {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });

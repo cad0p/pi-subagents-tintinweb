@@ -238,9 +238,9 @@ export class ConversationViewer implements Component {
     return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
   }
 
-  /** Steerable only when a steer handler exists and the agent is still active. */
+  /** Steerable whenever a steer handler exists; finished agents are resumed from their session file. */
   private canSteer(): boolean {
-    return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+    return !!this.onSteer;
   }
 
   /** Open the inline steering composer and route subsequent input to it. */

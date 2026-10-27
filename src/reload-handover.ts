@@ -12,7 +12,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
 import { teardownChildSession } from "./agent-runner.js";
-import type { AgentRecord, SubagentType } from "./types.js";
+import type { AgentRecord, DeliverOutcome, SubagentType } from "./types.js";
 import type { AgentActivity } from "./ui/agent-widget.js";
 import type { LifetimeUsage } from "./usage.js";
 
@@ -64,6 +64,8 @@ export interface DrainingPool {
   dispose(): void;
   /** This pool's own records only: older pools it was handed over from are listed by their own entries. */
   ownAgents(): AgentRecord[];
+  /** Input for a record this pool owns. Optional: a pool from an older activation has none and takes only a running session's steer. */
+  deliver?(id: string, text: string): Promise<DeliverOutcome>;
 }
 
 /** Disposes the sessions of the given items: a hand-over that is stopped holds no one to adopt them. */

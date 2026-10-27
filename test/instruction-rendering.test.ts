@@ -1,6 +1,6 @@
 /**
  * instruction-rendering.test.ts — pins the issue #29 display layer: the
- * `steer_subagent` call preview plus expandable body and the `Agent` call
+ * `SendMessage` call preview plus expandable body and the `Agent` call
  * body, plus the shared `formatInstructionHint` helper.
  *
  * Direct renderer units for both tools (groups 1-3), the adversarial trigger
@@ -154,22 +154,22 @@ describe("instruction rendering", () => {
   }
 
   // -------------------------------------------------------------------------
-  // Group 1 — steer_subagent renderCall units
+  // Group 1 — SendMessage renderCall units
   // -------------------------------------------------------------------------
 
-  describe("steer_subagent renderCall", () => {
+  describe("SendMessage renderCall", () => {
     it("renders header, target, and a short single-line preview without ellipsis or hint", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "Re-run the failing test first." }, theme);
-      expect(text).toBe("▸ Steer  abc  Re-run the failing test first.");
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message: "Re-run the failing test first." }, theme);
+      expect(text).toBe("▸ SendMessage  abc  Re-run the failing test first.");
     });
 
     it("clips a long single-line preview to 80 columns with an ellipsis", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "x".repeat(200) }, theme);
-      expect(stripAnsi(text)).toBe(`▸ Steer  abc  ${"x".repeat(79)}…` + currentHint(theme));
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message: "x".repeat(200) }, theme);
+      expect(stripAnsi(text)).toBe(`▸ SendMessage  abc  ${"x".repeat(79)}…` + currentHint(theme));
       expect(stripAnsi(text)).toContain("(ctrl+o to expand)");
     });
 
@@ -177,18 +177,18 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderCallText(
-        tools.get("steer_subagent"),
-        { agent_id: "abc", message: "Step 1: run the failing test.\nStep 2: fix the parser." },
+        tools.get("SendMessage"),
+        { to: "abc", message: "Step 1: run the failing test.\nStep 2: fix the parser." },
         theme,
       );
-      expect(text).toBe("▸ Steer  abc  Step 1: run the failing test. Step 2: fix the parser." + currentHint(theme));
+      expect(text).toBe("▸ SendMessage  abc  Step 1: run the failing test. Step 2: fix the parser." + currentHint(theme));
       expect(text).not.toContain("…");
     });
 
     it("does not ellipsize a message that is exactly 80 columns", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "y".repeat(80) }, theme);
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message: "y".repeat(80) }, theme);
       expect(text.endsWith("y".repeat(80))).toBe(true);
       expect(text).not.toContain("…");
     });
@@ -196,40 +196,40 @@ describe("instruction rendering", () => {
     it("renders an empty message as the bare header", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      expect(renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "" }, theme)).toBe("▸ Steer  abc");
-      expect(renderCallText(tools.get("steer_subagent"), { agent_id: "abc" }, theme)).toBe("▸ Steer  abc");
+      expect(renderCallText(tools.get("SendMessage"), { to: "abc", message: "" }, theme)).toBe("▸ SendMessage  abc");
+      expect(renderCallText(tools.get("SendMessage"), { to: "abc" }, theme)).toBe("▸ SendMessage  abc");
     });
 
     it("renders the expanded body with the ▾ marker, newlines preserved, two-space indent, and no footer", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderCallText(
-        tools.get("steer_subagent"),
-        { agent_id: "abc", message: "Step 1: run the failing test.\nStep 2: fix the parser." },
+        tools.get("SendMessage"),
+        { to: "abc", message: "Step 1: run the failing test.\nStep 2: fix the parser." },
         theme,
         { expanded: true, isPartial: true },
       );
-      expect(text).toBe("▾ Steer  abc\n  Step 1: run the failing test.\n  Step 2: fix the parser.");
+      expect(text).toBe("▾ SendMessage  abc\n  Step 1: run the failing test.\n  Step 2: fix the parser.");
     });
 
     it("renders only the header when expanded once a result exists (isPartial false)", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderCallText(
-        tools.get("steer_subagent"),
-        { agent_id: "abc", message: "body is owned by the result renderer" },
+        tools.get("SendMessage"),
+        { to: "abc", message: "body is owned by the result renderer" },
         theme,
         { expanded: true, isPartial: false },
       );
-      expect(text).toBe("▾ Steer  abc");
+      expect(text).toBe("▾ SendMessage  abc");
     });
 
     it("renders a 60-line message expanded in full with no caps or footer", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const message = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message }, theme, { expanded: true, isPartial: true });
-      expect(text).toBe("▾ Steer  abc\n" + message.split("\n").map((l) => `  ${l}`).join("\n"));
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message }, theme, { expanded: true, isPartial: true });
+      expect(text).toBe("▾ SendMessage  abc\n" + message.split("\n").map((l) => `  ${l}`).join("\n"));
       expect(text.split("\n")).toHaveLength(61);
     });
 
@@ -237,7 +237,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const message = "z".repeat(10 * 1024);
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message }, theme, { expanded: true, isPartial: true });
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message }, theme, { expanded: true, isPartial: true });
       expect(text.endsWith("z".repeat(10 * 1024))).toBe(true);
     });
 
@@ -245,18 +245,18 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const message = "keep\u001b[2Jthis\nnext\tline\rCR";
-      const args = { agent_id: "abc", message };
-      const preview = renderCallText(tools.get("steer_subagent"), args, theme);
+      const args = { to: "abc", message };
+      const preview = renderCallText(tools.get("SendMessage"), args, theme);
       expect(preview).not.toContain("\u001b");
       expect(preview).not.toContain("\n");
       expect(preview).not.toContain("\t");
       expect(preview).toContain("keepthis next line CR");
 
-      const expanded = renderCallText(tools.get("steer_subagent"), args, theme, { expanded: true, isPartial: true });
+      const expanded = renderCallText(tools.get("SendMessage"), args, theme, { expanded: true, isPartial: true });
       expect(expanded).not.toContain("\u001b");
       expect(expanded).toContain("  keepthis\n  next\tlineCR");
 
-      expect(args).toEqual({ agent_id: "abc", message: "keep\u001b[2Jthis\nnext\tline\rCR" });
+      expect(args).toEqual({ to: "abc", message: "keep\u001b[2Jthis\nnext\tline\rCR" });
     });
 
     it("keeps the preview UTF-16 well-formed when the clip boundary splits a surrogate", () => {
@@ -265,8 +265,8 @@ describe("instruction rendering", () => {
       // 78 ASCII columns + a 2-column emoji + tail: the 80-column clip lands
       // inside the emoji, so the boundary must not emit half of it.
       const message = "a".repeat(78) + "😀" + "tail";
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message }, theme);
-      expect(stripAnsi(text)).toBe(`▸ Steer  ${"a".repeat(78)}…` + currentHint(theme));
+      const text = renderCallText(tools.get("SendMessage"), { to: "", message }, theme);
+      expect(stripAnsi(text)).toBe(`▸ SendMessage  ${"a".repeat(78)}…` + currentHint(theme));
       expect(isWellFormed(text)).toBe(true);
       expect(text).not.toContain("tail");
     });
@@ -274,8 +274,8 @@ describe("instruction rendering", () => {
     it("bounds a CJK preview by columns, not code units", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message: "漢".repeat(60) }, theme);
-      const shown = stripAnsi(text).slice("▸ Steer  ".length);
+      const text = renderCallText(tools.get("SendMessage"), { to: "", message: "漢".repeat(60) }, theme);
+      const shown = stripAnsi(text).slice("▸ SendMessage  ".length);
       const hint = currentHint(theme);
       const preview = shown.slice(0, shown.length - hint.length);
       expect(preview.endsWith("…")).toBe(true);
@@ -287,7 +287,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const message = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
-      renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message }, theme);
+      renderCallText(tools.get("SendMessage"), { to: "abc", message }, theme);
       // The body path emits `  <line>`; a collapsed render must not reach it.
       expect(theme.calls.some(([, text]) => text.startsWith("  line "))).toBe(false);
     });
@@ -295,39 +295,39 @@ describe("instruction rendering", () => {
     it("tolerates undefined args, {}, and non-string fields", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const tool = tools.get("steer_subagent");
-      expect(renderCallText(tool, undefined, theme)).toBe("▸ Steer");
-      expect(renderCallText(tool, {}, theme)).toBe("▸ Steer");
-      expect(renderCallText(tool, { agent_id: 42, message: 99 }, theme)).toBe("▸ Steer");
-      expect(renderCallText(tool, { agent_id: "abc", message: null }, theme)).toBe("▸ Steer  abc");
+      const tool = tools.get("SendMessage");
+      expect(renderCallText(tool, undefined, theme)).toBe("▸ SendMessage");
+      expect(renderCallText(tool, {}, theme)).toBe("▸ SendMessage");
+      expect(renderCallText(tool, { to: 42, message: 99 }, theme)).toBe("▸ SendMessage");
+      expect(renderCallText(tool, { to: "abc", message: null }, theme)).toBe("▸ SendMessage  abc");
     });
 
     it("falls back to the sanitized raw id when the record is unknown", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "evicted-id", message: "hi" }, theme);
-      expect(text).toBe("▸ Steer  evicted-id  hi");
+      const text = renderCallText(tools.get("SendMessage"), { to: "evicted-id", message: "hi" }, theme);
+      expect(text).toBe("▸ SendMessage  evicted-id  hi");
     });
 
     it("falls back to the raw id when the record description is empty", async () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const { id } = await spawnBackground(tools, "");
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: id, message: "hi" }, theme);
-      expect(text).toBe(`▸ Steer  ${id}  hi`);
+      const text = renderCallText(tools.get("SendMessage"), { to: id, message: "hi" }, theme);
+      expect(text).toBe(`▸ SendMessage  ${id}  hi`);
     });
 
     it("freezes the first resolved description across record eviction", async () => {
       const { tools, lifecycle } = registerTools();
       const theme = makeTheme();
       const { id, record, handle } = await spawnBackground(tools, "Find auth files");
-      const tool = tools.get("steer_subagent");
+      const tool = tools.get("SendMessage");
       const state: Record<string, unknown> = {};
-      const args = { agent_id: id, message: "hi" };
+      const args = { to: id, message: "hi" };
 
       const first = renderCallText(tool, args, theme, { state });
       expect(first).toContain("Find auth files");
-      expect(state.steerDesc).toBe("Find auth files");
+      expect(state.sendDesc).toBe("Find auth files");
 
       // Settle + evict through the real session-start path (only removes
       // consumed, non-running records), then re-render with the same state.
@@ -348,7 +348,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const { id } = await spawnBackground(tools, "find\u001b[2Jfiles\nforged: yes");
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: id, message: "hi" }, theme);
+      const text = renderCallText(tools.get("SendMessage"), { to: id, message: "hi" }, theme);
       expect(text).not.toContain("\u001b");
       expect(text).not.toContain("\n");
       expect(text).toContain("findfiles forged: yes");
@@ -358,7 +358,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const { id } = await spawnBackground(tools, "d".repeat(400));
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: id, message: "hi" }, theme);
+      const text = renderCallText(tools.get("SendMessage"), { to: id, message: "hi" }, theme);
       expect(text).toContain("d".repeat(300) + "…");
       expect(text).not.toContain("d".repeat(301));
     });
@@ -367,21 +367,21 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const agentId = "\u001b]52;c;cGF3bmVk\u0007\nforged" + "x".repeat(400);
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: agentId, message: "hi" }, theme);
+      const text = renderCallText(tools.get("SendMessage"), { to: agentId, message: "hi" }, theme);
       expect(text.split("\n")).toHaveLength(1);
       expect(text).not.toContain("\u001b");
-      expect(text).toBe("▸ Steer  " + "forged" + "x".repeat(294) + "…  hi");
+      expect(text).toBe("▸ SendMessage  " + "forged" + "x".repeat(294) + "…  hi");
       expect(text).not.toContain("x".repeat(295));
     });
 
     it("renders whitespace-only messages as header-only when expanded", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "   \n\t  " }, theme, {
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message: "   \n\t  " }, theme, {
         expanded: true,
         isPartial: true,
       });
-      expect(text).toBe("▾ Steer  abc");
+      expect(text).toBe("▾ SendMessage  abc");
     });
   });
 
@@ -389,23 +389,23 @@ describe("instruction rendering", () => {
   // Group 1b — preview scan-window boundaries
   // -------------------------------------------------------------------------
 
-  describe("steer preview window boundaries", () => {
+  describe("SendMessage preview window boundaries", () => {
     const cases: Array<{ name: string; message: string; expected: string; hinted: boolean }> = [
-      { name: "exactly 512 ASCII chars", message: "a".repeat(512), expected: `▸ Steer  ${"a".repeat(79)}…`, hinted: true },
-      { name: "513 ASCII chars", message: "a".repeat(513), expected: `▸ Steer  ${"a".repeat(79)}…`, hinted: true },
+      { name: "exactly 512 ASCII chars", message: "a".repeat(512), expected: `▸ SendMessage  ${"a".repeat(79)}…`, hinted: true },
+      { name: "513 ASCII chars", message: "a".repeat(513), expected: `▸ SendMessage  ${"a".repeat(79)}…`, hinted: true },
       // The scan window cuts before the text; the row keeps the header and the
       // hint instead of silently hiding the message.
-      { name: "512 spaces then text", message: " ".repeat(512) + "tail", expected: "▸ Steer", hinted: true },
-      { name: "512 invisible chars then text", message: "\u200b".repeat(512) + "tail", expected: "▸ Steer", hinted: true },
-      { name: "500 spaces then text", message: " ".repeat(500) + "tail", expected: "▸ Steer  tail", hinted: false },
-      { name: "512-char unterminated OSC payload", message: "\u001b]52;" + "x".repeat(508), expected: `▸ Steer  ${"52;" + "x".repeat(76)}…`, hinted: true },
+      { name: "512 spaces then text", message: " ".repeat(512) + "tail", expected: "▸ SendMessage", hinted: true },
+      { name: "512 invisible chars then text", message: "\u200b".repeat(512) + "tail", expected: "▸ SendMessage", hinted: true },
+      { name: "500 spaces then text", message: " ".repeat(500) + "tail", expected: "▸ SendMessage  tail", hinted: false },
+      { name: "512-char unterminated OSC payload", message: "\u001b]52;" + "x".repeat(508), expected: `▸ SendMessage  ${"52;" + "x".repeat(76)}…`, hinted: true },
     ];
 
     for (const c of cases) {
       it(`${c.name} stays on one line with no empty-key artifact`, () => {
         const { tools } = registerTools();
         const theme = makeTheme();
-        const text = renderCallText(tools.get("steer_subagent"), { agent_id: "", message: c.message }, theme);
+        const text = renderCallText(tools.get("SendMessage"), { to: "", message: c.message }, theme);
         expect(text.split("\n")).toHaveLength(1);
         expect(text).not.toMatch(/\( to expand\)/);
         // Renderer-level: the appended hint is exactly the current binding's.
@@ -428,7 +428,7 @@ describe("instruction rendering", () => {
     it("appends exactly the current hint to a clipped preview and never an empty-key artifact", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderCallText(tools.get("steer_subagent"), { agent_id: "abc", message: "q".repeat(200) }, theme);
+      const text = renderCallText(tools.get("SendMessage"), { to: "abc", message: "q".repeat(200) }, theme);
       expect(text.endsWith(currentHint(theme))).toBe(true);
       expect(text).toContain("(ctrl+o to expand)");
       expect(text).not.toContain("( to expand)");
@@ -436,16 +436,16 @@ describe("instruction rendering", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Group 2 — steer_subagent renderResult units
+  // Group 2 — SendMessage renderResult units
   // -------------------------------------------------------------------------
 
-  describe("steer_subagent renderResult", () => {
+  describe("SendMessage renderResult", () => {
     const outcomes: Array<{ outcome: string; line: string; color: string }> = [
-      { outcome: "sent", line: "Steering message sent to agent abc. The agent will process it after its current tool execution.", color: "dim" },
-      { outcome: "queued", line: "Steering message queued for agent abc. It will be delivered once the session initializes.", color: "dim" },
+      { outcome: "sent", line: "Message sent to agent abc.", color: "dim" },
+      { outcome: "queued", line: "Message queued for agent abc. It is delivered once the session initializes.", color: "dim" },
       { outcome: "not-found", line: 'Agent not found: "abc". It may have been cleaned up.', color: "error" },
-      { outcome: "not-running", line: 'Agent "abc" is not running (status: completed). Cannot steer a non-running agent.', color: "error" },
-      { outcome: "failed", line: "Failed to steer agent: boom", color: "error" },
+      { outcome: "resumed", line: "Agent abc had finished; resumed it with the message (fresh max_turns budget).", color: "dim" },
+      { outcome: "failed", line: "Agent abc did not take the message: it is handing over after a reload or still settling, or it was stopped with its parent.", color: "error" },
     ];
 
     it("renders every outcome verbatim with a ⎿ prefix in the outcome color", () => {
@@ -453,8 +453,8 @@ describe("instruction rendering", () => {
       for (const c of outcomes) {
         const theme = makeTheme();
         const text = renderResultText(
-          tools.get("steer_subagent"),
-          { content: [{ type: "text", text: c.line }], details: { steerOutcome: c.outcome } },
+          tools.get("SendMessage"),
+          { content: [{ type: "text", text: c.line }], details: { sendOutcome: c.outcome } },
           theme,
         );
         expect(text).toBe(`  ⎿  ${c.line}`);
@@ -466,21 +466,21 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(
-        tools.get("steer_subagent"),
+        tools.get("SendMessage"),
         {
-          content: [{ type: "text", text: "Steering message sent to agent abc.\nCurrent state: 3 tool uses" }],
-          details: { steerOutcome: "sent" },
+          content: [{ type: "text", text: "Message sent to agent abc.\nCurrent state: 3 tool uses" }],
+          details: { sendOutcome: "sent" },
         },
         theme,
       );
-      expect(text).toBe("  ⎿  Steering message sent to agent abc.\n  ⎿  Current state: 3 tool uses");
+      expect(text).toBe("  ⎿  Message sent to agent abc.\n  ⎿  Current state: 3 tool uses");
       expect(theme.calls).toContainEqual(["dim", "  ⎿  Current state: 3 tool uses"]);
     });
 
     it("defaults to dim when details are absent (legacy replay)", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderResultText(tools.get("steer_subagent"), { content: [{ type: "text", text: "legacy" }], details: undefined }, theme);
+      const text = renderResultText(tools.get("SendMessage"), { content: [{ type: "text", text: "legacy" }], details: undefined }, theme);
       expect(text).toBe("  ⎿  legacy");
       expect(theme.calls).toContainEqual(["dim", "  ⎿  legacy"]);
     });
@@ -488,7 +488,7 @@ describe("instruction rendering", () => {
     it("tints a synthetic error result with no details as error", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const text = renderResultText(tools.get("steer_subagent"), { content: [{ type: "text", text: "aborted" }], details: undefined }, theme, {
+      const text = renderResultText(tools.get("SendMessage"), { content: [{ type: "text", text: "aborted" }], details: undefined }, theme, {
         isError: true,
       });
       expect(text).toBe("  ⎿  aborted");
@@ -499,12 +499,12 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(
-        tools.get("steer_subagent"),
-        { content: [{ type: "text", text: "Steering message sent to agent abc.\nCurrent state: 3 tool uses" }], details: { steerOutcome: "sent" } },
+        tools.get("SendMessage"),
+        { content: [{ type: "text", text: "Message sent to agent abc.\nCurrent state: 3 tool uses" }], details: { sendOutcome: "sent" } },
         theme,
         { args: { message: "line A\nline B" }, expanded: true },
       );
-      expect(text).toBe("  line A\n  line B\n  ⎿  Steering message sent to agent abc.\n  ⎿  Current state: 3 tool uses");
+      expect(text).toBe("  line A\n  line B\n  ⎿  Message sent to agent abc.\n  ⎿  Current state: 3 tool uses");
       expect(text.indexOf("line A")).toBeLessThan(text.indexOf("⎿"));
     });
 
@@ -512,8 +512,8 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(
-        tools.get("steer_subagent"),
-        { content: [{ type: "text", text: "sent" }], details: { steerOutcome: "sent" } },
+        tools.get("SendMessage"),
+        { content: [{ type: "text", text: "sent" }], details: { sendOutcome: "sent" } },
         theme,
         { args: { message: "   \n\t  " }, expanded: true },
       );
@@ -525,8 +525,8 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const message = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n");
       const text = renderResultText(
-        tools.get("steer_subagent"),
-        { content: [{ type: "text", text: "sent" }], details: { steerOutcome: "sent" } },
+        tools.get("SendMessage"),
+        { content: [{ type: "text", text: "sent" }], details: { sendOutcome: "sent" } },
         theme,
         { args: { message }, expanded: true },
       );
@@ -539,8 +539,8 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const body = "w".repeat(10 * 1024);
       const text = renderResultText(
-        tools.get("steer_subagent"),
-        { content: [{ type: "text", text: "sent" }], details: { steerOutcome: "sent" } },
+        tools.get("SendMessage"),
+        { content: [{ type: "text", text: "sent" }], details: { sendOutcome: "sent" } },
         theme,
         { args: { message: body }, expanded: true },
       );
@@ -551,8 +551,8 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
       const text = renderResultText(
-        tools.get("steer_subagent"),
-        { content: [{ type: "image", data: "aGk=", mimeType: "image/png" }], details: { steerOutcome: "sent" } },
+        tools.get("SendMessage"),
+        { content: [{ type: "image", data: "aGk=", mimeType: "image/png" }], details: { sendOutcome: "sent" } },
         theme,
       );
       expect(text).toBe("");
@@ -562,9 +562,9 @@ describe("instruction rendering", () => {
     it("renders the same collapsed status for a partial result", () => {
       const { tools } = registerTools();
       const theme = makeTheme();
-      const result = { content: [{ type: "text", text: "Steering message sent to agent abc." }], details: { steerOutcome: "sent" } };
-      const collapsed = renderResultText(tools.get("steer_subagent"), result, theme);
-      const partial = renderResultText(tools.get("steer_subagent"), result, theme, { isPartial: true });
+      const result = { content: [{ type: "text", text: "Message sent to agent abc." }], details: { sendOutcome: "sent" } };
+      const collapsed = renderResultText(tools.get("SendMessage"), result, theme);
+      const partial = renderResultText(tools.get("SendMessage"), result, theme, { isPartial: true });
       expect(partial).toBe(collapsed);
     });
   });
@@ -573,61 +573,51 @@ describe("instruction rendering", () => {
   // Group 2b — execute-level outcome wiring
   // -------------------------------------------------------------------------
 
-  describe("steer_subagent execute outcome wiring", () => {
-    it("attaches not-found and not-running", async () => {
+  describe("SendMessage execute outcome wiring", () => {
+    it("attaches not-found", async () => {
       const { tools } = registerTools();
-      const steer = tools.get("steer_subagent");
+      const steer = tools.get("SendMessage");
 
-      const missing = await steer.execute("tc", { agent_id: "nope", message: "x" }, undefined, undefined, spawnCtx(cwd));
-      expect(missing.details.steerOutcome).toBe("not-found");
+      const missing = await steer.execute("tc", { to: "nope", message: "x" }, undefined, undefined, spawnCtx(cwd));
+      expect(missing.details.sendOutcome).toBe("not-found");
       expect(missing.content[0].text).toContain("Agent not found");
-
-      const { id, record } = await spawnBackground(tools);
-      record.status = "completed";
-      const notRunning = await steer.execute("tc", { agent_id: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
-      expect(notRunning.details.steerOutcome).toBe("not-running");
-      expect(notRunning.content[0].text).toContain("is not running");
     });
 
     it("attaches queued when the session is not ready yet", async () => {
       const { tools } = registerTools();
-      const steer = tools.get("steer_subagent");
+      const steer = tools.get("SendMessage");
       const { id, record } = await spawnBackground(tools);
       record.session = undefined;
 
-      const queued = await steer.execute("tc", { agent_id: id, message: "queue me" }, undefined, undefined, spawnCtx(cwd));
-      expect(queued.details.steerOutcome).toBe("queued");
+      const queued = await steer.execute("tc", { to: id, message: "queue me" }, undefined, undefined, spawnCtx(cwd));
+      expect(queued.details.sendOutcome).toBe("queued");
       expect(record.pendingSteers).toEqual(["queue me"]);
     });
 
-    it("attaches sent and failed via the session steer call", async () => {
+    it("attaches delivered when a running session takes the prompt as a steer", async () => {
       const { tools } = registerTools();
-      const steer = tools.get("steer_subagent");
+      const steer = tools.get("SendMessage");
       const { id, record } = await spawnBackground(tools);
 
-      const steerFn = vi.fn(async () => {});
-      record.session = { steer: steerFn, sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
-      const sent = await steer.execute("tc", { agent_id: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
-      expect(sent.details.steerOutcome).toBe("sent");
-      expect(steerFn).toHaveBeenCalledWith("go left");
-
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
-      const failed = await steer.execute("tc", { agent_id: id, message: "go right" }, undefined, undefined, spawnCtx(cwd));
-      expect(failed.details.steerOutcome).toBe("failed");
-      expect(failed.content[0].text).toBe("Failed to steer agent: boom");
+      const prompt = vi.fn(async () => {});
+      record.session = { prompt, sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+      const sent = await steer.execute("tc", { to: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
+      expect(sent.details.sendOutcome).toBe("delivered");
+      expect(prompt).toHaveBeenCalledWith("go left", { streamingBehavior: "steer" });
     });
 
-    it("colors a failed execute result as an error end-to-end", async () => {
+    it("attaches failed and colors it as an error when the record refuses input", async () => {
       const { tools } = registerTools();
-      const steer = tools.get("steer_subagent");
+      const steer = tools.get("SendMessage");
       const { id, record } = await spawnBackground(tools);
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+      record.ownerAborted = true;
 
-      const failed = await steer.execute("tc", { agent_id: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
+      const failed = await steer.execute("tc", { to: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
+      expect(failed.details.sendOutcome).toBe("failed");
       const theme = makeTheme();
       const text = renderResultText(steer, failed, theme, { args: { message: "x" } });
-      expect(text).toBe("  ⎿  Failed to steer agent: boom");
-      expect(theme.calls).toContainEqual(["error", "  ⎿  Failed to steer agent: boom"]);
+      expect(text).toContain("did not take the message");
+      expect(theme.calls.some(([color]) => color === "error")).toBe(true);
     });
   });
 
@@ -764,15 +754,15 @@ describe("instruction rendering", () => {
       initTheme("dark");
     });
 
-    it("steer: collapsed preview, expanded body, collapse again", () => {
+    it("SendMessage: collapsed preview, expanded body, collapse again", () => {
       const { tools } = registerTools();
       const message = "PREVIEW-END " + "x".repeat(100) + " TAILMARK";
       const component = new ToolExecutionComponent(
-        "steer_subagent",
+        "SendMessage",
         "tc-steer-1",
-        { agent_id: "abc", message },
+        { to: "abc", message },
         {},
-        tools.get("steer_subagent"),
+        tools.get("SendMessage"),
         { requestRender: () => {} } as any,
         cwd,
       );
@@ -783,13 +773,13 @@ describe("instruction rendering", () => {
       expect(collapsedCall).toContain("▸");
 
       component.updateResult({
-        content: [{ type: "text", text: "Steering message sent to agent abc." }],
-        details: { steerOutcome: "sent" },
+        content: [{ type: "text", text: "Message sent to agent abc." }],
+        details: { sendOutcome: "sent" },
         isError: false,
       });
       const collapsed = stripAnsi(component.render(100).join("\n"));
       expect(collapsed).toContain("PREVIEW-END");
-      expect(collapsed).toContain("⎿  Steering message sent to agent abc.");
+      expect(collapsed).toContain("⎿  Message sent to agent abc.");
       expect(collapsed).not.toContain("TAILMARK");
 
       component.setExpanded(true);

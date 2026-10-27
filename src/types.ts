@@ -105,6 +105,13 @@ export interface AgentConfig {
  */
 export type WidgetMode = 'all' | 'off';
 
+/**
+ * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
+ * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "held" (parked until a
+ * teardown or a hand-over's adoption ends), or false (unknown, still settling, or aborted by its owner).
+ */
+export type DeliverOutcome = "delivered" | "queued" | "resumed" | "held" | false;
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
@@ -157,6 +164,10 @@ export interface AgentRecord {
   resultDelivered?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
+  /** Input parked while a teardown runs (`transition`); handed over as one resume when it ends. */
+  pendingInput?: string[];
+  /** Set when the owning parent settled and aborted this nested child. Input is refused: nobody can read the answer. */
+  ownerAborted?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */

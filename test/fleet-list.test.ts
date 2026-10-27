@@ -46,7 +46,7 @@ function fakeManager(agents: AgentRecord[], draining: string[] = []): AgentManag
     listAgents: () => agents,
     isDraining: (id: string) => draining.includes(id),
     abort: () => true,
-    steer: vi.fn(() => true),
+    steer: vi.fn(() => Promise.resolve("delivered" as const)),
     settledTranscript: () => undefined,
   } as unknown as AgentManager;
 }

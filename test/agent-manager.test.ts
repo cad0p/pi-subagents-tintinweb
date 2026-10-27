@@ -6,6 +6,7 @@ import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-age
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
+import { toDto } from "../src/reload-handover.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -27,6 +28,7 @@ import {
   type ChildSessionSettings,
   createChildSession,
   type RunOptions,
+  resumeAgent,
   runAgent,
   setDefaultMaxTurns,
 } from "../src/agent-runner.js";
@@ -867,18 +869,18 @@ describe("AgentManager — abort() state machine", () => {
   });
 });
 
-describe("AgentManager — steer()", () => {
+describe("AgentManager — deliver()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
-  it("returns false for an unknown id", () => {
+  it("returns false for an unknown id", async () => {
     manager = new AgentManager();
-    expect(manager.steer("nope", "hi")).toBe(false);
+    expect(await manager.deliver("nope", "hi")).toBe(false);
   });
 
-  it("delivers to a live session via session.steer()", () => {
+  it("delivers to a live session as a steer, without awaiting the prompt", async () => {
     manager = new AgentManager();
-    const steer = vi.fn(() => Promise.resolve());
+    const prompt = vi.fn(() => Promise.resolve());
     let captured: ((s: any) => void) | undefined;
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
       captured = (opts as any)?.onSessionCreated;
@@ -886,31 +888,262 @@ describe("AgentManager — steer()", () => {
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
     // Simulate the session becoming ready.
-    captured?.({ steer, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } });
+    captured?.({ prompt, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } });
 
-    expect(manager.steer(id, "go left")).toBe(true);
-    expect(steer).toHaveBeenCalledWith("go left");
+    expect(await manager.deliver(id, "go left")).toBe("delivered");
+    expect(prompt).toHaveBeenCalledWith("go left", { streamingBehavior: "steer" });
   });
 
-  it("queues onto pendingSteers when the session isn't ready yet", () => {
+  it("queues onto pendingSteers when the session isn't ready yet", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
     const record = manager.getRecord(id)!;
     record.session = undefined; // not ready
 
-    expect(manager.steer(id, "first")).toBe(true);
-    expect(manager.steer(id, "second")).toBe(true);
+    expect(await manager.deliver(id, "first")).toBe("queued");
+    expect(await manager.deliver(id, "second")).toBe("queued");
     expect(record.pendingSteers).toEqual(["first", "second"]);
   });
 
-  it("refuses to steer an agent that is no longer running", async () => {
+  it("refuses a finished agent it cannot reopen from a session file", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.childSettings = undefined; // nothing to reopen from
+    expect(await manager.deliver(id, "too late")).toBe(false);
+  });
+
+  it("resumes a finished agent from its session file with a fresh max_turns budget", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", maxTurns: 2 });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again done" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+
+    expect(await manager.deliver(id, "more")).toBe("resumed");
+    await manager.getRecord(id)?.promise;
+    expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "more", expect.objectContaining({ maxTurns: 2 }));
+    expect(record.result).toBe("again done");
+  });
+
+  it("parks input during a teardown and resumes the parked text as one resume when it ends", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "after teardown" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    record.transition = "teardown";
+
+    expect(await manager.deliver(id, "first")).toBe("held");
+    expect(await manager.deliver(id, "second")).toBe("held");
+    expect(record.pendingInput).toEqual(["first", "second"]);
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    (manager as unknown as { endTransition(r: AgentRecord): void }).endTransition(record);
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "first\n\nsecond", expect.anything()));
+  });
+
+  it("refuses input for a child its owner aborted", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.ownerAborted = true;
+    vi.mocked(resumeAgent).mockClear();
+    expect(await manager.deliver(id, "late")).toBe(false);
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  it("refuses input for a nested child still running when its parent settles; a finished child stays resumable", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const finished = manager.spawn(mockPi, mockCtx, "general-purpose", "f", {
+      description: "finished",
+      parentAgentId: "parent-x",
+      depth: 2,
+    });
+    await manager.getRecord(finished)!.promise;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) =>
+      new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      }) as never,
+    );
+    const running = manager.spawn(mockPi, mockCtx, "general-purpose", "r", {
+      description: "running",
+      parentAgentId: "parent-x",
+      depth: 2,
+    });
+
+    (manager as unknown as { abortOwnedChildren(id: string): void }).abortOwnedChildren("parent-x");
+    await manager.getRecord(running)!.promise?.catch(() => {});
+
+    expect(manager.getRecord(running)!.ownerAborted).toBe(true);
+    expect(await manager.deliver(running, "late")).toBe(false);
+    expect(manager.getRecord(finished)!.ownerAborted).toBeUndefined();
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "again" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    expect(await manager.deliver(finished, "again")).toBe("resumed");
+  });
+
+  it("refuses a finished agent that is still settling", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.settled = false;
+    expect(await manager.deliver(id, "too early")).toBe(false);
+  });
+
+  it("logs a rejected steer prompt and does not retry it", async () => {
+    manager = new AgentManager();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let captured: ((s: AgentSession) => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      captured = opts?.onSessionCreated;
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+    const prompt = vi.fn(() => Promise.reject(new Error("boom")));
+    captured?.({ prompt, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession);
+
+    expect(await manager.deliver(id, "go")).toBe("delivered");
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining("boom")));
+    expect(prompt).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("holds input for an adopting record and delivers it when the adoption window closes", async () => {
     manager = new AgentManager();
     resolvedRun();
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     await manager.getRecord(id)?.promise;
-    expect(manager.getRecord(id)?.status).toBe("completed");
-    expect(manager.steer(id, "too late")).toBe(false);
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "adopted" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+
+    manager.beginAdoption(id);
+    expect(manager.isAdopting(id)).toBe(true);
+    expect(await manager.deliver(id, "during")).toBe("held");
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    manager.endAdoption(id);
+    expect(manager.isAdopting(id)).toBe(false);
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "during", expect.anything()));
+  });
+
+  it("flushes input parked during a refused resume's teardown once that teardown ends", async () => {
+    const onStart = vi.fn();
+    manager = new AgentManager(undefined, undefined, onStart);
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(createChildSession).mockResolvedValueOnce({ ...mockSession(), extensionRunner: { emit: () => hold } });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "after refusal" });
+    onStart.mockImplementationOnce(() => {
+      throw new Error("stale extension context");
+    });
+
+    const refused = manager.deliver(id, "first");
+    await vi.waitFor(() => expect(record.transition).toBe("teardown"));
+    expect(await manager.deliver(id, "late")).toBe("held");
+    expect(record.pendingInput).toEqual(["late"]);
+    expect(await refused).toBe(false);
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "late", expect.anything()));
+  });
+
+  it("parks input received during the settle-time teardown and delivers it once the teardown ends", async () => {
+    manager = new AgentManager();
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    resolvedRun({ ...mockSession(), extensionRunner: { emit: () => hold } });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await vi.waitFor(() => expect(record.transition).toBe("teardown"));
+    expect(record.settled).toBe(false);
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "after settle" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+
+    expect(await manager.deliver(id, "late")).toBe("held");
+    release();
+    await record.promise;
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "late", expect.anything()));
+  });
+
+  it("parks input for an adopted record whose teardown is running and delivers it when the teardown ends", async () => {
+    const source = new AgentManager();
+    resolvedRun();
+    const id = source.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = source.getRecord(id)!;
+    await record.promise;
+    const dto = toDto(record);
+    source.dispose();
+
+    manager = new AgentManager();
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "adopted" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    manager.adopt({ dto, session: { ...mockSession(), extensionRunner: { emit: () => hold } } }, false);
+
+    expect(await manager.deliver(id, "during")).toBe("held");
+    release();
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "during", expect.anything()));
+  });
+
+  it("reports only the steers it took to onSteered", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+
+    expect(await manager.steer("nope", "lost")).toBe(false);
+    expect(onSteered).not.toHaveBeenCalled();
+    expect(await manager.steer(id, "kept")).toBe("queued");
+    expect(onSteered).toHaveBeenCalledTimes(1);
+    expect(onSteered).toHaveBeenCalledWith(expect.objectContaining({ id }), "kept");
+  });
+
+  it("delivers to a draining record through the pool's deliver", async () => {
+    manager = new AgentManager();
+    const deliver = vi.fn(() => Promise.resolve("delivered" as const));
+    const record = { id: "old-1", status: "running" } as unknown as AgentRecord;
+    manager.setDrainingPools([{ runningCount: () => 1, abortAll: () => 0, dispose: () => {}, ownAgents: () => [record], deliver }]);
+
+    expect(await manager.deliver("old-1", "note")).toBe("delivered");
+    expect(deliver).toHaveBeenCalledWith("old-1", "note");
+  });
+
+  it("a B1-shaped pool without deliver takes a steer only into a running session", async () => {
+    manager = new AgentManager();
+    const steer = vi.fn(() => Promise.resolve());
+    const running = { id: "old-1", status: "running", session: { steer } } as unknown as AgentRecord;
+    const finished = { id: "old-2", status: "completed" } as unknown as AgentRecord;
+    manager.setDrainingPools([{ runningCount: () => 1, abortAll: () => 0, dispose: () => {}, ownAgents: () => [running, finished] }]);
+
+    expect(await manager.deliver("old-1", "note")).toBe("delivered");
+    expect(steer).toHaveBeenCalledWith("note");
+    expect(await manager.deliver("old-2", "late")).toBe(false);
   });
 });
 

@@ -73,7 +73,7 @@ pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s '
 ## Visual proof
 
 Required for every PR that changes what a pi session shows or how it behaves
-over time (rendering, FleetView, notifications, spawn/steer/resume/reload
+over time (rendering, FleetView, notifications, spawn/SendMessage/reload
 flows). A test passing is not proof of what the user sees.
 
 - Run the scenario in a real pi session inside tmux, with the branch build
@@ -115,8 +115,8 @@ author's own checks don't count as review. Record every round in the PR body,
 under Evidence. A verdict counts only for the SHA it reviewed.
 
 - Spawn a new `general-purpose` agent with `max_turns: 20`. Don't
-  use `resume`, `inherit_context`, `isolation` (a worktree branches from the
-  caller's committed `HEAD`, not the PR head), or `steer_subagent`.
+  use `inherit_context`, `isolation` (a worktree branches from the
+  caller's committed `HEAD`, not the PR head), or `SendMessage`.
 - Brief it with the linked issue (the guarantees), the head SHA and the
   worktree path holding it, the diff range `origin/main...<head-sha>`, and this
   checklist. Leave out your own conclusions, test results, the PR body's

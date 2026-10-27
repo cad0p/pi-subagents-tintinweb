@@ -217,7 +217,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(jobs[0].subagent_type).toBe("general-purpose");
   });
 
-  it("never blocks resume, which ignores subagent_type entirely", async () => {
+  it("never blocks SendMessage to a finished agent, which ignores subagent_type entirely", async () => {
     // resume replays a stored session; the type is required by the schema but
     // unused. Gating it would make a live agent unresumable the moment its type
     // is deleted or disabled — the opposite of what strict dispatch is for.
@@ -235,9 +235,9 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(id).toBeTruthy();
 
     setFallbackSubagent(NO_FALLBACK);
-    const resumed = await tools.get("Agent").execute(
+    const resumed = await tools.get("SendMessage").execute(
       "tc-7",
-      { resume: id, prompt: "keep going", description: "resume", subagent_type: "deleted-since" },
+      { to: id, message: "keep going" },
       undefined, undefined, ctx(),
     );
 

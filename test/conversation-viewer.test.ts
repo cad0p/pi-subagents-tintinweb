@@ -535,11 +535,11 @@ describe("ConversationViewer", () => {
       expect(viewer.render(W).join("\n")).toContain("Enter send · Esc cancel");
     });
 
-    it("no steer affordance once the agent is no longer running", () => {
+    it("offers steer for a finished agent: SendMessage resumes it from file", () => {
       const { viewer, onSteer } = makeViewer({ status: "completed" });
-      expect(viewer.render(W).join("\n")).not.toContain("Enter steer");
+      expect(viewer.render(W).join("\n")).toContain("Enter steer");
       viewer.handleInput("\r");
-      expect(viewer.render(W).join("\n")).not.toContain("Enter send");
+      expect(viewer.render(W).join("\n")).toContain("Enter send");
       expect(onSteer).not.toHaveBeenCalled();
     });
 

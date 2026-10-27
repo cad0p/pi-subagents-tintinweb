@@ -117,16 +117,8 @@ describe("nested ownership metadata", () => {
 
     const call = (name: string, params: Record<string, unknown>) =>
       root.tools.get(name).execute("tc", params, undefined, undefined, ctx());
-    for (const name of ["get_subagent_result", "steer_subagent"]) {
-      expect(textOf(await call(name, { agent_id: nestedId, message: "x" }))).toContain("not found");
-    }
-    const resumed = await call("Agent", {
-      prompt: "more",
-      description: "d",
-      subagent_type: "general-purpose",
-      resume: nestedId,
-    });
-    expect(textOf(resumed)).toContain("not found");
+    expect(textOf(await call("get_subagent_result", { agent_id: nestedId }))).toContain("not found");
+    expect(textOf(await call("SendMessage", { to: nestedId, message: "x" }))).toContain("not found");
   });
 
   it("the RPC surface cannot spawn with forged metadata or stop a nested child", async () => {
