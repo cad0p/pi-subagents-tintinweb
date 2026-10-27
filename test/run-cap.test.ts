@@ -70,7 +70,7 @@ const fakeChild = () => {
   const deliver = () => {
     const last = child.sendCustomMessage.mock.lastCall?.[0];
     if (!last) throw new Error("no wake was sent");
-    emit({ type: "message_start", message: { role: "custom", customType: last.customType, content: last.content } });
+    emit({ type: "message_start", message: { role: "custom", customType: last.customType, content: last.content, details: last.details } });
   };
   const child = {
     sessionId: "child-session-id",
@@ -93,7 +93,7 @@ const fakeChild = () => {
       return Promise.resolve();
     }),
     steer: vi.fn(),
-    sendCustomMessage: vi.fn((_message: { customType: string; content: string }, _options?: unknown) => Promise.resolve()),
+    sendCustomMessage: vi.fn((_message: { customType: string; content: string; details?: unknown }, _options?: unknown) => Promise.resolve()),
     dispose: vi.fn(),
     extensionRunner: { emit: () => Promise.resolve() },
     sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
