@@ -64,7 +64,6 @@ export function setQuietMs(ms: number): void {
 const WAKE_TYPE = "pi-subagents-wake";
 /** The custom message that carries a finished run's result to its parent or to the main session. */
 const NOTIFICATION_TYPE = "subagent-notification";
-let wakeSeq = 0;
 
 /** Grace window between an agent settling and its completion notification being sent, so a parent that pulls the result first can still cancel the nudge. Nested results settling in it share one message. */
 export const NUDGE_HOLD_MS = 200;
@@ -937,7 +936,9 @@ export class AgentManager {
    * Starts a run, or steers the running one, with a custom message the fork owns. The record counts as busy from the
    * send until the message's `message_start` is observed on the session, or until the send throws. `delivered` runs at
    * the observation; `failed` runs when the send throws. An `input` wake carries user input, so a finish that drops it
-   * names it.
+   * names it. The batch id is random, not a counter: a reloaded activation shares the session with the previous activation's
+   * subscriptions, and a counter restarted at 1 would let a stale listener match the new wake, splice itself out during the
+   * session's emit, and skip the new listener.
    */
   private wake(
     record: AgentRecord,
@@ -949,7 +950,7 @@ export class AgentManager {
       input = false,
       customType = WAKE_TYPE,
       display = false,
-      batch = `${record.id}:${++wakeSeq}`,
+      batch = `${record.id}:${randomUUID()}`,
     }: {
       delivered?: () => void;
       failed?: () => void;
@@ -1077,8 +1078,10 @@ export class AgentManager {
   }
 
   /**
-   * Takes the nested results still waiting in a batch for a reload hand-over. The batch timers are cleared; each undelivered
-   * child comes back as a `{ id, target }` nudge, so the adopter delivers it to its parent exactly once.
+   * Takes the nested results still waiting for a reload hand-over: those debounced in a batch and those in a wake sent but not
+   * observed here, which the new parent session may never have received. The timers are cleared and the in-flight set emptied,
+   * so this activation never marks them delivered. Each comes back as a `{ id, target }` nudge, so the adopter delivers it to
+   * its parent exactly once.
    */
   takeNestedPending(): NudgeEntry[] {
     const taken: NudgeEntry[] = [];
@@ -1089,6 +1092,10 @@ export class AgentManager {
       }
     }
     this.nestedBatches.clear();
+    for (const child of this.nestedInFlight) {
+      if (child.parentAgentId) taken.push({ id: child.id, target: child.parentAgentId });
+    }
+    this.nestedInFlight.clear();
     return taken;
   }
 

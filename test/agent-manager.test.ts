@@ -2531,4 +2531,11 @@ describe("AgentManager — PR119 r1 findings", () => {
     warn.mockRestore();
   });
 
+  it("a batch sent but not yet observed is handed over on reload", async () => {
+    const { id } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.takeNestedPending().map((entry) => entry.id)).toContain("c1");
+  });
 });

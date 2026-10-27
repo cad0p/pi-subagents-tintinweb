@@ -1266,6 +1266,52 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(naming(sent.mock.calls)).toHaveLength(0);
   }, 20_000);
 
+  it("hands a nested result whose wake was sent but never observed across /reload to the parent once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first batch wake leaves the session but its message_start never reaches this activation: the reload starts in that step.
+    let reloading: Promise<void> = Promise.resolve();
+    let swallowed = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!swallowed && message.customType === "subagent-notification") {
+        swallowed = true;
+        reloading = reloadRoot(root);
+        return Promise.resolve();
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(swallowed).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.resultDelivered).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(observed.filter((message) => JSON.stringify(message).includes(childId))).toHaveLength(1);
+    expect(sent.mock.calls.filter(([message]) => JSON.stringify(message).includes(childId))).toHaveLength(0);
+  }, 20_000);
+
   it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {
     const root = session;
     if (!root) throw new Error("no session");
