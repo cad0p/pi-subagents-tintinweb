@@ -329,7 +329,8 @@ describe("slot gate — provider requests", () => {
     slotGateExtension(c).factory(ext);
     const hook = hooks[0]!;
 
-    const idle = track(hook({}, { isIdle: () => true, signal: undefined } as unknown as ExtensionContext));
+    const idleCtx = { isIdle: () => true, signal: new AbortController().signal } as unknown as ExtensionContext;
+    const idle = track(hook({}, idleCtx));
     await flush();
     expect(idle.settled).toBe(true);
     expect(m.runningCount()).toBe(1);

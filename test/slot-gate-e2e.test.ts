@@ -54,6 +54,15 @@ function oneShot() {
   return { released, open: () => latch.open?.() };
 }
 
+/** Settles with `p`, or with undefined after 10 s, so a stuck run fails the test instead of hanging the worker. */
+function withinLimit<T>(p: Promise<T>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<undefined>((resolve) => {
+    timer = setTimeout(resolve, 10_000);
+  });
+  return Promise.race([p, limit]).finally(() => clearTimeout(timer));
+}
+
 interface Spawn {
   description: string;
   subagentType: string;
@@ -120,6 +129,9 @@ describe.each(SCENARIOS)("slot gate on resume: $name", ({ childType }) => {
       cwd,
       persistSession: true,
       awaitPayload: true,
+      // The parent's turn ends after B returns; no completion-nudge hold. Under a broken gate the hold re-prompts forever
+      // and starves the timers that bound the test.
+      hold: false,
       respond: (context) =>
         mentions(context, "P-TASK")
           ? parentReply(context, spawns)
@@ -147,8 +159,8 @@ describe.each(SCENARIOS)("slot gate on resume: $name", ({ childType }) => {
       expect(events.indexOf("B:returned")).toBeLessThan(events.indexOf("A:2"));
     } finally {
       holdB.open();
-      await resumed;
-      run = await pending;
+      await withinLimit(resumed ?? Promise.resolve());
+      run = await pending.catch(() => undefined);
     }
     expect(run?.responseText).toBe("parent done");
   });
