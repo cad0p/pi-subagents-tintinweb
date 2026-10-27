@@ -23,7 +23,7 @@ setQuietMs(20);
 
 const CAP_MS = 120_000;
 const LEAD_MS = 60_000;
-const pi = {} as ExtensionAPI;
+const pi = { appendEntry: vi.fn() } as unknown as ExtensionAPI;
 const ctx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 const dirs: string[] = [];
 
