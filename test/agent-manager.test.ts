@@ -1409,6 +1409,67 @@ describe("AgentManager — finish waits for idle and pending work", () => {
   });
 });
 
+describe("AgentManager — finish after a wake steer the aborted run never drained (#103)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  /** Starts a streaming run whose prompt never reports. The test ends the loop with `endLoop`. */
+  const streamingRun = async () => {
+    manager = new AgentManager();
+    const session = { ...liveSession(), messages: [], abort: vi.fn(), prompt: vi.fn(() => new Promise<void>(() => {})) };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      hostChild(opts, session);
+      void attachSessionLifecycle(session).prompt("go", { observer: opts.observer, signal: opts.signal });
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    session.isStreaming = true;
+    session.agent.state.isStreaming = true;
+    session.emit({ type: "agent_start" });
+    // The loop returns without draining its steering queue: no message_start for a queued wake, then agent_settled.
+    const endLoop = () => {
+      session.emit({ type: "agent_end" });
+      session.isStreaming = false;
+      session.agent.state.isStreaming = false;
+      session.emit({ type: "agent_settled" });
+    };
+    return { id, record: manager.getRecord(id) as AgentRecord, endLoop };
+  };
+
+  /** Resolves "settled" when the promise does, "hang" when it has not within `ms`. */
+  const settlesWithin = async (promise: Promise<unknown>, ms: number) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hang = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve("hang"), ms);
+    });
+    const outcome = await Promise.race([promise.then(() => "settled"), hang]);
+    clearTimeout(timer);
+    return outcome;
+  };
+
+  it("settles a stopped record whose queued wake the aborted loop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    expect(internals(manager).waking.has(id)).toBe(true);
+    manager.abort(id);
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("settles a soft-limited record whose queued wake the hard stop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    record.turnBudget = { turns: 1, softLimitReached: true };
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(child.resultDelivered).toBe(false);
+  });
+});
+
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());

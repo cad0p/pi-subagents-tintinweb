@@ -704,14 +704,27 @@ export class AgentManager {
     }
     const session = record.session;
     const busy = session !== undefined && (session.isStreaming || session.agent.state.isStreaming);
-    // A stopped record does not wait on deliveries: abort() must settle it even if a prompt never reports.
-    const preflighting = record.status !== "stopped" && (record.preflight ?? 0) > 0;
-    if (busy || this.waking.has(record.id) || preflighting) {
+    if (busy) {
       life.quiet = undefined;
       return;
     }
-    if (record.status === "stopped" || record.turnBudget?.softLimitReached) {
+    // A stopped record does not wait on deliveries: abort() must settle it even if a prompt never reports, or a wake
+    // it queued never drains. An aborted loop returns without draining its steering queue, so `waking` may never clear.
+    if (record.status === "stopped") {
       this.finalize(record, life);
+      return;
+    }
+    // A delivered prompt still in its preflight is not torn down under it, but a soft-limited run finishes once idle.
+    if ((record.preflight ?? 0) > 0) {
+      life.quiet = undefined;
+      return;
+    }
+    if (record.turnBudget?.softLimitReached) {
+      this.finalize(record, life);
+      return;
+    }
+    if (this.waking.has(record.id)) {
+      life.quiet = undefined;
       return;
     }
     if (session && record.held?.length) {
