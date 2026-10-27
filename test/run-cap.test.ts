@@ -383,6 +383,23 @@ describe("run cap", () => {
     expect(record).toMatchObject({ status: "completed", limitReason: "time", capMinutes: 2 });
     await next.dispose(false);
   });
+  it("a run that finishes before its cap clears both cap timers at the settle", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    const capTimers = (manager as unknown as { capTimers: Map<string, unknown> }).capTimers;
+    expect(capTimers.has(record.id)).toBe(true);
+    child.end("done");
+    await settle();
+    vi.advanceTimersByTime(1500);
+    await settle();
+    vi.advanceTimersByTime(1500);
+    await settle();
+    expect(record.status).toBe("completed");
+    expect(capTimers.has(record.id)).toBe(false);
+  });
+
   it("dispose clears the cap timers, so a disposed waiting run is never capped", async () => {
     pending = [bgItem];
     const child = fakeChild();
@@ -398,5 +415,29 @@ describe("run cap", () => {
     expect(record.limitReason).toBeUndefined();
     expect(child.sendCustomMessage).not.toHaveBeenCalled();
     expect(completions).toHaveLength(0);
+  });
+  it("a hard stop before the session exists settles at once, and the session that arrives later is torn down", async () => {
+    const child = fakeChild();
+    let releaseSession = () => {};
+    const created = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+      await created;
+      const session = child as unknown as AgentSession;
+      opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+      return { text: "", aborted: true, steered: false } as unknown as Awaited<ReturnType<typeof runAgent>>;
+    });
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time" });
+    expect(completions).toHaveLength(1);
+    releaseSession();
+    await settle();
+    expect(child.dispose).toHaveBeenCalled();
+    expect(record.session).toBeUndefined();
   });
 });

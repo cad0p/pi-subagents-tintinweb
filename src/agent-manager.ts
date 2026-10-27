@@ -640,6 +640,12 @@ export class AgentManager {
         record.childSettings = settings;
       },
       onSessionCreated: (session, lifecycle) => {
+        // The lifecycle settled before its session existed (a hard stop or abort during createChildSession). Nothing
+        // else retires this session, so it is torn down here instead of bound to the settled record.
+        if (this.lives.get(record.id) !== life) {
+          void teardownChildSession(session);
+          return;
+        }
         bindSession(record, session, lifecycle);
         options.onSessionCreated?.(session);
       },
