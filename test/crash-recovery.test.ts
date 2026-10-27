@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({
@@ -37,7 +37,7 @@ function deadPid(): number {
 }
 
 /** A child session; a reopen hands its own session manager back, as the real session does. */
-function childSession(sessionManager?: unknown) {
+function childSession(sessionManager?: unknown): AgentSession {
   return {
     abort: vi.fn(async () => {}),
     extensionRunner: { emit: vi.fn(async () => {}) },
@@ -52,7 +52,7 @@ function childSession(sessionManager?: unknown) {
     sendCustomMessage: vi.fn(async () => {}),
 
     sessionManager: sessionManager ?? { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
-  } as any;
+  } as unknown as AgentSession;
 }
 
 let tmpDir: string;
@@ -108,15 +108,22 @@ function spawned(id: string, pid: number, extra: Record<string, unknown> = {}) {
   });
 }
 
-function entriesOf(file: string): any[] {
-  return readFileSync(file, "utf-8").trim().split("\n").slice(1).map((line) => JSON.parse(line));
+/** A session file line after the header; custom entries carry `customType` and `data`. */
+interface Entry {
+  type: string;
+  customType?: string;
+  data?: { id?: string; status?: string };
+}
+
+function entriesOf(file: string): Entry[] {
+  return readFileSync(file, "utf-8").trim().split("\n").slice(1).map((line) => JSON.parse(line) as Entry);
 }
 
 /** Ids of the runs the file settled as interrupted. */
 function interruptedSettles(file: string): string[] {
   return entriesOf(file)
-    .filter((e) => e.customType === "subagents:record" && e.data.status === "interrupted")
-    .map((e) => e.data.id)
+    .filter((e) => e.customType === "subagents:record" && e.data?.status === "interrupted")
+    .map((e) => e.data?.id ?? "")
     .sort();
 }
 
@@ -131,7 +138,7 @@ function boot(file: string) {
 
 /** The session_start context: spawnCtx with the real session file opened. */
 function startup(made: ReturnType<typeof makePi>, file: string, modelRegistry?: Record<string, unknown>) {
-  const ctx = { ...spawnCtx(tmpDir), sessionManager: SessionManager.open(file, undefined, tmpDir), ...(modelRegistry ? { modelRegistry } : {}) } as any;
+  const ctx = { ...spawnCtx(tmpDir), sessionManager: SessionManager.open(file, undefined, tmpDir), ...(modelRegistry ? { modelRegistry } : {}) };
   return made.lifecycle.get("session_start")({ reason: "startup" }, ctx);
 }
 
@@ -216,7 +223,7 @@ describe("crash recovery — startup report", () => {
     const childFile = join(tmpDir, "stop.jsonl");
     writeSession(file);
     writeSession(childFile);
-    vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts: any) => {
+    vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts) => {
       const session = childSession();
       session.sessionManager.getSessionFile = () => childFile;
       opts.onChildSettings?.({ effectiveCwd: tmpDir });
@@ -230,7 +237,7 @@ describe("crash recovery — startup report", () => {
     await made.lifecycle.get("session_shutdown")({ reason: "quit" }, spawnCtx(tmpDir));
 
     const settle = entriesOf(file).find((e) => e.customType === "subagents:record");
-    expect(settle?.data.status).toBe("stopped");
+    expect(settle?.data?.status).toBe("stopped");
     const reopened = boot(file);
     await startup(reopened, file);
     await quiet();
@@ -247,7 +254,7 @@ describe("crash recovery — resume", () => {
     const findModel = vi.fn(() => undefined);
     await startup(made, file, { find: findModel, getAvailable: vi.fn(() => []) });
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
-    vi.mocked(resumeAgent).mockResolvedValue({ responseText: "done", session: childSession(), aborted: false, steered: false } as any);
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
 
     await made.tools.get("SendMessage").execute("tc-resume", { to: "res", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
 
@@ -256,7 +263,7 @@ describe("crash recovery — resume", () => {
     expect(prompt).toMatch(/^You were interrupted by a crash\. /);
     expect(prompt).toContain("continue");
     expect(findModel).toHaveBeenCalledWith("faux", "model");
-    expect(entriesOf(file).some((e) => e.customType === "subagent-resumed" && e.data.id === "res")).toBe(true);
+    expect(entriesOf(file).some((e) => e.customType === "subagent-resumed" && e.data?.id === "res")).toBe(true);
   });
 
   it("reports a nested interrupted run at its parent's resume, not at startup", async () => {
