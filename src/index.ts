@@ -890,7 +890,7 @@ export default function (pi: ExtensionAPI) {
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
       const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]
-        .filter((record) => record.spawnerSessionId === undefined)
+        .filter((record) => record.spawnerSessionId === undefined && record.resultDelivered === undefined)
         .map((record) => record.id);
       for (const spec of taken.queued) {
         try {

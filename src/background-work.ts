@@ -35,7 +35,8 @@ function isListableString(value: string, maxLength: number): boolean {
  *
  * Between `beginDrain` and adoption, a reload's queued and idle-undelivered records sit in the
  * hand-over buffer, in no manager, so a snapshot taken in that window misses them. The main session is
- * idle during /reload, and waiting consumers confirm an empty result with a second snapshot about 1 s later.
+ * idle during /reload, and the package tells consumers to confirm an empty result with a second snapshot
+ * (@cad0p/pi-background-work README, "An empty snapshot").
  */
 export function listSubagentWork(source: BackgroundWorkSource | undefined, context?: BackgroundWorkListContext): BackgroundWorkItem[] {
   const items: BackgroundWorkItem[] = [];

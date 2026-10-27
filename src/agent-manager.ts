@@ -255,6 +255,8 @@ export class AgentManager {
       // Captured once. A nested record is reported under its parent's child session (the parent's finish
       // check queries that key); every other record under the spawning session. Never the root session:
       // a spawn from a child-session context must not be listed under the main session's key.
+      // A nested spawn whose parent record is gone gets no key and is never listed; its parent cannot
+      // wait on it anyway.
       spawnerSessionId: options.parentAgentId
         ? this.getRecord(options.parentAgentId)?.sessionId
         : sessionKey(ctx.sessionManager),
@@ -907,6 +909,9 @@ export class AgentManager {
       // run is still writing to, and the file has to outlive the run.
       if (record.settled === false) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
+      // Listed as background work until delivered, so kept until then. Bounded: a top-level result is
+      // delivered by its nudge, a nested one by its parent's pull or by the parent's settle.
+      if (!record.resultDelivered) continue;
       this.removeRecord(id, record);
     }
   }
