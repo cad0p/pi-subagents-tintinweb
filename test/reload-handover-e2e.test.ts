@@ -1100,6 +1100,36 @@ describe("subagents across a real /reload (faux provider)", () => {
     offAfter();
   }, 20_000);
 
+  it("keeps a waiting parent in its draining pool across /reload, settles it there, and announces it once from the new activation", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+
+    await reloadRoot(root);
+    // The waiting parent is not handed over: the reloaded root lists the record its draining pool still holds, unsettled.
+    expect(publishedRoot().manager.getRecord(parentId)).toBe(draining.getRecord(parentId));
+    expect(draining.getRecord(parentId)?.settled).toBe(false);
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    const announced = () => sent.mock.calls.filter(([message]) => message.customType === "subagent-notification");
+
+    release();
+    // The draining pool settles the parent; the notification leaves through the new activation, exactly once.
+    await vi.waitFor(() => expect(announced()).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(announced()).toHaveLength(1);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
+  }, 20_000);
+
   it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {
     const root = session;
     if (!root) throw new Error("no session");
