@@ -377,11 +377,23 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 | `aborted` | Grace period exceeded | `✗` red |
 | `stopped` | User-initiated abort | `■` dim |
 
+## Run Cap
+
+`max_turns` cannot bound time: an agent waiting on a timer or a child costs no turns. So every agent lifecycle (from the moment it leaves the spawn queue, and again from every resume) is capped at `maxBackgroundWait` minutes of wall time, working, waiting and queued at the gate alike. The value comes from your `background-work.json` (`<cwd>/.pi/background-work.json`, then `~/.pi/agent/background-work.json`; default `30`, fractions allowed), read at spawn and at resume.
+
+1. One minute before the cap (half the cap when it is 2 minutes or less) the agent is told to write its report now. A running turn gets it as a steer; a waiting agent is woken with it.
+2. When that run ends, the agent finishes, whatever background work it still has listed.
+3. At the cap a still-running turn is aborted; an idle or queued agent finishes at once.
+
+The result is the last run's text, status `completed`, with the note *time limit reached (N min); resume with SendMessage to continue*. A resume starts a fresh cap.
+
+Why 30 minutes: pi keeps an idle session's prompt cache warm for 30 minutes after its last real request (`MAX_IDLE_WARMING_AGE_MS`, pi 1.4.0 `dist/core/cache-warmer.js`). The parent's last request is at or after the spawn, so a report by 30:00 reaches the parent while its cache is still warm.
+
 ## Concurrency
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
-Resumed runs (a `SendMessage` to a finished agent) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
+The limit counts running turns. An agent waiting on background work holds no slot. A woken or resumed agent (a timer, a nested result, a `SendMessage` to a finished agent) takes a slot when its next provider request is sent, and shows as queued until one is free. Scheduled fires still start immediately and can exceed the limit.
 
 ## Session Persistence
 
