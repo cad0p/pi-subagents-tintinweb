@@ -1673,6 +1673,34 @@ describe("AgentManager — nested results batch per parent (#83)", () => {
     expect(manager.resultReachedParent(child)).toBe(false);
     expect(child.resultConsumed).toBeUndefined();
   });
+
+  it("a child result sent from inside the parent's agent_settled listener wakes the parent, which stays live until that wake runs", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    const settled = { type: "agent_settled" };
+    session.subscribe((event) => {
+      if (event === settled) manager.deliverNested(child, "late child");
+    });
+    session.emit(settled);
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "late child" }), expect.anything());
+    expect(manager.getRecord(id)?.status).toBe("running");
+    expect(internals(manager).lives.has(id)).toBe(true);
+    observeLastCustom(session);
+    expect(child.resultDelivered).toBe(true);
+    expect(internals(manager).waking.has(id)).toBe(false);
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("a result text starting with /reload is delivered as a message and runs no command", async () => {
+    const { id, session } = await parentWithSession();
+    manager.deliverNested(nestedChild(id), "/reload now");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "/reload now" }), expect.anything());
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
 });
 
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
