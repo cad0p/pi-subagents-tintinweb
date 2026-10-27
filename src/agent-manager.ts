@@ -62,6 +62,9 @@ export function setQuietMs(ms: number): void {
 /** Custom message type of the fork's own wakes: queued input, held input, nested results, the continue notice. */
 const WAKE_TYPE = "pi-subagents-wake";
 
+/** Longest a delivered prompt may stay unreported before its preflight stops counting against finish (a deferred re-run that throws never reports). */
+const PREFLIGHT_TIMEOUT_MS = 30_000;
+
 /** Wake text for a finished subagent that has queued input or background work to pick up. */
 const CONTINUE_NOTICE =
   "Input or background work you were waiting on is ready. Continue your task. When you are done, your final message is your result; restate anything from before the wait that the parent needs.";
@@ -1205,16 +1208,10 @@ export class AgentManager {
       return "queued";
     }
     if (record.status === "running" && record.session) {
-      // Not awaited: the tool answers at once. Pending (`preflight`) until pi reports the disposition or the prompt
-      // rejects; a prompt pi defers (during agent_settled) reports when it re-runs. A busy rejection parks the text in
-      // `held`; other rejections are logged, not retried.
-      let reported = false;
-      const report = () => {
-        if (reported) return;
-        reported = true;
-        record.preflight = (record.preflight ?? 1) - 1;
-      };
-      record.preflight = (record.preflight ?? 0) + 1;
+      // Not awaited: the tool answers at once. Pending (`preflight`) until pi reports the disposition, the prompt
+      // rejects, or the bound in countPreflight passes; a prompt pi defers (during agent_settled) reports when it re-runs.
+      // A busy rejection parks the text in `held`; other rejections are logged, not retried.
+      const report = this.countPreflight(record, id);
       record.session
         .prompt(text, { streamingBehavior: "steer", preflightResult: report })
         .catch((err: unknown) => {
@@ -1236,6 +1233,24 @@ export class AgentManager {
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     return this.resume(id, text, callbacks) ? "resumed" : false;
+  }
+
+  /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */
+  private countPreflight(record: AgentRecord, id: string): () => void {
+    let open = true;
+    record.preflight = (record.preflight ?? 0) + 1;
+    const timer = setTimeout(() => {
+      console.warn(`[pi-subagents] ${id}: a steer did not report preflight within ${PREFLIGHT_TIMEOUT_MS / 1000} s; no longer waiting for it`);
+      release();
+    }, PREFLIGHT_TIMEOUT_MS);
+    timer.unref();
+    const release = () => {
+      if (!open) return;
+      open = false;
+      clearTimeout(timer);
+      record.preflight = (record.preflight ?? 1) - 1;
+    };
+    return release;
   }
 
   /** Input for a record a draining pool owns. A pool from an older activation has no `deliver`: only a running session takes it. */

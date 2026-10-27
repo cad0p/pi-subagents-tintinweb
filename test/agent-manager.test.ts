@@ -970,6 +970,33 @@ describe("AgentManager — deliver()", () => {
     expect(manager.getRecord(id)?.preflight).toBe(0);
   });
 
+  it("stops counting a steer whose preflight never reports, after a bound, and lets the record settle", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    session.prompt = vi.fn(() => Promise.resolve());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const id = spawnHosted(manager, session);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(manager.getRecord(id)?.session).toBe(session);
+      expect(await manager.deliver(id, "go")).toBe("delivered");
+      const record = manager.getRecord(id)!;
+      expect(record.preflight).toBe(1);
+      settleRun(manager, id);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(record.preflight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(record.preflight).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("did not report preflight"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      await record.promise;
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
   it("parks a steer pi rejects as already processing in held", async () => {
     manager = new AgentManager();
     const session = liveSession();
