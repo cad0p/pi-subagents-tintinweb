@@ -875,7 +875,11 @@ describe("AgentManager — abort() state machine", () => {
   });
 });
 
-type Internals = { lives: Map<string, { lastRun?: unknown }>; decide(record: AgentRecord, life: unknown): void };
+type Internals = {
+  lives: Map<string, { lastRun?: unknown; tick?: unknown }>;
+  waking: Set<string>;
+  decide(record: AgentRecord, life: unknown): void;
+};
 const internals = (m: AgentManager) => m as unknown as Internals;
 
 /** A session the test drives: `emit` reaches its subscribers. Its run settles only when the test settles it. */
@@ -1407,6 +1411,62 @@ describe("AgentManager — finish waits for idle and pending work", () => {
     session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
     expect(child.resultDelivered).toBe(true);
   });
+
+  it("finishes a settled session only after a second quiet observation", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+    await vi.waitFor(() => expect(internals(manager).lives.has(id)).toBe(false));
+  });
+
+  it("does not finish while a wake it sent is still unobserved", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const parentId = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
+    const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    settleRun(manager, parentId);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(internals(manager).lives.has(parentId)).toBe(true);
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("clears the lifecycle tick when it finishes", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    const tick = internals(manager).lives.get(id)?.tick;
+    expect(tick).toBeDefined();
+    const clear = vi.spyOn(globalThis, "clearInterval");
+    try {
+      (manager.getRecord(id) as AgentRecord).status = "stopped";
+      settleRun(manager, id);
+      expect(clear).toHaveBeenCalledWith(tick);
+    } finally {
+      clear.mockRestore();
+    }
+  });
+
+  it("a resumed run starts with a fresh turn budget, not the soft limit of the run before", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id) as AgentRecord;
+    await record.promise;
+    record.turnBudget = { turns: 1, softLimitReached: true };
+    await reopen(manager, id);
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise(() => {}));
+    manager.resume(id, "more");
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+  });
 });
 
 describe("AgentManager — finish after a wake steer the aborted run never drained (#103)", () => {
@@ -1434,7 +1494,7 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
       session.agent.state.isStreaming = false;
       session.emit({ type: "agent_settled" });
     };
-    return { id, record: manager.getRecord(id) as AgentRecord, endLoop };
+    return { id, session, record: manager.getRecord(id) as AgentRecord, endLoop };
   };
 
   /** Resolves "settled" when the promise does, "hang" when it has not within `ms`. */
@@ -1467,6 +1527,16 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
     endLoop();
     expect(await settlesWithin(record.promise, 1000)).toBe("settled");
     expect(child.resultDelivered).toBe(false);
+  });
+
+  it("settles a wake steered into a run already streaming, with no run start after it", async () => {
+    const { id, record, session, endLoop } = await streamingRun();
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    expect(child.resultDelivered).toBe(true);
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
   });
 });
 
