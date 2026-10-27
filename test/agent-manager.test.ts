@@ -1095,7 +1095,7 @@ describe("AgentManager — deliver()", () => {
       depth: 2,
     });
 
-    (manager as unknown as { abortOwnedChildren(id: string): void }).abortOwnedChildren("parent-x");
+    (manager as unknown as { abortOwnedChildren(parent: AgentRecord): void }).abortOwnedChildren({ id: "parent-x" } as AgentRecord);
     await manager.getRecord(running)!.promise?.catch(() => {});
 
     expect(manager.getRecord(running)!.ownerAborted).toBe(true);
@@ -1648,6 +1648,30 @@ describe("AgentManager — nested results batch per parent (#83)", () => {
     vi.advanceTimersByTime(NUDGE_HOLD_MS);
     expect(session.sendCustomMessage).toHaveBeenCalledTimes(2);
     expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "second" }), expect.anything());
+  });
+
+  it("a pull during the window removes that result from the batch", async () => {
+    const { id, session } = await parentWithSession();
+    const first = nestedChild(id);
+    const second = nestedChild(id);
+    manager.deliverNested(first, "first");
+    manager.deliverNested(second, "second");
+    expect(consumeResult(second)).toBe(true);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "first" }), expect.anything());
+  });
+
+  it("a result in a sent batch reads as reached the parent before and after observation, and is not consumed", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    expect(manager.resultReachedParent(child)).toBe(false);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.resultReachedParent(child)).toBe(true);
+    observeLastCustom(session);
+    expect(manager.resultReachedParent(child)).toBe(true);
+    expect(child.resultConsumed).toBeUndefined();
   });
 });
 
@@ -2339,6 +2363,38 @@ describe("AgentManager — nested children", () => {
     // A second top-level spawn queues behind it too, so the pool is not bypassed.
     const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
     expect(manager.getRecord(sibling)!.status).toBe("queued");
+  });
+
+  it("an owner-aborted child is never delivered, and the parent result names it", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    hangingRun();
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", { description: "child", parentAgentId: parent, depth: 2 });
+    const deliver = vi.spyOn(manager, "deliver");
+    await manager.getRecord(parent)!.promise;
+    await manager.getRecord(child)!.promise?.catch(() => {});
+    manager.deliverNested(manager.getRecord(child)!, "stopped result");
+    expect(manager.getRecord(child)!.ownerAborted).toBe(true);
+    expect(deliver).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(manager.getRecord(parent)!.result).toContain("stopped with parent: " + child));
+  });
+
+  it("a result for a settled nested parent resumes it once; the resumed finish is its one notification", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
+    await manager.getRecord(parent)!.promise;
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "resumed" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(late, "late result");
+    await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(2));
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "late result", expect.anything());
   });
 });
 

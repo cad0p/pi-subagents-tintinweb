@@ -366,6 +366,8 @@ export class AgentManager {
   private waking = new Map<string, string | undefined>();
   /** Nested results queued per parent. `flushNested` sends a parent's batch when its window closes or its decide runs. */
   private nestedBatches = new Map<string, NestedBatch>();
+  /** Child records whose result is in a sent nested batch that the parent has not yet observed. */
+  private nestedInFlight = new Set<AgentRecord>();
   /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
   private capTimers = new Map<
     string,
@@ -972,7 +974,16 @@ export class AgentManager {
    */
   deliverNested(child: AgentRecord, content: string): void {
     const parentId = child.parentAgentId;
-    if (!parentId || !this.agents.get(parentId)?.session) return;
+    const parent = parentId ? this.agents.get(parentId) : undefined;
+    // An owner abort is the parent's own stop, not a result to hand on.
+    if (!parentId || !parent || child.ownerAborted) return;
+    if (!parent.session) {
+      // A settled parent is resumed with the result; its finish is then its one notification to its owner.
+      void this.deliver(parentId, content).then((outcome) => {
+        if (outcome) child.resultDelivered = true;
+      });
+      return;
+    }
     const batch = this.nestedBatches.get(parentId);
     if (batch) {
       batch.entries.push({ child, content });
@@ -998,13 +1009,26 @@ export class AgentManager {
     const session = parent?.session;
     const entries = batch.entries.filter((entry) => !entry.child.resultDelivered);
     if (!parent || !session || entries.length === 0) return;
+    for (const entry of entries) this.nestedInFlight.add(entry.child);
     this.wake(parent, session, entries.map((entry) => entry.content).join("\n\n"), {
       customType: NOTIFICATION_TYPE,
       display: true,
       delivered: () => {
-        for (const entry of entries) entry.child.resultDelivered = true;
+        for (const entry of entries) {
+          entry.child.resultDelivered = true;
+          this.nestedInFlight.delete(entry.child);
+        }
       },
     });
+  }
+
+  /**
+   * Whether a settled child's result already reached its parent: in a sent batch, or delivered (observed or resumed).
+   * A pull answers "already delivered" then, so the parent never reads one result twice.
+   */
+  resultReachedParent(child: AgentRecord): boolean {
+    if (child.status === "running" || child.status === "queued") return false;
+    return this.nestedInFlight.has(child) || (child.resultDelivered === true && child.resultConsumed !== true);
   }
 
   private armNested(parentId: string): ReturnType<typeof setTimeout> {
@@ -1090,7 +1114,7 @@ export class AgentManager {
     // a resumed turn: grandchildren follow transitively, each through its own
     // settle tail.
     // Each step is failure-safe: a throw here would strand `transition` and `settled = false` forever.
-    try { this.abortOwnedChildren(record.id); } catch { /* keep the completion tail failure-safe */ }
+    try { this.abortOwnedChildren(record); } catch { /* keep the completion tail failure-safe */ }
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     const session = record.session;
@@ -1211,14 +1235,23 @@ export class AgentManager {
    * A child that had already finished was not stopped: it keeps its file and stays
    * resumable through `deliver`.
    */
-  private abortOwnedChildren(parentId: string): void {
+  private abortOwnedChildren(parent: AgentRecord): void {
+    const stopped: string[] = [];
     for (const [id, record] of this.agents) {
-      if (record.parentAgentId !== parentId) continue;
+      if (record.parentAgentId !== parent.id) continue;
       const live = record.status === "queued" || record.status === "running";
+      // Flagged before the abort: a settle the abort triggers must already see the owner's stop.
+      if (live) {
+        record.ownerAborted = true;
+        stopped.push(id);
+      }
       this.abort(id);
       // The owning parent settled, so no one can pull this child's result: it is delivered.
       record.resultDelivered = true;
-      if (live) record.ownerAborted = true;
+    }
+    if (stopped.length > 0) {
+      const note = `stopped with parent: ${stopped.join(", ")}`;
+      parent.result = parent.result ? `${parent.result}\n\n${note}` : note;
     }
   }
 
