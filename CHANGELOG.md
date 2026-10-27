@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - *(background-work)* List subagents as pi-subagents background work until delivered (closes #11) ([#96](https://github.com/cad0p/pi-subagents-tintinweb/pull/96))
 - *(lifecycle)* Tear child sessions down at settle and resume from file (closes #98) ([#99](https://github.com/cad0p/pi-subagents-tintinweb/pull/99))
 - *(subagents)* SendMessage replaces steer_subagent and Agent resume; one deliver path (closes #101) ([#102](https://github.com/cad0p/pi-subagents-tintinweb/pull/102))
+- *(subagents)* A subagent finishes only when idle with no pending background work (closes #103) ([#105](https://github.com/cad0p/pi-subagents-tintinweb/pull/105))
 
 ### 🐛 Bug Fixes
 
