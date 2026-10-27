@@ -34,7 +34,7 @@ const COST = 0.0123;
 
 /** A child session stand-in — only the members the manager touches. */
 function fakeSession(): AgentSession {
-  return { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as unknown as AgentSession;
+  return { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
 }
 
 /** Deterministic record: fixed timestamps → 5.0s duration, fixed usage. */

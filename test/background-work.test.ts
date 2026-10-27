@@ -17,11 +17,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<Record<string, unknown>>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn() };
 });
 
 import { AgentManager } from "../src/agent-manager.js";
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import {
+  attachSessionLifecycle,
+  type ChildSessionSettings,
+  createChildSession,
+  resumeAgent,
+  runAgent,
+} from "../src/agent-runner.js";
 import { registerSubagentProvider } from "../src/background-work.js";
 import subagentsExtension from "../src/index.js";
 import { legacyDelivered } from "../src/reload-handover.js";
@@ -205,13 +211,22 @@ describe("background-work delivered flag — manager records", () => {
   const mgrCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => MAIN } } as any;
   const listedNow = (): string[] => snapshotBackgroundWork([MAIN]).items.map((item) => item.id);
 
-  /** Spawns a background run that settles at once, then waits for it. */
+  /** A fake child session with the fields the teardown and the reopen read. */
+  const fakeChild = () =>
+    ({
+      dispose: vi.fn(),
+      subscribe: () => () => {},
+      sessionId: "child",
+      sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+    }) as any;
+
+  /** Spawns a background run that settles at once, then waits for it. The runner hosts the child as it does for a real run. */
   async function settledRecord(manager: AgentManager): Promise<string> {
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "first",
-      session: { dispose: vi.fn(), sessionId: "child", sessionManager: { getSessionFile: () => undefined } } as any,
-      aborted: false,
-      steered: false,
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      const child = fakeChild();
+      opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+      opts.onSessionCreated?.(child, attachSessionLifecycle(child));
+      return { responseText: "first", session: child, aborted: false, steered: false } as any;
     });
     const id = manager.spawn({} as any, mgrCtx, "general-purpose", "test", { description: "test" });
     await manager.getRecord(id)?.promise;
@@ -235,6 +250,8 @@ describe("background-work delivered flag — manager records", () => {
     manager.getRecord(id)!.resultDelivered = true;
     expect(listedNow()).toEqual([]);
 
+    vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
+    await manager.restoreSession(id);
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" } as any);
     await manager.resume(id, "more")?.promise;
     expect(listedNow()).toEqual([id]);

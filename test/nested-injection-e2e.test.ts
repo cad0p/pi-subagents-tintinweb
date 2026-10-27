@@ -120,7 +120,7 @@ describe("nested tool injection into a real child session", () => {
       isProjectTrusted: () => true,
       model,
       modelRegistry,
-      sessionManager: { getSessionFile: () => undefined },
+      sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     };
     const spawns: SpawnCall[] = [];
     let session: AgentSession | undefined;

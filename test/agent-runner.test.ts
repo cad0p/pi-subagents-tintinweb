@@ -153,6 +153,7 @@ vi.mock("../src/skill-loader.js", () => ({
 }));
 
 import {
+  attachSessionLifecycle,
   EXCLUDED_TOOL_NAMES,
   extensionCanonicalName,
   extensionCanonicalNames,
@@ -161,6 +162,7 @@ import {
   resolveScopedModels,
   resumeAgent,
   runAgent,
+  type SessionLifecycle,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
 import { retargetToolsSection } from "../src/prompts.js";
@@ -564,13 +566,23 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
   });
 
-  it("runAgent and resumeAgent unsubscribe every listener when the prompt throws (#58)", async () => {
+  it("runAgent and resumeAgent keep one listener until the lifecycle detaches, even when the prompt throws (#58)", async () => {
     const run = createSession("");
     run.session.prompt = vi.fn(async () => {
       throw new Error("boom");
     }) as any;
     createAgentSession.mockResolvedValue({ session: run.session });
-    await expect(runAgent(ctx, "Explore", "go", { pi })).rejects.toThrow("boom");
+    let lifecycle: SessionLifecycle | undefined;
+    await expect(
+      runAgent(ctx, "Explore", "go", {
+        pi,
+        onSessionCreated: (_session, attached) => {
+          lifecycle = attached;
+        },
+      }),
+    ).rejects.toThrow("boom");
+    expect(run.listeners).toHaveLength(1);
+    lifecycle?.detach();
     expect(run.listeners).toHaveLength(0);
 
     const resume = createSession("");
@@ -578,6 +590,8 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       throw new Error("boom");
     }) as any;
     await expect(resumeAgent(resume.session as any, "go")).rejects.toThrow("boom");
+    expect(resume.listeners).toHaveLength(1);
+    attachSessionLifecycle(resume.session as any).detach();
     expect(resume.listeners).toHaveLength(0);
   });
 

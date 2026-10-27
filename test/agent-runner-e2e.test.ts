@@ -155,7 +155,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       modelRegistry,
       // No parent session file: the child still writes its own session, it just
       // has no `parentSession` link to record.
-      sessionManager: { getSessionFile: () => undefined },
+      sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     };
 
     let active: string[] = [];

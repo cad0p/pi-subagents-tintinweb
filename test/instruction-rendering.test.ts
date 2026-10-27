@@ -606,12 +606,12 @@ describe("instruction rendering", () => {
       const { id, record } = await spawnBackground(tools);
 
       const steerFn = vi.fn(async () => {});
-      record.session = { steer: steerFn, sessionManager: { getSessionFile: () => undefined } } as any;
+      record.session = { steer: steerFn, sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       const sent = await steer.execute("tc", { agent_id: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
       expect(sent.details.steerOutcome).toBe("sent");
       expect(steerFn).toHaveBeenCalledWith("go left");
 
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined } } as any;
+      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       const failed = await steer.execute("tc", { agent_id: id, message: "go right" }, undefined, undefined, spawnCtx(cwd));
       expect(failed.details.steerOutcome).toBe("failed");
       expect(failed.content[0].text).toBe("Failed to steer agent: boom");
@@ -621,7 +621,7 @@ describe("instruction rendering", () => {
       const { tools } = registerTools();
       const steer = tools.get("steer_subagent");
       const { id, record } = await spawnBackground(tools);
-      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined } } as any;
+      record.session = { steer: vi.fn(async () => { throw new Error("boom"); }), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
 
       const failed = await steer.execute("tc", { agent_id: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
       const theme = makeTheme();

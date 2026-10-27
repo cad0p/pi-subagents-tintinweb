@@ -35,7 +35,7 @@ export class ConversationViewer implements Component {
 
   constructor(
     private tui: TUI,
-    private session: AgentSession,
+    private session: Pick<AgentSession, "messages" | "subscribe">,
     private record: AgentRecord,
     private activity: AgentActivity | undefined,
     private theme: Theme,
@@ -164,7 +164,7 @@ export class ConversationViewer implements Component {
     const usage = this.activity?.lifetimeUsage ?? this.record.lifetimeUsage;
     const tokens = getLifetimeTotal(usage);
     if (tokens > 0) {
-      const percent = getSessionContextPercent(this.activity?.session);
+      const percent = getSessionContextPercent(this.activity?.session ?? this.record.sessionSnapshot);
       headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
     }
     const cost = this.showCost ? formatCost(getLifetimeCost(usage)) : "";

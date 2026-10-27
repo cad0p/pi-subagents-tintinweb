@@ -37,7 +37,7 @@ type ToolResult = { content: { type: string; text: string }[]; details?: unknown
 
 /** A child session stand-in — only the members the manager touches. */
 function fakeSession(dispose: () => void = vi.fn()): AgentSession {
-  return { dispose, sessionManager: { getSessionFile: () => undefined } } as unknown as AgentSession;
+  return { dispose, sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));

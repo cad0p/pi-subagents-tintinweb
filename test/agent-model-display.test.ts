@@ -61,7 +61,7 @@ function reportingSession(
   return {
     sessionId: "child-session-id",
     dispose: vi.fn(),
-    sessionManager: { getSessionFile: () => undefined },
+    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     model,
     thinkingLevel,
   } as unknown as AgentSession;

@@ -19,7 +19,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { textOf } from "./helpers/subagents-harness.js";
 
@@ -108,11 +108,11 @@ describe("FleetView wiring (real extension lifecycle)", () => {
   });
 
   it("registers the belowEditor widget once a spawned agent has a session, then clears it on shutdown", async () => {
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done",
-      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
-      aborted: false,
-      steered: false,
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      // The runner hands the live session over before the run settles; the settled record keeps a snapshot of it.
+      const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+      opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+      return { responseText: "done", session, aborted: false, steered: false } as any;
     });
 
     const { pi, tools, lifecycle } = makePi();

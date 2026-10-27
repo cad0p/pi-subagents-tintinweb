@@ -443,7 +443,7 @@ export class AgentWidget {
       // stats at all — and, with the setting on, no cost.
       const usage = bg?.lifetimeUsage ?? a.lifetimeUsage;
       const tokens = getLifetimeTotal(usage);
-      const contextPercent = getSessionContextPercent(bg?.session);
+      const contextPercent = getSessionContextPercent(bg?.session ?? a.sessionSnapshot);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
       const costText = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
 

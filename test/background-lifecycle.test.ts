@@ -12,11 +12,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn(async () => mockSession()) };
 });
 
 import { AgentManager } from "../src/agent-manager.js";
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import {
+  attachSessionLifecycle,
+  type ChildSessionSettings,
+  createChildSession,
+  resumeAgent,
+  runAgent,
+} from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
@@ -27,7 +33,7 @@ const mockSession = () => ({
   sessionId: "child-session-id",
   messages: [],
   subscribe: () => () => {},
-  sessionManager: { getSessionFile: () => undefined },
+  sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
 
 /** Minimal theme for asserting rendered widget text (colors stay legible wrappers). */
@@ -36,13 +42,24 @@ const mockTheme = {
   bold: (text: string) => `**${text}**`,
 };
 
+/** A run that hosts its session the way pi does: handed to `onSessionCreated`, so the record binds it and keeps the entries a settled resume reopens from. */
+type RunHooks = { onChildSettings?: (settings: ChildSessionSettings) => void; onSessionCreated?: (session: any, lifecycle: any) => void };
+
+/** Hosts a live session on a run the way pi does, so the record binds it while the run is in flight. */
+function hostSession(opts: RunHooks): ReturnType<typeof mockSession> {
+  const session = mockSession();
+  opts.onChildSettings?.({ effectiveCwd: tmpdir() } as ChildSessionSettings);
+  opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+  return session;
+}
+
+function hostedRun(opts: RunHooks, responseText: string) {
+  const session = hostSession(opts);
+  return { responseText, session, aborted: false, steered: false };
+}
+
 function resolvedRun(responseText = "done") {
-  return vi.mocked(runAgent).mockResolvedValue({
-    responseText,
-    session: mockSession(),
-    aborted: false,
-    steered: false,
-  });
+  return vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts) => hostedRun(opts, responseText));
 }
 
 /** Temp dirs created by the worktree tests — the repo fixture plus the
@@ -449,6 +466,7 @@ describe("background lifecycle — resume", () => {
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
 
+    await manager.restoreSession(id);
     const rec = manager.resume(id, "more");
     expect(rec).toBe(record);
     expect(record.status).toBe("running");
@@ -486,6 +504,7 @@ describe("background lifecycle — resume", () => {
       reentrant = manager.resume(record.id, "reentrant");
     });
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
     vi.mocked(resumeAgent).mockClear();
 
@@ -506,6 +525,7 @@ describe("background lifecycle — resume", () => {
       if (stopOnStart) manager.abort(record.id);
     });
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
     vi.mocked(resumeAgent).mockClear();
 
@@ -561,10 +581,12 @@ describe("background lifecycle — resume", () => {
   it("refuses to resume while the prior run is winding down, then allows it once settled", async () => {
     manager = new AgentManager();
     let resolveRun!: (v: any) => void;
-    vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
+    vi.mocked(runAgent).mockImplementation((_c, _t, _p, opts) => {
+      hostSession(opts);
+      return new Promise((r) => { resolveRun = r; });
+    });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     const record = manager.getRecord(id)!;
-    record.session = mockSession();
     manager.abort(id);
     expect(record.status).toBe("stopped");
     expect(record.settled).toBe(false);
@@ -575,6 +597,7 @@ describe("background lifecycle — resume", () => {
     resolveRun({ responseText: "partial", session: mockSession(), aborted: false, steered: false });
     await record.promise;
     expect(record.settled).toBe(true);
+    await manager.restoreSession(id);
     vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed" });
     expect(manager.resume(id, "more")).toBe(record);
     await record.promise;
@@ -601,6 +624,7 @@ describe("background lifecycle — resume", () => {
   it("keeps a stopped resume stopped instead of overwriting it", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     const record = manager.getRecord(id)!;
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
@@ -626,6 +650,7 @@ describe("background lifecycle — resume", () => {
   it("clears resultConsumed so the resume report is not swallowed", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     const record = manager.getRecord(id)!;
     record.resultConsumed = true;
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
@@ -638,6 +663,7 @@ describe("background lifecycle — resume", () => {
   it("resets turnCount to the fresh-spawn value when a resume starts", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     const record = manager.getRecord(id)!;
     record.turnCount = 7; // the prior run's final count
     let resolveResume!: (v: any) => void;
@@ -660,6 +686,7 @@ describe("background lifecycle — resume", () => {
   it("clears the prior run's latest checkpoint when a resume starts", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     const record = manager.getRecord(id)!;
     record.lastCheckpoint = { turn: 7, summary: "PRIOR-RUN-SUMMARY" };
     let resolveResume!: (v: any) => void;
@@ -679,6 +706,7 @@ describe("background lifecycle — resume", () => {
   it("counts the resumed run while it runs and drains a queued spawn when it settles", async () => {
     manager = new AgentManager(undefined, 1);
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
 
@@ -698,7 +726,9 @@ describe("background lifecycle — resume", () => {
   it("starts two resumes at maxConcurrent 1 and drains the counter when both settle", async () => {
     manager = new AgentManager(undefined, 1);
     const first = await spawnSettled("first");
+    await manager.restoreSession(first);
     const second = await spawnSettled("second");
+    await manager.restoreSession(second);
     let resolveFirst!: (v: any) => void;
     let resolveSecond!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation((_session: any, prompt: string) =>
@@ -801,6 +831,7 @@ describe("background lifecycle — resume", () => {
   it("forwards activity callbacks and stamps the record", async () => {
     manager = new AgentManager();
     const id = await spawnSettled();
+    await manager.restoreSession(id);
     const record = manager.getRecord(id)!;
     const turns: number[] = [];
     const deltas: string[] = [];
@@ -1312,15 +1343,13 @@ describe("background lifecycle — model-visible surfaces", () => {
     // The resumed session already carries the prior run's transcript: the
     // start index must be its length, so the streamer writes only the new turn.
     const record = handle.getRecord(id);
-    record.session = {
-      dispose: vi.fn(),
-      sessionId: "child-session-id",
+    vi.mocked(createChildSession).mockResolvedValueOnce({
+      ...mockSession(),
       messages: [
         { role: "user", content: [{ type: "text", text: "PRIOR-USER" }] },
         { role: "assistant", content: [{ type: "text", text: "PRIOR-ANSWER" }] },
       ],
-      subscribe: () => () => {},
-    };
+    } as ReturnType<typeof mockSession>);
 
     vi.mocked(resumeAgent).mockImplementation(async (session: any) => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED-ANSWER" }] });

@@ -120,7 +120,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
       modelRegistry,
       // No parent session file: the child still writes its own session, it just
       // has no `parentSession` link to record.
-      sessionManager: { getSessionFile: () => undefined },
+      sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 

@@ -23,10 +23,16 @@ import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn() };
 });
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import {
+  attachSessionLifecycle,
+  type ChildSessionSettings,
+  createChildSession,
+  resumeAgent,
+  runAgent,
+} from "../src/agent-runner.js";
 
 type RunResult = Awaited<ReturnType<typeof runAgent>>;
 
@@ -34,10 +40,25 @@ const mockPi = {} as unknown as ExtensionAPI;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 
 const fakeSession = () =>
-  ({ dispose: vi.fn(), sessionId: "child", sessionManager: { getSessionFile: () => undefined } }) as unknown as AgentSession;
+  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
 
-const finishedRun = (text: string): RunResult =>
-  ({ responseText: text, session: fakeSession(), aborted: false, steered: false }) as unknown as RunResult;
+const finishedRun = (text: string, session = fakeSession()): RunResult =>
+  ({ responseText: text, session, aborted: false, steered: false }) as unknown as RunResult;
+
+/** Runs once and hosts its child the way the runner does, so the settled record can reopen. */
+const hostedRunOnce = (text: string) =>
+  vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts) => {
+    const session = fakeSession();
+    opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+    opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+    return finishedRun(text, session);
+  });
+
+/** Reopens a settled record's child from its session file or memory, as the Agent tool does before a resume. */
+const reopen = async (manager: AgentManager, id: string) => {
+  vi.mocked(createChildSession).mockResolvedValueOnce(fakeSession());
+  await manager.restoreSession(id);
+};
 
 const dtoOf = (id: string): AgentDto => toDto({ id, status: "completed" } as unknown as AgentRecord);
 
@@ -99,26 +120,30 @@ describe("ReloadHandover buffering", () => {
     expect(idle.dispose).not.toHaveBeenCalled();
   });
 
-  it("disposes the idle and buffered sessions it holds when stopped", () => {
+  it("disposes the idle and buffered sessions it holds when stopped", async () => {
     const idle = fakeSession();
     const buffered = fakeSession();
     const handover = new ReloadHandover([{ dto: dtoOf("i"), session: idle }], [], [], undefined, stubPool);
     handover.emit({ kind: "settled", items: [{ dto: dtoOf("b"), session: buffered }] });
     handover.stop();
-    expect(idle.dispose).toHaveBeenCalledTimes(1);
-    expect(buffered.dispose).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(idle.dispose).toHaveBeenCalledTimes(1);
+      expect(buffered.dispose).toHaveBeenCalledTimes(1);
+    });
     expect(handover.idleItems()).toEqual([]);
   });
 
-  it("disposes a settled run or a kept item it is given after stop", () => {
+  it("disposes a settled run or a kept item it is given after stop", async () => {
     const late = fakeSession();
     const kept = fakeSession();
     const handover = new ReloadHandover([], [], [], undefined, stubPool);
     handover.stop();
     handover.emit({ kind: "settled", items: [{ dto: dtoOf("l"), session: late }] });
     handover.keepItems([{ dto: dtoOf("k"), session: kept }]);
-    expect(late.dispose).toHaveBeenCalledTimes(1);
-    expect(kept.dispose).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(late.dispose).toHaveBeenCalledTimes(1);
+      expect(kept.dispose).toHaveBeenCalledTimes(1);
+    });
     expect(handover.idleItems()).toEqual([]);
   });
 });
@@ -159,8 +184,8 @@ describe("DTO and spawn data", () => {
     expect(dto).not.toHaveProperty("promise");
     expect(dto).not.toHaveProperty("outputCleanup");
 
-    const rebuilt = fromDto(dto, record.session);
-    expect(rebuilt.session).toBe(record.session);
+    const rebuilt = fromDto(dto);
+    expect(rebuilt.session).toBeUndefined();
     expect(rebuilt.abortController).not.toBe(record.abortController);
   });
 
@@ -286,10 +311,11 @@ describe("AgentManager hand-over", () => {
         seen = { settled, moved };
       }),
     );
-    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    hostedRunOnce("idle");
     const idle = manager.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
     await vi.waitFor(() => expect(manager.getRecord(idle)?.settled).toBe(true));
 
+    await reopen(manager, idle);
     vi.mocked(resumeAgent).mockReturnValueOnce(new Promise<never>(() => {}));
     resuming = true;
     manager.resume(idle, "again");
@@ -308,7 +334,8 @@ describe("AgentManager hand-over", () => {
         moved = manager.beginDrain([], undefined).idleItems().map((item) => item.dto.id);
       }),
     );
-    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("parent")).mockResolvedValueOnce(finishedRun("child"));
+    hostedRunOnce("parent");
+    hostedRunOnce("child");
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
     await vi.waitFor(() => expect(manager.getRecord(parent)?.settled).toBe(true));
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
@@ -317,6 +344,7 @@ describe("AgentManager hand-over", () => {
     });
     await vi.waitFor(() => expect(manager.getRecord(child)?.settled).toBe(true));
 
+    await reopen(manager, child);
     vi.mocked(resumeAgent).mockReturnValueOnce(new Promise<never>(() => {}));
     resuming = true;
     manager.resume(child, "again");
@@ -411,11 +439,56 @@ describe("AgentManager hand-over", () => {
     const adopted = next.adopt(item, false);
     expect(next.getRecord(idle)).toBe(adopted);
     expect(adopted.settled).toBe(true);
-    expect(adopted.session).toBe(item.session);
+    // The old run tore its child down at settle, so the handed-over item carries no live session.
+    expect(item.session).toBeUndefined();
+    expect(adopted.session).toBeUndefined();
     expect(onComplete).not.toHaveBeenCalled();
 
     next.adopt({ dto: { ...item.dto, id: "other" } }, true);
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("tears down a settled item that still holds a live session when adopted", async () => {
+    const header = { type: "session", id: "h", version: 3, timestamp: "t", cwd: "/tmp" };
+    const entry = { type: "message", id: "e" };
+    const emit = vi.fn(async () => {});
+    const dispose = vi.fn();
+    const session = {
+      isStreaming: false,
+      abort: vi.fn(async () => {}),
+      extensionRunner: { emit },
+      dispose,
+      getSessionStats: () => ({}),
+      sessionManager: { getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
+    };
+    const next = track(new AgentManager());
+    const adopted = next.adopt({ dto: dtoOf("late"), session: session as unknown as AgentSession }, false);
+    expect(adopted.session).toBeUndefined();
+    expect(adopted.sessionSnapshot).toBeDefined();
+    expect(adopted.memoryEntries).toEqual([header, entry]);
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledTimes(1));
+    expect(emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+  });
+
+  it("refuses to reopen an adopted record until its old live session is torn down", async () => {
+    let finishAbort: () => void = () => {};
+    const abort = vi.fn(() => new Promise<void>((resolve) => { finishAbort = resolve; }));
+    const dispose = vi.fn();
+    const session = {
+      isStreaming: false,
+      abort,
+      extensionRunner: { emit: vi.fn(async () => {}) },
+      dispose,
+      getSessionStats: () => ({}),
+      sessionManager: { getSessionFile: () => "/tmp/adopted.jsonl", getHeader: () => undefined, getEntries: () => [] },
+    };
+    const next = track(new AgentManager());
+    const adopted = next.adopt({ dto: { ...dtoOf("late"), sessionFile: "/tmp/adopted.jsonl" }, session: session as unknown as AgentSession }, false);
+    expect(adopted.transition).toBe("teardown");
+    expect(await next.restoreSession(adopted.id)).toBeUndefined();
+    finishAbort();
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(adopted.transition).toBeUndefined());
   });
 
   it("lists, finds and aborts a draining record through the new manager", async () => {
@@ -512,7 +585,7 @@ describe("AgentManager hand-over", () => {
   it("announces a resumed run again after a hand-over carried its earlier announcement", async () => {
     const announced = vi.fn();
     const first = track(new AgentManager(announced));
-    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("idle"));
+    hostedRunOnce("idle");
     const idle = first.spawn(mockPi, mockCtx, "general-purpose", "idle", { description: "idle" });
     await vi.waitFor(() => expect(first.getRecord(idle)?.settled).toBe(true));
     expect(announced).toHaveBeenCalledTimes(1);
@@ -522,6 +595,7 @@ describe("AgentManager hand-over", () => {
     const next = track(new AgentManager(reannounced));
     next.adopt(item, false);
 
+    await reopen(next, idle);
     vi.mocked(resumeAgent).mockResolvedValueOnce(finishedRun("again"));
     next.resume(idle, "again");
     await vi.waitFor(() => expect(reannounced).toHaveBeenCalledTimes(1));
