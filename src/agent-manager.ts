@@ -1100,9 +1100,10 @@ export class AgentManager {
 
   /**
    * Takes the nested results still waiting for a reload hand-over: those debounced in a batch and those in a wake sent but not
-   * observed here, which the new parent session may never have received. The timers are cleared and the in-flight set emptied,
-   * so this activation never marks them delivered. Each comes back as a `{ id, target }` nudge, so the adopter delivers it to
-   * its parent exactly once.
+   * observed here. The timers are cleared. A wake sent to a streaming parent sits in that session's queue, or is the run the
+   * session just started, and the session outlives this activation: this activation's listener still observes it. Such a child
+   * stays in flight, since a nudge would deliver it twice. Each other one comes back as a `{ id, target }` nudge, so the adopter
+   * delivers it to its parent exactly once.
    */
   takeNestedPending(): NudgeEntry[] {
     const taken: NudgeEntry[] = [];
@@ -1114,9 +1115,11 @@ export class AgentManager {
     }
     this.nestedBatches.clear();
     for (const child of this.nestedInFlight) {
-      if (child.parentAgentId) taken.push({ id: child.id, target: child.parentAgentId });
+      const parentId = child.parentAgentId;
+      if (parentId && this.getRecord(parentId)?.session?.isStreaming) continue;
+      this.nestedInFlight.delete(child);
+      if (parentId) taken.push({ id: child.id, target: parentId });
     }
-    this.nestedInFlight.clear();
     return taken;
   }
 
