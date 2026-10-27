@@ -42,7 +42,7 @@ const mockPi = {} as unknown as ExtensionAPI;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 
 const fakeSession = () =>
-  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
+  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
 
 const finishedRun = (text: string, session = fakeSession()): RunResult =>
   ({ responseText: text, session, aborted: false, steered: false }) as unknown as RunResult;
@@ -463,7 +463,7 @@ describe("AgentManager hand-over", () => {
       extensionRunner: { emit },
       dispose,
       getSessionStats: () => ({}),
-      agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
+      agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
     };
     const next = track(new AgentManager());
     const adopted = next.adopt({ dto: dtoOf("late"), session: session as unknown as AgentSession }, false);

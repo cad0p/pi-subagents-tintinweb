@@ -80,7 +80,7 @@ describe("output_transcript agent wiring", () => {
       const session = {
         messages: [],
         isStreaming: false,
-        agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+        agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
         subscribe: vi.fn(() => vi.fn()),
         dispose: vi.fn(),
         sessionManager: {

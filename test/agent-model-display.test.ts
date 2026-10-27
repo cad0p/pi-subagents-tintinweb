@@ -65,7 +65,7 @@ function reportingSession(
     sessionId: "child-session-id",
     dispose: vi.fn(),
     isStreaming: false,
-    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
     sendCustomMessage: () => Promise.resolve(),
     sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     model,

@@ -37,7 +37,7 @@ const COST = 0.0123;
 
 /** A child session stand-in — only the members the manager touches. */
 function fakeSession(): AgentSession {
-  return { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
+  return { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
 }
 
 /** Deterministic record: fixed timestamps → 5.0s duration, fixed usage. */

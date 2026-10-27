@@ -700,7 +700,9 @@ export class AgentManager {
     }
     const session = record.session;
     const busy = session !== undefined && (session.isStreaming || session.agent.state.isStreaming);
-    if (busy || this.waking.has(record.id) || (record.preflight ?? 0) > 0) {
+    // A stopped record does not wait on deliveries: abort() must settle it even if a prompt never reports.
+    const preflighting = record.status !== "stopped" && (record.preflight ?? 0) > 0;
+    if (busy || this.waking.has(record.id) || preflighting) {
       life.quiet = undefined;
       return;
     }
@@ -796,8 +798,26 @@ export class AgentManager {
     record.ending = false;
     record.waiting = undefined;
     this.waking.delete(record.id);
-    const text = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
+    const dropped = this.dropUndelivered(record);
+    const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
+    const text = dropped ? [finished, dropped].filter(Boolean).join("\n\n") : finished;
+    if (dropped) record.result = text;
     void this.afterRun(record).then(() => life.resolve(text));
+  }
+
+  /**
+   * Drops input a finishing record will never run: parked input, input queued before the session existed, and the
+   * session's queued messages. Returns a note naming them for the result, or "" when nothing was dropped.
+   */
+  private dropUndelivered(record: AgentRecord): string {
+    const lost = [...(record.held ?? []), ...(record.pendingSteers ?? [])];
+    record.held = undefined;
+    record.pendingSteers = undefined;
+    const queued = record.session?.clearQueue();
+    if (queued) lost.push(...queued.steering, ...queued.followUp);
+    if (lost.length === 0) return "";
+    const quoted = lost.map((text) => `"${text}"`).join(", ");
+    return `Input not delivered because the agent finished first: ${quoted}.`;
   }
 
   /**
@@ -1184,9 +1204,9 @@ export class AgentManager {
       return "queued";
     }
     if (record.status === "running" && record.session) {
-      // Not awaited: the tool answers at once. Pending (`preflight`) until prompt() settles. A busy rejection parks
-      // the text in `held`; other rejections are logged, not retried.
-      // Pending until pi reports the disposition or the prompt rejects. A prompt pi defers (during agent_settled) reports later.
+      // Not awaited: the tool answers at once. Pending (`preflight`) until pi reports the disposition or the prompt
+      // rejects; a prompt pi defers (during agent_settled) reports when it re-runs. A busy rejection parks the text in
+      // `held`; other rejections are logged, not retried.
       let reported = false;
       const report = () => {
         if (reported) return;

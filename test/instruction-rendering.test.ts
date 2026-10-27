@@ -600,7 +600,7 @@ describe("instruction rendering", () => {
       const { id, record } = await spawnBackground(tools);
 
       const prompt = vi.fn(async () => {});
-      record.session = { prompt, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+      record.session = { prompt, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       const sent = await steer.execute("tc", { to: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
       expect(sent.details.sendOutcome).toBe("delivered");
       expect(prompt).toHaveBeenCalledWith("go left", expect.objectContaining({ streamingBehavior: "steer" }));
