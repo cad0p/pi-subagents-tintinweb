@@ -99,6 +99,7 @@ export function spawnCtx(cwd: string) {
   return {
     cwd,
     sessionManager: { getSessionId: vi.fn(() => "parent-session"), getEntries: vi.fn(() => []) },
+    isProjectTrusted: vi.fn(() => true),
     getSystemPrompt: vi.fn(() => "parent"),
     model: undefined,
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
