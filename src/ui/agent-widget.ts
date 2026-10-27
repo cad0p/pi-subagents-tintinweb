@@ -89,6 +89,13 @@ export interface AgentDetails {
 
 // ---- Formatting helpers ----
 
+/** `waiting · timer:abc (+1) · 0:05`: a run idle on pending background work, shown in place of its activity. */
+export function waitingLabel(waiting: { since: number; items: string[] }, elapsed: string): string {
+  const [first = "background work"] = waiting.items;
+  const more = waiting.items.length > 1 ? ` (+${waiting.items.length - 1})` : "";
+  return `waiting · ${toSingleLine(first)}${more} · ${elapsed}`;
+}
+
 /** Apply foreground styling while restoring it after nested foreground/full ANSI resets. */
 export function fgPreservingNestedStyles(theme: Theme, color: string, text: string): string {
   const styledEmpty = theme.fg(color, "");
@@ -464,7 +471,9 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
+      const activity = a.waiting
+        ? waitingLabel(a.waiting, formatMs(Date.now() - a.waiting.since))
+        : toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
 
       runningLines.push([
         truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}${drainTag}  ${theme.fg("muted", toSingleLine(a.description))} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
@@ -554,14 +563,16 @@ export class AgentWidget {
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
+    let waitingCount = 0;
     let queuedCount = 0;
     let hasFinished = false;
     for (const a of allAgents) {
-      if (a.status === "running") { runningCount++; }
+      if (a.status === "running" && a.waiting) { waitingCount++; }
+      else if (a.status === "running") { runningCount++; }
       else if (a.status === "queued") { queuedCount++; }
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
-    const hasActive = runningCount > 0 || queuedCount > 0;
+    const hasActive = runningCount > 0 || waitingCount > 0 || queuedCount > 0;
 
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished) {
@@ -587,8 +598,9 @@ export class AgentWidget {
     if (hasActive) {
       const statusParts: string[] = [];
       if (runningCount > 0) statusParts.push(`${runningCount} running`);
+      if (waitingCount > 0) statusParts.push(`${waitingCount} waiting`);
       if (queuedCount > 0) statusParts.push(`${queuedCount} queued`);
-      const total = runningCount + queuedCount;
+      const total = runningCount + waitingCount + queuedCount;
       newStatusText = `${statusParts.join(", ")} agent${total === 1 ? "" : "s"}`;
     }
     if (newStatusText !== this.lastStatusText) {
