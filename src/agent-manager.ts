@@ -1056,7 +1056,13 @@ export class AgentManager {
     const content = entries.map((entry) => entry.content).join("\n\n");
     const onAssistantUsage = (usage: { input: number; output: number; cacheWrite: number }) => this.foldUsageIntoAncestors(parentId, usage);
     void this.deliver(parentId, content, { onAssistantUsage }).then((outcome) => {
-      if (outcome) for (const entry of entries) entry.child.resultDelivered = true;
+      if (outcome) {
+        for (const entry of entries) entry.child.resultDelivered = true;
+        return;
+      }
+      // Left unmarked: each child stays pullable from its own record.
+      const ids = entries.map((entry) => entry.child.id).join(", ");
+      console.warn(`[pi-subagents] ${parentId} refused nested result(s) ${ids}; they stay pullable`);
     });
   }
 

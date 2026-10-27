@@ -2514,4 +2514,21 @@ describe("AgentManager — PR119 r1 findings", () => {
     expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "child result" }), expect.anything());
     expect(manager.resultReachedParent(child)).toBe(true);
   });
+
+  it("a nested result the settled parent refuses is logged and stays pullable", async () => {
+    const { id } = await parentWithSession();
+    manager.getRecord(id)!.session = undefined;
+    const deliver = vi.spyOn(manager, "deliver").mockResolvedValueOnce(false);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    await flush();
+    expect(deliver).toHaveBeenCalledWith(id, "child result", expect.anything());
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("refused nested result(s) c1"));
+    expect(child.resultDelivered).toBe(false);
+    expect(manager.resultReachedParent(child)).toBe(false);
+    deliver.mockRestore();
+    warn.mockRestore();
+  });
+
 });
