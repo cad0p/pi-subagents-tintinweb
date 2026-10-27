@@ -2487,4 +2487,18 @@ describe("AgentManager — PR119 r1 findings", () => {
     expect(manager.getRecord(id)?.result ?? "").toContain("c1");
   });
 
+  it("a stop names a debounced child result in the parent's result", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    manager.abort(id);
+    settleRun(manager, id);
+    await flush();
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(manager.getRecord(id)?.settled).toBe(true);
+    expect(session.sendCustomMessage).not.toHaveBeenCalled();
+    expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+    expect(child.resultDelivered).toBe(false);
+  });
+
 });
