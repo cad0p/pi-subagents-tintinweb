@@ -289,7 +289,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
     : "";
   const errorPreview = headerPreview(errorText);
   if (errorPreview) header += ` — ${errorPreview}`;
-  header += getStatusNote(record.status, record.limitReason);
+  header += getStatusNote(record.status, record.limitReason, record.capMinutes);
   if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
 
   const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];

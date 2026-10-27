@@ -18,9 +18,10 @@ import type { AgentRecord } from "./types.js";
  * turn limit was hit) — the parent should treat human intervention differently
  * from a budget cutoff.
  */
-export function getStatusNote(status: string, limitReason?: "time"): string {
+export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number): string {
   if (limitReason === "time") {
-    return " (time limit reached — the run was capped by maxBackgroundWait; resume with SendMessage to continue)";
+    const cap = capMinutes === undefined ? "" : ` (${capMinutes} min)`;
+    return ` (time limit reached${cap}; resume with SendMessage to continue)`;
   }
   switch (status) {
     case "stopped":

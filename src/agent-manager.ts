@@ -70,15 +70,15 @@ const HEADS_UP_LEAD_MS = 60_000;
 /** Distinct background-work policy warnings already logged, so a warning is shown once per process. */
 const policyWarnings = new Set<string>();
 
-/** The run cap in ms: `maxBackgroundWait` (minutes) from the background-work policy at `cwd`. */
-function readCapMs(cwd: string = process.cwd()): number {
+/** The run cap in minutes: `maxBackgroundWait` from the background-work policy at `cwd`. */
+function readCapMinutes(cwd: string = process.cwd()): number {
   const { policy, warnings } = readBackgroundWorkPolicy({ cwd });
   for (const warning of warnings) {
     if (policyWarnings.has(warning)) continue;
     policyWarnings.add(warning);
     console.warn(`[pi-subagents] ${warning}`);
   }
-  return policy.maxBackgroundWait * 60_000;
+  return policy.maxBackgroundWait;
 }
 
 /** Wake text for a finished subagent that has queued input or background work to pick up. */
@@ -842,7 +842,9 @@ export class AgentManager {
    * at the cap. Both are unref'd and cleared by `clearCap` at the lifecycle's final settle.
    */
   private armCap(record: AgentRecord, life: Life): void {
-    const capMs = readCapMs(record.cwd);
+    const capMinutes = readCapMinutes(record.cwd);
+    record.capMinutes = capMinutes;
+    const capMs = capMinutes * 60_000;
     const leadMs = capMs <= 2 * HEADS_UP_LEAD_MS ? capMs / 2 : capMs - HEADS_UP_LEAD_MS;
     const left = capMs - leadMs >= 60_000 ? "1 minute" : `${Math.round((capMs - leadMs) / 1000)} seconds`;
     const headsUp = setTimeout(() => this.headsUp(record, life, left), leadMs);
