@@ -2142,7 +2142,7 @@ describe("AgentManager — session file retention", () => {
     expect(existsSync(file)).toBe(true);
   });
 
-  it("evicts the default agent's file after the 10-minute grace window", async () => {
+  it("evicts the default agent's file after the 60-minute grace window", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
     try {
@@ -2157,7 +2157,7 @@ describe("AgentManager — session file retention", () => {
       // The completion nudge (index.ts) marks it delivered; this manager has no completion surface.
       manager.getRecord(id)!.resultDelivered = true;
 
-      vi.advanceTimersByTime(11 * 60_000);
+      vi.advanceTimersByTime(61 * 60_000);
 
       expect(manager.getRecord(id)).toBeUndefined();
       expect(existsSync(file)).toBe(false);
@@ -2178,7 +2178,7 @@ describe("AgentManager — session file retention", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await finished;
 
-      vi.advanceTimersByTime(11 * 60_000);
+      vi.advanceTimersByTime(61 * 60_000);
       expect(manager.getRecord(id)).toBeDefined();
 
       manager.getRecord(id)!.resultDelivered = true;

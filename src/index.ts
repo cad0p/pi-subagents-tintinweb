@@ -1251,6 +1251,7 @@ export default function (pi: ExtensionAPI) {
   applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+      setEvictAfterMinutes: (n) => manager.setEvictAfterMinutes(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setSchedulingEnabled,
@@ -2532,6 +2533,7 @@ ${systemPrompt}
   function snapshotSettings(): SubagentsSettings {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
+      evictAfterMinutes: manager.getEvictAfterMinutes(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -2558,11 +2560,12 @@ ${systemPrompt}
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth", "failurePreviewMaxChars"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "evictAfterMinutes", "defaultMaxTurns", "graceTurns", "maxSubagentDepth", "failurePreviewMaxChars"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
+      const ev = manager.getEvictAfterMinutes();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -2589,6 +2592,13 @@ ${systemPrompt}
           description: "Max concurrent background agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
+        },
+        {
+          id: "evictAfterMinutes",
+          label: "Evict after minutes",
+          description: "Minutes a settled run stays resumable before its record is removed (Enter to type)",
+          currentValue: String(ev),
+          values: [String(ev)],
         },
         {
           id: "defaultMaxTurns",
@@ -2726,6 +2736,12 @@ ${systemPrompt}
         if (n >= 1) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
+        }
+      } else if (id === "evictAfterMinutes") {
+        const n = parseInt(value, 10);
+        if (n >= 1) {
+          manager.setEvictAfterMinutes(n);
+          notifyApplied(ctx, `Evict after minutes set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -2904,6 +2920,7 @@ ${systemPrompt}
     if (result && NUMERIC_IDS.has(result)) {
       const numericPrompt: Record<string, { current: string; label: string }> = {
         maxConcurrent: { current: String(manager.getMaxConcurrent()), label: "Max concurrency (1+)" },
+        evictAfterMinutes: { current: String(manager.getEvictAfterMinutes()), label: "Evict after minutes (1+)" },
         defaultMaxTurns: { current: String(getDefaultMaxTurns() ?? 0), label: "Default max turns (0 = unlimited)" },
         graceTurns: { current: String(getGraceTurns()), label: "Grace turns (1+)" },
         maxSubagentDepth: { current: String(getMaxSubagentDepth()), label: "Nested depth (0/1 = nesting off)" },

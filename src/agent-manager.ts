@@ -151,6 +151,7 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
+const DEFAULT_EVICT_AFTER_MINUTES = 60;
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -366,6 +367,7 @@ export class AgentManager {
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
   private maxConcurrent: number;
+  private evictAfterMinutes = DEFAULT_EVICT_AFTER_MINUTES;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -415,7 +417,7 @@ export class AgentManager {
     this.onUsage = onUsage;
     this.onSteered = onSteered;
     this.maxConcurrent = maxConcurrent;
-    // Cleanup completed agents after 10 minutes (but keep sessions for resume)
+    // Evict settled agents after evictAfterMinutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
   }
@@ -429,6 +431,15 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  /** Update how long a settled record stays resumable before eviction removes it. */
+  setEvictAfterMinutes(n: number) {
+    this.evictAfterMinutes = Math.max(1, n);
+  }
+
+  getEvictAfterMinutes(): number {
+    return this.evictAfterMinutes;
   }
 
   /**
@@ -1825,7 +1836,7 @@ export class AgentManager {
    * Dispose a record's session and remove it from the map.
    *
    * The record's removal is also the child session file's disposal point: the
-   * 10-minute eviction and `clearCompleted()` on session switch are the grace
+   * eviction (`evictAfterMinutes`) and `clearCompleted()` on session switch are the grace
    * window in which a live record can still resume the agent, so nothing may
    * delete the file earlier. A `persist_session` agent keeps its file
    * indefinitely; every other settled agent's file goes here.
@@ -1866,7 +1877,7 @@ export class AgentManager {
   }
 
   private cleanup() {
-    const cutoff = Date.now() - 10 * 60_000;
+    const cutoff = Date.now() - this.evictAfterMinutes * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       // Stopped but still unwinding: removing it would dispose a session a live
@@ -1884,7 +1895,7 @@ export class AgentManager {
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
-   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * (resultConsumed=false) — they will be evicted by the cleanup timer instead.
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {

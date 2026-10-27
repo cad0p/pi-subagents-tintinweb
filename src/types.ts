@@ -60,7 +60,7 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Keep this subagent's pi session file after the run settles. Every run
    *  writes a session file while it runs (crash recovery); without this the file
-   *  is deleted when the agent record is removed — the 10-minute eviction or a
+   *  is deleted when the agent record is removed — the eviction (`evictAfterMinutes`) or a
    *  session switch. */
   persistSession?: boolean;
   /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
