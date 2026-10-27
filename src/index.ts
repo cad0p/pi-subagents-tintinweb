@@ -17,6 +17,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, type SpawnOptions } from "./agent-manager.js";
+import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
@@ -32,7 +33,7 @@ import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
-import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
+import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -1658,21 +1659,13 @@ Terse command-style prompts produce shallow, generic work.
       if (!record && manager.isAdopting(params.agent_id)) {
         return textResult(`Agent "${params.agent_id}" is handing over after a reload; retry in a moment.`);
       }
-      // Nested records belong to their spawning agent's scoped tools only.
-      if (!record || record.parentAgentId) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
-      }
+      if (!isOwnedRecord(record, undefined)) return agentNotFoundResponse(params.agent_id);
 
-      // Mark result as consumed — suppresses the completion notification. Safe
-      // for every status: only a settled record has a nudge parked, and a
-      // running/queued one has none to cancel.
-      if (record.status !== "running" && record.status !== "queued") {
-        record.resultConsumed = true;
-        record.resultDelivered = true;
-        cancelNudge(params.agent_id);
-      }
+      // Consuming suppresses the completion notification. Safe for every status:
+      // only a settled record has a nudge parked, so a running one has none to cancel.
+      if (consumeResult(record)) cancelNudge(params.agent_id);
 
-      return textResult(renderAgentReport(record));
+      return agentReportResponse(record);
     },
 
     renderResult(result, _options, theme) {

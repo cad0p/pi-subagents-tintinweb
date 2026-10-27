@@ -397,6 +397,27 @@ describe("AgentManager hand-over", () => {
     finish();
   });
 
+  it("starts a queued nested child at the drain and hands its slot over with its parent", async () => {
+    const manager = track(new AgentManager(undefined, 1));
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("parent"));
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    await vi.waitFor(() => expect(manager.getRecord(parent)?.settled).toBe(true));
+    const finishBusy = controlledRun("busy");
+    const busy = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+    const finishChild = controlledRun("child");
+    const child = manager.spawn(mockPi, mockCtx, "general-purpose", "child", { description: "child", parentAgentId: parent });
+    expect(manager.getRecord(child)?.status).toBe("queued");
+
+    const handover = manager.beginDrain([], undefined);
+
+    expect(handover.take().queued).toEqual([]);
+    expect(manager.getRecord(child)?.status).toBe("running");
+    expect(handover.slotHolders).toEqual(new Set([busy, child]));
+    finishBusy();
+    finishChild();
+    await vi.waitFor(() => expect(handover.slotHolders.size).toBe(0));
+  });
+
   it("settles a draining run into the handover, not the old onComplete", async () => {
     const onComplete = vi.fn();
     const manager = track(new AgentManager(onComplete));

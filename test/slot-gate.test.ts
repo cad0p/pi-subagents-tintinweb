@@ -353,3 +353,34 @@ describe("slot gate — provider requests", () => {
     expect(m.runningCount()).toBe(1);
   });
 });
+
+describe("slot gate — nested children", () => {
+  beforeEach(() => runsHang());
+
+  it("a nested child's request waits for a slot its sibling holds, and passes once it is released", async () => {
+    const m = manager(1);
+    publishSlots(m);
+    const parent = spawn(m);
+    const child = m.spawn(mockPi, mockCtx, "general-purpose", "c", { description: "c", parentAgentId: parent, depth: 2 });
+    expect(m.getRecord(child)!.status).toBe("queued");
+
+    // The parent ends its turn: its slot goes to the queued child, which then ends its own turn.
+    m.releaseSlot(parent);
+    await flush();
+    expect(m.getRecord(child)!.status).toBe("running");
+    m.releaseSlot(child);
+    const sibling = spawn(m);
+    expect(m.getRecord(sibling)!.status).toBe("running");
+
+    // The child's next request is gated: it is no longer a slot holder and the sibling holds the only slot.
+    const request = track(m.acquireSlot(child, new AbortController().signal));
+    await flush();
+    expect(request.settled).toBe(false);
+    expect(m.getRecord(child)!.gated).toBe(true);
+
+    m.releaseSlot(sibling);
+    await flush();
+    expect(request.settled).toBe(true);
+    expect(m.runningCount()).toBe(1);
+  });
+});
