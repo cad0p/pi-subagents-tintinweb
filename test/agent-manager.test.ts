@@ -315,9 +315,11 @@ describe("AgentManager — restoreSession", () => {
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
     const record = manager.getRecord(id)!;
     await record.promise;
-    // A settled record that lost its live session, as a failed reload leaves it.
+    // A settled record that lost its live session, as a failed reload leaves it. An in-memory child keeps the
+    // reopen off the file, which eviction deletes while the reopen is in flight.
     record.session = undefined;
-    record.sessionFile = join(tmpdir(), `restore-evicted-${id}.jsonl`);
+    record.sessionFile = undefined;
+    record.memoryEntries = [];
     record.childSettings = { effectiveCwd: tmpdir() } as NonNullable<AgentRecord["childSettings"]>;
 
     let finishReopen!: (session: AgentSession) => void;

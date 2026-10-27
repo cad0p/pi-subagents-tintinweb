@@ -38,7 +38,7 @@ import {
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
-import { type LedgerWriter, resumedEntry, spawnedEntry } from "./ledger.js";
+import { type LedgerWriter, openChildSession, resumedEntry, spawnedEntry } from "./ledger.js";
 import { describeModel } from "./model-resolver.js";
 import { currentOwnerStamp } from "./owner-identity.js";
 import {
@@ -345,9 +345,12 @@ export type ResumeCallbacks = Pick<
 
 /** The prefix a resumed interrupted run carries; names the worktree's fate when it is gone (its run then uses the parent cwd). */
 function crashNote(record: AgentRecord, text: string): string {
-  const when = new Date(record.interruptedAt ?? record.startedAt).toISOString();
+  const when =
+    record.crashedAt === undefined
+      ? `The crash time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
+      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the crash came after it.`;
   const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
-  return `You were interrupted by a crash at ${when}; a command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
+  return `You were interrupted by a crash. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
 }
 
 export class AgentManager {
@@ -1629,8 +1632,9 @@ export class AgentManager {
         .then((childSettings) => {
           if (!childSettings) return undefined;
           const sessionManager = sessionFile
-            ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
+            ? openChildSession(sessionFile, childSettings.effectiveCwd)
             : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
+          if (!sessionManager) throw new Error(`Cannot resume ${id}: its session file ${sessionFile} is missing or unreadable.`);
           // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
           return createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
             .then(async (session) => {

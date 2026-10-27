@@ -1,6 +1,9 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { LEDGER_VERSION, replayLedger, resumedEntry, spawnedEntry } from "../src/ledger.js";
+import { LEDGER_VERSION, lastActivityOf, openChildSession, replayLedger, resumedEntry, spawnedEntry } from "../src/ledger.js";
 import type { OwnerHost } from "../src/owner-identity.js";
 import type { AgentRecord } from "../src/types.js";
 
@@ -55,8 +58,12 @@ const alive: OwnerHost = { bootId: undefined, startTime: () => undefined, pidAli
 const spawn = (pid = 42) => custom("subagent-spawned", spawnedEntry(record, "/s/child.jsonl", { pid }));
 const resume = (pid = 42) => custom("subagent-resumed", resumedEntry("child-1", { pid }));
 const settle = (status: string) => custom("subagents:record", { id: "child-1", status });
-const replay = (entries: SessionEntry[], host: OwnerHost = dead, isLiveHere = () => false) =>
-  replayLedger(entries, { host, isLiveHere, now: 5000 });
+const replay = (
+  entries: SessionEntry[],
+  host: OwnerHost = dead,
+  isLiveHere = () => false,
+  lastActivity: (sessionFile: string) => number | undefined = () => undefined,
+) => replayLedger(entries, { host, isLiveHere, lastActivity, now: 5000 });
 
 describe("ledger replay", () => {
   it("a settled run is not recovered", () => {
@@ -96,5 +103,29 @@ describe("ledger replay", () => {
   it("ignores a resume with no spawn and entries from a later ledger version", () => {
     expect(replay([resume()])).toEqual([]);
     expect(replay([custom("subagent-spawned", { ...spawnedEntry(record, "/s/child.jsonl", { pid: 42 }), v: LEDGER_VERSION + 1 })])).toEqual([]);
+  });
+
+  it("the crash time is the session file's last saved entry; unset when the file is unreadable", () => {
+    expect(replay([spawn()], dead, () => false, () => 4000)[0]).toMatchObject({ crashedAt: 4000, interruptedAt: 5000 });
+    expect(replay([spawn()])[0]).toMatchObject({ crashedAt: undefined, interruptedAt: 5000 });
+  });
+});
+
+describe("child session files", () => {
+  it("a missing, empty or unparseable file opens as undefined and is left unmodified", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ledger-"));
+    try {
+      const garbage = join(dir, "garbage.jsonl");
+      const empty = join(dir, "empty.jsonl");
+      writeFileSync(garbage, "not json\n");
+      writeFileSync(empty, "");
+      expect(openChildSession(join(dir, "missing.jsonl"))).toBeUndefined();
+      expect(openChildSession(empty)).toBeUndefined();
+      expect(openChildSession(garbage)).toBeUndefined();
+      expect(lastActivityOf(garbage)).toBeUndefined();
+      expect(readFileSync(garbage, "utf8")).toBe("not json\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

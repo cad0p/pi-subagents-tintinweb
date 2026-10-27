@@ -125,6 +125,8 @@ export interface AgentRecord {
   completedAt?: number;
   /** Set on a run recovered from a crash: when the crash was detected. */
   interruptedAt?: number;
+  /** Set on a run recovered from a crash: when its session file last saved anything (the crash came after it); unset when unreadable. */
+  crashedAt?: number;
   /** Interrupted settles in a row for this run, including this crash (the crash-loop guard's count). */
   crashCount?: number;
   /** Directory the run executed in (its worktree for an isolated run). A recovered run restores it when it still exists. */

@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -28,7 +28,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { type ReplayOptions, replayLedger } from "./ledger.js";
+import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -1087,6 +1087,7 @@ export default function (pi: ExtensionAPI) {
     const options: ReplayOptions = {
       host: localOwnerHost(),
       isLiveHere: (id) => manager.getRecord(id) !== undefined,
+      lastActivity: lastActivityOf,
       now: Date.now(),
     };
     const spawnerSessionId = sessionKey(ctx.sessionManager);
@@ -1104,8 +1105,12 @@ export default function (pi: ExtensionAPI) {
 
   /** Lists the nested runs a crashed parent left in its own session file. They are reported when the parent resumes. */
   function listCrashedChildren(parent: AgentRecord, options: ReplayOptions): void {
-    if (!parent.sessionFile || !existsSync(parent.sessionFile)) return;
-    const childSessions = SessionManager.open(parent.sessionFile);
+    if (!parent.sessionFile) return;
+    const childSessions = openChildSession(parent.sessionFile);
+    if (!childSessions) {
+      console.warn(`[pi-subagents] ${parent.id}: session file ${parent.sessionFile} cannot be read; its nested runs are not listed`);
+      return;
+    }
     const children = replayLedger(childSessions.getEntries(), options);
     const spawnerSessionId = sessionKey(childSessions);
     for (const child of children) child.spawnerSessionId = spawnerSessionId;

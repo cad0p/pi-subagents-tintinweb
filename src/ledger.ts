@@ -5,7 +5,8 @@
  * above their own.
  */
 
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { existsSync, statSync } from "node:fs";
+import { type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { type OwnerHost, type OwnerStamp, ownerAlive } from "./owner-identity.js";
 import type { AgentRecord, ThinkingLevel } from "./types.js";
 
@@ -69,6 +70,23 @@ export function resumedEntry(id: string, owner: OwnerStamp): ResumedLedgerEntry 
   return { v: LEDGER_VERSION, id, ownerPid: owner.pid, bootId: owner.bootId, ownerStartTime: owner.startTime };
 }
 
+/** Opens a child's session file to resume or replay it; undefined when it is missing, empty, or not a session. */
+export function openChildSession(sessionFile: string, cwd?: string): SessionManager | undefined {
+  if (!existsSync(sessionFile) || statSync(sessionFile).size === 0) return undefined;
+  try {
+    return SessionManager.open(sessionFile, undefined, cwd);
+  } catch {
+    return undefined;
+  }
+}
+
+/** When a session file last saved anything; the crash came after it. Undefined when the file cannot be read. */
+export function lastActivityOf(sessionFile: string): number | undefined {
+  const last = openChildSession(sessionFile)?.getEntries().at(-1);
+  const at = last ? Date.parse(last.timestamp) : Number.NaN;
+  return Number.isNaN(at) ? undefined : at;
+}
+
 /** The `subagents:record` fields a replay reads. */
 interface SettleLedgerEntry {
   id: string;
@@ -84,6 +102,8 @@ export interface ReplayOptions {
   host: OwnerHost;
   /** True when this process still holds the run live (the same-process rule). */
   isLiveHere: (id: string) => boolean;
+  /** When the run's session file last saved anything (its crash time); undefined when unreadable. */
+  lastActivity: (sessionFile: string) => number | undefined;
   now: number;
 }
 
@@ -107,11 +127,11 @@ function ownerLive(owner: OwnerStamp, id: string, options: ReplayOptions): boole
 }
 
 /** The record a crashed run becomes: settled as interrupted, its session file kept for a resume. */
-function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number): AgentRecord {
+function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number, crashedAt: number | undefined): AgentRecord {
   return {
     id: spawned.id, type: spawned.type, description: spawned.description,
     status: "interrupted", toolUses: 0, lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, compactionCount: 0,
-    startedAt: spawned.spawnedAt, completedAt: now, interruptedAt: now,
+    startedAt: spawned.spawnedAt, completedAt: now, interruptedAt: now, crashedAt,
     sessionFile: spawned.sessionFile, persistSession: spawned.persistSession,
     parentAgentId: spawned.parentId, cwd: spawned.cwd, worktree: spawned.worktree,
     runCwd: spawned.runCwd, configCwd: spawned.configCwd,
@@ -151,7 +171,7 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
   const crashed: AgentRecord[] = [];
   for (const [id, run] of open) {
     if (ownerLive(run.owner, id, options)) continue;
-    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now));
+    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now, options.lastActivity(run.spawned.sessionFile)));
   }
   return crashed;
 }
