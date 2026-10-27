@@ -32,7 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
+import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -898,7 +898,7 @@ export default function (pi: ExtensionAPI) {
   // replay would otherwise drop items that were not taken yet.
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
-    for (const h of held) manager.adoptSlotHolders(h.slotHolders);
+    for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
@@ -943,13 +943,11 @@ export default function (pi: ExtensionAPI) {
         if (!(await adoptItem(item, false))) return;
         h.removeItem(item);
       }
-      const pending = h.takeNudged();
+      const pending = takeNudgeEntries(h);
       const pendingIds = new Set(pending.map((nudge) => nudge.id));
       for (const id of legacyIds) {
         const record = manager.getRecord(id);
-        if (!record) continue;
-        record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
-        record.resultDelivered = legacyDelivered(record, pendingIds);
+        if (record) fixLegacyRecord(record, ctx, pendingIds);
       }
       // A nested child's result is a wake on its parent, never a nudge on the main session.
       for (const { id, target } of pending) {
@@ -977,6 +975,12 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  /** Gives a record of an older activation, which carries neither, its spawner key and its delivery state. */
+  function fixLegacyRecord(record: AgentRecord | HandoverItem["dto"], ctx: ExtensionContext, pendingIds: ReadonlySet<string>): void {
+    record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
+    record.resultDelivered = legacyDelivered(record, pendingIds);
+  }
+
   /** A draining run settled, or reported usage: the reloaded activation takes it over. */
   function onHandoverEvent(h: ReloadHandover, event: HandoverEvent): void {
     // The items have left the old manager: their input is parked until each one is adopted.
@@ -985,6 +989,11 @@ export default function (pi: ExtensionAPI) {
       .then(async () => {
         if (event.kind === "settled") {
           for (const [i, item] of event.items.entries()) {
+            // A run of an older activation that settled before this one attached left its pool before adoption
+            // fixed it up: fix it here, before adopt reads it. Its nudge is this adoption's, so none is pending.
+            if (item.dto.spawnerSessionId === undefined && item.dto.resultDelivered === undefined && currentCtx) {
+              fixLegacyRecord(item.dto, currentCtx, new Set());
+            }
             if (!(await adoptItem(item, i === 0))) {
               // The items already left the old manager: they go back into the hand-over for the next activation.
               h.keepItems(event.items.slice(i));

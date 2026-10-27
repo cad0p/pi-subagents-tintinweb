@@ -20,6 +20,8 @@ import type { LifetimeUsage } from "./usage.js";
  * Permanent global key. The members a reader calls on a published hand-over (see `isReadableHandover`) are
  * permanent and may only be added to. A reader of any release takes a hand-over that carries them, whatever its
  * version, and ignores fields it does not know. A hand-over without them stays published for a reader that knows it.
+ * A field added after the first release is absent from older hand-overs: read it through an accessor that
+ * tolerates that (`slotHoldersOf`, `takeNudgeEntries`), never directly.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
@@ -189,7 +191,10 @@ export function fromDto(dto: AgentDto): AgentRecord {
  * delivered when its result was consumed, or when it settled, was announced, and its nudge is not still pending in
  * this hand-over (a nudge that is not pending was already sent). A missing flag never means announced.
  */
-export function legacyDelivered(record: AgentRecord, pendingNudges: ReadonlySet<string>): boolean {
+export function legacyDelivered(
+  record: Pick<AgentRecord, "id" | "resultConsumed" | "settled" | "notified">,
+  pendingNudges: ReadonlySet<string>,
+): boolean {
   return record.resultConsumed === true || (record.settled === true && record.notified === true && !pendingNudges.has(record.id));
 }
 
@@ -248,6 +253,19 @@ function isReadableHandover(value: unknown): value is ReloadHandover {
     "activity" in value &&
     value.activity instanceof Map
   );
+}
+
+/**
+ * The slots a hand-over's draining runs hold. Fields are read through these accessors, never directly: a hand-over
+ * published by an older release lacks what was added after it (`slotHolders` came with the slot gate, #107).
+ */
+export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
+  return (handover as { slotHolders?: Set<string> }).slotHolders ?? [];
+}
+
+/** The pending nudges as entries: releases before nested delivery handed plain ids over. */
+export function takeNudgeEntries(handover: ReloadHandover): NudgeEntry[] {
+  return (handover.takeNudged() as (NudgeEntry | string)[]).map((nudge) => (typeof nudge === "string" ? { id: nudge } : nudge));
 }
 
 /** Takes the handovers this release reads; each is returned once. Any other hand-over stays published for a reader that knows it. */
