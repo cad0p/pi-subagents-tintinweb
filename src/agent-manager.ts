@@ -37,7 +37,9 @@ import {
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
+import { resumedEntry, spawnedEntry } from "./ledger.js";
 import { describeModel } from "./model-resolver.js";
+import { currentOwnerStamp } from "./owner-identity.js";
 import {
   type DrainingPool,
   fromDto,
@@ -343,6 +345,10 @@ export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
   private reopening = new Map<string, Promise<AgentSession | undefined>>();
+  /** The pi each record was spawned by: its ledger entries go into that session's file (see writeLedger). */
+  private ledgerPi = new Map<string, ExtensionAPI>();
+  /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
+  private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -469,6 +475,7 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    this.ledgerPi.set(id, pi);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
@@ -487,6 +494,7 @@ export class AgentManager {
     } catch (err) {
       this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
       this.agents.delete(id);
+      this.ledgerPi.delete(id);
       throw err;
     }
     return id;
@@ -674,6 +682,9 @@ export class AgentManager {
           return;
         }
         bindSession(record, session, lifecycle);
+        if (record.sessionFile) {
+          this.writeLedger(id, "subagent-spawned", spawnedEntry(record, record.sessionFile, currentOwnerStamp()));
+        }
         options.onSessionCreated?.(session);
       },
     })
@@ -1223,7 +1234,27 @@ export class AgentManager {
     if (!this.onComplete || record.notified) return;
     if (this.handover && !record.parentAgentId) return;
     record.notified = true;
+    // A shutdown stop already wrote its settle entry (abortAll); every other settle writes it here.
+    if (!this.stopLedgered.delete(record.id)) this.ledgerSettle(record);
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
+  }
+
+  /** Appends a ledger entry through the spawner's pi. A failed write is logged; recovery's same-process rule covers it. */
+  private writeLedger(id: string, customType: string, data: object): void {
+    try {
+      this.ledgerPi.get(id)?.appendEntry(customType, data);
+    } catch (err) {
+      console.warn(`[pi-subagents] ledger write ${customType} for ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The settle entry: the record's final status, written into the spawner's session. */
+  private ledgerSettle(record: AgentRecord): void {
+    this.writeLedger(record.id, "subagents:record", {
+      id: record.id, type: record.type, description: record.description,
+      status: record.status, result: record.result, error: record.error,
+      startedAt: record.startedAt, completedAt: record.completedAt,
+    });
   }
 
   /**
@@ -1492,6 +1523,7 @@ export class AgentManager {
       return undefined;
     }
     record.settled = false;
+    this.writeLedger(id, "subagent-resumed", resumedEntry(id, currentOwnerStamp()));
     // No slot is taken here. The run's first provider request meets the gate (acquireSlot), so a resume
     // that finds the pool full waits in the same FIFO as a queued spawn.
     record.turnBudget = { turns: 0, softLimitReached: false };
@@ -1768,6 +1800,8 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    this.ledgerPi.delete(id);
+    this.stopLedgered.delete(id);
     this.clearCap(id);
     // An open lifecycle of a removed record has no tick or decide left to finish it (dispose clears them): close it here so its promise settles.
     const life = this.lives.get(id);
@@ -1845,6 +1879,9 @@ export class AgentManager {
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
+        // A shutdown stop is deliberate, not a crash: its settle entry goes out now, before the session is replaced.
+        this.ledgerSettle(record);
+        this.stopLedgered.add(record.id);
         count++;
       }
     }
