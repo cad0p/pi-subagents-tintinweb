@@ -32,7 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
+import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -898,7 +898,7 @@ export default function (pi: ExtensionAPI) {
   // replay would otherwise drop items that were not taken yet.
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
-    for (const h of held) manager.adoptSlotHolders(h.slotHolders);
+    for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
@@ -943,7 +943,7 @@ export default function (pi: ExtensionAPI) {
         if (!(await adoptItem(item, false))) return;
         h.removeItem(item);
       }
-      const pending = h.takeNudged();
+      const pending = takeNudgeEntries(h);
       const pendingIds = new Set(pending.map((nudge) => nudge.id));
       for (const id of legacyIds) {
         const record = manager.getRecord(id);

@@ -17,7 +17,9 @@ import {
   type HandoverEvent,
   publishHandovers,
   ReloadHandover,
+  slotHoldersOf,
   takeHandovers,
+  takeNudgeEntries,
   toDto,
   toSpawnData,
 } from "../src/reload-handover.js";
@@ -114,6 +116,21 @@ describe("ReloadHandover buffering", () => {
     expect(again.queued).toEqual([]);
     expect(handover.takeNudged()).toEqual([{ id: "n1" }]);
     expect(handover.takeNudged()).toEqual([]);
+  });
+
+  it("reads a hand-over published before the slot gate: no slotHolders, nudges as plain ids", () => {
+    // The shape a release before #107 publishes: its class has no slotHolders field and hands nudges over as ids.
+    const older = new ReloadHandover([], [], [], undefined, stubPool);
+    Reflect.deleteProperty(older, "slotHolders");
+    Object.assign(older, { takeNudged: () => ["n1", "n2"] });
+    expect([...slotHoldersOf(older)]).toEqual([]);
+    expect(takeNudgeEntries(older)).toEqual([{ id: "n1" }, { id: "n2" }]);
+  });
+
+  it("reads the current hand-over's slot holders and nudge targets unchanged", () => {
+    const current = new ReloadHandover([], [], [{ id: "n1", target: "p1" }], undefined, stubPool, new Map(), new Set(["s1"]));
+    expect([...slotHoldersOf(current)]).toEqual(["s1"]);
+    expect(takeNudgeEntries(current)).toEqual([{ id: "n1", target: "p1" }]);
   });
 
   it("keeps the idle sessions it holds on detach, for the next activation", () => {
