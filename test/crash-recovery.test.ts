@@ -287,4 +287,40 @@ describe("crash recovery — resume", () => {
     expect(interruptedSettles(nestedFile)).toEqual(["nest-c"]);
     expect(made.pi.sendMessage).toHaveBeenCalledTimes(1);
   });
+
+  it("the crash note gives the run's last saved activity, read from its session file", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    const saved = "2026-01-02T03:04:05.000Z";
+    writeSession(file, [spawned("timed", DEAD_PID)]);
+    writeSession(join(tmpDir, "timed.jsonl"), [{ ...custom("note", {}), timestamp: saved }]);
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
+
+    await made.tools.get("SendMessage").execute("tc-timed", { to: "timed", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
+    expect(vi.mocked(resumeAgent).mock.calls[0][1]).toContain(`Your last saved activity was at ${saved}`);
+  });
+});
+
+describe("crash recovery — unreadable session file", () => {
+  it("still lists an interrupted run whose session file is missing; its resume fails with a curated error", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("gone", DEAD_PID)]);
+    const made = boot(file);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    expect(made.pi.sendMessage.mock.calls[0][0].content).toContain("gone");
+
+    const result = await made.tools.get("SendMessage").execute("tc-gone", { to: "gone", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+
+    expect(result.details).toMatchObject({ sendOutcome: "failed" });
+    expect(resumeAgent).not.toHaveBeenCalled();
+    expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).toContain("missing or unreadable");
+    warn.mockRestore();
+  });
 });

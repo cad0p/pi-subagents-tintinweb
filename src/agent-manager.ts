@@ -1718,7 +1718,11 @@ export class AgentManager {
     }
     // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
     if (record.settled === false) return false;
-    const reopened = await this.restoreSession(id);
+    // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the log, and callers get false.
+    const reopened = await this.restoreSession(id).catch((err: unknown) => {
+      console.warn(`[pi-subagents] ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    });
     const current = this.agents.get(id);
     if (!reopened || !current) return false;
     // Another input may have started or parked the record while the session reopened: take the current state.
