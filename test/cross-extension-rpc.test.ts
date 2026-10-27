@@ -242,6 +242,34 @@ describe("cross-extension RPC", () => {
 
   // --- concurrent requests ---
 
+  describe("steer RPC", () => {
+    it("routes the message through manager.steer and replies success on a delivered outcome", async () => {
+      (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue("resumed");
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-sg1", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-sg1", agentId: "agent-42", message: "go on" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.steer).toHaveBeenCalledWith("agent-42", "go on");
+      expect(reply).toHaveBeenCalledWith({ success: true });
+    });
+
+    it("replies the delivery text when the outcome is refused", async () => {
+      (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-sg2", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-sg2", agentId: "agent-42", message: "go on" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: expect.stringContaining("did not take the message"),
+      });
+    });
+  });
+
   describe("concurrent requests", () => {
     it("handles multiple simultaneous spawn requests independently", async () => {
       let callCount = 0;

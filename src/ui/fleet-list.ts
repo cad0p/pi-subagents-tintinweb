@@ -13,6 +13,7 @@
 
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
+import { deliveryText } from "../delivery-text.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
@@ -316,7 +317,9 @@ export class FleetList {
             if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           },
           keybindings,
-          (message: string) => this.manager.steer(record.id, message),
+          (message: string) => {
+            void this.manager.steer(record.id, message).then((outcome) => this.ui?.notify(deliveryText(record.id, outcome), outcome === false ? "warning" : "info"));
+          },
           this.showCost(),
         );
       },

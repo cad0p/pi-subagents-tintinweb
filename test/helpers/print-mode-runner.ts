@@ -202,6 +202,11 @@ export function agentCall(
   return fauxToolCall("Agent", { subagent_type: "general-purpose", ...args }, opts);
 }
 
+/** A SendMessage call that continues a subagent by its id. */
+export function sendMessageCall(args: { to: string; message: string }, opts?: { id?: string }): ToolCall {
+  return fauxToolCall("SendMessage", args, opts);
+}
+
 function resolveReply(
   reply: FauxReply | ((ctx: Context) => FauxReply),
   ctx: Context,

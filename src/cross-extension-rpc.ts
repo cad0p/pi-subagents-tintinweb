@@ -9,8 +9,9 @@
  *   error   → { success: false, error: string }
  */
 
+import { deliveryText } from "./delivery-text.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import type { AgentRecord } from "./types.js";
+import type { AgentRecord, DeliverOutcome } from "./types.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
 export interface EventBus {
@@ -43,10 +44,10 @@ export interface SpawnCapable {
    */
   consumeResult(id: string): boolean;
   /**
-   * Deliver a message to a running or queued agent's conversation — what
-   * `steer_subagent` does. False when the agent is unknown or has settled.
+   * Deliver a message to an agent's conversation — what `SendMessage` does; a
+   * finished agent is resumed. False when the agent is unknown or cannot take input.
    */
-  steer(id: string, message: string): boolean;
+  steer(id: string, message: string): Promise<DeliverOutcome>;
 }
 
 export interface RpcDeps {
@@ -169,12 +170,13 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // agent for the same work or dropping the fact. Outside the ping version
   // handshake, like consume: additive and best-effort.
   const unsubSteer = handleRpc<{ requestId: string; agentId: string; message: unknown }>(
-    events, "subagents:rpc:steer", ({ agentId, message }) => {
+    events, "subagents:rpc:steer", async ({ agentId, message }) => {
       if (typeof message !== "string" || message.trim().length === 0) {
         throw new Error("Steer message must be a non-empty string");
       }
       assertOwned(agentId);
-      if (!manager.steer(agentId, message)) throw new Error("Agent is not running");
+      const outcome = await manager.steer(agentId, message);
+      if (outcome === false) throw new Error(deliveryText(agentId, outcome));
     },
   );
 

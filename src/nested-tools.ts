@@ -22,15 +22,17 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
+import { type ResumeCallbacks } from "./agent-manager.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { deliveryText } from "./delivery-text.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { renderAgentReport } from "./result-report.js";
-import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
 
@@ -71,16 +73,11 @@ export interface NestedSpawnOptions {
 /** The manager surface nested tools need. Structural so tests can fake it. */
 export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
-  resume(
-    id: string,
-    prompt: string,
-    callbacks?: { onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void },
-  ): AgentRecord | undefined;
+  deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome>;
   getRecord(id: string): AgentRecord | undefined;
   /** True while a draining activation still holds the run; its children stay with it. */
   isDraining(id: string): boolean;
   listAgents(): AgentRecord[];
-  restoreSession(id: string): Promise<AgentSession | undefined>;
 }
 
 export interface NestedToolContext {
@@ -121,6 +118,20 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
   };
 
+  // Usage a nested child reports belongs to every ancestor: nested records
+  // are hidden from every reporting surface, so their spend would otherwise
+  // be unattributable. The whole chain is walked — a spawn callback only
+  // fires for that child's OWN turns, so stopping at one level would hide a
+  // great-grandchild from the only record anyone can see.
+  const foldUsageIntoAncestors = (usage: { input: number; output: number; cacheWrite: number }): void => {
+    for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
+      const ancestor = context.manager.getRecord(id);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, usage);
+      id = ancestor.parentAgentId;
+    }
+  };
+
   const agentTool = defineTool({
     name: "Agent",
     label: "Agent",
@@ -142,7 +153,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(
         Type.Number({ description: "Maximum number of agentic turns before stopping. Omit for the agent's own limit.", minimum: 1 }),
       ),
-      resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
       isolated: Type.Optional(Type.Boolean({ description: "If true, the nested agent gets no extension tools." })),
       inherit_context: Type.Optional(
         Type.Boolean({ description: "If true, fork this agent's conversation into the nested agent." }),
@@ -153,41 +163,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-      // Usage a nested child reports belongs to every ancestor: nested records
-      // are hidden from every reporting surface, so their spend would otherwise
-      // be unattributable. The whole chain is walked — a spawn callback only
-      // fires for that child's OWN turns, so stopping at one level would hide a
-      // great-grandchild from the only record anyone can see.
-      const foldUsageIntoAncestors = (usage: { input: number; output: number; cacheWrite: number }): void => {
-        for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
-          const ancestor = context.manager.getRecord(id);
-          if (!ancestor) break;
-          addUsage(ancestor.lifetimeUsage, usage);
-          id = ancestor.parentAgentId;
-        }
-      };
-
-      if (params.resume) {
-        const existing = context.manager.getRecord(params.resume);
-        if (!ownsRecord(existing, context.parentAgentId)) {
-          return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
-        }
-        const reopened = await context.manager.restoreSession(params.resume);
-        if (!reopened) {
-          return textResult(`Failed to resume nested agent "${params.resume}" — no session could be reopened.`, true);
-        }
-        const resumed = context.manager.resume(params.resume, params.prompt, {
-          onAssistantUsage: foldUsageIntoAncestors,
-        });
-        if (!resumed) {
-          return textResult(`Failed to resume nested agent "${params.resume}" — it is still active or has no session.`, true);
-        }
-        return textResult(
-          `Nested agent resumed in background.\nAgent ID: ${resumed.id}\n\n` +
-          `Use get_subagent_result to retrieve its result. Do not duplicate its work.`,
-        );
-      }
-
       if (context.depth >= context.maxSubagentDepth) {
         return textResult(
           `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
@@ -357,36 +332,26 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  const steerTool = defineTool({
-    name: "steer_subagent",
-    label: "Steer Nested Agent",
-    description: "Send a steering message to a running nested agent owned by this parent.",
-    promptSnippet: "Send a steering message to redirect a nested subagent",
+  const sendMessageTool = defineTool({
+    name: "SendMessage",
+    label: "Send Message",
+    description:
+      "Send a message to a nested agent owned by this parent. A running agent takes it as a steer; " +
+      "a finished agent is resumed with it. Use the agent's ID as `to`.",
+    promptSnippet: "Send a message to a nested subagent (resumes it if it has finished)",
     parameters: Type.Object({
-      agent_id: Type.String({ description: "The nested agent ID to steer." }),
-      message: Type.String({ description: "The steering message to send." }),
+      to: Type.String({ description: "The nested agent ID to message." }),
+      message: Type.String({ description: "The message to send." }),
     }),
     execute: async (_toolCallId, params) => {
-      const record = context.manager.getRecord(params.agent_id);
+      const record = context.manager.getRecord(params.to);
       if (!ownsRecord(record, context.parentAgentId)) {
-        return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
+        return textResult(`Nested agent not found or not owned by this parent: "${params.to}".`, true);
       }
-      if (record.status !== "running" && record.status !== "queued") {
-        return textResult(`Nested agent "${params.agent_id}" is not running (status: ${record.status}).`, true);
-      }
-      // Session not ready yet — queue the steer. The manager flushes pending
-      // steers when the session is created (same contract as the top-level tool).
-      if (!record.session) {
-        if (!record.pendingSteers) record.pendingSteers = [];
-        record.pendingSteers.push(params.message);
-        return textResult(`Steering message queued for nested agent ${record.id}. It will be delivered once the session initializes.`);
-      }
-      try {
-        await record.session.steer(params.message);
-      } catch (err) {
-        return textResult(`Failed to steer nested agent: ${err instanceof Error ? err.message : String(err)}`, true);
-      }
-      return textResult(`Steering message sent to nested agent ${record.id}.`);
+      const outcome = await context.manager.deliver(params.to, params.message, {
+        onAssistantUsage: foldUsageIntoAncestors,
+      });
+      return textResult(deliveryText(params.to, outcome), outcome === false);
     },
   });
 
@@ -411,5 +376,5 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  return [agentTool, resultTool, steerTool, checkpointTool];
+  return [agentTool, resultTool, sendMessageTool, checkpointTool];
 }

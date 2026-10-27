@@ -49,7 +49,7 @@ function makeNestedManager(spawns: SpawnCall[]) {
       spawns.push({ type, options });
       return "child-1";
     },
-    resume: () => undefined,
+    deliver: () => Promise.resolve(false as const),
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
   };

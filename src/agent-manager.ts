@@ -44,7 +44,7 @@ import {
   toDto,
   toSpawnData,
 } from "./reload-handover.js";
-import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-widget.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -54,9 +54,8 @@ export type OnAgentStart = (record: AgentRecord) => void;
 /**
  * Fired by `steer()` once a message is delivered or queued. Every steer path
  * that goes through the manager reports through it — the widget, the fleet
- * list, the conversation viewer, and the cross-extension RPC. The steer tools
- * (`steer_subagent` in index.ts and its nested twin) bypass this method because
- * they await the session directly, so they emit on their own.
+ * list, the conversation viewer, and the cross-extension RPC. The SendMessage
+ * tools (index.ts and its nested twin) call `deliver` directly and emit nothing.
  */
 export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
@@ -250,7 +249,7 @@ export interface SpawnOptions {
 }
 
 /** The five activity callbacks a resumed run forwards to its caller. */
-type ResumeCallbacks = Pick<
+export type ResumeCallbacks = Pick<
   SpawnOptions,
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
@@ -276,6 +275,8 @@ export class AgentManager {
   private runningBackground = 0;
   /** Pools of older activations whose runs still count against `maxConcurrent`. */
   private drainingPools: DrainingPool[] = [];
+  /** Ids whose hand-over item is being adopted: input for them is parked here until `endAdoption`. */
+  private adopting = new Map<string, string[]>();
   /** Set once this activation shuts down for a reload: its draining runs settle into it. */
   private handover?: ReloadHandover;
 
@@ -616,6 +617,8 @@ export class AgentManager {
     await this.retireSession(record);
     record.settled = true;
     this.releaseSettled();
+    // Input parked during the teardown is delivered only now: a settled record takes a resume, an unsettled one refuses.
+    this.endTransition(record);
   }
 
   /**
@@ -633,6 +636,26 @@ export class AgentManager {
     } finally {
       record.transition = undefined;
     }
+  }
+
+  /** Ends a teardown and hands over the input parked during it, as one resume of the finished record. */
+  private endTransition(record: AgentRecord): void {
+    record.transition = undefined;
+    const parked = record.pendingInput;
+    record.pendingInput = undefined;
+    if (parked) this.flushParked(record.id, parked);
+  }
+
+  /** Delivers input that was answered "held" earlier. A refusal now cannot reach the sender, so it is logged. */
+  private flushParked(id: string, parked: string[]): void {
+    const warn = (why: string) =>
+      console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id}: ${why}`);
+    this.deliver(id, parked.join("\n\n")).then(
+      (outcome) => {
+        if (outcome === false) warn("refused after the hand-over ended");
+      },
+      (err: unknown) => warn(err instanceof Error ? err.message : String(err)),
+    );
   }
 
   /**
@@ -694,13 +717,17 @@ export class AgentManager {
    * from the UI and only their owner can consume them, so a child outliving its
    * parent would burn tokens unseen with no way to reach it. Grandchildren are
    * covered transitively — each abort lands in that child's own settle path.
+   * A child that had already finished was not stopped: it keeps its file and stays
+   * resumable through `deliver`.
    */
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
       if (record.parentAgentId !== parentId) continue;
+      const live = record.status === "queued" || record.status === "running";
       this.abort(id);
       // The owning parent settled, so no one can pull this child's result: it is delivered.
       record.resultDelivered = true;
+      if (live) record.ownerAborted = true;
     }
   }
 
@@ -783,7 +810,7 @@ export class AgentManager {
       // A listener threw (stale extension context). Restore the pre-resume
       // state and refuse: the tool reports failure and the counter is untouched.
       Object.assign(record, prior);
-      void this.retireSession(record);
+      void this.retireSession(record).then(() => this.endTransition(record));
       return undefined;
     }
     // A resumed run is a new run: it is announced when it settles, whatever the prior run announced.
@@ -796,7 +823,7 @@ export class AgentManager {
     // already stopped.
     if (this.stoppedInStartPrologue(record)) {
       this.settleStoppedWithoutRun(record);
-      void this.retireSession(record);
+      void this.retireSession(record).then(() => this.endTransition(record));
       return undefined;
     }
     record.settled = false;
@@ -827,6 +854,7 @@ export class AgentManager {
         this.onCompact?.(record, info);
         callbacks?.onCompaction?.(info);
       },
+      maxTurns: record.effectiveMaxTurns,
       signal: record.abortController.signal,
     })
       .then(({ text, failure }) => {
@@ -897,28 +925,78 @@ export class AgentManager {
   }
 
   /**
-   * Send a steering message to an agent from the UI (mirrors the steer_subagent
-   * tool). A live session delivers it now — it interrupts the agent after its
-   * current tool execution and appears as a user message. If the session isn't
-   * ready yet, the message is queued on `pendingSteers` and flushed when the
-   * session is created. Returns false if the agent can't accept steering
-   * (unknown id, or no longer running/queued). Fires `onSteered` on either
-   * accepted path, so the viewers and the cross-extension RPC report the steer
-   * the same way without each emitting by hand. The steer tools bypass this
-   * method because they await delivery.
+   * The one input path to a subagent: `SendMessage` and its nested twin call `deliver` directly; the UI and the
+   * cross-extension RPC go through `steer`, which adds the `onSteered` report. Returns how the text was taken
+   * (see `DeliverOutcome`). `callbacks` observe the run a finished record is resumed into.
    */
-  steer(id: string, message: string): boolean {
-    const record = this.getRecord(id);
-    if (!record) return false;
-    if (record.status !== "running" && record.status !== "queued") return false;
-    if (record.session) {
-      record.session.steer(message).catch(() => {});
-    } else {
-      if (!record.pendingSteers) record.pendingSteers = [];
-      record.pendingSteers.push(message);
+  async deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome> {
+    const parked = this.adopting.get(id);
+    if (parked) {
+      parked.push(text);
+      return "held";
     }
-    this.onSteered?.(record, message);
-    return true;
+    if (!this.agents.has(id)) return this.deliverToDraining(id, text);
+    const record = this.agents.get(id);
+    if (!record || record.ownerAborted) return false;
+    if (record.transition) {
+      record.pendingInput = [...(record.pendingInput ?? []), text];
+      return "held";
+    }
+    if (record.status === "queued" || (record.status === "running" && !record.session)) {
+      record.pendingSteers = [...(record.pendingSteers ?? []), text];
+      return "queued";
+    }
+    if (record.status === "running" && record.session) {
+      // Not awaited: the tool answers at once. A rejection is logged, the text is not retried.
+      record.session.prompt(text, { streamingBehavior: "steer" }).catch((err: unknown) => {
+        console.warn(`[pi-subagents] steer ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return "delivered";
+    }
+    // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
+    if (record.settled === false) return false;
+    const reopened = await this.restoreSession(id);
+    const current = this.agents.get(id);
+    if (!reopened || !current) return false;
+    // Another input may have started or parked the record while the session reopened: take the current state.
+    if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
+    return this.resume(id, text, callbacks) ? "resumed" : false;
+  }
+
+  /** Input for a record a draining pool owns. A pool from an older activation has no `deliver`: only a running session takes it. */
+  private async deliverToDraining(id: string, text: string): Promise<DeliverOutcome> {
+    const pool = this.drainingPools.find((p) => p.ownAgents().some((r) => r.id === id));
+    if (pool?.deliver) return pool.deliver(id, text);
+    const record = pool?.ownAgents().find((r) => r.id === id);
+    if (record?.status !== "running" || !record.session) return false;
+    record.session.steer(text).catch((err: unknown) => {
+      console.warn(`[pi-subagents] steer ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    return "delivered";
+  }
+
+  /** Opens the adoption window of a hand-over item: input for `id` is parked until `endAdoption`. */
+  beginAdoption(id: string): void {
+    this.adopting.set(id, []);
+  }
+
+  /** Closes the adoption window and delivers the input parked during it, now that the record is adopted here. */
+  endAdoption(id: string): void {
+    const parked = this.adopting.get(id) ?? [];
+    this.adopting.delete(id);
+    if (parked.length > 0) this.flushParked(id, parked);
+  }
+
+  isAdopting(id: string): boolean {
+    return this.adopting.has(id);
+  }
+
+  /** Send a steering message from the UI or the RPC. Fires `onSteered` on every outcome that took the text. */
+  async steer(id: string, message: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome> {
+    const outcome = await this.deliver(id, message, callbacks);
+    const record = this.getRecord(id);
+    if (outcome !== false && record) this.onSteered?.(record, message);
+    return outcome;
   }
 
   getRecord(id: string): AgentRecord | undefined {
@@ -1135,9 +1213,7 @@ export class AgentManager {
       record.sessionSnapshot ??= snapshotSession(session);
       // Refuse a reopen until the old session is gone, so two sessions never write one file.
       record.transition = "teardown";
-      void teardownChildSession(session).finally(() => {
-        record.transition = undefined;
-      });
+      void teardownChildSession(session).finally(() => this.endTransition(record));
     }
     record.settled = true;
     this.agents.set(record.id, record);
@@ -1182,6 +1258,16 @@ export class AgentManager {
   /** `prune` is false in a child activation: only the root prunes git worktrees, which are repo-wide state. */
   async dispose(prune = true): Promise<void> {
     clearInterval(this.cleanupInterval);
+    // Input parked for a hand-over item that never reached adoption dies with this manager.
+    for (const [id, parked] of this.adopting) {
+      if (parked.length > 0) console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id} during shutdown`);
+    }
+    this.adopting.clear();
+    for (const [id, record] of this.agents) {
+      const count = record.pendingInput?.length ?? 0;
+      if (count > 0) console.warn(`[pi-subagents] dropped ${count} input(s) parked for ${id} during shutdown`);
+      record.pendingInput = undefined;
+    }
     // Clear queue
     this.queue = [];
     // An in-flight run keeps its session file for the crash-recovery follow-up;

@@ -12,14 +12,14 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## Features
 
-- **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
+- **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `SendMessage`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (default — every agent) or `off` (hide the widget)
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for any running agent
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
-- **Session resume** — pick up where an agent left off, preserving full conversation context
+- **Session resume** — message a finished agent with `SendMessage` to pick up where it left off, preserving full conversation context
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. Unknown types fall back to general-purpose with a note
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
@@ -91,7 +91,7 @@ Malformed store records are skipped rather than crashing the menu: a job whose s
 **Disable the feature entirely**: `/agents → Settings → Scheduling → disabled` removes `schedule` from the `Agent` tool spec (no LLM-context cost), hides the menu entry, and stops any active scheduler. The schema-level removal takes effect on the next pi session; the runtime kill is immediate. Re-enable from the same menu.
 
 Restrictions:
-- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
+- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time). Schedules always create fresh agents.
 - Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
 - **Headless `pi -p` does not wait for background subagents** — the process exits at the parent settle and running children are aborted before their reports can be delivered. Tracked in [#35](https://github.com/cad0p/pi-subagents-tintinweb/issues/35).
 
@@ -127,7 +127,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `⏺`, the rest `◯`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `⏺`, the rest `◯`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `SendMessage` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
 
 Individual agent results render Claude Code-style in the conversation:
 
@@ -303,7 +303,6 @@ Launch a sub-agent.
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
-| `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"worktree"` or `"off"` | no | `worktree` runs in an isolated git worktree; `off` declines one (the default) |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
@@ -318,14 +317,14 @@ Check a subagent's status and retrieve its result. Use the agent ID returned by 
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to check |
 
-### `steer_subagent`
+### `SendMessage`
 
-Send a steering message to a subagent. The message interrupts after the current tool execution.
+Send a message to an agent by ID. One path serves every case: a running agent gets it as a steer (it interrupts after the current tool execution); a queued agent gets it once it starts; a finished agent is reopened from its session file and resumed with the message and a fresh `max_turns` budget. A message held while a `/reload` hand-over or teardown is in flight is delivered when it ends. An agent stopped with its parent, or still settling, refuses the message; send again in a moment. The result says which case applied (sent, queued, resumed, held, or refused).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to steer (must be running or queued) |
-| `message` | string | yes | Message to inject into agent conversation |
+| `to` | string | yes | Agent ID to message |
+| `message` | string | yes | Message to deliver to the agent |
 
 The message shows as a one-line preview in the tool row; press ctrl+o to expand the full text.
 
@@ -352,7 +351,7 @@ Create new agent                            ← manual wizard or AI-generated
 Settings                                    ← concurrency, turns, scheduling, failure preview, fleet view, widget, …
 ```
 
-- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it. A stopped agent reports its partial output flagged as incomplete, not as a completion.
+- **Running agents** — select one to open its live conversation viewer. Press `Enter` to open the steering composer, then `Enter` again to send a message (a running agent is redirected, a finished one is resumed; same mechanism as the `SendMessage` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it. A stopped agent reports its partial output flagged as incomplete, not as a completion.
 - **Agent types** — unified list with source indicators: `•` (project), `◦` (global), `✕` (disabled). Each row shows the agent's model, and the highlighted agent's full description appears below the list. The model column flags `(unavailable, fallback: inherit)` when a configured model can't be resolved (it would silently inherit the parent model), and shows `(→ provider/id)` when it resolves to a different provider or version than configured. Select an agent to manage it:
   - **Default agents** (no override): Eject (export as `.md`), Disable
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
@@ -382,7 +381,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
-Resumed runs (`resume`) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
+Resumed runs (a `SendMessage` to a finished agent) are exempt: a resume starts immediately, occupies a pool slot while it runs, and is never queued — a burst of resumes can therefore push the actual concurrency above `maxConcurrent` by design.
 
 ## Session Persistence
 
@@ -392,7 +391,7 @@ Retention is decided when the run settles, not when the session is created:
 
 | `persist_session` | Behavior |
 |---|---|
-| `false` (default) | The session file is deleted when the agent record is removed: the 10-minute eviction after completion, `clearCompleted()` on session switch, or a clean shutdown once the run has settled. Until then the completed record can still `resume` the agent, which is why the file outlives the run itself. |
+| `false` (default) | The session file is deleted when the agent record is removed: the 10-minute eviction after completion, `clearCompleted()` on session switch, or a clean shutdown once the run has settled. Until then the completed record can still be resumed through `SendMessage`, which is why the file outlives the run itself. |
 | `true` | The session file is kept indefinitely. |
 
 Shutdown keeps an in-flight run's file — a run killed mid-flight is the case this exists for — and deletes a settled one's, because the manager's map is discarded and nothing would ever revisit it. `session_dir:` picks the directory the file is written to; omitted, it is the parent session's own directory, worktree children included, so the file stays beside the parent after the worktree is removed. On a host session with no file of its own (`--no-session`, or an SDK host using an in-memory session) subagent sessions are in-memory too and explicitly not recoverable. A resumed agent keeps the same session file and the same retention decision as its first run.
@@ -401,7 +400,7 @@ Shutdown keeps an in-flight run's file — a run killed mid-flight is the case t
 
 ## Reload
 
-A `/reload` does not stop subagents. An agent that is mid-run finishes that run on the old code, then moves to the reloaded session. An idle agent (finished and kept for `resume`) moves at once, and a queued agent moves and starts on the new code. Nested children move with their top-level agent. Each moved child is then reloaded, so its extensions run the new code too. Child reloads happen only while the child is idle, so an in-flight call (an MCP tool, for example) is never cut. Completions, usage and slot releases from a draining agent reach the reloaded session, and `maxConcurrent` is one budget across the old and new sessions.
+A `/reload` does not stop subagents. An agent that is mid-run finishes that run on the old code, then moves to the reloaded session. An idle agent (finished and kept for `SendMessage`) moves at once, and a queued agent moves and starts on the new code. Nested children move with their top-level agent. Each moved child is then reloaded, so its extensions run the new code too. Child reloads happen only while the child is idle, so an in-flight call (an MCP tool, for example) is never cut. Completions, usage and slot releases from a draining agent reach the reloaded session, and `maxConcurrent` is one budget across the old and new sessions.
 
 **Bootstrap:** the first release with this code is a one-time exception. A session still on 0.22.0 has no hand-over to give, so the reload that installs it loses its subagents. Restart pi once after updating; every later reload keeps them.
 
@@ -447,9 +446,9 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` aborts extension load, naming the file, instead of being skipped with a warning. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. For a checked-in `.pi/agents/`, failing at startup is the point: the alternative is running a *different* agent than the file names.
 
-**Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on nested subagent delegation, counted from the main session — main is 0, its subagents are 1, their children are 2. `0` or `1` disables nesting project-wide. An agent only gets the nested tools (`Agent`, `get_subagent_result`, `steer_subagent`) when its own frontmatter opts in with `allowed_subagents` *and* it sits below the cap; its `max_subagent_depth` can tighten the project cap but never raise it. A nested child does not take a `maxConcurrent` slot — its parent already holds one — and it is aborted when its parent settles, since only the parent can reach it.
+**Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on nested subagent delegation, counted from the main session — main is 0, its subagents are 1, their children are 2. `0` or `1` disables nesting project-wide. An agent only gets the nested tools (`Agent`, `get_subagent_result`, `SendMessage`) when its own frontmatter opts in with `allowed_subagents` *and* it sits below the cap; its `max_subagent_depth` can tighten the project cap but never raise it. A nested child does not take a `maxConcurrent` slot — its parent already holds one — and it is aborted when its parent settles, since only the parent can reach it.
 
-**Report usage** (`reportUsage`, default `true`): subagents run in their own pi session, so without this the parent's footer, statusline and `/cost` show only what the main model spent — a session that delegated most of its work reads as nearly free. With this on, each `Agent` / `get_subagent_result` / `steer_subagent` result carries the spend accumulated since the last one, and pi folds it into the session totals under `/cost`'s "Tools/summaries" bucket. Tokens include `cacheRead` (pi bills the cached prefix on every call), cost is pi's own per-message figure, and the context-window percentage is unaffected. Two consequences worth knowing: an agent that finishes in the background has no result of its own to ride on, so its spend lands on the **next** call rather than the moment it finishes, and a session that ends with nothing pending reports nothing. Nested children are counted once each, on the top-level result. On by default here, unlike upstream: a session total that omits the delegated work is wrong about what the session cost, and the setting stays available for anyone tracking the old numbers. Turning it on does move numbers a statusline may already be reading, which is the one reason it is a setting rather than unconditional.
+**Report usage** (`reportUsage`, default `true`): subagents run in their own pi session, so without this the parent's footer, statusline and `/cost` show only what the main model spent — a session that delegated most of its work reads as nearly free. With this on, each `Agent` / `get_subagent_result` / `SendMessage` result carries the spend accumulated since the last one, and pi folds it into the session totals under `/cost`'s "Tools/summaries" bucket. Tokens include `cacheRead` (pi bills the cached prefix on every call), cost is pi's own per-message figure, and the context-window percentage is unaffected. Two consequences worth knowing: an agent that finishes in the background has no result of its own to ride on, so its spend lands on the **next** call rather than the moment it finishes, and a session that ends with nothing pending reports nothing. Nested children are counted once each, on the top-level result. On by default here, unlike upstream: a session total that omits the delegated work is wrong about what the session cost, and the setting stays available for anyone tracking the old numbers. Turning it on does move numbers a statusline may already be reading, which is the one reason it is a setting rather than unconditional.
 
 **Show cost** (`showCost`, default `true`): `~$0.0042` beside the subagent token counts in the widget, FleetView, the conversation viewer, `get_subagent_result` and completion notifications. Independent of `reportUsage`: that one changes the session's totals, this one is what a human reads. Omitted entirely when pi has no pricing data for the model, so `$0.00` never means "measured, free".
 

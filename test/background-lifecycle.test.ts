@@ -30,6 +30,7 @@ const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 const mockSession = () => ({
   dispose: vi.fn(),
+  prompt: vi.fn(async () => {}),
   sessionId: "child-session-id",
   messages: [],
   subscribe: () => () => {},
@@ -138,7 +139,7 @@ describe("background lifecycle — pooling and the completion tail", () => {
     const queued = manager.spawn(mockPi, mockCtx, "X", "queued", { description: "queued" });
     const record = manager.getRecord(queued)!;
     expect(record.status).toBe("queued");
-    expect(manager.steer(queued, "go left")).toBe(true);
+    expect(await manager.steer(queued, "go left")).toBe("queued");
     // The session does not exist yet — the message parks until the run starts.
     expect(record.pendingSteers).toEqual(["go left"]);
 
@@ -946,7 +947,7 @@ describe("background lifecycle — model-visible surfaces", () => {
       `Agent started in background.\nAgent ID: ${id}\nType: Explore\nDescription: d\n` +
         `Output file: ${record.outputFile}\n` +
         `\nYou will be notified on subagent completion/failure.\n` +
-        `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
+        `Use get_subagent_result to retrieve full results, or SendMessage to message it.\n` +
         `Do not duplicate this agent's work.`,
     );
     expect(textOf(spawn)).not.toContain("when this agent completes");
@@ -1163,7 +1164,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     }
   });
 
-  it("returns the no-active-session envelope when resuming a queued-then-aborted record", async () => {
+  it("refuses a SendMessage to a queued-then-stopped record that has no session to reopen", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const { tools, lifecycle, busHandlers } = registerExtension({ maxConcurrent: 1 });
     const bindCtx = { ...spawnCtx(tmpDir), sessionManager: { getSessionId: () => undefined } };
@@ -1187,18 +1188,18 @@ describe("background lifecycle — model-visible surfaces", () => {
     await busHandlers.get("subagents:rpc:stop")!({ requestId: "stop-queued", agentId: id });
     expect(handle.getRecord(id).status).toBe("stopped");
 
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    // The resume guard does not claim a queued-then-stopped record; the
-    // session guard is what refuses it.
-    expect(textOf(resume)).toBe(`Agent "${id}" has no active session to resume.`);
+    // A record stopped before its session existed has nothing to reopen.
+    expect(textOf(resume)).toContain("did not take the message");
+    expect(textOf(resume)).toContain("no session to reopen");
   });
 
-  it("returns a background envelope from a resume and re-attaches the transcript", async () => {
+  it("resumes a finished agent through SendMessage and runs the message to completion", async () => {
     resolvedRun("first");
     const { tools } = registerExtension();
 
@@ -1214,29 +1215,13 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.outputFile).toBeTruthy();
 
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    expect(textOf(resume)).toBe(
-      `Agent resumed in background.\nAgent ID: ${id}\nType: Explore\nDescription: d\n` +
-        `Output file: ${record.outputFile}\n` +
-        `\nYou will be notified on subagent completion/failure.\n` +
-        `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
-        `Do not duplicate this agent's work.`,
-    );
-    expect(textOf(resume)).not.toContain("when this agent completes");
-    // The row's identity fields mirror the record (and the envelope text),
-    // not the resume call's subagent_type/description.
-    expect(resume.details).toMatchObject({
-      displayName: "Explore",
-      subagentType: "Explore",
-      description: "d",
-    });
-    expect((resume.details as { status: string }).status).toBe("background");
-    expect(record.outputCleanup).toBeTypeOf("function"); // transcript re-attached
+    expect(textOf(resume)).toContain("resumed it with the message");
     await record.promise;
     expect(record.result).toBe("second");
   });
@@ -1272,9 +1257,9 @@ describe("background lifecycle — model-visible surfaces", () => {
     // Starting the resume clears the stale latch, so the resumed run's own
     // completion row is visible instead of inheriting the aged-out one.
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
-    await tools.get("Agent").execute(
+    await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "aged out", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, { ...spawnCtx(tmpDir), ui },
     );
     await record.promise;
@@ -1301,9 +1286,9 @@ describe("background lifecycle — model-visible surfaces", () => {
 
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
-    await tools.get("Agent").execute(
+    await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
 
@@ -1355,9 +1340,9 @@ describe("background lifecycle — model-visible surfaces", () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED-ANSWER" }] });
       return { text: "second" };
     });
-    await tools.get("Agent").execute(
+    await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
     await record.promise;
@@ -1368,7 +1353,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(transcript).not.toContain("PRIOR-ANSWER");
   });
 
-  it("returns the still-active envelope when resuming a running agent", async () => {
+  it("parks a message sent to a running agent until its session initializes", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const { tools } = registerExtension();
 
@@ -1379,20 +1364,19 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
     const id = agentIdOf(spawn);
 
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    expect(textOf(resume)).toBe(
-      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
-    );
-    // The tool-level guard fires before the manager is ever touched.
-    expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("running");
+    expect(textOf(resume)).toContain(`Message queued for agent ${id}.`);
+    const record = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+    expect(record.status).toBe("running");
+    expect(record.pendingSteers).toEqual(["more"]);
   });
 
-  it("refuses a re-entrant tool resume issued from the started event", async () => {
+  it("steers rather than resumes a message sent from the started event", async () => {
     resolvedRun("first");
     const { pi, tools } = registerExtension();
 
@@ -1415,28 +1399,26 @@ describe("background lifecycle — model-visible surfaces", () => {
     pi.events.emit.mockImplementation((event: string, payload: any) => {
       if (event !== "subagents:started" || nestedCalled) return;
       nestedCalled = true;
-      nested = tools.get("Agent").execute(
+      nested = tools.get("SendMessage").execute(
         "tc-nested",
-        { prompt: "again", description: "d", subagent_type: "general-purpose", resume: payload.id },
+        { to: payload.id, message: "again" },
         undefined, undefined, spawnCtx(tmpDir),
       );
     });
 
-    const resumed = await tools.get("Agent").execute(
+    const resumed = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
-    expect(textOf(resumed)).toContain("Agent resumed in background");
+    expect(textOf(resumed)).toContain("resumed it with the message");
     expect(nested).toBeDefined();
-    expect(textOf(await nested!)).toBe(
-      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
-    );
+    expect(textOf(await nested!)).toContain("Message sent to agent");
     // Only the outer resume reached the runner.
     expect(resumeAgent).toHaveBeenCalledTimes(1);
   });
 
-  it("returns the still-active envelope while a stopped record is still winding down", async () => {
+  it("refuses a message sent to a record that is still winding down", async () => {
     let resolveRun!: (v: any) => void;
     vi.mocked(runAgent).mockImplementation(() => new Promise((r) => { resolveRun = r; }));
     const { tools, lifecycle, busHandlers } = registerExtension();
@@ -1456,14 +1438,12 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(handle.getRecord(id).status).toBe("stopped");
     expect(handle.getRecord(id).settled).toBe(false);
 
-    const resume = await tools.get("Agent").execute(
+    const resume = await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
-    expect(textOf(resume)).toBe(
-      `Agent "${id}" is still active (running, queued, or winding down) — wait for it to finish before resuming.`,
-    );
+    expect(textOf(resume)).toContain("did not take the message");
 
     // Settle the aborted run so the lifecycle completes.
     resolveRun({ responseText: "", session: mockSession(), aborted: true, steered: false });
@@ -1485,9 +1465,9 @@ describe("background lifecycle — model-visible surfaces", () => {
 
     const startedBefore = pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:started").length;
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
-    await tools.get("Agent").execute(
+    await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
 
@@ -1532,9 +1512,9 @@ describe("background lifecycle — model-visible surfaces", () => {
       opts.onAssistantUsage({ input: 1000, output: 0, cacheWrite: 0 });
       return new Promise((r) => { resolveResume = r; });
     });
-    await tools.get("Agent").execute(
+    await tools.get("SendMessage").execute(
       "tc-resume",
-      { prompt: "more", description: "d2", subagent_type: "general-purpose", resume: id },
+      { to: id, message: "more" },
       undefined, undefined, { ...spawnCtx(tmpDir), ui },
     );
 
@@ -1551,7 +1531,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     await handle.getRecord(id).promise;
   });
 
-  it("steers a queued agent through the steer_subagent tool", async () => {
+  it("delivers a message to a queued agent through the SendMessage tool", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
     const { tools } = registerExtension({ maxConcurrent: 1 });
 
@@ -1568,10 +1548,10 @@ describe("background lifecycle — model-visible surfaces", () => {
     const id = agentIdOf(second);
     expect((globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id).status).toBe("queued");
 
-    const steer = await tools.get("steer_subagent").execute(
-      "tc-steer", { agent_id: id, message: "go left" }, undefined, undefined, spawnCtx(tmpDir),
+    const sent = await tools.get("SendMessage").execute(
+      "tc-send", { to: id, message: "go left" }, undefined, undefined, spawnCtx(tmpDir),
     );
-    expect((steer.details as { steerOutcome: string }).steerOutcome).toBe("queued");
-    expect(textOf(steer)).toContain("Steering message queued");
+    expect((sent.details as { sendOutcome: string }).sendOutcome).toBe("queued");
+    expect(textOf(sent)).toContain("Message queued for agent");
   });
 });

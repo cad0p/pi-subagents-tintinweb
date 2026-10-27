@@ -61,6 +61,16 @@ function publishedRoot(): RootRoute {
   return published.root();
 }
 
+/** Whether a user turn carrying `text` reached the child's transcript. */
+function hasUserText(session: { messages: readonly { role: string; content: unknown }[] }, text: string): boolean {
+  return session.messages.some((m) => m.role === "user" && JSON.stringify(m.content).includes(text));
+}
+
+/** Whether the session recorded a tool result for `toolName`. */
+function hasToolResult(session: { messages: readonly { role: string }[] }, toolName: string): boolean {
+  return session.messages.some((m) => m.role === "toolResult" && "toolName" in m && m.toolName === toolName);
+}
+
 /** Steer over the same bus a cross-extension caller uses (subagents:rpc:steer). */
 function steerOverBus(events: EventBus, agentId: string, message: string): Promise<RpcReply> {
   const requestId = `steer-${agentId}`;
@@ -112,6 +122,8 @@ let parentLeavesChild = false;
 let parentSpawnsOnRelease = false;
 /** The nested child a resumed parent turn reopens through the Agent tool when it is told "again". */
 let nestedResumeTarget = "";
+/** The run a root turn messages through SendMessage when it is told "send-now". */
+let sendTarget = "";
 
 /** The nested child a parent turn spawns through the Agent tool. */
 function nestedSpawn() {
@@ -145,12 +157,7 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
   if (parentTurn && JSON.stringify(parentTurn.content).includes(PARENT_TASK)) {
     if (last?.role === "user" && nestedResumeTarget && text.includes("again")) {
       return fauxAssistantMessage([
-        fauxToolCall("Agent", {
-          resume: nestedResumeTarget,
-          description: "nested reload agent",
-          prompt: "again",
-          subagent_type: "general-purpose",
-        }),
+        fauxToolCall("SendMessage", { to: nestedResumeTarget, message: "again" }),
       ]);
     }
     const results = context.messages.filter((m) => m.role === "toolResult");
@@ -167,7 +174,7 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
     }
     if (results.length === 1) {
       return steerGate.then(() =>
-        fauxAssistantMessage([fauxToolCall("steer_subagent", { agent_id: nestedId, message: "STEER-NOTE" })]),
+        fauxAssistantMessage([fauxToolCall("SendMessage", { to: nestedId, message: "STEER-NOTE" })]),
       );
     }
     if (results.length === 2) {
@@ -188,14 +195,12 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
   if (last?.role === "user" && text.includes("bash-now")) {
     return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
   }
+  if (last?.role === "user" && text.includes("send-now")) {
+    return fauxAssistantMessage([fauxToolCall("SendMessage", { to: sendTarget, message: "STEER-NOTE" })]);
+  }
   if (last?.role === "user" && text.includes("resume-now")) {
     return fauxAssistantMessage([
-      fauxToolCall("Agent", {
-        resume: resumeTarget,
-        description: "reload agent",
-        prompt: "again",
-        subagent_type: "general-purpose",
-      }),
+      fauxToolCall("SendMessage", { to: resumeTarget, message: "again" }),
     ]);
   }
   if (last?.role === "user" && text.includes("spawn-recorder")) {
@@ -932,15 +937,39 @@ describe("subagents across a real /reload (faux provider)", () => {
     const after = liveRegistry();
     const draining = after.listAgents().find((r) => r.status === "running");
     if (!draining?.session) throw new Error("no draining session");
-    const steer = vi.spyOn(draining.session, "steer");
+    const drainingSession = draining.session;
     expect(await steerOverBus(publishedRoot().pi.events, draining.id, "STEER-NOTE")).toEqual({ success: true });
-    expect(steer).toHaveBeenCalledWith("STEER-NOTE");
 
     release();
     await vi.waitFor(
       () => expect(after.listAgents().find((r) => r.id === draining.id)?.status).toBe("completed"),
       { timeout: 10_000 },
     );
+    expect(hasUserText(drainingSession, "STEER-NOTE")).toBe(true);
+  }, 20_000);
+
+  it("delivers a root SendMessage to a draining subagent after a reload", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
+    await reloadRoot(root);
+    const after = liveRegistry();
+    const draining = after.listAgents().find((r) => r.status === "running");
+    if (!draining?.session) throw new Error("no draining session");
+    const drainingSession = draining.session;
+    sendTarget = draining.id;
+
+    await root.prompt("send-now");
+    const sent = root.messages.find((m) => m.role === "toolResult" && "toolName" in m && m.toolName === "SendMessage");
+    expect(JSON.stringify(sent)).toContain("Message sent to agent");
+
+    release();
+    await vi.waitFor(
+      () => expect(after.listAgents().find((r) => r.id === draining.id)?.status).toBe("completed"),
+      { timeout: 10_000 },
+    );
+    expect(hasUserText(drainingSession, "STEER-NOTE")).toBe(true);
   }, 20_000);
 
   it("drives a nested spawn, get_subagent_result and steer from a draining parent", async () => {
@@ -970,15 +999,23 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(nestedRunning()?.session).toBeDefined(), { timeout: 10_000 });
     const nested = nestedRunning();
     if (!nested?.session) throw new Error("no nested session");
-    const steer = vi.spyOn(nested.session, "steer");
+    const nestedSession = nested.session;
+    const parentSession = () => liveRegistry().listAgents().find((r) => r.id === parentId)?.session;
     releaseSteer();
-    await vi.waitFor(() => expect(steer).toHaveBeenCalledWith("STEER-NOTE"), { timeout: 10_000 });
-
+    // Release the child only after the parent's SendMessage has queued its note into the child.
+    await vi.waitFor(
+      () => {
+        const session = parentSession();
+        expect(session && hasToolResult(session, "SendMessage")).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
     release();
     await vi.waitFor(
       () => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"),
       { timeout: 10_000 },
     );
+    expect(hasUserText(nestedSession, "STEER-NOTE")).toBe(true);
     expect(parentSawChild).toBe(true);
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-FINISHED");
   }, 20_000);

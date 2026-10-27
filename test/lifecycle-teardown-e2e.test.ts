@@ -1,6 +1,6 @@
 /**
  * lifecycle-teardown-e2e.test.ts — the child session lifecycle, full-stack: a real child settles and is torn
- * down, a timer it armed cannot reach the provider afterwards, and a resume through the Agent tool reopens the
+ * down, a timer it armed cannot reach the provider afterwards, and a resume through SendMessage reopens the
  * same session file and is torn down again.
  *
  * The lifecycle fixture arms a timer on each child agent_end that would send a user message and trigger a turn.
@@ -21,6 +21,7 @@ import {
   type PrintModeRun,
   routeBySession,
   runPrintMode,
+  sendMessageCall,
 } from "./helpers/print-mode-runner.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
 
@@ -125,7 +126,7 @@ describe("child session lifecycle — full stack", () => {
     expect(manager()?.getRecord(String(record?.id))).toBeDefined();
   });
 
-  it("a settled child resumed through the Agent tool reopens its session file and is torn down again", async () => {
+  it("a settled child resumed through SendMessage reopens its session file and is torn down again", async () => {
     let spawned = false;
     let resumed = false;
     let sessionFile: string | undefined;
@@ -149,11 +150,7 @@ describe("child session lifecycle — full stack", () => {
           sessionFile = liveRecord("watched")?.sessionFile;
           outputFile = liveRecord("watched")?.outputFile;
           firstOutput = liveRecord("watched")?.lifetimeUsage.output ?? 0;
-          return agentCall({
-            description: "watched",
-            prompt: "Again.",
-            resume: String(liveRecord("watched")?.id ?? ""),
-          });
+          return sendMessageCall({ to: String(liveRecord("watched")?.id ?? ""), message: "Again." });
         }
         return "parent done";
       },
@@ -260,7 +257,7 @@ describe("child session lifecycle — full stack", () => {
         await vi.waitFor(() => expect(watched?.settled).toBe(true));
         const reopened = await rootManager()?.restoreSession(String(watched?.id));
         reopenedTranscript = JSON.stringify(reopened?.messages);
-        return agentCall({ description: "watched", prompt: "Again.", resume: String(watched?.id) });
+        return sendMessageCall({ to: String(watched?.id), message: "Again." });
       },
     });
 

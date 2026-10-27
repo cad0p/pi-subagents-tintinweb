@@ -124,8 +124,8 @@ describe("toolDescriptionMode", () => {
     // If you change one of these behaviors, update BOTH descriptions.
     for (const contract of [
       "subagent completion/failure",
-      "resume",
-      "steer_subagent",
+      "resumes it with full context",
+      "SendMessage",
       'isolation: "worktree"',
       ".pi/agents/",
       "self-contained",
@@ -142,7 +142,7 @@ describe("toolDescriptionMode", () => {
         "- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.",
         "- You will be notified on subagent completion/failure — never poll or sleep.",
         "- Verify an agent's claimed code changes before reporting work done.",
-        "- resume continues a previous agent by ID; steer_subagent messages a running one.",
+        "- To continue a previously spawned agent, use SendMessage with the agent's ID as the `to` field — that resumes it with full context. A new Agent call starts a fresh agent with no memory of prior runs.",
         '- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.',
       ].join("\n"),
     );
@@ -157,8 +157,8 @@ describe("toolDescriptionMode", () => {
         "- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).",
         "- When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.",
         "- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.",
-        "- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.",
-        "- Use steer_subagent to send mid-run messages to a running subagent.",
+        "- To continue a previously spawned agent, use SendMessage with the agent's ID as the `to` field — that resumes it with full context. A new Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.",
+        "- Use SendMessage to send mid-run messages to a running subagent.",
         "- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.",
         "- Use inherit_context if the agent needs the parent conversation history.",
         '- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.',
@@ -186,15 +186,23 @@ describe("toolDescriptionMode", () => {
     expect(tool.description).not.toContain("run_in_background");
   });
 
-  it("steer_subagent carries the approved description, snippet, and agent_id contract", () => {
+  it("SendMessage carries the approved description, snippet, and to contract", () => {
     const tools = setup();
-    const tool = tools.get("steer_subagent");
+    const tool = tools.get("SendMessage");
     expect(tool.description).toBe(
-      "Send a steering message to a subagent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run.",
+      "Send a message to a subagent by its ID. A running agent takes it as a steer: it is injected into the " +
+      "conversation after the current tool execution. A finished agent is resumed with it and keeps its full context.",
     );
-    expect(tool.promptSnippet).toBe("Send a steering message to redirect a subagent");
-    expect(tool.parameters.properties.agent_id.description).toBe("The agent ID to steer (must be running or queued).");
+    expect(tool.promptSnippet).toBe("Send a message to a subagent (resumes it if it has finished)");
+    expect(tool.parameters.properties.to.description).toBe("The agent ID to message (running, queued, or finished).");
+  });
+
+  it("SendMessage replaces steer_subagent and the Agent tool has no resume parameter", () => {
+    const tools = setup();
+    expect(tools.has("steer_subagent")).toBe(false);
+    expect(Object.keys(tools.get("SendMessage").parameters.properties).sort()).toEqual(["message", "to"]);
+    expect(tools.get("Agent").parameters.properties).not.toHaveProperty("resume");
+    expect(JSON.stringify(tools.get("Agent"))).toContain("use SendMessage with the agent's ID as the `to` field");
   });
 
   it("the Agent tool carries the approved completion notification guideline", () => {
@@ -210,7 +218,7 @@ describe("toolDescriptionMode", () => {
       "Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). " +
         'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
         "Interval delays are capped by the JS timer ceiling (~24.8 days); one-shot dates further out stay scheduled and arm at a later session start once closer. " +
-        "Incompatible with inherit_context and resume. Returns job ID.",
+        "Incompatible with inherit_context. Returns job ID.",
     );
   });
 
@@ -352,7 +360,7 @@ describe("toolDescriptionMode", () => {
       const tools = setup({ toolDescriptionMode: "compact", worktreeIsolation: false });
       expect(tools.get("Agent").description).not.toContain("isolation");
       // The bullet above it survives — the gate trims a suffix, not the list.
-      expect(tools.get("Agent").description).toContain("resume continues a previous agent by ID");
+      expect(tools.get("Agent").description).toContain("To continue a previously spawned agent, use SendMessage");
     });
   });
 });

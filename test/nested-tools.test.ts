@@ -10,7 +10,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -56,8 +55,7 @@ function makeManager(): NestedAgentManager {
       });
       return id;
     },
-    resume: vi.fn((id: string) => records.get(id)),
-    restoreSession: vi.fn(async () => ({}) as AgentSession),
+    deliver: vi.fn(async () => "delivered" as const),
     getRecord: (id: string) => records.get(id),
     listAgents: () => [...records.values()],
   };
@@ -261,24 +259,25 @@ describe("nested Agent tool", () => {
     expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
   });
 
-  it("resumes an owned child in the background and rejects a foreign one", async () => {
+  it("delivers to an owned finished child as a resume and rejects a foreign one", async () => {
     records.set("child-1", { id: "child-1", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
-    const resumed = await run(0, { resume: "child-1", subagent_type: "scout", description: "d", prompt: "more" });
-    expect(textOf(resumed)).toContain("resumed in background");
-    expect(manager.resume).toHaveBeenCalledWith("child-1", "more", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    vi.mocked(manager.deliver).mockResolvedValueOnce("resumed");
+    const resumed = await run(2, { to: "child-1", message: "more" });
+    expect(textOf(resumed)).toContain("had finished; resumed it");
+    expect(manager.deliver).toHaveBeenCalledWith("child-1", "more", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
 
     records.set("foreign", { id: "foreign", status: "completed", parentAgentId: "other" } as AgentRecord);
-    const denied = await run(0, { resume: "foreign", subagent_type: "scout", description: "d", prompt: "more" });
+    const denied = await run(2, { to: "foreign", message: "more" });
     expect(textOf(denied)).toContain("not owned by this parent");
+    expect(manager.deliver).toHaveBeenCalledTimes(1);
   });
 
-  it("reports a resume whose session cannot be reopened instead of resuming the record", async () => {
+  it("reports a delivery the manager refuses as an error", async () => {
     records.set("child-2", { id: "child-2", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
-    vi.mocked(manager.restoreSession).mockResolvedValueOnce(undefined);
-    const result = await run(0, { resume: "child-2", subagent_type: "scout", description: "d", prompt: "more" });
-    expect(textOf(result)).toContain("no session could be reopened");
+    vi.mocked(manager.deliver).mockResolvedValueOnce(false);
+    const result = await run(2, { to: "child-2", message: "more" });
+    expect(textOf(result)).toContain("did not take the message");
     expect((result as { isError?: boolean }).isError).toBe(true);
-    expect(manager.resume).not.toHaveBeenCalled();
   });
 });
 
@@ -349,17 +348,14 @@ describe("nested result / steer / checkpoint tools", () => {
     settle?.();
   });
 
-  it("steers an owned running child and queues when the session is not ready", async () => {
-    const steer = vi.fn(async () => {});
-    records.set("ready", {
-      id: "ready", status: "running", parentAgentId: "parent-1", session: { steer },
-    } as unknown as AgentRecord);
-    records.set("pending", { id: "pending", status: "running", parentAgentId: "parent-1" } as AgentRecord);
+  it("SendMessage hands the message to manager.deliver and reports the outcome", async () => {
+    records.set("ready", { id: "ready", status: "running", parentAgentId: "parent-1" } as AgentRecord);
+    records.set("pending", { id: "pending", status: "queued", parentAgentId: "parent-1" } as AgentRecord);
+    vi.mocked(manager.deliver).mockResolvedValueOnce("delivered").mockResolvedValueOnce("queued");
 
-    expect(textOf(await run(2, { agent_id: "ready", message: "focus" }))).toContain("sent");
-    expect(steer).toHaveBeenCalledWith("focus");
-    expect(textOf(await run(2, { agent_id: "pending", message: "focus" }))).toContain("queued");
-    expect(records.get("pending")!.pendingSteers).toEqual(["focus"]);
+    expect(textOf(await run(2, { to: "ready", message: "focus" }))).toContain("Message sent to agent ready.");
+    expect(manager.deliver).toHaveBeenLastCalledWith("ready", "focus", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    expect(textOf(await run(2, { to: "pending", message: "focus" }))).toContain("queued");
   });
 
   it("checkpoint writes the child's own record and history file", async () => {
@@ -395,13 +391,20 @@ describe("nested result / steer / checkpoint tools", () => {
 
 describe("nested tool set shape", () => {
   it("exposes exactly the four child-safe tools", () => {
-    expect(tools().map((t) => t.name)).toEqual(["Agent", "get_subagent_result", "steer_subagent", "checkpoint"]);
+    expect(tools().map((t) => t.name)).toEqual(["Agent", "get_subagent_result", "SendMessage", "checkpoint"]);
+  });
+
+  it("SendMessage takes to and message, and steer_subagent is gone", () => {
+    expect(tools().map((tool) => tool.name)).not.toContain("steer_subagent");
+    const send = tools().find((tool) => tool.name === "SendMessage");
+    const schema = send?.parameters as unknown as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties).sort()).toEqual(["message", "to"]);
   });
 
   it("offers no model, thinking, or run_in_background parameter", () => {
     const schema = tools()[0].parameters as unknown as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(
-      ["description", "inherit_context", "isolated", "isolation", "max_turns", "prompt", "resume", "subagent_type"],
+      ["description", "inherit_context", "isolated", "isolation", "max_turns", "prompt", "subagent_type"],
     );
   });
 

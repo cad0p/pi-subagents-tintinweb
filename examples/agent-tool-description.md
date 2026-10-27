@@ -16,8 +16,8 @@ If the target is already known, use a direct tool — `read` for a known path, `
 - Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
 - When an agent finishes or fails, you will be notified on subagent completion/failure — do NOT poll or sleep waiting for it.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.
-- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running subagent.
+- To continue a previously spawned agent, use SendMessage with the agent's ID as the `to` field — that resumes it with full context. A new Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
+- Use SendMessage to send mid-run messages to a running subagent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - Use inherit_context if the agent needs the parent conversation history.{{isolationGuideline}}{{scheduleGuideline}}
 

@@ -47,7 +47,7 @@ import type { LifetimeUsage } from "./usage.js";
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
   GET_RESULT: "get_subagent_result",
-  STEER: "steer_subagent",
+  SEND_MESSAGE: "SendMessage",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -1400,19 +1400,10 @@ export async function resumeAgent(
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
+    /** The resumed run gets its own max_turns budget: a finished record starts over, as a fresh spawn does. */
+    maxTurns?: number;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
-  const result = await attachSessionLifecycle(session).prompt(prompt, { signal: options.signal, hooks: options });
+  const result = await attachSessionLifecycle(session).prompt(prompt, { signal: options.signal, maxTurns: options.maxTurns, hooks: options });
   return { text: result.text, failure: result.failure };
-}
-
-/**
- * Send a steering message to a running subagent.
- * The message will interrupt the agent after its current tool execution.
- */
-export async function steerAgent(
-  session: AgentSession,
-  message: string,
-): Promise<void> {
-  await session.steer(message);
 }
