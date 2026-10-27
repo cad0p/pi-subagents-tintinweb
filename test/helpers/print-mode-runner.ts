@@ -73,6 +73,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { awaitPayloadOnFaux } from "./await-payload.js";
 import { createFauxModelRuntime } from "./faux-runtime.js";
 import { resolveRunAgentDir } from "./hermetic-agent-dir.js";
 import { createIsolatedAgentDir } from "./isolated-agent-dir.js";
@@ -123,6 +124,11 @@ export interface RunPrintModeOptions {
   steps?: FauxResponseStep[];
   /** Faux mode: how many model calls to pad the queue for. Default 16. */
   maxModelCalls?: number;
+  /**
+   * Faux mode: await each request's `onPayload` hook before its scripted reply
+   * runs, so the before_provider_request slot gate sees faux requests. Off by default.
+   */
+  awaitPayload?: boolean;
   /**
    * Honor the subagent hold condition — block the parent agent loop until
    * background subagents finish (the pi-chonky-step monkey-patch). Default true.
@@ -412,6 +418,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
 
   // --- model backend ---
   let faux: ReturnType<typeof registerFauxProvider> | undefined;
+  let releasePayloadWrap: (() => void) | undefined;
   let model: Model<string> | undefined;
   let modelRuntime: ModelRuntime | undefined;
   if (live) {
@@ -450,6 +457,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
       throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
     }
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    if (options.awaitPayload) {
+      releasePayloadWrap = awaitPayloadOnFaux(faux.api);
+    }
     model = faux.getModel();
     // Pi >=0.80.8 resolves auth through the session's ModelRuntime, so a
     // structural faux registry is ignored. Build a real runtime with the faux
@@ -560,6 +570,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     } catch {
       /* ignore */
     }
+    releasePayloadWrap?.();
     faux?.unregister();
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
     // Restore cwd before removing the temp dir (can't rm the dir you're in).

@@ -15,6 +15,12 @@ import type { NestedAgentManager } from "./nested-tools.js";
 type ActivitySink = (activity: ToolActivity) => void;
 
 /**
+ * How a slot request ends: the run has a slot, its abort fired first, or the root that answered is draining and
+ * the caller must ask the live root again.
+ */
+export type SlotOutcome = "granted" | "aborted" | "reroute";
+
+/**
  * Permanent global key. The v1 members of `ImplV1` (scopeBlockReason, activityOf, root) are permanent
  * and may only be added to. A reader of any release accepts the value on this key whatever its version,
  * as long as those members are functions, and ignores fields it does not know. Without them it keeps its own code.
@@ -37,6 +43,10 @@ export interface ImplV1 {
   /** The live activity sink of a child by id, or undefined when the child has no record here. */
   activityOf(agentId: string): ActivitySink | undefined;
   root(): RootRoute;
+  /** Optional: readers feature-detect it, and a root without it leaves a gated run uncounted. */
+  acquireSlot?(agentId: string, signal: AbortSignal): Promise<SlotOutcome>;
+  /** Optional, idempotent per id. */
+  releaseSlot?(agentId: string): void;
 }
 
 type ImplHolder = typeof globalThis & { [IMPL_KEY]?: unknown };
@@ -46,13 +56,20 @@ function scopeBlockReason(gate: NestedCallGate, toolName: string): string | unde
 }
 
 /** Called by the root activation. Child activations never publish. */
-export function publishImpl(root: () => RootRoute, activityOf: (agentId: string) => ActivitySink | undefined): void {
-  const impl: ImplV1 = { version: IMPL_VERSION, scopeBlockReason, activityOf, root };
+export function publishImpl(
+  root: () => RootRoute,
+  activityOf: (agentId: string) => ActivitySink | undefined,
+  slots: Pick<ImplV1, "acquireSlot" | "releaseSlot">,
+): void {
+  const impl: ImplV1 = { version: IMPL_VERSION, scopeBlockReason, activityOf, root, ...slots };
   (globalThis as ImplHolder)[IMPL_KEY] = impl;
+  const woken = publishWaiters;
+  publishWaiters = [];
+  for (const wake of woken) wake();
 }
 
 /** The members every reader calls. Feature-detected, so a newer layout that keeps them is read too. */
-type LiveImpl = Pick<ImplV1, "scopeBlockReason" | "activityOf" | "root">;
+type LiveImpl = Pick<ImplV1, "scopeBlockReason" | "activityOf" | "root" | "acquireSlot" | "releaseSlot">;
 
 function isLiveImpl(value: unknown): value is LiveImpl {
   return (
@@ -70,6 +87,54 @@ function isLiveImpl(value: unknown): value is LiveImpl {
 function liveImpl(): LiveImpl | undefined {
   const published: unknown = (globalThis as ImplHolder)[IMPL_KEY];
   return isLiveImpl(published) ? published : undefined;
+}
+
+let degradeLogged = false;
+let publishWaiters: Array<() => void> = [];
+
+/** Resolves at the next publish, or when the signal aborts. */
+function nextPublish(signal: AbortSignal): Promise<void> {
+  return new Promise((wake) => {
+    const done = () => {
+      publishWaiters = publishWaiters.filter((waiter) => waiter !== done);
+      signal.removeEventListener("abort", done);
+      wake();
+    };
+    publishWaiters.push(done);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
+ * Takes a slot for one run from the live root. A root without a slot pair (an older release) passes the run
+ * uncounted and logs once. After a reroute the caller waits for the next publish before asking again, so a waiter
+ * of a draining root reaches the new root once it is live.
+ */
+export async function routedAcquireSlot(agentId: string, signal: AbortSignal): Promise<SlotOutcome> {
+  let asked: unknown;
+  for (;;) {
+    if (signal.aborted) return "aborted";
+    const impl = liveImpl();
+    if (typeof impl?.acquireSlot !== "function") {
+      if (!degradeLogged) console.warn("[pi-subagents] no live slot pool; a gated run continues without a slot");
+      degradeLogged = true;
+      return "granted";
+    }
+    if (impl === asked) {
+      await nextPublish(signal);
+      continue;
+    }
+    const outcome = await impl.acquireSlot(agentId, signal);
+    if (outcome !== "reroute") return outcome;
+    asked = impl;
+  }
+}
+
+/** Gives a run's slot back to the live root, or to the caller's own pool when the live root has no slot pair. */
+export function routedReleaseSlot(agentId: string, fallback: (agentId: string) => void): void {
+  const impl = liveImpl();
+  if (typeof impl?.releaseSlot === "function") impl.releaseSlot(agentId);
+  else fallback(agentId);
 }
 
 /** Scope rule for one tool call of a child. The local rule runs when no root has published. */

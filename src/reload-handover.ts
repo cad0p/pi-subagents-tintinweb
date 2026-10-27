@@ -97,6 +97,8 @@ export class ReloadHandover {
     readonly draining: DrainingPool,
     /** The draining runs' live activity at hand-over, so their rows keep the running tool and counts. */
     readonly activity: ReadonlyMap<string, AgentActivity> = new Map(),
+    /** The pool slots the draining runs hold. The old manager shares this set, so its releases reach it until adoption. */
+    readonly slotHolders: Set<string> = new Set(),
   ) {
     this.items = items;
     this.queued = queued;

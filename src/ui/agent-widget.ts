@@ -9,7 +9,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "../text-safety.js";
-import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
+import type { AgentInvocation, AgentRecord, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -94,6 +94,11 @@ export function waitingLabel(waiting: { since: number; items: string[] }, elapse
   const [first = "background work"] = waiting.items;
   const more = waiting.items.length > 1 ? ` (+${waiting.items.length - 1})` : "";
   return `waiting · ${toSingleLine(first)}${more} · ${elapsed}`;
+}
+
+/** Queued for a slot: a spawn not yet admitted, or a run held at the provider gate. */
+export function isQueued(record: AgentRecord): boolean {
+  return record.status === "queued" || (record.status === "running" && record.gated === true);
 }
 
 /** Apply foreground styling while restoring it after nested foreground/full ANSI resets. */
@@ -408,8 +413,8 @@ export class AgentWidget {
    */
   private renderWidget(tui: any, theme: Theme): string[] {
     const allAgents = this.widgetAgents();
-    const running = allAgents.filter(a => a.status === "running");
-    const queued = allAgents.filter(a => a.status === "queued");
+    const running = allAgents.filter(a => a.status === "running" && !isQueued(a));
+    const queued = allAgents.filter(isQueued);
     const finished = allAgents.filter(a =>
       a.status !== "running" && a.status !== "queued" && a.completedAt
       && this.shouldShowFinished(a.id, a.status),
@@ -567,9 +572,9 @@ export class AgentWidget {
     let queuedCount = 0;
     let hasFinished = false;
     for (const a of allAgents) {
-      if (a.status === "running" && a.waiting) { waitingCount++; }
+      if (isQueued(a)) { queuedCount++; }
+      else if (a.status === "running" && a.waiting) { waitingCount++; }
       else if (a.status === "running") { runningCount++; }
-      else if (a.status === "queued") { queuedCount++; }
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
     const hasActive = runningCount > 0 || waitingCount > 0 || queuedCount > 0;

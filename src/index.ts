@@ -670,6 +670,11 @@ export default function (pi: ExtensionAPI) {
     },
     listAgents: () => manager.listAgents(),
   };
+  // Slot calls wait for adoptHandovers, which counts the holders the old roots hand over before any admission.
+  let openSlots: () => void = () => {};
+  const slotsAdopted = new Promise<void>((resolve) => {
+    openSlots = resolve;
+  });
   const isRoot = !inChildSessionContext();
   if (isRoot) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
@@ -679,6 +684,10 @@ export default function (pi: ExtensionAPI) {
       (agentId) => {
         const state = agentActivity.get(agentId);
         return state ? (activity) => applyToolActivity(state, activity) : undefined;
+      },
+      {
+        acquireSlot: (agentId, signal) => slotsAdopted.then(() => manager.acquireSlot(agentId, signal)),
+        releaseSlot: (agentId) => void slotsAdopted.then(() => manager.releaseSlot(agentId)),
       },
     );
   }
@@ -813,7 +822,11 @@ export default function (pi: ExtensionAPI) {
     if (isRoot) {
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
       registerSubagentProvider(event.reason, () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY]);
-      await adoptHandovers(ctx);
+      try {
+        await adoptHandovers(ctx);
+      } finally {
+        openSlots();
+      }
       stopStranded(ctx.sessionManager.getSessionId());
     }
   });
@@ -883,6 +896,8 @@ export default function (pi: ExtensionAPI) {
   // replay would otherwise drop items that were not taken yet.
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
+    for (const h of held) manager.adoptSlotHolders(h.slotHolders);
+    openSlots();
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
       // A draining run has no activity entry in this activation: take the one it had at the hand-over, or seed one.
