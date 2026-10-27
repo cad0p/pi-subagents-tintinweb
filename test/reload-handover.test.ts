@@ -7,6 +7,8 @@
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
+import { IMPL_KEY, publishImpl } from "../src/impl-route.js";
+import type { NestedAgentManager } from "../src/nested-tools.js";
 import {
   type AgentDto,
   type DrainingPool,
@@ -215,6 +217,7 @@ describe("AgentManager hand-over", () => {
 
   afterEach(() => {
     for (const manager of managers.splice(0)) manager.dispose();
+    Reflect.deleteProperty(globalThis, IMPL_KEY);
     vi.restoreAllMocks();
   });
 
@@ -400,15 +403,17 @@ describe("AgentManager hand-over", () => {
     const finish = controlledRun("busy");
     const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
     const handover = manager.beginDrain([], undefined);
-
-    finish();
-    await vi.waitFor(() => expect(handover.draining.runningCount()).toBe(0));
+    // The draining pool reports no count at once; the run's slot stays in the hand-over until the run settles.
+    expect(handover.draining.runningCount()).toBe(0);
+    expect(handover.slotHolders.has(running)).toBe(true);
 
     const events: HandoverEvent[] = [];
     handover.attach((event) => events.push(event));
-    expect(events.map((e) => e.kind)).toEqual(["settled", "slotFreed"]);
+    finish();
+    await vi.waitFor(() => expect(events.map((e) => e.kind)).toEqual(["settled", "slotFreed"]));
     const settled = events[0];
     expect(settled.kind === "settled" && settled.items.map((item) => item.dto.id)).toEqual([running]);
+    expect(handover.slotHolders.has(running)).toBe(false);
     expect(onComplete).not.toHaveBeenCalled();
   });
 
@@ -418,17 +423,34 @@ describe("AgentManager hand-over", () => {
     old.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
     const handover = old.beginDrain([], undefined);
 
+    // The reload path adopts the draining runs' slots on the new root, then sets the pools (src/index.ts).
     const next = track(new AgentManager(undefined, 1));
+    next.adoptSlotHolders(handover.slotHolders);
     next.setDrainingPools([handover.draining]);
+    // The live root holds the slot pair: the old run's release reaches the new manager.
+    publishImpl(() => ({ manager: next as unknown as NestedAgentManager, pi: mockPi }), () => undefined, {
+      acquireSlot: (id, signal) => next.acquireSlot(id, signal),
+      releaseSlot: (id) => next.releaseSlot(id),
+    });
     vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("waited"));
     const waiting = next.spawn(mockPi, mockCtx, "general-purpose", "waits", { description: "waits" });
     expect(next.getRecord(waiting)?.status).toBe("queued");
     expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
 
     finish();
-    await vi.waitFor(() => expect(handover.draining.runningCount()).toBe(0));
+    await vi.waitFor(() => expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2));
+  });
+
+  it("still counts a pre-C draining pool that reports only runningCount() against poolFull()", () => {
+    const next = track(new AgentManager(undefined, 1));
+    next.setDrainingPools([{ ...stubPool, runningCount: () => 1 }]);
+    vi.mocked(runAgent).mockResolvedValueOnce(finishedRun("waited"));
+    const waiting = next.spawn(mockPi, mockCtx, "general-purpose", "waits", { description: "waits" });
+    expect(next.getRecord(waiting)?.status).toBe("queued");
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+
     next.setDrainingPools([]);
-    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
   });
 
   it("adopts a handed-over record as settled and notifies only when asked", async () => {
