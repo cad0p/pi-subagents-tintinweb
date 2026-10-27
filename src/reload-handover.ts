@@ -73,20 +73,26 @@ function disposeItems(items: HandoverItem[]): void {
   for (const item of items) if (item.session) void teardownChildSession(item.session);
 }
 
+/** A completion nudge still pending at hand-over. `target` is the owning parent of a nested child, so a reload never routes its result to the main session. */
+export interface NudgeEntry {
+  id: string;
+  target?: string;
+}
+
 export class ReloadHandover {
   readonly version = HANDOVER_VERSION;
   private pending: HandoverEvent[] = [];
   private listener?: (event: HandoverEvent) => void;
   private items: HandoverItem[];
   private queued: QueuedSpec[];
-  private nudged: string[];
+  private nudged: NudgeEntry[];
   private unreported?: LifetimeUsage;
   private stopped = false;
 
   constructor(
     items: HandoverItem[],
     queued: QueuedSpec[],
-    nudged: string[],
+    nudged: NudgeEntry[],
     unreported: LifetimeUsage | undefined,
     readonly draining: DrainingPool,
     /** The draining runs' live activity at hand-over, so their rows keep the running tool and counts. */
@@ -107,7 +113,7 @@ export class ReloadHandover {
   }
 
   /** Hands out the pending nudges; each is returned once. */
-  takeNudged(): string[] {
+  takeNudged(): NudgeEntry[] {
     const taken = this.nudged;
     this.nudged = [];
     return taken;

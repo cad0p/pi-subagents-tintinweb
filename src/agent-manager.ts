@@ -41,6 +41,7 @@ import {
   type DrainingPool,
   fromDto,
   type HandoverItem,
+  type NudgeEntry,
   type QueuedSpec,
   ReloadHandover,
   toDto,
@@ -1464,7 +1465,7 @@ export class AgentManager {
    * subtrees leave now as data; a subtree with a live run stays here and reports
    * through the handover when it settles. Nothing is aborted or disposed.
    */
-  beginDrain(nudged: string[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
+  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
     for (const { id, args } of this.queue) {
       if (this.agents.get(id)?.status !== "queued") continue;

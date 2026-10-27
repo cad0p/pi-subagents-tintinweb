@@ -106,11 +106,11 @@ describe("ReloadHandover buffering", () => {
   });
 
   it("hands out its queued specs and nudges once", () => {
-    const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], ["n1"], undefined, stubPool);
+    const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], [{ id: "n1" }], undefined, stubPool);
     expect(handover.take().queued.map((q) => q.id)).toEqual(["q"]);
     const again = handover.take();
     expect(again.queued).toEqual([]);
-    expect(handover.takeNudged()).toEqual(["n1"]);
+    expect(handover.takeNudged()).toEqual([{ id: "n1" }]);
     expect(handover.takeNudged()).toEqual([]);
   });
 
