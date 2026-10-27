@@ -2424,6 +2424,24 @@ describe("AgentManager — nested children", () => {
     expect(resumeAgent).toHaveBeenCalledTimes(1);
     expect(resumeAgent).toHaveBeenCalledWith(expect.anything(), "late result", expect.anything());
   });
+
+  it("a resumed settled parent folds its turns' usage into its ancestors, as a live nested run's does", async () => {
+    manager = new AgentManager();
+    hangingRun();
+    const grand = manager.spawn(mockPi, mockCtx, "general-purpose", "g", { description: "grand" });
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent", parentAgentId: grand, depth: 2 });
+    await manager.getRecord(parent)!.promise;
+    vi.mocked(resumeAgent).mockClear().mockImplementation(async (_session, _prompt, opts) => {
+      opts?.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      return { text: "resumed" };
+    });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(late, "late result");
+    await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
+    expect(manager.getRecord(grand)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+  });
 });
 
 describe("AgentManager — dispose() prunes worktrees only when asked (F5a)", () => {

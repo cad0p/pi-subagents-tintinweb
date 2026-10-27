@@ -1037,9 +1037,20 @@ export class AgentManager {
   /** Resumes a parent that is no longer live with its nested results as one message; each child is delivered once it lands. */
   private resumeNested(parentId: string, entries: { child: AgentRecord; content: string }[]): void {
     const content = entries.map((entry) => entry.content).join("\n\n");
-    void this.deliver(parentId, content).then((outcome) => {
+    const onAssistantUsage = (usage: { input: number; output: number; cacheWrite: number }) => this.foldUsageIntoAncestors(parentId, usage);
+    void this.deliver(parentId, content, { onAssistantUsage }).then((outcome) => {
       if (outcome) for (const entry of entries) entry.child.resultDelivered = true;
     });
+  }
+
+  /** Usage a resumed parent reports belongs to every ancestor, as a nested child's turns do (nested-tools foldUsageIntoAncestors). */
+  private foldUsageIntoAncestors(id: string, usage: { input: number; output: number; cacheWrite: number }): void {
+    for (let ancestorId = this.getRecord(id)?.parentAgentId; ancestorId !== undefined; ) {
+      const ancestor = this.getRecord(ancestorId);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, usage);
+      ancestorId = ancestor.parentAgentId;
+    }
   }
 
   /**
