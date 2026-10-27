@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Context, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NUDGE_HOLD_MS } from "../src/index.js";
+import { NUDGE_HOLD_MS } from "../src/agent-manager.js";
 import {
   agentCall,
   agentToolCalls,

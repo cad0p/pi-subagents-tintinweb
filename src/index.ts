@@ -16,7 +16,7 @@ import { sessionKey } from "@cad0p/pi-background-work";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { AgentManager, type SpawnOptions } from "./agent-manager.js";
+import { AgentManager, NUDGE_HOLD_MS, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -215,10 +215,6 @@ export function effectiveFailurePreviewCap(value: number): number {
   }
   return DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
 }
-
-/** Grace window between an agent settling and its completion notification being
- *  sent, so a parent that pulls the result first can still cancel the nudge. */
-export const NUDGE_HOLD_MS = 200;
 
 /** Max turns for the AI-generation wizard run. Exported for the wizard tests,
  *  which tell the generator run apart from other spawns by this value. */

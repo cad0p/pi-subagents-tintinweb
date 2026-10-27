@@ -66,6 +66,15 @@ const WAKE_TYPE = "pi-subagents-wake";
 const NOTIFICATION_TYPE = "subagent-notification";
 let wakeSeq = 0;
 
+/** Grace window between an agent settling and its completion notification being sent, so a parent that pulls the result first can still cancel the nudge. Nested results settling in it share one message. */
+export const NUDGE_HOLD_MS = 200;
+
+/** A parent's nested results waiting for its window to close. The window opens at the first settle and sends one message. */
+interface NestedBatch {
+  entries: { child: AgentRecord; content: string }[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
 /** The batch id a fork-sent custom message carries in `details`, or undefined. */
 function batchOf(details: unknown): string | undefined {
   return typeof details === "object" && details !== null && "batch" in details && typeof details.batch === "string" ? details.batch : undefined;
@@ -355,6 +364,8 @@ export class AgentManager {
    * user input the wake carries, named in the result if the record finishes before the wake is observed.
    */
   private waking = new Map<string, string | undefined>();
+  /** Nested results queued per parent. `flushNested` sends a parent's batch when its window closes or its decide runs. */
+  private nestedBatches = new Map<string, NestedBatch>();
   /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
   private capTimers = new Map<
     string,
@@ -807,6 +818,7 @@ export class AgentManager {
       life.quiet = undefined;
       return;
     }
+    this.flushNested(record.id);
     if (record.turnBudget?.softLimitReached) {
       this.finalize(record, life);
       return;
@@ -954,20 +966,51 @@ export class AgentManager {
   }
 
   /**
-   * Hands a nested child's result to its owning parent. The child's `resultDelivered` is set once the parent observes the
-   * message. A parent that is no longer live takes nothing, so the child stays listed until its own parent settles.
+   * Queues a nested child's result for its owning parent. Results that settle within NUDGE_HOLD_MS of the parent's first
+   * queued one go out as one message. A parent that is no longer live takes nothing, so the child stays listed until its
+   * own parent settles.
    */
   deliverNested(child: AgentRecord, content: string): void {
-    const parent = child.parentAgentId ? this.agents.get(child.parentAgentId) : undefined;
+    const parentId = child.parentAgentId;
+    if (!parentId || !this.agents.get(parentId)?.session) return;
+    const batch = this.nestedBatches.get(parentId);
+    if (batch) {
+      batch.entries.push({ child, content });
+      return;
+    }
+    this.nestedBatches.set(parentId, { entries: [{ child, content }], timer: this.armNested(parentId) });
+  }
+
+  /**
+   * Sends a parent's queued nested results as one notification, dropping children pulled since they settled. While an
+   * earlier wake is unobserved the batch waits, since one message is in flight per parent. An emptied batch sends nothing.
+   */
+  private flushNested(parentId: string): void {
+    const batch = this.nestedBatches.get(parentId);
+    if (!batch) return;
+    clearTimeout(batch.timer);
+    if (this.waking.has(parentId)) {
+      batch.timer = this.armNested(parentId);
+      return;
+    }
+    this.nestedBatches.delete(parentId);
+    const parent = this.agents.get(parentId);
     const session = parent?.session;
-    if (!parent || !session) return;
-    this.wake(parent, session, content, {
+    const entries = batch.entries.filter((entry) => !entry.child.resultDelivered);
+    if (!parent || !session || entries.length === 0) return;
+    this.wake(parent, session, entries.map((entry) => entry.content).join("\n\n"), {
       customType: NOTIFICATION_TYPE,
       display: true,
       delivered: () => {
-        child.resultDelivered = true;
+        for (const entry of entries) entry.child.resultDelivered = true;
       },
     });
+  }
+
+  private armNested(parentId: string): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => this.flushNested(parentId), NUDGE_HOLD_MS);
+    timer.unref();
+    return timer;
   }
 
   /** Background work the session's providers still report. A provider that throws holds nothing open. */
@@ -994,6 +1037,9 @@ export class AgentManager {
     record.waiting = undefined;
     const unsent = this.waking.get(record.id);
     this.waking.delete(record.id);
+    const nested = this.nestedBatches.get(record.id);
+    if (nested) clearTimeout(nested.timer);
+    this.nestedBatches.delete(record.id);
     const dropped = this.dropUndelivered(record, unsent);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
     const text = dropped ? [finished, dropped].filter(Boolean).join("\n\n") : finished;
