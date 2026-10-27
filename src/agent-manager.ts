@@ -974,14 +974,12 @@ export class AgentManager {
    */
   deliverNested(child: AgentRecord, content: string): void {
     const parentId = child.parentAgentId;
-    const parent = parentId ? this.agents.get(parentId) : undefined;
+    const parent = parentId ? this.getRecord(parentId) : undefined;
     // An owner abort is the parent's own stop, not a result to hand on.
     if (!parentId || !parent || child.ownerAborted) return;
     if (!parent.session) {
       // A settled parent is resumed with the result; its finish is then its one notification to its owner.
-      void this.deliver(parentId, content).then((outcome) => {
-        if (outcome) child.resultDelivered = true;
-      });
+      this.resumeNested(parentId, [{ child, content }]);
       return;
     }
     const batch = this.nestedBatches.get(parentId);
@@ -1005,10 +1003,15 @@ export class AgentManager {
       return;
     }
     this.nestedBatches.delete(parentId);
-    const parent = this.agents.get(parentId);
-    const session = parent?.session;
+    const parent = this.getRecord(parentId);
     const entries = batch.entries.filter((entry) => !entry.child.resultDelivered);
-    if (!parent || !session || entries.length === 0) return;
+    if (!parent || entries.length === 0) return;
+    const session = parent.session;
+    if (!session) {
+      // The parent settled (or drained) while its batch waited: its resume takes the results instead.
+      this.resumeNested(parentId, entries);
+      return;
+    }
     for (const entry of entries) this.nestedInFlight.add(entry.child);
     this.wake(parent, session, entries.map((entry) => entry.content).join("\n\n"), {
       customType: NOTIFICATION_TYPE,
@@ -1023,12 +1026,36 @@ export class AgentManager {
   }
 
   /**
-   * Whether a settled child's result already reached its parent: in a sent batch, or delivered (observed or resumed).
-   * A pull answers "already delivered" then, so the parent never reads one result twice.
+   * Whether a settled child's result is in a batch the parent has been sent but not yet observed. A pull answers
+   * "already delivered" then, so the parent never reads one result twice. Once observed, a pull returns the result.
    */
   resultReachedParent(child: AgentRecord): boolean {
     if (child.status === "running" || child.status === "queued") return false;
-    return this.nestedInFlight.has(child) || (child.resultDelivered === true && child.resultConsumed !== true);
+    return this.nestedInFlight.has(child);
+  }
+
+  /** Resumes a parent that is no longer live with its nested results as one message; each child is delivered once it lands. */
+  private resumeNested(parentId: string, entries: { child: AgentRecord; content: string }[]): void {
+    const content = entries.map((entry) => entry.content).join("\n\n");
+    void this.deliver(parentId, content).then((outcome) => {
+      if (outcome) for (const entry of entries) entry.child.resultDelivered = true;
+    });
+  }
+
+  /**
+   * Takes the nested results still waiting in a batch for a reload hand-over. The batch timers are cleared; each undelivered
+   * child comes back as a `{ id, target }` nudge, so the adopter delivers it to its parent exactly once.
+   */
+  takeNestedPending(): NudgeEntry[] {
+    const taken: NudgeEntry[] = [];
+    for (const [parentId, batch] of this.nestedBatches) {
+      clearTimeout(batch.timer);
+      for (const entry of batch.entries) {
+        if (!entry.child.resultDelivered) taken.push({ id: entry.child.id, target: parentId });
+      }
+    }
+    this.nestedBatches.clear();
+    return taken;
   }
 
   private armNested(parentId: string): ReturnType<typeof setTimeout> {

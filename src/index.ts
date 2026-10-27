@@ -860,7 +860,9 @@ export default function (pi: ExtensionAPI) {
       widget.dispose();
       if (isRoot) {
         for (const h of held) h.detach();
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(nudged, pendingUsage.takeLifetime(), new Map(agentActivity))]);
+        // Nested results still waiting in a batch ride the hand-over as targeted nudges, so the new activation delivers them.
+        const handoverNudges = [...nudged, ...manager.takeNestedPending()];
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, pendingUsage.takeLifetime(), new Map(agentActivity))]);
         held = [];
       }
     } else {
@@ -955,7 +957,9 @@ export default function (pi: ExtensionAPI) {
       // A nested child's result is a wake on its parent, never a nudge on the main session.
       for (const { id, target } of pending) {
         const record = manager.getRecord(id);
-        if (record && !target) sendIndividualNudge(record);
+        if (!record) continue;
+        if (target) manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+        else sendIndividualNudge(record);
       }
     }
     for (const h of held) h.attach((event) => onHandoverEvent(h, event));

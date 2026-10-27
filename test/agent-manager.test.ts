@@ -1662,7 +1662,7 @@ describe("AgentManager — nested results batch per parent (#83)", () => {
     expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "first" }), expect.anything());
   });
 
-  it("a result in a sent batch reads as reached the parent before and after observation, and is not consumed", async () => {
+  it("a result reads as reached the parent only while its sent batch is unobserved, and is not consumed", async () => {
     const { id, session } = await parentWithSession();
     const child = nestedChild(id);
     manager.deliverNested(child, "child result");
@@ -1670,7 +1670,7 @@ describe("AgentManager — nested results batch per parent (#83)", () => {
     vi.advanceTimersByTime(NUDGE_HOLD_MS);
     expect(manager.resultReachedParent(child)).toBe(true);
     observeLastCustom(session);
-    expect(manager.resultReachedParent(child)).toBe(true);
+    expect(manager.resultReachedParent(child)).toBe(false);
     expect(child.resultConsumed).toBeUndefined();
   });
 });

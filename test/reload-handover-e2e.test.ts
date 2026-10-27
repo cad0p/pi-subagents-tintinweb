@@ -1224,6 +1224,48 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
   }, 20_000);
 
+  it("hands a nested result still held in its batch across /reload to the parent once, never the main session", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const toParent = vi.spyOn(parentSession, "sendCustomMessage");
+    const queueNested = draining.deliverNested.bind(draining);
+    // The reload starts in the same step that queues the child's result, so the hold window is open at hand-over.
+    let reloading: Promise<void> = Promise.resolve();
+    const queued = vi.spyOn(draining, "deliverNested").mockImplementation((child, content) => {
+      queueNested(child, content);
+      reloading = reloadRoot(root);
+    });
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(queued).toHaveBeenCalled(), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    // The parent's own completion reaches the main session after the window closes, so a stray child nudge would have landed.
+    await vi.waitFor(() => expect(sent.mock.calls.some(([m]) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(parentId))).toBe(true), { timeout: 10_000 });
+    const naming = (calls: Array<[{ customType: string; content: unknown }, ...unknown[]]>) =>
+      calls.filter(([m]) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId));
+    expect(naming(toParent.mock.calls)).toHaveLength(1);
+    expect(naming(sent.mock.calls)).toHaveLength(0);
+  }, 20_000);
+
   it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {
     const root = session;
     if (!root) throw new Error("no session");
