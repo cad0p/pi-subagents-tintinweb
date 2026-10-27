@@ -135,7 +135,7 @@ function completedHeader(record: AgentRecord): string {
   statsParts.push(`Duration: ${duration}`);
   return (
     `Agent: ${toSingleLine(record.id)}\n` +
-    `Type: ${displayName} | Status: ${toSingleLine(record.status)}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
+    `Type: ${displayName} | Status: ${toSingleLine(record.status)}${getStatusNote(record.status, record.limitReason, record.capMinutes)} | ${statsParts.join(" | ")}\n` +
     `Description: ${toSingleLine(record.description)}`
   );
 }

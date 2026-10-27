@@ -18,7 +18,11 @@ import type { AgentRecord } from "./types.js";
  * turn limit was hit) — the parent should treat human intervention differently
  * from a budget cutoff.
  */
-export function getStatusNote(status: string): string {
+export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number): string {
+  if (limitReason === "time") {
+    const cap = capMinutes === undefined ? "" : ` (${capMinutes} min)`;
+    return ` (time limit reached${cap}; resume with SendMessage to continue)`;
+  }
   switch (status) {
     case "stopped":
       return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";

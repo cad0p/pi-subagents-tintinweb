@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { listBackgroundWorkProviders, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
+import { listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -64,6 +64,23 @@ const WAKE_TYPE = "pi-subagents-wake";
 /** Longest a delivered prompt may stay unreported before its preflight stops counting against finish (a deferred re-run that throws never reports). */
 const PREFLIGHT_TIMEOUT_MS = 30_000;
 
+/** The run cap's heads-up lands this long before the cap; a cap of 2 min or less puts it at half the cap. */
+const HEADS_UP_LEAD_MS = 60_000;
+
+/** Distinct background-work policy warnings already logged, so a warning is shown once per process. */
+const policyWarnings = new Set<string>();
+
+/** The run cap in minutes: `maxBackgroundWait` from the background-work policy at `cwd`. */
+function readCapMinutes(cwd: string = process.cwd()): number {
+  const { policy, warnings } = readBackgroundWorkPolicy({ cwd });
+  for (const warning of warnings) {
+    if (policyWarnings.has(warning)) continue;
+    policyWarnings.add(warning);
+    console.warn(`[pi-subagents] ${warning}`);
+  }
+  return policy.maxBackgroundWait;
+}
+
 /** Wake text for a finished subagent that has queued input or background work to pick up. */
 const CONTINUE_NOTICE =
   "Input or background work you were waiting on is ready. Continue your task. When you are done, your final message is your result; restate anything from before the wait that the parent needs.";
@@ -79,6 +96,8 @@ interface Life {
   lastRun?: RunOutcome;
   failed?: { error: unknown };
   quiet?: { runSeq: number; at: number };
+  /** Set when the run cap's hard stop ended the lifecycle: decide settles it once the session is idle. */
+  hardStopped?: boolean;
   tick: ReturnType<typeof setInterval>;
   /** Writes the terminal status and result, and returns the result text. */
   finish(run: RunOutcome, failed: { error: unknown } | undefined): string;
@@ -327,6 +346,11 @@ export class AgentManager {
    * user input the wake carries, named in the result if the record finishes before the wake is observed.
    */
   private waking = new Map<string, string | undefined>();
+  /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
+  private capTimers = new Map<
+    string,
+    { headsUp: ReturnType<typeof setTimeout>; hardStop: ReturnType<typeof setTimeout> }
+  >();
   /** Pools of older activations whose runs still count against `maxConcurrent`. */
   private drainingPools: DrainingPool[] = [];
   /** Ids whose hand-over item is being adopted: input for them is parked here until `endAdoption`. */
@@ -459,6 +483,7 @@ export class AgentManager {
     // repo and both cleanup calls below MUST agree on this value forever.
     const customCwd = options.cwd ?? undefined; // null (RPC "unset") → undefined
     const baseCwd = customCwd ?? ctx.cwd;
+    record.cwd = baseCwd;
 
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done
@@ -535,7 +560,8 @@ export class AgentManager {
         // Precedence: a hard abort keeps "aborted"; then a failed final turn
         // (provider error that pi resolved instead of rejecting, #144) is an
         // honest "error" — not a completion with an empty or stale result.
-        if (run.aborted) {
+        // A time-limit hard stop ends its run aborted, but it is a completion, not an abort.
+        if (run.aborted && record.limitReason !== "time") {
           record.status = "aborted";
         } else if (run.failure) {
           record.status = "error";
@@ -561,6 +587,7 @@ export class AgentManager {
       }
       return run.text;
     });
+    this.armCap(record, life);
     runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
@@ -613,6 +640,12 @@ export class AgentManager {
         record.childSettings = settings;
       },
       onSessionCreated: (session, lifecycle) => {
+        // The lifecycle settled before its session existed (a hard stop or abort during createChildSession). Nothing
+        // else retires this session, so it is torn down here instead of bound to the settled record.
+        if (this.lives.get(record.id) !== life) {
+          void teardownChildSession(session);
+          return;
+        }
         bindSession(record, session, lifecycle);
         options.onSessionCreated?.(session);
       },
@@ -740,7 +773,7 @@ export class AgentManager {
   private decide(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
     // A stopped run whose runner never reports (its session was torn down) finishes on the tick once idle.
-    if (!life.lastRun && !life.failed && !(life.observed && record.status === "stopped")) return;
+    if (!life.lastRun && !life.failed && !life.hardStopped && !(life.observed && record.status === "stopped")) return;
     record.ending = false;
     if (record.transition) return;
     if (life.failed) {
@@ -755,7 +788,8 @@ export class AgentManager {
     }
     // A stopped record does not wait on deliveries: abort() must settle it even if a prompt never reports, or a wake
     // it queued never drains. An aborted loop returns without draining its steering queue, so `waking` may never clear.
-    if (record.status === "stopped") {
+    // The same holds for a time-limit hard stop: it settles once the session is idle, whatever input it left.
+    if (record.status === "stopped" || life.hardStopped) {
       this.finalize(record, life);
       return;
     }
@@ -784,6 +818,12 @@ export class AgentManager {
       life.quiet = undefined;
       return;
     }
+    // The heads-up reached a run that has now ended: settle, whatever background work is still listed.
+    if (record.capForced) {
+      record.limitReason = "time";
+      this.finalize(record, life);
+      return;
+    }
     const items = session ? this.pendingWork(session) : [];
     if (items.length > 0) {
       record.waiting = { since: record.waiting?.since ?? Date.now(), items };
@@ -800,6 +840,74 @@ export class AgentManager {
     } else if (now - life.quiet.at >= quietMs) {
       this.finalize(record, life);
     }
+  }
+
+  /**
+   * Arms the run cap of one lifecycle: `maxBackgroundWait` of wall time from admission or resume, gate time included.
+   * The heads-up comes at the lead (a minute before the cap, or half of a cap of two minutes or less); the hard stop
+   * at the cap. Both are unref'd and cleared by `clearCap` at the lifecycle's final settle.
+   */
+  private armCap(record: AgentRecord, life: Life): void {
+    const capMinutes = readCapMinutes(record.cwd);
+    record.capMinutes = capMinutes;
+    const capMs = capMinutes * 60_000;
+    const leadMs = capMs <= 2 * HEADS_UP_LEAD_MS ? capMs / 2 : capMs - HEADS_UP_LEAD_MS;
+    const left = capMs - leadMs >= 60_000 ? "1 minute" : `${Math.round((capMs - leadMs) / 1000)} seconds`;
+    const headsUp = setTimeout(() => this.headsUp(record, life, left), leadMs);
+    const hardStop = setTimeout(() => this.hardStop(record, life), capMs);
+    headsUp.unref();
+    hardStop.unref();
+    this.capTimers.set(record.id, { headsUp, hardStop });
+  }
+
+  /**
+   * The heads-up wake. Skipped once the lifecycle is over, hard-stopped, already forced, or while an input wake is in
+   * flight (the hard stop backstops that case). The wake counts as pending until observed; its observation forces the
+   * settle at the next finish (`capForced`).
+   */
+  private headsUp(record: AgentRecord, life: Life, left: string): void {
+    const session = record.session;
+    if (this.lives.get(record.id) !== life || life.hardStopped || record.capForced || !session) return;
+    if (record.status !== "running" || this.waking.has(record.id)) return;
+    const content = `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
+    this.wake(record, session, content, {
+      delivered: () => {
+        record.capForced = true;
+      },
+    });
+  }
+
+  /**
+   * The hard stop. Sets the time limit and ends a streaming run with `session.abort()`, not `abort(id)`, which marks the
+   * record stopped. An idle record, or one queued at the gate with no run streaming, settles through `decide` at once.
+   */
+  private hardStop(record: AgentRecord, life: Life): void {
+    if (this.lives.get(record.id) !== life) return;
+    record.limitReason = "time";
+    life.hardStopped = true;
+    // A run waiting at the pool gate has no request to abort: its FIFO entry goes now, so the gate neither admits it
+    // nor counts it as running.
+    const gate = this.slotFifo.find((entry): entry is GateEntry => entry.kind === "gate" && entry.id === record.id);
+    if (gate) {
+      this.slotFifo = this.slotFifo.filter((entry) => entry !== gate);
+      this.endGate(gate, "aborted");
+    }
+    const session = record.session;
+    if (session && (session.isStreaming || session.agent.state.isStreaming)) {
+      void session.abort();
+      return;
+    }
+    // Idle or not yet started: the run's signal goes too, so a prompt that has not begun meets it aborted.
+    record.abortController?.abort();
+    this.decide(record, life);
+  }
+
+  private clearCap(id: string): void {
+    const timers = this.capTimers.get(id);
+    if (!timers) return;
+    clearTimeout(timers.headsUp);
+    clearTimeout(timers.hardStop);
+    this.capTimers.delete(id);
   }
 
   /**
@@ -864,6 +972,7 @@ export class AgentManager {
   private finalize(record: AgentRecord, life: Life): void {
     this.lives.delete(record.id);
     clearInterval(life.tick);
+    this.clearCap(record.id);
     record.ending = false;
     record.waiting = undefined;
     const unsent = this.waking.get(record.id);
@@ -1113,6 +1222,8 @@ export class AgentManager {
       abortController: record.abortController,
       turnCount: record.turnCount,
       lastCheckpoint: record.lastCheckpoint,
+      limitReason: record.limitReason,
+      capForced: record.capForced,
     };
     record.status = "running";
     record.startedAt = Date.now();
@@ -1125,6 +1236,9 @@ export class AgentManager {
     // Run-local too: the prior run's latest checkpoint must not surface as the
     // resumed run's state. The .checkpoints.md history stays cumulative.
     record.lastCheckpoint = undefined;
+    // A fresh lifecycle gets a fresh cap: the prior time-limit settle and heads-up do not carry over.
+    record.limitReason = undefined;
+    record.capForced = undefined;
     record.abortController = new AbortController();
     try {
       this.onStart?.(record);
@@ -1168,6 +1282,7 @@ export class AgentManager {
       record.completedAt ??= Date.now();
       return run.text;
     });
+    this.armCap(record, life);
     resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
@@ -1424,6 +1539,7 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    this.clearCap(id);
     // An open lifecycle of a removed record has no tick or decide left to finish it (dispose clears them): close it here so its promise settles.
     const life = this.lives.get(id);
     if (life) {
@@ -1641,6 +1757,7 @@ export class AgentManager {
   async dispose(prune = true): Promise<void> {
     clearInterval(this.cleanupInterval);
     for (const life of this.lives.values()) clearInterval(life.tick);
+    for (const id of [...this.capTimers.keys()]) this.clearCap(id);
     // Input parked for a hand-over item that never reached adoption dies with this manager.
     for (const [id, parked] of this.adopting) {
       if (parked.length > 0) console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id} during shutdown`);
