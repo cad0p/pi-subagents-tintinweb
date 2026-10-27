@@ -217,7 +217,7 @@ describe("background-work delivered flag — manager records", () => {
       dispose: vi.fn(),
       subscribe: () => () => {},
       sessionId: "child",
-      sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+      agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     }) as any;
 
   /** Spawns a background run that settles at once, then waits for it. The runner hosts the child as it does for a real run. */

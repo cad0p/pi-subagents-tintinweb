@@ -17,7 +17,7 @@ import { deliveryText } from "../delivery-text.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, getDisplayName, type Theme } from "./agent-widget.js";
+import { type AgentActivity, formatCost, getDisplayName, type Theme, waitingLabel } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -388,7 +388,9 @@ export class FleetList {
     const tokens = getLifetimeTotal(usage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
-    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
+    const stats = record.waiting
+      ? waitingLabel(record.waiting, formatFleetElapsed(Date.now() - record.waiting.since))
+      : `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }

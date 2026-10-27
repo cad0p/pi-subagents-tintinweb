@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatSessionTokens, waitingLabel } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -102,6 +102,27 @@ describe("AgentWidget", () => {
   it("renders nothing in 'off' mode", () => {
     const manager = { isDraining: () => false, listAgents: () => [makeRecord("agent")] };
     expect(renderLines(manager, "agent", () => "off")).toBe("");
+  });
+
+  it("labels a waiting run with its first item, extra count and elapsed time", () => {
+    expect(waitingLabel({ since: 0, items: ["timer:abc", "bg:x"] }, "0:05")).toBe("waiting · timer:abc (+1) · 0:05");
+    expect(waitingLabel({ since: 0, items: [] }, "0:05")).toBe("waiting · background work · 0:05");
+  });
+
+  it("shows a waiting run in place of its activity line", () => {
+    const waiting = { ...makeRecord("waiter"), waiting: { since: Date.now() - 5000, items: ["timer:abc"] } };
+    const manager = { isDraining: () => false, listAgents: () => [waiting] };
+    expect(renderLines(manager, "waiter")).toContain("waiting · timer:abc · ");
+  });
+
+  it("counts waiting runs apart from running ones in the status bar", () => {
+    const waiting = { ...makeRecord("waiter"), waiting: { since: Date.now(), items: ["timer:abc"] } };
+    const manager = { isDraining: () => false, listAgents: () => [makeRecord("runner"), waiting] };
+    let status: string | undefined;
+    const widget = new AgentWidget(manager as any, new Map(), () => "all");
+    widget.setUICtx({ setStatus: (_key, text) => { status = text; }, setWidget: () => {} });
+    widget.update();
+    expect(status).toBe("1 running, 1 waiting agents");
   });
 
   it("marks a running row as draining only while the manager holds it in a draining pool", () => {

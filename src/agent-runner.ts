@@ -370,6 +370,10 @@ export interface RunOptions {
   agentId?: string;
   model?: Model<any>;
   maxTurns?: number;
+  /** Turns counted across the owner's lifecycle (every run); created by the owner, reset on resume. */
+  turnBudget?: TurnBudget;
+  /** Receives this lifecycle's run boundaries (start, end, settle). */
+  observer?: RunObserver;
   signal?: AbortSignal;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -564,10 +568,33 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
 /** Event hooks of one prompt. The lifecycle forwards each session event to the current prompt's hooks. */
 export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction">;
 
-/** What one prompt needs: its abort signal, its own max_turns budget and its hooks. */
+/** Turns counted across every run of one lifecycle. The owner creates it and resets it on resume. */
+export interface TurnBudget {
+  turns: number;
+  softLimitReached: boolean;
+}
+
+/** What one settled run produced. */
+export interface RunOutcome {
+  text: string;
+  failure?: string;
+  aborted: boolean;
+  steered: boolean;
+}
+
+/** Run boundaries of a session, reported to the lifecycle's owner. */
+export interface RunObserver {
+  runStarted(): void;
+  agentEnded(): void;
+  runSettled(outcome: RunOutcome): void;
+}
+
+/** What one prompt needs: its abort signal, the lifecycle's max_turns budget, its observer and its hooks. */
 export interface SessionRun {
   signal?: AbortSignal;
   maxTurns?: number;
+  budget?: TurnBudget;
+  observer?: RunObserver;
   hooks?: SessionHooks;
 }
 
@@ -588,30 +615,52 @@ const lifecycles = new WeakMap<AgentSession, SessionLifecycle>();
 
 /**
  * Attach the session's single event subscription and abort forwarder. Idempotent per session.
- * Turn count, max_turns state and the abort binding are reset per prompt. Runs that pi starts
- * between prompts still reach the current hooks.
+ * The subscription tracks run boundaries for the observer of the latest prompt, and counts turns
+ * into that prompt's budget, so runs pi starts between prompts are tracked like any other.
+ * The abort binding is per prompt. The current hooks receive every session event.
  */
 export function attachSessionLifecycle(session: AgentSession): SessionLifecycle {
   const existing = lifecycles.get(session);
   if (existing) return existing;
 
   let run: SessionRun = {};
-  let turnCount = 0;
-  let softLimitReached = false;
-  let aborted = false;
+  let budget: TurnBudget = { turns: 0, softLimitReached: false };
+  let inRun = false;
+  let runStartLen = 0;
+  let runAborted = false;
+  let lastAssistant: AssistantMessage | undefined;
   let currentMessageText = "";
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     const hooks = run.hooks;
     const maxTurns = run.maxTurns;
+    const observer = run.observer;
+    if (event.type === "agent_start" && !inRun) {
+      inRun = true;
+      runStartLen = session.messages.length;
+      runAborted = false;
+      lastAssistant = undefined;
+      observer?.runStarted();
+    }
+    if (event.type === "agent_end") observer?.agentEnded();
+    // pi's _startRun race: the loser's agent_settled arrives while the winner's run is live. Only an idle session settles.
+    if (event.type === "agent_settled" && !session.agent.state.isStreaming) {
+      inRun = false;
+      observer?.runSettled({
+        text: getLastAssistantText(session, runStartLen).trim(),
+        failure: finalTurnError(session, runStartLen, lastAssistant),
+        aborted: runAborted,
+        steered: budget.softLimitReached,
+      });
+    }
     if (event.type === "turn_end") {
-      turnCount++;
-      hooks?.onTurnEnd?.(turnCount);
+      budget.turns++;
+      hooks?.onTurnEnd?.(budget.turns);
       if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
+        if (!budget.softLimitReached && budget.turns >= maxTurns) {
+          budget.softLimitReached = true;
           session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
-          aborted = true;
+        } else if (budget.softLimitReached && budget.turns >= maxTurns + graceTurns) {
+          runAborted = true;
           session.abort();
         }
       }
@@ -630,6 +679,7 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
       hooks?.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
+      lastAssistant = event.message;
       const u = event.message.usage;
       if (u)
         hooks?.onAssistantUsage?.({
@@ -649,9 +699,7 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
   const lifecycle: SessionLifecycle = {
     async prompt(text, next = {}) {
       run = next;
-      turnCount = 0;
-      softLimitReached = false;
-      aborted = false;
+      budget = next.budget ?? { turns: 0, softLimitReached: false };
       currentMessageText = "";
       detachAbort();
       detachAbort = forwardAbortSignal(session, next.signal);
@@ -665,8 +713,8 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
       }
       return {
         text: collector.getText().trim() || getLastAssistantText(session, startLen),
-        aborted,
-        steered: softLimitReached,
+        aborted: runAborted,
+        steered: budget.softLimitReached,
         failure: finalTurnError(session, startLen, collector.getLastAssistant()),
       };
     },
@@ -1377,7 +1425,13 @@ export async function runAgent(
   }
 
   const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
-  const result = await lifecycle.prompt(effectivePrompt, { signal: options.signal, maxTurns, hooks: options });
+  const result = await lifecycle.prompt(effectivePrompt, {
+    signal: options.signal,
+    maxTurns,
+    budget: options.turnBudget,
+    observer: options.observer,
+    hooks: options,
+  });
   return {
     responseText: result.text,
     session,
@@ -1402,8 +1456,16 @@ export async function resumeAgent(
     signal?: AbortSignal;
     /** The resumed run gets its own max_turns budget: a finished record starts over, as a fresh spawn does. */
     maxTurns?: number;
+    turnBudget?: TurnBudget;
+    observer?: RunObserver;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
-  const result = await attachSessionLifecycle(session).prompt(prompt, { signal: options.signal, maxTurns: options.maxTurns, hooks: options });
+  const result = await attachSessionLifecycle(session).prompt(prompt, {
+    signal: options.signal,
+    maxTurns: options.maxTurns,
+    budget: options.turnBudget,
+    observer: options.observer,
+    hooks: options,
+  });
   return { text: result.text, failure: result.failure };
 }

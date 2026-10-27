@@ -38,13 +38,16 @@ vi.mock("../src/worktree.js", async (importOriginal) => {
   };
 });
 
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 import { AgentWidget, buildInvocationTags, type Theme } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
+
+// Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
+setQuietMs(20);
 
 const PARENT_MODEL = { provider: "openai", id: "gpt-5.5", name: "GPT 5.5" };
 const CHILD_MODEL = { provider: "anthropic", id: "claude-haiku-4-5", name: "Claude Haiku 4.5" };
@@ -61,7 +64,10 @@ function reportingSession(
   return {
     sessionId: "child-session-id",
     dispose: vi.fn(),
-    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+    isStreaming: false,
+    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
+    sendCustomMessage: () => Promise.resolve(),
+    sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     model,
     thinkingLevel,
   } as unknown as AgentSession;

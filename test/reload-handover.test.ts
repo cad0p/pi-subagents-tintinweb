@@ -6,7 +6,7 @@
  */
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import {
   type AgentDto,
   type DrainingPool,
@@ -34,13 +34,15 @@ import {
   runAgent,
 } from "../src/agent-runner.js";
 
+setQuietMs(20);
+
 type RunResult = Awaited<ReturnType<typeof runAgent>>;
 
 const mockPi = {} as unknown as ExtensionAPI;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 
 const fakeSession = () =>
-  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
+  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
 
 const finishedRun = (text: string, session = fakeSession()): RunResult =>
   ({ responseText: text, session, aborted: false, steered: false }) as unknown as RunResult;
@@ -104,11 +106,11 @@ describe("ReloadHandover buffering", () => {
   });
 
   it("hands out its queued specs and nudges once", () => {
-    const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], ["n1"], undefined, stubPool);
+    const handover = new ReloadHandover([], [{ id: "q", type: "general-purpose", prompt: "p", options: { description: "d" } }], [{ id: "n1" }], undefined, stubPool);
     expect(handover.take().queued.map((q) => q.id)).toEqual(["q"]);
     const again = handover.take();
     expect(again.queued).toEqual([]);
-    expect(handover.takeNudged()).toEqual(["n1"]);
+    expect(handover.takeNudged()).toEqual([{ id: "n1" }]);
     expect(handover.takeNudged()).toEqual([]);
   });
 
@@ -355,15 +357,17 @@ describe("AgentManager hand-over", () => {
   });
 
   it("stops the old manager's cleanup interval once its last draining record leaves", async () => {
+    const intervals = vi.spyOn(globalThis, "setInterval");
     const manager = track(new AgentManager());
+    const cleanup = intervals.mock.results[intervals.mock.calls.findIndex(([, ms]) => ms === 60_000)]?.value;
     const clear = vi.spyOn(globalThis, "clearInterval");
     const finish = controlledRun("busy");
     const running = manager.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
     manager.beginDrain([], undefined);
 
-    expect(clear).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalledWith(cleanup);
     finish();
-    await vi.waitFor(() => expect(clear).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(clear).toHaveBeenCalledWith(cleanup));
     expect(manager.getRecord(running)).toBeUndefined();
   });
 
@@ -459,7 +463,7 @@ describe("AgentManager hand-over", () => {
       extensionRunner: { emit },
       dispose,
       getSessionStats: () => ({}),
-      sessionManager: { getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
+      agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
     };
     const next = track(new AgentManager());
     const adopted = next.adopt({ dto: dtoOf("late"), session: session as unknown as AgentSession }, false);

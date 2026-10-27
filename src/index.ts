@@ -516,10 +516,12 @@ export default function (pi: ExtensionAPI) {
     // handle too, so the child session is unreachable once its teardown ran.
     const activity = agentActivity.get(record.id);
     if (activity) activity.session = undefined;
-    // Nested children report only through their owning parent's scoped tools.
-    // Keep them out of top-level lifecycle, transcript, notification, and UI
-    // channels — nothing in the main session can act on them.
-    if (record.parentAgentId) return;
+    // Nested children report only to their owning parent: the result is a wake on that parent's session. The
+    // main session's lifecycle, transcript, notification, and UI channels stay untouched.
+    if (record.parentAgentId) {
+      manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+      return;
+    }
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -833,7 +835,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle = undefined;
     currentCtx = undefined;
     scheduler.stop();
-    const nudged = [...pendingNudges.keys(), ...parkedNudges.keys()];
+    const nudged = [...pendingNudges.keys(), ...parkedNudges.keys()].map((id) => ({ id, target: manager.getRecord(id)?.parentAgentId }));
     if (event.reason === "reload") {
       // Nothing is aborted: runs still going move to the reloaded activation (reload-handover.ts).
       widget.dispose();
@@ -924,16 +926,18 @@ export default function (pi: ExtensionAPI) {
         if (!(await adoptItem(item, false))) return;
         h.removeItem(item);
       }
-      const pending = new Set(h.takeNudged());
+      const pending = h.takeNudged();
+      const pendingIds = new Set(pending.map((nudge) => nudge.id));
       for (const id of legacyIds) {
         const record = manager.getRecord(id);
         if (!record) continue;
         record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
-        record.resultDelivered = legacyDelivered(record, pending);
+        record.resultDelivered = legacyDelivered(record, pendingIds);
       }
-      for (const id of pending) {
+      // A nested child's result is a wake on its parent, never a nudge on the main session.
+      for (const { id, target } of pending) {
         const record = manager.getRecord(id);
-        if (record) sendIndividualNudge(record);
+        if (record && !target) sendIndividualNudge(record);
       }
     }
     for (const h of held) h.attach((event) => onHandoverEvent(h, event));

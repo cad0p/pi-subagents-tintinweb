@@ -195,7 +195,8 @@ describe("background-work provider — full stack", () => {
         }
         if (first === "Nest.") {
           if (toolResults(context, "Agent").length === 0) return agentCall({ description: "nested", prompt: "Work." });
-          await vi.waitFor(() => expect(liveRecord("nested")?.status).toBe("completed"));
+          // A finish lands a quiet tick after the run: wait past vitest's 1 s default.
+          await vi.waitFor(() => expect(liveRecord("nested")?.status).toBe("completed"), { timeout: 10_000 });
           return "nested done";
         }
         if (toolResults(context, "Agent").length === 0) {

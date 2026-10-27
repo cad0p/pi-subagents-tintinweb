@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { toDto } from "../src/reload-handover.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
@@ -35,6 +35,9 @@ import {
 import { getSessionContextPercent } from "../src/usage.js";
 import { isWorktreeIsolationEnabled, pruneWorktrees } from "../src/worktree.js";
 
+// Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
+setQuietMs(20);
+
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 
@@ -44,7 +47,10 @@ const mockSession = () => ({
   dispose: vi.fn(),
   subscribe: () => () => {},
   sessionId: "child-session-id",
-  sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  isStreaming: false,
+  agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
+  sendCustomMessage: () => Promise.resolve(),
+  sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
 
 /** Host a child the way the runner does: settings first, then the session with its lifecycle. */
@@ -869,6 +875,48 @@ describe("AgentManager — abort() state machine", () => {
   });
 });
 
+type Internals = {
+  lives: Map<string, { lastRun?: unknown; tick?: unknown }>;
+  waking: Map<string, string | undefined>;
+  decide(record: AgentRecord, life: unknown): void;
+};
+const internals = (m: AgentManager) => m as unknown as Internals;
+
+/** A session the test drives: `emit` reaches its subscribers. Its run settles only when the test settles it. */
+const liveSession = () => {
+  const listeners = new Set<(event: unknown) => void>();
+  return {
+    ...mockSession(),
+    subscribe: (listener: (event: unknown) => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    emit: (event: unknown) => {
+      for (const listener of listeners) listener(event);
+    },
+    prompt: vi.fn(() => Promise.resolve()),
+    steer: vi.fn(() => Promise.resolve()),
+    sendCustomMessage: vi.fn(() => Promise.resolve()),
+  };
+};
+
+/** Spawns a child that hosts `session` and never settles on its own. */
+const spawnHosted = (m: AgentManager, session: unknown) => {
+  vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+    hostChild(opts, session);
+    return new Promise(() => {});
+  });
+  return m.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+};
+
+/** Marks the run settled and runs one decide step, as the runner's observer would. */
+const settleRun = (m: AgentManager, id: string) => {
+  const life = internals(m).lives.get(id);
+  if (!life) throw new Error(`no open lifecycle for ${id}`);
+  life.lastRun = { text: "done", aborted: false, steered: false };
+  internals(m).decide(m.getRecord(id) as AgentRecord, life);
+};
+
 describe("AgentManager — deliver()", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -891,7 +939,7 @@ describe("AgentManager — deliver()", () => {
     captured?.({ prompt, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } });
 
     expect(await manager.deliver(id, "go left")).toBe("delivered");
-    expect(prompt).toHaveBeenCalledWith("go left", { streamingBehavior: "steer" });
+    expect(prompt).toHaveBeenCalledWith("go left", expect.objectContaining({ streamingBehavior: "steer" }));
   });
 
   it("queues onto pendingSteers when the session isn't ready yet", async () => {
@@ -904,6 +952,64 @@ describe("AgentManager — deliver()", () => {
     expect(await manager.deliver(id, "first")).toBe("queued");
     expect(await manager.deliver(id, "second")).toBe("queued");
     expect(record.pendingSteers).toEqual(["first", "second"]);
+  });
+
+  it("keeps a record busy until pi reports a steer's disposition, even when the prompt resolves first", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    let report: (() => void) | undefined;
+    session.prompt = vi.fn((_text: string, opts: { preflightResult?: () => void }) => {
+      report = opts.preflightResult;
+      return Promise.resolve();
+    });
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    expect(await manager.deliver(id, "go")).toBe("delivered");
+    expect(manager.getRecord(id)?.preflight).toBe(1);
+    settleRun(manager, id);
+    await new Promise((done) => setTimeout(done, 60));
+    expect(internals(manager).lives.has(id)).toBe(true);
+    report?.();
+    await manager.getRecord(id)?.promise;
+    expect(manager.getRecord(id)?.preflight).toBe(0);
+  });
+
+  it("stops counting a steer whose preflight never reports, after a bound, and lets the record settle", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    session.prompt = vi.fn(() => Promise.resolve());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      const id = spawnHosted(manager, session);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(manager.getRecord(id)?.session).toBe(session);
+      expect(await manager.deliver(id, "go")).toBe("delivered");
+      const record = manager.getRecord(id)!;
+      expect(record.preflight).toBe(1);
+      settleRun(manager, id);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(record.preflight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(record.preflight).toBe(0);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("did not report preflight"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      await record.promise;
+    } finally {
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
+  it("parks a steer pi rejects as already processing in held", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    session.prompt = vi.fn(() => Promise.reject(new Error("Agent is already processing")));
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    expect(await manager.deliver(id, "again")).toBe("delivered");
+    await vi.waitFor(() => expect(manager.getRecord(id)?.held).toEqual(["again"]));
+    expect(manager.getRecord(id)?.preflight).toBe(0);
   });
 
   it("refuses a finished agent it cannot reopen from a session file", async () => {
@@ -1077,7 +1183,7 @@ describe("AgentManager — deliver()", () => {
     resolvedRun({ ...mockSession(), extensionRunner: { emit: () => hold } });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     const record = manager.getRecord(id)!;
-    await vi.waitFor(() => expect(record.transition).toBe("teardown"));
+    await vi.waitFor(() => expect(record.transition).toBe("teardown"), { timeout: 5_000 });
     expect(record.settled).toBe(false);
     vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "after settle" });
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
@@ -1158,7 +1264,7 @@ describe("AgentManager — deliver()", () => {
     expect([...outcomes].sort()).toEqual(["delivered", "resumed"]);
     expect(createChildSession).toHaveBeenCalledTimes(1);
     expect(resumeAgent).toHaveBeenCalledTimes(1);
-    expect(child.prompt).toHaveBeenCalledWith(expect.any(String), { streamingBehavior: "steer" });
+    expect(child.prompt).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ streamingBehavior: "steer" }));
   });
 
   it("logs parked input whose flush is refused", async () => {
@@ -1231,6 +1337,219 @@ describe("AgentManager — deliver()", () => {
 // "abort" event to this.abort(id), stopping the child. Covers the manager in
 // isolation — the Agent tool no longer forwards the parent ESC/abort signal to
 // child runs, so no production spawn caller passes one today.
+describe("AgentManager — finish waits for idle and pending work", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("flushes steers queued before the session existed once it is bound", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    let host: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      host = () => hostChild(opts, session);
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+    expect(await manager.deliver(id, "first")).toBe("queued");
+    host?.();
+    expect(session.steer).toHaveBeenCalledWith("first");
+  });
+
+  it("wakes a settled session that holds parked input instead of finishing it", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    const record = manager.getRecord(id) as AgentRecord;
+    record.held = ["late note"];
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "late note" }), {
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
+    expect(record.held).toBeUndefined();
+    expect(internals(manager).lives.has(id)).toBe(true);
+  });
+
+  it("wakes a settled session that still has queued messages", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    session.agent.hasQueuedMessages = () => true;
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    settleRun(manager, id);
+    expect(session.sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: "pi-subagents-wake" }), {
+      triggerTurn: true,
+      deliverAs: "steer",
+    });
+  });
+
+  it("a stopped finish names the input it drops and empties the session queue", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    session.clearQueue = vi.fn(() => ({ steering: ["queued steer"], followUp: ["queued follow-up"] }));
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    const record = manager.getRecord(id) as AgentRecord;
+    record.held = ["parked"];
+    record.status = "stopped";
+    settleRun(manager, id);
+    const text = await record.promise;
+    expect(text).toContain('Input not delivered because the agent finished first: "parked", "queued steer", "queued follow-up".');
+    expect(record.result).toBe(text);
+    expect(session.clearQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a nested result delivered only once the parent observes the wake", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const parentId = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
+    const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    expect(child.resultDelivered).toBe(false);
+    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    expect(child.resultDelivered).toBe(true);
+  });
+
+  it("finishes a settled session only after a second quiet observation", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+    await vi.waitFor(() => expect(internals(manager).lives.has(id)).toBe(false));
+  });
+
+  it("does not finish while a wake it sent is still unobserved", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const parentId = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(parentId)?.session).toBe(session));
+    const child = { parentAgentId: parentId, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    settleRun(manager, parentId);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(internals(manager).lives.has(parentId)).toBe(true);
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("clears the lifecycle tick when it finishes", async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    const tick = internals(manager).lives.get(id)?.tick;
+    expect(tick).toBeDefined();
+    const clear = vi.spyOn(globalThis, "clearInterval");
+    try {
+      (manager.getRecord(id) as AgentRecord).status = "stopped";
+      settleRun(manager, id);
+      expect(clear).toHaveBeenCalledWith(tick);
+    } finally {
+      clear.mockRestore();
+    }
+  });
+
+  it("a resumed run starts with a fresh turn budget, not the soft limit of the run before", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id) as AgentRecord;
+    await record.promise;
+    record.turnBudget = { turns: 1, softLimitReached: true };
+    await reopen(manager, id);
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise(() => {}));
+    manager.resume(id, "more");
+    settleRun(manager, id);
+    expect(internals(manager).lives.has(id)).toBe(true);
+  });
+});
+
+describe("AgentManager — finish after a wake steer the aborted run never drained (#103)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  /** Starts a streaming run whose prompt never reports. The test ends the loop with `endLoop`. */
+  const streamingRun = async () => {
+    manager = new AgentManager();
+    const session = { ...liveSession(), messages: [], abort: vi.fn(), prompt: vi.fn(() => new Promise<void>(() => {})) };
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      hostChild(opts, session);
+      void attachSessionLifecycle(session).prompt("go", { observer: opts.observer, signal: opts.signal });
+      return new Promise(() => {});
+    });
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    session.isStreaming = true;
+    session.agent.state.isStreaming = true;
+    session.emit({ type: "agent_start" });
+    // The loop returns without draining its steering queue: no message_start for a queued wake, then agent_settled.
+    const endLoop = () => {
+      session.emit({ type: "agent_end" });
+      session.isStreaming = false;
+      session.agent.state.isStreaming = false;
+      session.emit({ type: "agent_settled" });
+    };
+    return { id, session, record: manager.getRecord(id) as AgentRecord, endLoop };
+  };
+
+  /** Resolves "settled" when the promise does, "hang" when it has not within `ms`. */
+  const settlesWithin = async (promise: Promise<unknown>, ms: number) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const hang = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve("hang"), ms);
+    });
+    const outcome = await Promise.race([promise.then(() => "settled"), hang]);
+    clearTimeout(timer);
+    return outcome;
+  };
+
+  it("settles a stopped record whose queued wake the aborted loop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    expect(internals(manager).waking.has(id)).toBe(true);
+    manager.abort(id);
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("names held input whose wake the aborted loop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    record.held = ["also run the linter"];
+    endLoop();
+    await vi.waitFor(() => expect(internals(manager).waking.has(id)).toBe(true));
+    manager.abort(id);
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(record.result).toContain('"also run the linter"');
+  });
+
+  it("settles a soft-limited record whose queued wake the hard stop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    record.turnBudget = { turns: 1, softLimitReached: true };
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(child.resultDelivered).toBe(false);
+  });
+
+  it("settles a wake steered into a run already streaming, with no run start after it", async () => {
+    const { id, record, session, endLoop } = await streamingRun();
+    const child = { parentAgentId: id, resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(child, "child result");
+    session.emit({ type: "message_start", message: { role: "custom", customType: "pi-subagents-wake", content: "child result" } });
+    expect(child.resultDelivered).toBe(true);
+    endLoop();
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+  });
+});
+
 describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -1668,7 +1987,9 @@ describe("AgentManager — session file retention", () => {
       const { session, file } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
       resolve(done(session));
-      await manager.getRecord(id)!.promise;
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
       expect(existsSync(file)).toBe(true);
       // The completion nudge (index.ts) marks it delivered; this manager has no completion surface.
       manager.getRecord(id)!.resultDelivered = true;
@@ -1690,7 +2011,9 @@ describe("AgentManager — session file retention", () => {
       const { session } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
       resolve(done(session));
-      await manager.getRecord(id)!.promise;
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
 
       vi.advanceTimersByTime(11 * 60_000);
       expect(manager.getRecord(id)).toBeDefined();

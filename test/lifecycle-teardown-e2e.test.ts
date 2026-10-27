@@ -32,8 +32,8 @@ const FIXTURE = fileURLToPath(new URL("./fixtures/e2e-lifecycle-ext.mjs", import
 const MAIN_SESSION = Symbol.for("pi-subagents.test:main-session");
 const SHUTDOWNS = Symbol.for("pi-subagents.test:shutdowns");
 const SHUTDOWN_GATE = Symbol.for("pi-subagents.test:shutdown-gate");
-/** Must match the fixture's nudge delay. */
-const NUDGE_DELAY_MS = 50;
+/** Must match the fixture's nudge delay. Longer than the finish quiet window, so the timer is pending at teardown. */
+const NUDGE_DELAY_MS = 3000;
 
 /** Writes the `watcher` agent into the project. Its frontmatter loads the fixture, so only the child gets it. */
 function writeWatcher(dir: string): void {
@@ -57,6 +57,9 @@ function isParent(context: Context): boolean {
 function shutdowns(): string[] {
   return (Reflect.get(globalThis, SHUTDOWNS) as string[] | undefined) ?? [];
 }
+
+/** Settling waits a finish quiet window after the run, which outlasts vitest's 1 s waitFor default. */
+const waitForSettle = (check: () => void) => vi.waitFor(check, { timeout: 10_000 });
 
 /** The run's manager, published by the harness on a global. */
 function manager(): ManagerHandle | undefined {
@@ -115,8 +118,8 @@ describe("child session lifecycle — full stack", () => {
 
     const record = run.subagents.find((r) => r.description === "watched");
     expect(record).toBeDefined();
-    await vi.waitFor(() => expect(shutdowns()).toEqual(["quit"]));
-    await new Promise((resolve) => setTimeout(resolve, NUDGE_DELAY_MS * 4));
+    await waitForSettle(() => expect(shutdowns()).toEqual(["quit"]));
+    await new Promise((resolve) => setTimeout(resolve, NUDGE_DELAY_MS));
     expect(lateTurns).toBe(0);
     expect(record?.session).toBeUndefined();
     expect(record?.sessionSnapshot).toBeDefined();
@@ -146,7 +149,7 @@ describe("child session lifecycle — full stack", () => {
         if (!resumed) {
           resumed = true;
           // Holds the parent's model call until the first run has settled and been torn down.
-          await vi.waitFor(() => expect(liveRecord("watched")?.settled).toBe(true));
+          await waitForSettle(() => expect(liveRecord("watched")?.settled).toBe(true));
           sessionFile = liveRecord("watched")?.sessionFile;
           outputFile = liveRecord("watched")?.outputFile;
           firstOutput = liveRecord("watched")?.lifetimeUsage.output ?? 0;
@@ -159,7 +162,7 @@ describe("child session lifecycle — full stack", () => {
     const record = run.subagents.find((r) => r.description === "watched");
     expect(sessionFile).toBeDefined();
     expect(outputFile).toBeDefined();
-    await vi.waitFor(() => expect(shutdowns()).toEqual(["quit", "quit"]));
+    await waitForSettle(() => expect(shutdowns()).toEqual(["quit", "quit"]));
     expect(record?.session).toBeUndefined();
     expect(record?.sessionFile).toBe(sessionFile);
     const transcript = JSON.stringify(SessionManager.open(String(sessionFile)).buildSessionContext().messages);
@@ -190,14 +193,14 @@ describe("child session lifecycle — full stack", () => {
     });
     // The child has settled and its session_shutdown waits on the gate. The foreground spawn settles only after
     // the teardown, so the gate is opened from here, not from a respond callback.
-    await vi.waitFor(() => expect(liveRecord("watched")?.transition).toBe("teardown"));
+    await waitForSettle(() => expect(liveRecord("watched")?.transition).toBe("teardown"));
     const id = String(liveRecord("watched")?.id);
     const refusedRestore = await rootManager()?.restoreSession(id);
     const refusedResume = rootManager()?.resume(id, "Again.");
     openGate?.();
     run = await pending;
 
-    await vi.waitFor(() => expect(shutdowns()).toEqual(["quit"]));
+    await waitForSettle(() => expect(shutdowns()).toEqual(["quit"]));
     expect(refusedRestore).toBeUndefined();
     expect(refusedResume).toBeUndefined();
     const watched = run.subagents.find((r) => r.description === "watched");
@@ -221,16 +224,16 @@ describe("child session lifecycle — full stack", () => {
         }
         if (restored) return "parent done";
         const watched = liveRecord("watched");
-        await vi.waitFor(() => expect(watched?.settled).toBe(true));
+        await waitForSettle(() => expect(watched?.settled).toBe(true));
         const id = String(watched?.id);
         restored = await Promise.all([rootManager()?.restoreSession(id), rootManager()?.restoreSession(id)]);
         rootManager()?.resume(id, "Again.");
-        await vi.waitFor(() => expect(liveRecord("watched")?.settled).toBe(true));
+        await waitForSettle(() => expect(liveRecord("watched")?.settled).toBe(true));
         return "parent done";
       },
     });
 
-    await vi.waitFor(() => expect(shutdowns()).toEqual(["quit", "quit"]));
+    await waitForSettle(() => expect(shutdowns()).toEqual(["quit", "quit"]));
     expect(restored?.[0]).toBeDefined();
     expect(restored?.[1]).toBe(restored?.[0]);
   });
@@ -254,14 +257,14 @@ describe("child session lifecycle — full stack", () => {
         if (resumed) return "parent done";
         resumed = true;
         watched = liveRecord("watched");
-        await vi.waitFor(() => expect(watched?.settled).toBe(true));
+        await waitForSettle(() => expect(watched?.settled).toBe(true));
         const reopened = await rootManager()?.restoreSession(String(watched?.id));
         reopenedTranscript = JSON.stringify(reopened?.messages);
         return sendMessageCall({ to: String(watched?.id), message: "Again." });
       },
     });
 
-    await vi.waitFor(() => expect(shutdowns()).toEqual(["quit", "quit"]));
+    await waitForSettle(() => expect(shutdowns()).toEqual(["quit", "quit"]));
     expect(watched?.sessionFile).toBeUndefined();
     expect(watched?.memoryEntries).toBeDefined();
     expect(reopenedTranscript).toContain("Work.");

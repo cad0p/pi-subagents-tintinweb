@@ -15,7 +15,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn(async () => mockSession()) };
 });
 
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import {
   attachSessionLifecycle,
   type ChildSessionSettings,
@@ -26,6 +26,9 @@ import {
 import subagentsExtension from "../src/index.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
+// Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
+setQuietMs(20);
+
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 const mockSession = () => ({
@@ -34,7 +37,10 @@ const mockSession = () => ({
   sessionId: "child-session-id",
   messages: [],
   subscribe: () => () => {},
-  sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  isStreaming: false,
+  agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
+  sendCustomMessage: () => Promise.resolve(),
+  sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
 
 /** Minimal theme for asserting rendered widget text (colors stay legible wrappers). */

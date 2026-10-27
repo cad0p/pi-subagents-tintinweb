@@ -8,8 +8,11 @@ vi.mock("../src/agent-runner.js", async () => {
   };
 });
 
+import { setQuietMs } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+
+setQuietMs(20);
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -72,7 +75,7 @@ describe("print mode background notifications", () => {
   it("ignores stale-context errors from delayed completion nudges", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
-      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+      session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
       aborted: false,
       steered: false,
     });

@@ -50,7 +50,7 @@ vi.mock("../src/settings.js", async (importOriginal) => {
   };
 });
 
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -58,6 +58,8 @@ import subagentsExtension, { WIZARD_MAX_TURNS } from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
+
+setQuietMs(20);
 
 function ctx() {
   return {
@@ -118,7 +120,7 @@ function fakeChild(): AgentSession {
     subscribe: () => () => {},
     sessionId: "child-session",
     messages: [],
-    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
   } as unknown as AgentSession;
 }
 
@@ -136,7 +138,7 @@ function hostedRun(session: AgentSession, responseText: string): void {
 async function spawnCompleting(tools: Map<string, any>, description = "research thing"): Promise<string> {
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "# Report\n\nTHE-RESULT-PAYLOAD",
-    session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+    session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
     aborted: false,
     steered: false,
   });
@@ -426,7 +428,7 @@ describe("Agent result rendering", () => {
   it("fresh spawn defaults to a background result with no onUpdate streaming", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
-      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+      session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
       aborted: false,
       steered: false,
     });
@@ -623,7 +625,7 @@ describe("Agent result rendering", () => {
 
       vi.mocked(runAgent).mockResolvedValue({
         responseText: "ok",
-        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+        session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
         aborted: false,
         steered: false,
       });
@@ -903,7 +905,7 @@ describe("Agent result rendering", () => {
 
       vi.mocked(runAgent).mockResolvedValue({
         responseText: "ok",
-        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+        session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
         aborted: false,
         steered: false,
       });
@@ -982,7 +984,7 @@ describe("get_subagent_result terminal rendering", () => {
     vi.useFakeTimers();
 
     const id = await spawnCompleting(tools);
-    await vi.advanceTimersByTimeAsync(0); // let the completion microtasks land
+    await vi.advanceTimersByTimeAsync(100); // the finish check settles the record on its quiet ticks
 
     const tool = tools.get("get_subagent_result");
     const result = await tool.execute("tc-gsr", { agent_id: id }, undefined, undefined, ctx());
@@ -1001,7 +1003,7 @@ describe("get_subagent_result terminal rendering", () => {
     vi.useFakeTimers();
 
     const id = await spawnCompleting(tools);
-    await vi.advanceTimersByTimeAsync(0); // let the completion microtasks land
+    await vi.advanceTimersByTimeAsync(100); // the finish check settles the record on its quiet ticks
 
     // Unexpected terminal status value, as a corrupted or resumed record can
     // carry. It still renders through the completed-header path.
@@ -1453,7 +1455,7 @@ describe("agents command terminal surfaces", () => {
       vi.mocked(runAgent).mockImplementation(async () => {
         mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
         writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
-        return { responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false };
+        return { responseText: "created", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false };
       });
       const { pi, commands } = makePi();
       subagentsExtension(pi);
@@ -1490,7 +1492,7 @@ describe("agents command terminal surfaces", () => {
         if (isGeneratorRun(opts)) {
           mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
           writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
-          return Promise.resolve({ responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false });
+          return Promise.resolve({ responseText: "created", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false });
         }
         return new Promise((r) => { releaseFiller = r; });
       });
@@ -1517,7 +1519,7 @@ describe("agents command terminal surfaces", () => {
         expect(rec?.status).toBe("queued");
       });
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       expect(
@@ -1571,7 +1573,7 @@ describe("agents command terminal surfaces", () => {
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
       expect(messages.some(m => m.includes("file was not created"))).toBe(false);
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
@@ -1625,7 +1627,7 @@ describe("agents command terminal surfaces", () => {
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
       expect(messages.some(m => m.includes("file was not created"))).toBe(false);
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
@@ -1715,7 +1717,7 @@ describe("agents command terminal surfaces", () => {
       });
 
       // Freeing the slot drains the queue; the generation's start rejects.
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       const failed = notifications.find(n => n.message.startsWith("Generation failed"));
@@ -1782,7 +1784,7 @@ describe("agents command terminal surfaces", () => {
       });
 
       // Freeing the slot drains the queue; the generator fails to start.
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       const record = handle.getRecord(queuedId);

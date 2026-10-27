@@ -324,6 +324,13 @@ describe("FleetList rendering", () => {
     expect(live).not.toContain("(draining)");
   });
 
+  it("shows a waiting row as waiting · item · elapsed instead of its tokens", () => {
+    const waiting = makeRecord({ id: "w1", description: "waiting one", waiting: { since: Date.now() - 5000, items: ["timer:abc", "bg:x"] } });
+    const line = harness([waiting]).render().find((l) => l.includes("waiting one"));
+    expect(line).toContain("waiting · timer:abc (+1) · ");
+    expect(line).not.toContain("tokens");
+  });
+
   it("orders agents earliest-launched first (top)", () => {
     const agents = [
       makeRecord({ id: "new", description: "newest", startedAt: 2000 }),

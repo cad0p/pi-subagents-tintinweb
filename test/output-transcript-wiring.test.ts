@@ -79,9 +79,16 @@ describe("output_transcript agent wiring", () => {
       await Promise.resolve();
       const session = {
         messages: [],
+        isStreaming: false,
+        agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
         subscribe: vi.fn(() => vi.fn()),
         dispose: vi.fn(),
-        sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+        sessionManager: {
+          getSessionId: () => "child-session",
+          getSessionFile: () => undefined,
+          getHeader: () => ({ type: "session" }),
+          getEntries: () => [],
+        },
       } as any;
       options.onSessionCreated?.(session);
       return { responseText: "done", session, aborted: false, steered: false };

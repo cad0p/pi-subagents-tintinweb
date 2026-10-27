@@ -1036,11 +1036,13 @@ describe("subagents across a real /reload (faux provider)", () => {
     await childStarted;
     const childId = draining.listAgents().find((r) => r.parentAgentId === parentId)?.id ?? "";
     expect(childId).not.toBe("");
-    // The parent settles in the old manager, which aborts the child it spawned while the child streams.
-    await vi.waitFor(() => expect(draining.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
-    await vi.waitFor(() => expect(childSignal?.aborted).toBe(true), { timeout: 10_000 });
-    // The child unwinds, the subtree moves to the live root together, and the settled child resumes there.
+    // The parent waits in the old manager while its nested child streams: it neither settles nor aborts the child.
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    expect(draining.getRecord(parentId)?.settled).toBe(false);
+    expect(childSignal?.aborted).toBe(false);
+    // The child unwinds on release, the parent settles after it, and the subtree moves to the live root together.
     release();
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
     await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.settled).toBe(true), { timeout: 10_000 });
     faux = registerFauxProvider({ api: faux.api, provider: "faux", models: [FAUX_MODEL] });
     faux.setResponses(scripted());
@@ -1055,26 +1057,29 @@ describe("subagents across a real /reload (faux provider)", () => {
     mkdirSync(join(tmp, "agents"), { recursive: true });
     writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
     const reported: Array<{ id: string; usage: { totalTokens: number } }> = [];
-    const off = publishedRoot().pi.events.on("subagents:usage", (event) => {
+    const onUsage = (event: unknown) => {
       reported.push(event as { id: string; usage: { totalTokens: number } });
-    });
+    };
+    const offBefore = publishedRoot().pi.events.on("subagents:usage", onUsage);
     parentNests = true;
     parentLeavesChild = true;
     parentSpawnsOnRelease = true;
     await root.prompt("spawn-parent-now");
     const parentId = liveRegistry().listAgents()[0]?.id ?? "";
-    // The parent spawns its child once released and completes only after the child streams behind the gate.
+    // The parent spawns its child once released and waits behind it: the child streams behind the gate.
     releaseParent();
     await childStarted;
-    // The parent's completion tail aborts the streaming child, which stays unsettled until the gate opens.
-    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
-    await vi.waitFor(() => expect(childSignal?.aborted).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    expect(publishedRoot().manager.getRecord(parentId)?.settled).toBe(false);
+    expect(childSignal?.aborted).toBe(false);
     expect(publishedRoot().manager.listAgents().find((r) => r.parentAgentId === parentId)?.settled).toBe(false);
     const parentFile = publishedRoot().manager.getRecord(parentId)?.sessionFile ?? "";
     expect(existsSync(parentFile)).toBe(true);
 
     await reloadRoot(root);
-    // The old manager cannot retire while its child is unwinding, so the parent's session file survives the reload.
+    // pi's reload builds a new event bus: usage emitted after it (hand-over replay included) arrives there.
+    const offAfter = publishedRoot().pi.events.on("subagents:usage", onUsage);
+    // The waiting parent stays in the old manager's pool, so its session file survives the reload.
     expect(existsSync(parentFile)).toBe(true);
 
     release();
@@ -1082,13 +1087,47 @@ describe("subagents across a real /reload (faux provider)", () => {
       () => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"),
       { timeout: 10_000 },
     );
-    off();
     expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
     const lifetime = publishedRoot().manager.getRecord(parentId)?.lifetimeUsage;
     const total = (lifetime?.input ?? 0) + (lifetime?.output ?? 0) + (lifetime?.cacheRead ?? 0) + (lifetime?.cacheWrite ?? 0);
     expect(total).toBeGreaterThan(0);
-    const reportedTotal = reported.filter((event) => event.id === parentId).reduce((sum, event) => sum + event.usage.totalTokens, 0);
-    expect(reportedTotal).toBe(total);
+    // Lifetime usage folds each nested descendant's spend into its ancestors (nested-tools.ts), while each
+    // message is reported once under its own id. The parent's lifetime therefore equals the sum over its subtree.
+    const subtree = new Set([parentId, ...publishedRoot().manager.listAgents().filter((r) => r.parentAgentId === parentId).map((r) => r.id)]);
+    // The hand-over replays draining usage to the listener after the adopted record shows as completed.
+    await vi.waitFor(() => expect(reported.filter((event) => subtree.has(event.id)).reduce((sum, event) => sum + event.usage.totalTokens, 0)).toBe(total), { timeout: 10_000 });
+    offBefore();
+    offAfter();
+  }, 20_000);
+
+  it("keeps a waiting parent in its draining pool across /reload, settles it there, and announces it once from the new activation", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+
+    await reloadRoot(root);
+    // The waiting parent is not handed over: the reloaded root lists the record its draining pool still holds, unsettled.
+    expect(publishedRoot().manager.getRecord(parentId)).toBe(draining.getRecord(parentId));
+    expect(draining.getRecord(parentId)?.settled).toBe(false);
+    const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+    const announced = () => sent.mock.calls.filter(([message]) => message.customType === "subagent-notification");
+
+    release();
+    // The draining pool settles the parent; the notification leaves through the new activation, exactly once.
+    await vi.waitFor(() => expect(announced()).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(announced()).toHaveLength(1);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result).toContain("PARENT-LEFT");
   }, 20_000);
 
   it("reports a queued respawn the reloaded activation cannot start as an error with a notification", async () => {

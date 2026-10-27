@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { sessionKey } from "@cad0p/pi-background-work";
+import { listBackgroundWorkProviders, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -27,6 +27,8 @@ import {
   createChildSession,
   getDefaultMaxTurns,
   normalizeMaxTurns,
+  type RunObserver,
+  type RunOutcome,
   resumeAgent,
   runAgent,
   type SessionLifecycle,
@@ -39,6 +41,7 @@ import {
   type DrainingPool,
   fromDto,
   type HandoverItem,
+  type NudgeEntry,
   type QueuedSpec,
   ReloadHandover,
   toDto,
@@ -48,6 +51,40 @@ import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, Isolati
 import type { AgentActivity } from "./ui/agent-widget.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+
+/** Quiet time the finish check needs, observed on two ticks, before it finishes an idle record. Tests shorten it. */
+let quietMs = 1000;
+
+export function setQuietMs(ms: number): void {
+  quietMs = ms;
+}
+
+/** Custom message type of the fork's own wakes: queued input, held input, nested results, the continue notice. */
+const WAKE_TYPE = "pi-subagents-wake";
+
+/** Longest a delivered prompt may stay unreported before its preflight stops counting against finish (a deferred re-run that throws never reports). */
+const PREFLIGHT_TIMEOUT_MS = 30_000;
+
+/** Wake text for a finished subagent that has queued input or background work to pick up. */
+const CONTINUE_NOTICE =
+  "Input or background work you were waiting on is ready. Continue your task. When you are done, your final message is your result; restate anything from before the wait that the parent needs.";
+
+/**
+ * Open run lifecycle of one record. It runs from admission until the finish check settles the record, which
+ * can span several runs (a wake reopens it). It lives off the record: the timer and the last outcome are
+ * owned here.
+ */
+interface Life {
+  /** Set once the lifecycle's observer reported a run; a runner that resolves without one reports its result directly. */
+  observed: boolean;
+  lastRun?: RunOutcome;
+  failed?: { error: unknown };
+  quiet?: { runSeq: number; at: number };
+  tick: ReturnType<typeof setInterval>;
+  /** Writes the terminal status and result, and returns the result text. */
+  finish(run: RunOutcome, failed: { error: unknown } | undefined): string;
+  resolve(text: string): void;
+}
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -273,6 +310,13 @@ export class AgentManager {
   private queue: { id: string; args: SpawnArgs }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
+  /** Open run lifecycles, keyed by record id. A record has at most one; `abort()` and `dispose()` reach it here. */
+  private lives = new Map<string, Life>();
+  /**
+   * Records with a wake in flight: sent, and no run has started yet. `decide` treats them as busy. The value is the
+   * user input the wake carries, named in the result if the record finishes before the wake is observed.
+   */
+  private waking = new Map<string, string | undefined>();
   /** Pools of older activations whose runs still count against `maxConcurrent`. */
   private drainingPools: DrainingPool[] = [];
   /** Ids whose hand-over item is being adopted: input for them is parked here until `endAdoption`. */
@@ -458,9 +502,56 @@ export class AgentManager {
     // Increment only after every synchronous throw site (cwd/worktree
     // validation, onStart) — the runner calls are async, so any later throw
     // arrives as a rejection through .catch/.finally and cannot leak the slot.
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    this.acquireSlot(record);
     record.settled = false;
-    const promise = runAgent(ctx, type, prompt, {
+    record.turnBudget = { turns: 0, softLimitReached: false };
+    const life = this.openLife(record, (run, failed) => {
+      if (failed) {
+        // Don't overwrite status if externally stopped via abort()
+        if (record.status !== "stopped") record.status = "error";
+        record.error = failed.error instanceof Error ? failed.error.message : String(failed.error);
+        record.completedAt ??= Date.now();
+        detach();
+        // Best-effort worktree cleanup on error
+        if (record.worktree) {
+          try {
+            record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, options.description);
+          } catch { /* ignore cleanup errors */ }
+        }
+        return "";
+      }
+      // Don't overwrite status if externally stopped via abort()
+      if (record.status !== "stopped") {
+        // Precedence: a hard abort keeps "aborted"; then a failed final turn
+        // (provider error that pi resolved instead of rejecting, #144) is an
+        // honest "error" — not a completion with an empty or stale result.
+        if (run.aborted) {
+          record.status = "aborted";
+        } else if (run.failure) {
+          record.status = "error";
+          record.error = run.failure;
+        } else {
+          record.status = run.steered ? "steered" : "completed";
+        }
+      }
+      record.result = run.text;
+      record.completedAt ??= Date.now();
+      detach();
+      // Clean up worktree if used
+      if (record.worktree) {
+        const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
+        record.worktreeResult = wtResult;
+        if (wtResult.hasChanges && wtResult.branch) {
+          // With a caller-supplied cwd the branch lives in THAT repo, not the
+          // parent session's — say so, or the orchestrator merges in the wrong repo.
+          const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          record.result = (record.result ?? "") +
+            `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+        }
+      }
+      return run.text;
+    });
+    runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
       model: options.model,
@@ -480,6 +571,8 @@ export class AgentManager {
       worktree: worktreePromptInfo,
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
+      turnBudget: record.turnBudget,
+      observer: this.observerFor(record, life),
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -513,73 +606,257 @@ export class AgentManager {
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, aborted, steered, failure }) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          // Precedence: a hard abort keeps "aborted"; then a failed final turn
-          // (provider error that pi resolved instead of rejecting, #144) is an
-          // honest "error" — not a completion with an empty or stale result.
-          if (aborted) {
-            record.status = "aborted";
-          } else if (failure) {
-            record.status = "error";
-            record.error = failure;
-          } else {
-            record.status = steered ? "steered" : "completed";
-          }
-        }
-        record.result = responseText;
-        record.completedAt ??= Date.now();
+      .then(
+        (run) => this.runResolved(record, life, { text: run.responseText, aborted: run.aborted, steered: run.steered, failure: run.failure }),
+        (error: unknown) => this.runRejected(record, life, error),
+      );
+  }
 
-        detach();
+  /** Takes the pool slot a run occupies. Idempotent: admission, a resume and a wake from waiting all call it. */
+  private acquireSlot(record: AgentRecord): void {
+    if (!occupiesPoolSlot(record) || record.holdsSlot) return;
+    record.holdsSlot = true;
+    this.runningBackground++;
+  }
 
-        // Clean up worktree if used
-        if (record.worktree) {
-          const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
-          record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
-          }
-        }
+  /** Gives the slot back. Only a record that holds one releases one; a record waiting on background work releases it. */
+  private releaseSlot(record: AgentRecord): void {
+    if (!record.holdsSlot) return;
+    record.holdsSlot = false;
+    this.runningBackground--;
+  }
 
-        return responseText;
-      })
-      .catch((err) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
-          record.status = "error";
-        }
-        record.error = err instanceof Error ? err.message : String(err);
-        record.completedAt ??= Date.now();
+  /**
+   * Opens the run lifecycle of one admission. The record's promise settles once `finish` has written the terminal
+   * state. `decide` finishes the lifecycle: from the observer, a runner's settle or rejection, abort(), or the tick.
+   */
+  private openLife(record: AgentRecord, finish: Life["finish"]): Life {
+    let resolve: (text: string) => void = () => {};
+    record.promise = new Promise<string>((done) => {
+      resolve = done;
+    });
+    const life: Life = {
+      observed: false,
+      tick: setInterval(() => {
+        if (!record.ending) this.decide(record, life);
+      }, quietMs),
+      finish,
+      resolve,
+    };
+    life.tick.unref();
+    this.lives.set(record.id, life);
+    return life;
+  }
 
-        detach();
+  /**
+   * The run boundaries one lifecycle reports. Events from a lifecycle that is no longer the record's open one are
+   * ignored: a finished run's session can still emit while it is torn down.
+   */
+  private observerFor(record: AgentRecord, life: Life): RunObserver {
+    const open = () => this.lives.get(record.id) === life;
+    return {
+      runStarted: () => {
+        if (!open()) return;
+        life.observed = true;
+        life.quiet = undefined;
+        record.runSeq = (record.runSeq ?? 0) + 1;
+        this.waking.delete(record.id);
+        record.waiting = undefined;
+        this.acquireSlot(record);
+      },
+      agentEnded: () => {
+        if (open()) record.ending = true;
+      },
+      runSettled: (run) => {
+        if (!open()) return;
+        life.observed = true;
+        life.lastRun = run;
+        setImmediate(() => this.decide(record, life));
+      },
+    };
+  }
 
-        // Best-effort worktree cleanup on error
-        if (record.worktree) {
-          try {
-            const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
-            record.worktreeResult = wtResult;
-          } catch { /* ignore cleanup errors */ }
-        }
+  /** A runner that resolves without reporting through the observer has its outcome taken from the resolution. */
+  private runResolved(record: AgentRecord, life: Life, outcome: RunOutcome): void {
+    if (this.lives.get(record.id) !== life) return;
+    if (!life.observed) life.lastRun = outcome;
+    this.decide(record, life);
+  }
 
-        return "";
-      })
-      .finally(() => this.afterRun(record));
+  private runRejected(record: AgentRecord, life: Life, error: unknown): void {
+    if (this.lives.get(record.id) !== life) return;
+    life.failed = { error };
+    this.decide(record, life);
+  }
 
-    record.promise = promise;
+  /**
+   * Finishes a lifecycle once nothing keeps it running. Stays open while a run is in flight or the session is busy.
+   * A failed run finishes at once; a stopped or soft-limited run finishes once idle. Pending background work parks
+   * the record as waiting and releases its slot. Otherwise two quiet observations at least QUIET_MS apart, with the
+   * same run sequence, finish it.
+   */
+  private decide(record: AgentRecord, life: Life): void {
+    if (this.lives.get(record.id) !== life) return;
+    // A stopped run whose runner never reports (its session was torn down) finishes on the tick once idle.
+    if (!life.lastRun && !life.failed && !(life.observed && record.status === "stopped")) return;
+    record.ending = false;
+    if (record.transition) return;
+    if (life.failed) {
+      this.finalize(record, life);
+      return;
+    }
+    const session = record.session;
+    const busy = session !== undefined && (session.isStreaming || session.agent.state.isStreaming);
+    if (busy) {
+      life.quiet = undefined;
+      return;
+    }
+    // A stopped record does not wait on deliveries: abort() must settle it even if a prompt never reports, or a wake
+    // it queued never drains. An aborted loop returns without draining its steering queue, so `waking` may never clear.
+    if (record.status === "stopped") {
+      this.finalize(record, life);
+      return;
+    }
+    // A delivered prompt still in its preflight is not torn down under it, but a soft-limited run finishes once idle.
+    if ((record.preflight ?? 0) > 0) {
+      life.quiet = undefined;
+      return;
+    }
+    if (record.turnBudget?.softLimitReached) {
+      this.finalize(record, life);
+      return;
+    }
+    if (this.waking.has(record.id)) {
+      life.quiet = undefined;
+      return;
+    }
+    if (session && record.held?.length) {
+      const held = record.held.join("\n\n");
+      record.held = undefined;
+      this.wake(record, session, held, { input: true });
+      life.quiet = undefined;
+      return;
+    }
+    if (session?.agent.hasQueuedMessages()) {
+      this.wake(record, session, CONTINUE_NOTICE);
+      life.quiet = undefined;
+      return;
+    }
+    const items = session ? this.pendingWork(session) : [];
+    if (items.length > 0) {
+      record.waiting = { since: record.waiting?.since ?? Date.now(), items };
+      life.quiet = undefined;
+      this.releaseSlot(record);
+      this.drainQueue();
+      return;
+    }
+    record.waiting = undefined;
+    const runSeq = record.runSeq ?? 0;
+    const now = Date.now();
+    if (life.quiet?.runSeq !== runSeq) {
+      life.quiet = { runSeq, at: now };
+    } else if (now - life.quiet.at >= quietMs) {
+      this.finalize(record, life);
+    }
+  }
+
+  /**
+   * Starts a run, or steers the running one, with a custom message the fork owns. The record counts as busy from the
+   * send until the message's `message_start` is observed on the session, or until the send throws. `delivered` runs at
+   * the observation. An `input` wake carries user input, so a finish that drops it names it.
+   */
+  private wake(
+    record: AgentRecord,
+    session: AgentSession,
+    content: string,
+    { delivered, input = false }: { delivered?: () => void; input?: boolean } = {},
+  ): void {
+    this.waking.set(record.id, input ? content : undefined);
+    const off = session.subscribe((event) => {
+      if (event.type !== "message_start" || event.message.role !== "custom") return;
+      if (event.message.customType !== WAKE_TYPE || event.message.content !== content) return;
+      off();
+      this.waking.delete(record.id);
+      delivered?.();
+    });
+    session
+      .sendCustomMessage({ customType: WAKE_TYPE, content, display: false }, { triggerTurn: true, deliverAs: "steer" })
+      .catch((err: unknown) => {
+        off();
+        this.waking.delete(record.id);
+        console.warn(`[pi-subagents] wake ${record.id} failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+  }
+
+  /**
+   * Hands a nested child's result to its owning parent. The child's `resultDelivered` is set once the parent observes the
+   * message. A parent that is no longer live takes nothing, so the child stays listed until its own parent settles.
+   */
+  deliverNested(child: AgentRecord, content: string): void {
+    const parent = child.parentAgentId ? this.agents.get(child.parentAgentId) : undefined;
+    const session = parent?.session;
+    if (!parent || !session) return;
+    this.wake(parent, session, content, {
+      delivered: () => {
+        child.resultDelivered = true;
+      },
+    });
+  }
+
+  /** Background work the session's providers still report. A provider that throws holds nothing open. */
+  private pendingWork(session: AgentSession): string[] {
+    const sessionIds = sessionIdentityForms(session.sessionManager);
+    const context = { sessionId: sessionIds[0] ?? "", sessionIds, nowMs: Date.now() };
+    const items: string[] = [];
+    for (const provider of listBackgroundWorkProviders()) {
+      try {
+        for (const work of provider.listActiveWork(context)) items.push(work.id);
+      } catch {
+        // Same as snapshotSession: a provider that throws reports nothing for this check.
+      }
+    }
+    return items;
+  }
+
+  /** Ends the lifecycle: the terminal state, then afterRun (slot, teardown), then the record's promise. */
+  private finalize(record: AgentRecord, life: Life): void {
+    this.lives.delete(record.id);
+    clearInterval(life.tick);
+    record.ending = false;
+    record.waiting = undefined;
+    const unsent = this.waking.get(record.id);
+    this.waking.delete(record.id);
+    const dropped = this.dropUndelivered(record, unsent);
+    const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
+    const text = dropped ? [finished, dropped].filter(Boolean).join("\n\n") : finished;
+    if (dropped) record.result = text;
+    void this.afterRun(record).then(() => life.resolve(text));
+  }
+
+  /**
+   * Drops input a finishing record will never run: parked input, input queued before the session existed, and the
+   * session's queued messages, and the input an unobserved wake carried. Returns a note naming them for the result, or
+   * "" when nothing was dropped.
+   */
+  private dropUndelivered(record: AgentRecord, unsent?: string): string {
+    const lost = [...(unsent ? [unsent] : []), ...(record.held ?? []), ...(record.pendingSteers ?? [])];
+    record.held = undefined;
+    record.pendingSteers = undefined;
+    const queued = record.session?.clearQueue();
+    if (queued) lost.push(...queued.steering, ...queued.followUp);
+    if (lost.length === 0) return "";
+    const quoted = lost.map((text) => `"${text}"`).join(", ");
+    return `Input not delivered because the agent finished first: ${quoted}.`;
   }
 
   /**
    * Announces a settled run to the completion surface, once per run. A hand-over carries `notified`, so the
    * activation that adopts a settled subtree does not announce a parent the old activation already reported.
-   * Skipped while no surface is wired: a draining manager has none after `beginDrain`, and the adopter announces then.
+   * A draining manager announces no top-level record: the adopter does. A nested result still reaches its parent here.
    */
   private notifyCompleted(record: AgentRecord): void {
     if (!this.onComplete || record.notified) return;
+    if (this.handover && !record.parentAgentId) return;
     record.notified = true;
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
   }
@@ -592,7 +869,7 @@ export class AgentManager {
    */
   private async afterRun(record: AgentRecord): Promise<void> {
     record.transition = "teardown";
-    if (occupiesPoolSlot(record)) this.runningBackground--;
+    this.releaseSlot(record);
     // Children spawned by this run must not outlive it — they are hidden from
     // every surface and reachable only through this agent, so an orphan would
     // burn tokens unseen. Runs on every settle path, which is what also covers
@@ -833,8 +1110,25 @@ export class AgentManager {
     // A nested child is not in the pool (`occupiesPoolSlot`), and afterRun only
     // decrements for records that are: counting it here leaked a slot per nested
     // resume until every top-level spawn queued forever.
-    if (occupiesPoolSlot(record)) this.runningBackground++;
-    const promise = resumeAgent(record.session, prompt, {
+    this.acquireSlot(record);
+    record.turnBudget = { turns: 0, softLimitReached: false };
+    const life = this.openLife(record, (run, failed) => {
+      if (failed) {
+        if (record.status !== "stopped") record.status = "error";
+        record.error = failed.error instanceof Error ? failed.error.message : String(failed.error);
+        record.completedAt ??= Date.now();
+        return "";
+      }
+      // Stop wins; a stopped resume is never overwritten with completed.
+      if (record.status !== "stopped") {
+        record.status = run.failure ? "error" : "completed";
+        if (run.failure) record.error = run.failure;
+      }
+      record.result = run.text;
+      record.completedAt ??= Date.now();
+      return run.text;
+    });
+    resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         callbacks?.onToolActivity?.(activity);
@@ -856,25 +1150,13 @@ export class AgentManager {
       },
       maxTurns: record.effectiveMaxTurns,
       signal: record.abortController.signal,
+      turnBudget: record.turnBudget,
+      observer: this.observerFor(record, life),
     })
-      .then(({ text, failure }) => {
-        // Stop wins; a stopped resume is never overwritten with completed.
-        if (record.status !== "stopped") {
-          record.status = failure ? "error" : "completed";
-          if (failure) record.error = failure;
-        }
-        record.result = text;
-        record.completedAt ??= Date.now();
-        return text;
-      })
-      .catch((err) => {
-        if (record.status !== "stopped") record.status = "error";
-        record.error = err instanceof Error ? err.message : String(err);
-        record.completedAt ??= Date.now();
-        return "";
-      })
-      .finally(() => this.afterRun(record));
-    record.promise = promise;
+      .then(
+        (run) => this.runResolved(record, life, { aborted: false, steered: false, ...run }),
+        (error: unknown) => this.runRejected(record, life, error),
+      );
     return record;
   }
 
@@ -942,15 +1224,30 @@ export class AgentManager {
       record.pendingInput = [...(record.pendingInput ?? []), text];
       return "held";
     }
+    if (record.ending) {
+      record.held = [...(record.held ?? []), text];
+      return "held";
+    }
     if (record.status === "queued" || (record.status === "running" && !record.session)) {
       record.pendingSteers = [...(record.pendingSteers ?? []), text];
       return "queued";
     }
     if (record.status === "running" && record.session) {
-      // Not awaited: the tool answers at once. A rejection is logged, the text is not retried.
-      record.session.prompt(text, { streamingBehavior: "steer" }).catch((err: unknown) => {
-        console.warn(`[pi-subagents] steer ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      // Not awaited: the tool answers at once. Pending (`preflight`) until pi reports the disposition, the prompt
+      // rejects, or the bound in countPreflight passes; a prompt pi defers (during agent_settled) reports when it re-runs.
+      // A busy rejection parks the text in `held`; other rejections are logged, not retried.
+      const report = this.countPreflight(record, id);
+      record.session
+        .prompt(text, { streamingBehavior: "steer", preflightResult: report })
+        .catch((err: unknown) => {
+          report();
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.includes("already processing")) {
+            record.held = [...(record.held ?? []), text];
+            return;
+          }
+          console.warn(`[pi-subagents] steer ${id} failed: ${message}`);
+        })
       return "delivered";
     }
     // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
@@ -961,6 +1258,24 @@ export class AgentManager {
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     return this.resume(id, text, callbacks) ? "resumed" : false;
+  }
+
+  /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */
+  private countPreflight(record: AgentRecord, id: string): () => void {
+    let open = true;
+    record.preflight = (record.preflight ?? 0) + 1;
+    const timer = setTimeout(() => {
+      console.warn(`[pi-subagents] ${id}: a steer did not report preflight within ${PREFLIGHT_TIMEOUT_MS / 1000} s; no longer waiting for it`);
+      release();
+    }, PREFLIGHT_TIMEOUT_MS);
+    timer.unref();
+    const release = () => {
+      if (!open) return;
+      open = false;
+      clearTimeout(timer);
+      record.preflight = (record.preflight ?? 1) - 1;
+    };
+    return release;
   }
 
   /** Input for a record a draining pool owns. A pool from an older activation has no `deliver`: only a running session takes it. */
@@ -1038,6 +1353,9 @@ export class AgentManager {
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
+    // A record idle on background work has no settle to come: finish it here.
+    const life = this.lives.get(id);
+    if (life) setImmediate(() => this.decide(record, life));
     return true;
   }
 
@@ -1066,6 +1384,14 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    // An open lifecycle of a removed record has no tick or decide left to finish it (dispose clears them): close it here so its promise settles.
+    const life = this.lives.get(id);
+    if (life) {
+      this.lives.delete(id);
+      clearInterval(life.tick);
+      this.waking.delete(id);
+      life.resolve(life.lastRun?.text ?? "");
+    }
     // Only a settled record reaches the unlink, and its session was torn down at settle, so no handle is open.
     if (record.settled === false || record.persistSession || !sessionFile) return retired;
     try {
@@ -1179,7 +1505,7 @@ export class AgentManager {
    * subtrees leave now as data; a subtree with a live run stays here and reports
    * through the handover when it settles. Nothing is aborted or disposed.
    */
-  beginDrain(nudged: string[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
+  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
     for (const { id, args } of this.queue) {
       if (this.agents.get(id)?.status !== "queued") continue;
@@ -1191,7 +1517,6 @@ export class AgentManager {
     this.handover = handover;
     this.onStart = undefined;
     this.onCompact = undefined;
-    this.onComplete = undefined;
     this.onSteered = undefined;
     this.onUsage = (record, usage) => handover.emit({ kind: "usage", dto: toDto(record), usage });
     return handover;
@@ -1258,6 +1583,7 @@ export class AgentManager {
   /** `prune` is false in a child activation: only the root prunes git worktrees, which are repo-wide state. */
   async dispose(prune = true): Promise<void> {
     clearInterval(this.cleanupInterval);
+    for (const life of this.lives.values()) clearInterval(life.tick);
     // Input parked for a hand-over item that never reached adoption dies with this manager.
     for (const [id, parked] of this.adopting) {
       if (parked.length > 0) console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id} during shutdown`);
