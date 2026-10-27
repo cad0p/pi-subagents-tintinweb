@@ -12,11 +12,11 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { sessionKey } from "@cad0p/pi-background-work";
+import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { AgentManager, NUDGE_HOLD_MS, type SpawnOptions } from "./agent-manager.js";
+import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -390,6 +390,8 @@ export default function (pi: ExtensionAPI) {
   /** The open batch of top-level completions. A parked batch waits for the next main-session message boundary. */
   interface NudgeBatch {
     records: Map<string, AgentRecord>;
+    /** Records recovered after a crash, with the decision that sets whether the batch takes a turn. */
+    crash: Map<string, CrashRecoveryDecision>;
     timer?: ReturnType<typeof setTimeout>;
     parked: boolean;
   }
@@ -401,12 +403,13 @@ export default function (pi: ExtensionAPI) {
   let mainTurnActive = false;
 
   /** Queue a settled top-level record into the open batch. The window is fixed at the batch's first record, not trailing. */
-  function scheduleNudge(record: AgentRecord) {
+  function scheduleNudge(record: AgentRecord, crash?: CrashRecoveryDecision) {
     if (!nudgeBatch) {
-      nudgeBatch = { records: new Map(), parked: mainTurnActive };
+      nudgeBatch = { records: new Map(), crash: new Map(), parked: mainTurnActive };
       if (!mainTurnActive) armNudgeWindow(nudgeBatch);
     }
     nudgeBatch.records.set(record.id, record);
+    if (crash) nudgeBatch.crash.set(record.id, crash);
   }
 
   function armNudgeWindow(batch: NudgeBatch) {
@@ -421,6 +424,11 @@ export default function (pi: ExtensionAPI) {
   /** Drop a record from the open batch (a pull, or a run that resumed). An emptied batch sends nothing. */
   function cancelNudge(id: string) {
     const batch = nudgeBatch;
+    const record = batch?.records.get(id);
+    // A crash-recovered record consumed before its batch went out is settled here, or a later recovery reports it again.
+    // A resume drops it without a settle: the subagent-resumed entry written at resume is the newer fact.
+    if (record && batch?.crash.has(id) && record.resultConsumed) manager.ledgerSettle(record);
+    batch?.crash.delete(id);
     if (!batch?.records.delete(id) || batch.records.size > 0) return;
     clearTimeout(batch.timer);
     nudgeBatch = undefined;
@@ -452,6 +460,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- Completion notification ----
+  /** One notice for the crash-recovered records of a batch: their ids, then each note the policy gave. */
+  function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
+    const names = records.map((record) => `${record.id} (${sanitizeHeaderText(record.description)})`).join(", ");
+    const lines = [`${records.length} ${records.length === 1 ? "subagent was" : "subagents were"} interrupted by a crash: ${names}`];
+    for (const record of records) {
+      const note = crash.get(record.id)?.note;
+      if (note) lines.push(`${record.id}: ${note}`);
+    }
+    return lines.join("\n");
+  }
+
   /** Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them. */
   function emitNudgeBatch() {
     const batch = nudgeBatch;
@@ -460,13 +479,20 @@ export default function (pi: ExtensionAPI) {
     clearTimeout(batch.timer);
     const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
     if (records.length === 0) return;
+    // A crash-recovered record carries its own notice; a batch takes a turn only if every such record allows one.
+    const interrupted = records.filter((record) => batch.crash.has(record.id));
+    const triggerTurn = interrupted.every((record) => batch.crash.get(record.id)?.triggerTurn);
+    const sections = records
+      .filter((record) => !batch.crash.has(record.id))
+      .map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+    if (interrupted.length > 0) sections.unshift(formatInterruptedNotice(interrupted, batch.crash));
 
     try {
       pi.sendMessage({
         customType: "subagent-notification",
-        content: records.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost)).join("\n\n"),
+        content: sections.join("\n\n"),
         display: true,
-      }, { deliverAs: "steer", triggerTurn: true });
+      }, triggerTurn ? { deliverAs: "steer", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: false });
     } catch (err) {
       // Nudge release paths swallow throws; surface the drop with the agent ids.
       console.warn(`[pi-subagents] failed to send completion notification for ${records.map((record) => record.id).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
@@ -474,6 +500,7 @@ export default function (pi: ExtensionAPI) {
       // Delivered even when the send threw: a retry could duplicate the notification, and the
       // pi-subagents background-work provider must not list the records forever.
       for (const record of records) record.resultDelivered = true;
+      for (const record of interrupted) manager.ledgerSettle(record);
     }
   }
 
@@ -1021,7 +1048,6 @@ export default function (pi: ExtensionAPI) {
       .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
   }
 
-  /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
   function recoverCrashed(ctx: ExtensionContext): void {
     const crashed = replayLedger(ctx.sessionManager.getEntries(), {
@@ -1029,9 +1055,14 @@ export default function (pi: ExtensionAPI) {
       isLiveHere: (id) => manager.getRecord(id) !== undefined,
       now: Date.now(),
     });
-    manager.adoptInterrupted(crashed, pi);
+    const adopted = manager.adoptInterrupted(crashed, pi);
+    if (adopted.length === 0) return;
+    const policy = readPolicy(ctx.cwd);
+    for (const record of adopted) scheduleNudge(record, crashRecoveryDecision(record.crashCount ?? 1, policy));
+    widget.update();
   }
 
+  /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
       const unreported = h.take().unreported;

@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
+import { type BackgroundWorkPolicy, listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -92,15 +92,15 @@ const HEADS_UP_LEAD_MS = 60_000;
 /** Distinct background-work policy warnings already logged, so a warning is shown once per process. */
 const policyWarnings = new Set<string>();
 
-/** The run cap in minutes: `maxBackgroundWait` from the background-work policy at `cwd`. */
-function readCapMinutes(cwd: string = process.cwd()): number {
+/** The background-work policy at `cwd`. Its config warnings are logged once per process, whichever reader asks. */
+export function readPolicy(cwd: string): BackgroundWorkPolicy {
   const { policy, warnings } = readBackgroundWorkPolicy({ cwd });
   for (const warning of warnings) {
     if (policyWarnings.has(warning)) continue;
     policyWarnings.add(warning);
     console.warn(`[pi-subagents] ${warning}`);
   }
-  return policy.maxBackgroundWait;
+  return policy;
 }
 
 /** Wake text for a finished subagent that has queued input or background work to pick up. */
@@ -887,7 +887,7 @@ export class AgentManager {
    * at the cap. Both are unref'd and cleared by `clearCap` at the lifecycle's final settle.
    */
   private armCap(record: AgentRecord, life: Life): void {
-    const capMinutes = readCapMinutes(record.cwd);
+    const capMinutes = readPolicy(record.cwd ?? process.cwd()).maxBackgroundWait;
     record.capMinutes = capMinutes;
     const capMs = capMinutes * 60_000;
     const leadMs = capMs <= 2 * HEADS_UP_LEAD_MS ? capMs / 2 : capMs - HEADS_UP_LEAD_MS;
@@ -1249,7 +1249,7 @@ export class AgentManager {
   }
 
   /** The settle entry: the record's final status, written into the spawner's session. */
-  private ledgerSettle(record: AgentRecord): void {
+  ledgerSettle(record: AgentRecord): void {
     this.writeLedger(record.id, "subagents:record", {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
@@ -1730,13 +1730,14 @@ export class AgentManager {
     return outcome;
   }
 
-  /** Lists the runs a crashed owner left behind. Their sessions load only on a resume. */
-  adoptInterrupted(records: AgentRecord[], pi: ExtensionAPI): void {
-    for (const record of records) {
-      if (this.agents.has(record.id)) continue;
+  /** Lists the runs a crashed owner left behind. Their sessions load only on a resume. Returns the ones listed here. */
+  adoptInterrupted(records: AgentRecord[], pi: ExtensionAPI): AgentRecord[] {
+    const adopted = records.filter((record) => !this.agents.has(record.id));
+    for (const record of adopted) {
       this.agents.set(record.id, record);
       this.ledgerPi.set(record.id, pi);
     }
+    return adopted;
   }
 
   getRecord(id: string): AgentRecord | undefined {
