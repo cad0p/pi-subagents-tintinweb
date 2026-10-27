@@ -27,7 +27,9 @@ import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
+import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
 import { toSingleLine } from "../src/text-safety.js";
+import type { AgentRecord } from "../src/types.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 describe("get_subagent_result output shapes", () => {
@@ -156,6 +158,60 @@ describe("get_subagent_result output shapes", () => {
     settleRecord(id, { status: "completed", result: "done", completedAt: Date.now() });
     await tools.get("get_subagent_result").execute("pull-settled", { agent_id: id }, undefined, undefined, spawnCtx(cwd));
     expect(record.resultDelivered).toBe(true);
+  });
+
+  // ---- One tool on both surfaces (agent-result-tool.ts) ----
+  /** The nested surface for `parentId`, reading one record from a fake manager. */
+  function nestedResultTool(record: AgentRecord, parentId: string) {
+    const manager = {
+      spawn: () => "",
+      deliver: async () => "delivered",
+      getRecord: (id: string) => (id === record.id ? record : undefined),
+      isDraining: () => false,
+      listAgents: () => [record],
+    } satisfies NestedAgentManager;
+    const tool = createNestedSubagentTools({
+      manager,
+      pi: {} as never,
+      parentAgentId: parentId,
+      depth: 1,
+      maxSubagentDepth: 2,
+      allowedSubagents: "all",
+      configCwd: cwd,
+    }).find((candidate) => candidate.name === "get_subagent_result");
+    if (!tool) throw new Error("the nested set has no get_subagent_result");
+    return tool;
+  }
+
+  it("answers a settled child with the same report on both surfaces", async () => {
+    const { tools, id } = await setupAgent({});
+    settleRecord(id, { status: "completed", result: "done", completedAt: Date.now() });
+    const top = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id) as AgentRecord;
+    const child = { ...top, parentAgentId: "parent-1" };
+    const topText = textOf(await tools.get("get_subagent_result").execute("top", { agent_id: id }, undefined, undefined, spawnCtx(cwd)));
+    const nestedText = textOf(await nestedResultTool(child, "parent-1").execute("nested", { agent_id: id }, undefined, undefined, {} as never));
+    expect(topText).toContain("done");
+    expect(nestedText).toBe(topText);
+  });
+
+  it("refuses another owner's agent on both surfaces", async () => {
+    const { tools, id } = await setupAgent({});
+    settleRecord(id, { status: "completed", result: "done", completedAt: Date.now() });
+    const top = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id) as AgentRecord;
+    const notFound = `Agent not found: "${id}". It may have been cleaned up.`;
+
+    // The main session does not reach a nested child.
+    top.parentAgentId = "parent-1";
+    const fromMain = await tools.get("get_subagent_result").execute("top-child", { agent_id: id }, undefined, undefined, spawnCtx(cwd));
+    expect(textOf(fromMain)).toBe(notFound);
+    expect((fromMain as { isError?: boolean }).isError).toBe(true);
+
+    // A nested agent does not reach a sibling's child or a top-level agent.
+    for (const parentAgentId of ["other", undefined]) {
+      const out = await nestedResultTool({ ...top, parentAgentId }, "parent-1").execute("nested-foreign", { agent_id: id }, undefined, undefined, {} as never);
+      expect(textOf(out)).toBe(notFound);
+      expect((out as { isError?: boolean }).isError).toBe(true);
+    }
   });
 
   // ---- Metadata sanitization across shapes ----
