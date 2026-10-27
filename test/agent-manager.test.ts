@@ -22,8 +22,16 @@ vi.mock("../src/worktree.js", () => ({
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
-import { createChildSession, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
-import { isWorktreeIsolationEnabled } from "../src/worktree.js";
+import {
+  attachSessionLifecycle,
+  type ChildSessionSettings,
+  createChildSession,
+  type RunOptions,
+  runAgent,
+  setDefaultMaxTurns,
+} from "../src/agent-runner.js";
+import { getSessionContextPercent } from "../src/usage.js";
+import { isWorktreeIsolationEnabled, pruneWorktrees } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
@@ -32,16 +40,28 @@ const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-ses
  *  captures as the record's session file (undefined: nothing to retain). */
 const mockSession = () => ({
   dispose: vi.fn(),
+  subscribe: () => () => {},
   sessionId: "child-session-id",
-  sessionManager: { getSessionFile: () => undefined },
+  sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
 
-const resolvedRun = () =>
-  vi.mocked(runAgent).mockResolvedValue({
-    responseText: "done",
-    session: mockSession(),
-    aborted: false,
-    steered: false,
+/** Host a child the way the runner does: settings first, then the session with its lifecycle. */
+const hostChild = (opts: RunOptions, session: any) => {
+  opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+  opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+};
+
+/** Reopen a settled record's child from its session file, as the Agent tool does before a resume. */
+const reopen = async (manager: AgentManager, id: string, child: any = mockSession()) => {
+  vi.mocked(createChildSession).mockResolvedValueOnce(child);
+  await manager.restoreSession(id);
+};
+
+const resolvedRun = (session?: any) =>
+  vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+    const child = session ?? mockSession();
+    hostChild(opts, child);
+    return { responseText: "done", session: child, aborted: false, steered: false } as any;
   });
 
 describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)", () => {
@@ -356,21 +376,16 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.abort(id2);
   });
 
-  it("clearCompleted calls dispose on sessions of removed records", async () => {
+  it("settle disposes the child session once; clearCompleted adds no second dispose", async () => {
     manager = new AgentManager();
     const disposeSpy = vi.fn();
-    const sess = { dispose: disposeSpy, sessionManager: { getSessionFile: () => undefined } };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done",
-      session: sess as any,
-      aborted: false,
-      steered: false,
-    });
+    resolvedRun({ ...mockSession(), dispose: disposeSpy });
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
     });
     await manager.getRecord(id)!.promise;
+    expect(disposeSpy).toHaveBeenCalledOnce();
 
     manager.clearCompleted();
 
@@ -522,12 +537,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
 
     // First, spawn with a session that resume can latch onto
     const session = { ...mockSession() };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "first",
-      session: session as any,
-      aborted: false,
-      steered: false,
-    });
+    resolvedRun(session);
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
@@ -546,6 +556,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       return { text: "second" };
     });
 
+    await reopen(manager, id);
     const rec = manager.resume(id, "more");
     await rec!.promise;
 
@@ -875,7 +886,7 @@ describe("AgentManager — steer()", () => {
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r" });
     // Simulate the session becoming ready.
-    captured?.({ steer, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } });
+    captured?.({ steer, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } });
 
     expect(manager.steer(id, "go left")).toBe(true);
     expect(steer).toHaveBeenCalledWith("go left");
@@ -1131,6 +1142,7 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
       failure: "retries exhausted on resume",
     });
 
+    await reopen(manager, id);
     const rec = manager.resume(id, "more");
     await rec!.promise;
 
@@ -1152,6 +1164,7 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
       failure: "provider died mid-turn",
     });
 
+    await reopen(manager, id);
     const rec = manager.resume(id, "more");
     await rec!.promise;
 
@@ -1213,7 +1226,7 @@ describe("AgentManager — session file retention", () => {
   function spawnPending(type: string, session: any): { id: string; resolve: (v: unknown) => void } {
     let resolve!: (v: unknown) => void;
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
-      opts.onSessionCreated?.(session);
+      hostChild(opts, session);
       return new Promise((r) => { resolve = r; });
     });
     const id = manager.spawn(mockPi, mockCtx, type, "p", { description: "d" });
@@ -1235,6 +1248,74 @@ describe("AgentManager — session file retention", () => {
     await manager.getRecord(id)!.promise;
     // The completed record can still be resumed, so the file outlives the run.
     expect(existsSync(file)).toBe(true);
+  });
+
+  it("the settled record reports the context figure read at settle, after the child is torn down", async () => {
+    manager = new AgentManager();
+    let disposed = false;
+    const session = {
+      ...mockSession(),
+      dispose: vi.fn(() => {
+        disposed = true;
+      }),
+      getSessionStats: () => {
+        if (disposed) throw new Error("disposed");
+        return { contextUsage: { percent: 42 } };
+      },
+    };
+    const { id, resolve } = spawnPending("general-purpose", session);
+    resolve(done(session));
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(disposed).toBe(true);
+    expect(record.session).toBeUndefined();
+    expect(getSessionContextPercent(record.sessionSnapshot)).toBe(42);
+  });
+
+  it("refuses a restore called from the completion callback, before the teardown starts", async () => {
+    let probe: Promise<AgentSession | undefined> | undefined;
+    manager = new AgentManager((record) => {
+      probe = manager.restoreSession(record.id);
+    });
+    const session = mockSession();
+    const { id, resolve } = spawnPending("general-purpose", session);
+    resolve(done(session));
+    await manager.getRecord(id)!.promise;
+    expect(await probe).toBeUndefined();
+  });
+
+  it("a child event after the teardown does not reach the settled record's usage", async () => {
+    manager = new AgentManager();
+    const listeners = new Set<(event: unknown) => void>();
+    const emit = (event: unknown) => {
+      for (const listener of [...listeners]) listener(event);
+    };
+    const assistantUsage = (output: number) => ({
+      type: "message_end",
+      message: { role: "assistant", usage: { input: 1, output, cacheWrite: 0, cacheRead: 0 } },
+    });
+    const session = {
+      ...mockSession(),
+      messages: [],
+      subscribe: (listener: (event: unknown) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      prompt: async () => emit(assistantUsage(3)),
+      abort: async () => {},
+    };
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      hostChild(opts, session);
+      await attachSessionLifecycle(session).prompt("p", { hooks: opts });
+      return { responseText: "done", session, aborted: false, steered: false } as any;
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "d" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(record.lifetimeUsage.output).toBe(3);
+
+    emit(assistantUsage(7)); // a late event from the torn-down session
+    expect(record.lifetimeUsage.output).toBe(3);
   });
 
   it("deletes the file when clearCompleted() removes a default agent's record", async () => {
@@ -1368,7 +1449,7 @@ describe("AgentManager — session file retention", () => {
     manager = new AgentManager();
     const { session, file } = sessionWithFile();
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
-      opts.onSessionCreated?.(session);
+      hostChild(opts, session);
       return done(session) as any;
     });
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "d" });
@@ -1377,10 +1458,12 @@ describe("AgentManager — session file retention", () => {
 
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
     vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
+    await reopen(manager, id, { ...mockSession(), sessionManager: SessionManager.open(file) });
     await manager.resume(id, "more")!.promise;
 
-    // The resume reused the record, so it is still the file the first run wrote.
-    expect(record.session?.sessionManager.getSessionFile()).toBe(file);
+    // The resume reused the record, so it is still the file the first run wrote. The live
+    // session is gone after settle (M7): the record keeps the file it was bound to.
+    expect(record.sessionFile).toBe(file);
     manager.clearCompleted();
     expect(existsSync(file)).toBe(false); // still a default agent: disposed on removal
   });
@@ -1440,6 +1523,7 @@ describe("AgentManager — nested children", () => {
 
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
     vi.mocked(resumeMock).mockResolvedValue({ text: "again" });
+    await reopen(manager, child);
     await manager.resume(child, "more")!.promise;
 
     expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(0);
@@ -1463,6 +1547,7 @@ describe("AgentManager — nested children", () => {
       return { text: "resumed" };
     });
 
+    await reopen(manager, id);
     const resumed = manager.resume(id, "more")!;
     await resumed.promise;
 
@@ -1515,5 +1600,16 @@ describe("AgentManager — nested children", () => {
     // A second top-level spawn still queues, so the pool is not bypassed.
     const sibling = manager.spawn(mockPi, mockCtx, "general-purpose", "s", { description: "sibling" });
     expect(manager.getRecord(sibling)!.status).toBe("queued");
+  });
+});
+
+describe("AgentManager — dispose() prunes worktrees only when asked (F5a)", () => {
+  it("a child's shutdown passes prune=false and leaves the worktrees alone", async () => {
+    vi.mocked(pruneWorktrees).mockClear();
+    const manager = new AgentManager();
+    await manager.dispose(false);
+    expect(pruneWorktrees).not.toHaveBeenCalled();
+    await manager.dispose(true);
+    expect(pruneWorktrees).toHaveBeenCalledWith(process.cwd());
   });
 });

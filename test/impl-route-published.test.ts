@@ -92,7 +92,7 @@ async function buildChild(runOpts: { agentId?: string; onToolActivity?: (activit
       registerProvider: () => {},
       unregisterProvider: () => {},
     },
-    sessionManager: { getSessionFile: () => undefined },
+    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
   } as unknown as Parameters<typeof runAgent>[0];
   const created: AgentSession[] = [];
   const pi = { exec: async () => ({ code: 1, stdout: "", stderr: "" }), getActiveTools: () => [] };

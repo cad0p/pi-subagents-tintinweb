@@ -21,7 +21,7 @@ import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAM
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
-import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
+import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
@@ -262,7 +262,7 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings, showCost = false): string {
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
-  const context = formatSessionContext(record.session);
+  const context = formatSessionContext(record.session ?? record.sessionSnapshot);
 
   const stats: string[] = [];
   const turnCount = record.turnCount ?? 0;
@@ -511,6 +511,10 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
+    // A settled record keeps a snapshot, not the live session: drop the widget's
+    // handle too, so the child session is unreachable once its teardown ran.
+    const activity = agentActivity.get(record.id);
+    if (activity) activity.session = undefined;
     // Nested children report only through their owning parent's scoped tools.
     // Keep them out of top-level lifecycle, transcript, notification, and UI
     // channels — nothing in the main session can act on them.
@@ -835,7 +839,7 @@ export default function (pi: ExtensionAPI) {
       // Only the root activation owns the registry entry; a child's shutdown must not delete it.
       if (isRoot && (globalThis as any)[MANAGER_KEY] === registryEntry) delete (globalThis as any)[MANAGER_KEY];
       manager.abortAll();
-      manager.dispose();
+      await manager.dispose(isRoot);
     }
     // After the abort: a completion the abort settles arms a nudge, and the shutdown must clear it.
     for (const timer of pendingNudges.values()) clearTimeout(timer);
@@ -923,25 +927,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Adopts one handed-over record. A child session is reloaded so its extensions run the new code.
+   * Adopts one handed-over record. A live session from an older activation is torn down by `manager.adopt`, not reloaded.
    * Returns false once this activation has begun to shut down: the record stays in the hand-over for the next one.
    */
   async function adoptItem(item: HandoverItem, notify: boolean): Promise<boolean> {
-    if (shutDown) return false;
-    const session = item.session;
-    if (session) {
-      try {
-        await runInChildSessionContext(() => session.reload());
-      } catch (err) {
-        item.dto.status = "error";
-        item.dto.error = `reload failed: ${err instanceof Error ? err.message : String(err)}`;
-        // Drop the broken session only where a file holds the transcript; `resume` reopens the child from it.
-        if (item.dto.sessionFile) {
-          session.dispose();
-          item.session = undefined;
-        }
-      }
-    }
     if (shutDown) return false;
     manager.adopt(item, notify);
     agentActivity.delete(item.dto.id);
@@ -2080,13 +2069,13 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
+    const session = record.session ?? manager.settledTranscript(record.id);
+    if (!session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
 
     const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
-    const session = record.session;
     const activity = agentActivity.get(record.id);
 
     await ctx.ui.custom<undefined>(

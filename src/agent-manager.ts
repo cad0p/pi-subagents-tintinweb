@@ -15,8 +15,24 @@ import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
-import { type AgentSession, type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
-import { createChildSession, getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import {
+  type AgentSession,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type FileEntry,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
+import {
+  attachSessionLifecycle,
+  createChildSession,
+  getDefaultMaxTurns,
+  normalizeMaxTurns,
+  resumeAgent,
+  runAgent,
+  type SessionLifecycle,
+  type ToolActivity,
+  teardownChildSession,
+} from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { describeModel } from "./model-resolver.js";
 import {
@@ -30,7 +46,7 @@ import {
 } from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-widget.js";
-import { addUsage, type LifetimeUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
@@ -100,6 +116,69 @@ interface SpawnArgs {
   type: SubagentType;
   prompt: string;
   options: SpawnOptions;
+}
+
+/**
+ * Bind a live session to its record: identity, the persistent lifecycle and the model and
+ * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
+ * same way as a fresh one.
+ */
+function bindSession(record: AgentRecord, session: AgentSession, lifecycle: SessionLifecycle): void {
+  record.session = session;
+  record.lifecycle = lifecycle;
+  record.sessionId = session.sessionId;
+  record.sessionFile = session.sessionManager.getSessionFile();
+  // The model and thinking level are only knowable once pi has resolved
+  // its defaults and clamped the level to what the model supports. Writing
+  // them back here makes the record authoritative, so every surface reads
+  // one place instead of each re-deriving "session, else the request" for
+  // itself. An agent started outside the Agent tool (RPC, scheduler) has
+  // no invocation yet and gains one here.
+  if (session.model) {
+    record.invocation ??= {};
+    // Read the kept request first: a caller's level survives being clamped
+    // AND, one line later, being replaced by the effective one.
+    const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+    Object.assign(record.invocation, describeModel(session.model));
+    // Guarded: a session that reports no level keeps the request rather
+    // than losing it. Overwriting unconditionally would turn a stubbed or
+    // older session into a blank `thinking:` tag, which is worse than the
+    // stale-but-true value it replaced.
+    if (session.thinkingLevel) {
+      record.invocation.thinking = session.thinkingLevel;
+      if (requested && requested !== session.thinkingLevel) {
+        record.invocation.requestedThinking = requested;
+      }
+    }
+  }
+  // Flush any steers that arrived before the session was ready
+  if (record.pendingSteers?.length) {
+    for (const msg of record.pendingSteers) {
+      session.steer(msg).catch(() => {});
+    }
+    record.pendingSteers = undefined;
+  }
+}
+
+/** Frozen stats of a settled session, so readers never hold the live session after settle. */
+function snapshotSession(session: AgentSession): SessionLike | undefined {
+  try {
+    const stats = session.getSessionStats();
+    return { getSessionStats: () => stats };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Entries that rebuild an in-memory child (no session file) when it is reopened. Undefined for a
+ * file-backed child, which reopens from its file.
+ */
+function captureMemoryEntries(session: AgentSession): FileEntry[] | undefined {
+  const sm = session.sessionManager;
+  if (sm.getSessionFile()) return undefined;
+  const header = sm.getHeader();
+  return header ? [header, ...sm.getEntries()] : undefined;
 }
 
 export interface SpawnOptions {
@@ -428,44 +507,12 @@ export class AgentManager {
       onChildSettings: (settings) => {
         record.childSettings = settings;
       },
-      onSessionCreated: (session) => {
-        record.session = session;
-        record.sessionId = session.sessionId;
-        record.sessionFile = session.sessionManager.getSessionFile();
-        // The model and thinking level are only knowable once pi has resolved
-        // its defaults and clamped the level to what the model supports. Writing
-        // them back here makes the record authoritative, so every surface reads
-        // one place instead of each re-deriving "session, else the request" for
-        // itself. An agent started outside the Agent tool (RPC, scheduler) has
-        // no invocation yet and gains one here.
-        if (session.model) {
-          record.invocation ??= {};
-          // Read the kept request first: a caller's level survives being clamped
-          // AND, one line later, being replaced by the effective one.
-          const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
-          Object.assign(record.invocation, describeModel(session.model));
-          // Guarded: a session that reports no level keeps the request rather
-          // than losing it. Overwriting unconditionally would turn a stubbed or
-          // older session into a blank `thinking:` tag, which is worse than the
-          // stale-but-true value it replaced.
-          if (session.thinkingLevel) {
-            record.invocation.thinking = session.thinkingLevel;
-            if (requested && requested !== session.thinkingLevel) {
-              record.invocation.requestedThinking = requested;
-            }
-          }
-        }
-        // Flush any steers that arrived before the session was ready
-        if (record.pendingSteers?.length) {
-          for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
-          }
-          record.pendingSteers = undefined;
-        }
+      onSessionCreated: (session, lifecycle) => {
+        bindSession(record, session, lifecycle);
         options.onSessionCreated?.(session);
       },
     })
-      .then(({ responseText, session, aborted, steered, failure }) => {
+      .then(({ responseText, aborted, steered, failure }) => {
         // Don't overwrite status if externally stopped via abort()
         if (record.status !== "stopped") {
           // Precedence: a hard abort keeps "aborted"; then a failed final turn
@@ -481,7 +528,6 @@ export class AgentManager {
           }
         }
         record.result = responseText;
-        record.session = session;
         record.completedAt ??= Date.now();
 
         detach();
@@ -537,8 +583,14 @@ export class AgentManager {
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
   }
 
-  /** Shared completion tail: release the slot, stop orphaned children, flush the transcript, notify, drain. */
-  private afterRun(record: AgentRecord): void {
+  /**
+   * Shared completion tail: release the slot, stop orphaned children, flush the transcript, snapshot the
+   * session, notify, drain, then tear the child session down. The slot is released before the teardown
+   * await, so a queued record starts without waiting for it. `settled` flips only after teardown, and
+   * `record.promise` resolves then.
+   */
+  private async afterRun(record: AgentRecord): Promise<void> {
+    record.transition = "teardown";
     if (occupiesPoolSlot(record)) this.runningBackground--;
     // Children spawned by this run must not outlive it — they are hidden from
     // every surface and reachable only through this agent, so an orphan would
@@ -548,13 +600,36 @@ export class AgentManager {
     this.abortOwnedChildren(record.id);
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
+    const session = record.session;
+    if (session) {
+      record.sessionSnapshot = snapshotSession(session);
+      record.memoryEntries = captureMemoryEntries(session);
+    }
     this.notifyCompleted(record);
     // A drain escape must not reject an already-fulfilled run promise or strand
     // `settled` — a stuck `settled = false` would refuse every later resume and
     // leave the queued records behind the freed slot unstarted.
     try { this.drainQueue(); } catch { /* keep the completion tail failure-safe */ }
+    await this.retireSession(record);
     record.settled = true;
     this.releaseSettled();
+  }
+
+  /**
+   * Detach the lifecycle, drop the session reference, then tear the child session down. `transition` stays set
+   * until the teardown resolves, so resume, reopen and hand-over refuse the record meanwhile.
+   */
+  private async retireSession(record: AgentRecord): Promise<void> {
+    record.transition = "teardown";
+    record.lifecycle?.detach();
+    record.lifecycle = undefined;
+    const session = record.session;
+    record.session = undefined;
+    try {
+      if (session) await teardownChildSession(session);
+    } finally {
+      record.transition = undefined;
+    }
   }
 
   /**
@@ -705,6 +780,7 @@ export class AgentManager {
       // A listener threw (stale extension context). Restore the pre-resume
       // state and refuse: the tool reports failure and the counter is untouched.
       Object.assign(record, prior);
+      void this.retireSession(record);
       return undefined;
     }
     // A resumed run is a new run: it is announced when it settles, whatever the prior run announced.
@@ -717,6 +793,7 @@ export class AgentManager {
     // already stopped.
     if (this.stoppedInStartPrologue(record)) {
       this.settleStoppedWithoutRun(record);
+      void this.retireSession(record);
       return undefined;
     }
     record.settled = false;
@@ -771,33 +848,49 @@ export class AgentManager {
   }
 
   /**
-   * Rebuild a record's session from its session file when the live session was
-   * dropped (a reload failed during adoption). Concurrent callers share one
+   * Reopen a settled record's child for its next run. Every resume goes through here: a settled record holds
+   * no live session, so the reopened one is the session the run uses. The session file is the source; an
+   * in-memory child (no file) reopens from the entries captured at settle. Concurrent callers share one
    * reopen, so two AgentSessions never write the same file.
    */
   async restoreSession(id: string): Promise<AgentSession | undefined> {
     const record = this.agents.get(id);
-    if (!record) return undefined;
+    if (!record || record.transition) return undefined;
     if (record.session) return record.session;
-    const { sessionFile, childSettings } = record;
-    if (!sessionFile || !childSettings) return undefined;
+    const { sessionFile, childSettings, memoryEntries } = record;
+    if (!childSettings || (!sessionFile && !memoryEntries)) return undefined;
     let reopen = this.reopening.get(id);
     if (!reopen) {
-      const sessionManager = SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd);
-      // Checked inside the shared promise so a session reopened for an evicted record is disposed once.
+      const sessionManager = sessionFile
+        ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
+        : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
+      // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
       reopen = createChildSession(childSettings, sessionManager, { agentId: id })
-        .then((session) => {
+        .then(async (session) => {
           if (this.agents.get(id) !== record) {
-            session.dispose();
+            await teardownChildSession(session);
             return undefined;
           }
-          record.session = session;
+          bindSession(record, session, attachSessionLifecycle(session));
           return session;
         })
         .finally(() => this.reopening.delete(id));
       this.reopening.set(id, reopen);
     }
     return reopen;
+  }
+
+  /**
+   * Read-only transcript of a settled record, rebuilt from its session file (or the in-memory
+   * entries of a `--no-session` child). Lets the viewer open a record after its session is torn down.
+   */
+  settledTranscript(id: string): Pick<AgentSession, "messages" | "subscribe"> | undefined {
+    const record = this.agents.get(id);
+    if (!record || record.session || (!record.sessionFile && !record.memoryEntries)) return undefined;
+    const sessionManager = record.sessionFile
+      ? SessionManager.open(record.sessionFile)
+      : SessionManager.inMemory(undefined, undefined, record.memoryEntries);
+    return { messages: sessionManager.buildSessionContext().messages, subscribe: () => () => {} };
   }
 
   /**
@@ -885,20 +978,19 @@ export class AgentManager {
    * Best-effort: a missing file, a permission error or a Windows lock must not
    * throw into the completion/eviction path.
    */
-  private removeRecord(id: string, record: AgentRecord): void {
+  private removeRecord(id: string, record: AgentRecord): Promise<void> {
     // Read from the session, not a copy taken at creation: pi moves the file on
     // `ctx.newSession()`/`fork()`, and deleting the path it started with would
     // leak the one it actually wrote.
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
-    record.session?.dispose?.();
-    record.session = undefined;
+    const retired = this.retireSession(record);
     this.agents.delete(id);
-    // After dispose, so the file handle is closed — Windows will not unlink an
-    // open file.
-    if (record.settled === false || record.persistSession || !sessionFile) return;
+    // Only a settled record reaches the unlink, and its session was torn down at settle, so no handle is open.
+    if (record.settled === false || record.persistSession || !sessionFile) return retired;
     try {
       rmSync(sessionFile, { force: true });
     } catch { /* retention is best-effort — never fail a turn over it */ }
+    return retired;
   }
 
   private cleanup() {
@@ -1031,7 +1123,15 @@ export class AgentManager {
 
   /** Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining. */
   adopt(item: HandoverItem, notify: boolean): AgentRecord {
-    const record = fromDto(item.dto, item.session);
+    const record = fromDto(item.dto);
+    // An older activation can hand over a settled record that still holds its session. Tear it down here, so no
+    // settled record keeps a live session. Only an in-memory child (no file) needs its entries kept for a reopen.
+    const session = item.session;
+    if (session) {
+      if (!record.sessionFile) record.memoryEntries ??= captureMemoryEntries(session);
+      record.sessionSnapshot ??= snapshotSession(session);
+      void teardownChildSession(session);
+    }
     record.settled = true;
     this.agents.set(record.id, record);
     if (notify) this.notifyCompleted(record);
@@ -1052,7 +1152,7 @@ export class AgentManager {
       if (!this.agents.has(record.id)) continue;
       if (record.parentAgentId !== undefined && this.agents.has(record.parentAgentId)) continue;
       const group = this.subtree(record);
-      if (group.some((member) => member.status === "queued" || member.status === "running" || member.settled === false)) continue;
+      if (group.some((member) => member.status === "queued" || member.status === "running" || member.settled === false || member.transition !== undefined)) continue;
       for (const member of group) this.agents.delete(member.id);
       groups.push(group.map((member) => ({ dto: toDto(member), session: member.session })));
     }
@@ -1072,16 +1172,21 @@ export class AgentManager {
     return members;
   }
 
-  dispose() {
+  /** `prune` is false in a child activation: only the root prunes git worktrees, which are repo-wide state. */
+  async dispose(prune = true): Promise<void> {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
     // An in-flight run keeps its session file for the crash-recovery follow-up;
     // a settled one is deleted here, because the manager's map is discarded and
     // nothing would ever revisit it.
+    const retiring: Promise<void>[] = [];
     for (const [id, record] of this.agents) {
-      this.removeRecord(id, record);
+      retiring.push(this.removeRecord(id, record));
     }
+    // Resolves once every child session has shut down, so a caller can announce the shutdown after it.
+    await Promise.all(retiring);
+    if (!prune) return;
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean

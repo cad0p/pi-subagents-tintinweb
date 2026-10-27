@@ -195,7 +195,7 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => !a.parentAgentId && a.session && (
+      .filter(a => !a.parentAgentId && (a.session ?? a.sessionSnapshot) !== undefined && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
@@ -294,11 +294,11 @@ export class FleetList {
     }
     const record = entry.record;
     if (!this.ui) return;
-    if (!record.session) {
+    const session = record.session ?? this.manager.settledTranscript(record.id);
+    if (!session) {
       this.ui.notify(`Agent is ${toSingleLine(record.status)} — no session available.`, "info");
       return;
     }
-    const session = record.session;
     const activity = this.agentActivity.get(record.id);
     this.viewingAgentId = record.id;
 

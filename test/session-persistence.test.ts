@@ -219,7 +219,7 @@ describe("subagent session persistence (real SessionManager)", () => {
     });
 
     await runAgent(
-      { ...ctx(), sessionManager: { getSessionFile: () => undefined } } as unknown as ExtensionContext,
+      { ...ctx(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as ExtensionContext,
       "persisted",
       "go",
       { pi },

@@ -3,9 +3,9 @@
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import type { ChildSessionSettings } from "./agent-runner.js";
-import type { LifetimeUsage } from "./usage.js";
+import type { AgentSession, FileEntry } from "@earendil-works/pi-coding-agent";
+import type { ChildSessionSettings, SessionLifecycle } from "./agent-runner.js";
+import type { LifetimeUsage, SessionLike } from "./usage.js";
 
 export type { ThinkingLevel };
 
@@ -115,9 +115,18 @@ export interface AgentRecord {
   toolUses: number;
   startedAt: number;
   completedAt?: number;
+  /** Live child session. Set while the record runs or is torn down; cleared at settle. */
   session?: AgentSession;
   /** Session file kept after `session` is dropped, so a failed reload can reopen the child. */
   sessionFile?: string;
+  /** Persistent subscription and abort forwarding for `session`. Detached at settle. */
+  lifecycle?: SessionLifecycle;
+  /** Set while the settle tail tears the child session down. Resume and reopen refuse such a record. */
+  transition?: "teardown";
+  /** Frozen session stats taken at settle. Readers use this instead of a live session. */
+  sessionSnapshot?: SessionLike;
+  /** Entries of an in-memory child (no session file), captured at settle so a resume can reopen it. */
+  memoryEntries?: FileEntry[];
   /** Resolved inputs the child was built from; `resume` rebuilds its session from them. */
   childSettings?: ChildSessionSettings;
   /** Resolved `persist_session` for this run, captured at spawn so the removal

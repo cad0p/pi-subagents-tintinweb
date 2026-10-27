@@ -122,7 +122,7 @@ function completedHeader(record: AgentRecord): string {
   const displayName = toSingleLine(getDisplayName(record.type));
   const duration = formatDuration(record.startedAt, record.completedAt);
   const tokens = formatLifetimeTokens(record);
-  const contextPercent = getSessionContextPercent(record.session);
+  const contextPercent = getSessionContextPercent(record.session ?? record.sessionSnapshot);
   const statsParts = [`Tool uses: ${record.toolUses}`];
   if (tokens) statsParts.push(tokens);
   // Labelled field, like its pipe-separated neighbours. Omitted entirely when

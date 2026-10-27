@@ -392,8 +392,11 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    // Adoption after the run settles rebuilds the record from its hand-over item: the viewer keeps the same session.
-    expect(publishedRoot().manager.getRecord(id)?.session).toBe(before);
+    // The run settled after adoption: the record keeps its snapshot and session file, not the live session (plan line 9).
+    const settled = publishedRoot().manager.getRecord(id);
+    expect(settled?.session).toBeUndefined();
+    expect(settled?.sessionFile).toBeDefined();
+    expect(existsSync(settled?.sessionFile ?? "")).toBe(true);
   }, 20_000);
 
   it("lists a draining subagent as (draining) in the widget after /reload, and drops the marker once it settles", async () => {
@@ -543,7 +546,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
   }, 20_000);
 
-  it("gives a reloaded child extension session_shutdown and session_start with reason reload", async () => {
+  it("tears a draining child down with reason quit once it settles after /reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     const eventLog = join(tmp, "child-events.jsonl");
@@ -569,15 +572,16 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(childSignal).toBeDefined(), { timeout: 10_000 });
     await reloadRoot(root);
     release();
-    // The running child is adopted when it settles: its session reloads inside the hand-over.
-    const reloadEvents = () =>
+    // The draining child settles in its own activation: its session shuts down with reason quit, never reload.
+    const childEvents = () =>
       readFileSync(eventLog, "utf8")
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as { event: string; reason?: string })
-        .filter((entry) => entry.reason === "reload")
-        .map((entry) => entry.event);
-    await vi.waitFor(() => expect(reloadEvents()).toEqual(["session_shutdown", "session_start"]), { timeout: 10_000 });
+        .map((line) => JSON.parse(line) as { event: string; reason?: string });
+    await vi.waitFor(() => expect(childEvents()).toContainEqual({ event: "session_shutdown", reason: "quit" }), {
+      timeout: 10_000,
+    });
+    expect(childEvents().filter((entry) => entry.reason === "reload")).toEqual([]);
   }, 20_000);
 
   it("moves an idle subagent to the reloaded root with its result", async () => {
@@ -616,7 +620,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(liveRegistry().listAgents().filter((row) => row.id === id)).toHaveLength(1);
   }, 20_000);
 
-  it("keeps idle subagents in the hand-over when a second /reload lands during their adoption", async () => {
+  it("keeps idle subagents across /reload with their session files on disk", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     release();
@@ -627,40 +631,18 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().every((row) => row.status === "completed")).toBe(true), {
       timeout: 10_000,
     });
-    const files = liveRegistry().listAgents().map((row) => row.session?.sessionManager.getSessionFile() ?? "");
+    const files = liveRegistry().listAgents().map((row) => row.sessionFile ?? "");
     expect(files.every((file) => existsSync(file))).toBe(true);
 
-    // The first idle child's reload is held, so the second /reload lands mid-adoption.
-    const originalReload = AgentSession.prototype.reload;
-    let openGate: () => void = () => {};
-    const childGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
-    let childReached: () => void = () => {};
-    const reached = new Promise<void>((resolve) => {
-      childReached = resolve;
-    });
-    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
-      if (this === root) return originalReload.call(this);
-      childReached();
-      return childGate.then(() => originalReload.call(this));
-    });
-
-    const firstReload = reloadRoot(root);
-    await reached;
-    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
-    openGate();
-    await firstReload;
-
-    const sid = root.sessionManager.getSessionId();
-    const published = takeHandovers(sid);
-    expect(published.flatMap((h) => h.idleItems().map((item) => item.dto.id)).sort()).toEqual([...ids].sort());
-    // The next activation takes the hand-over back. A second reloadRoot would shut this activation down again.
-    publishHandovers(sid, published);
+    // Settled children hold no live session, so no child reload is held open during adoption.
+    await reloadRoot(root);
+    const rows = liveRegistry().listAgents().filter((row) => ids.includes(row.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.status === "completed" && row.session === undefined)).toBe(true);
     expect(files.every((file) => existsSync(file))).toBe(true);
   }, 20_000);
 
-  it("reloads an adopted idle subagent once per later /reload while a draining run holds the hand-over", async () => {
+  it("keeps an adopted idle subagent through later /reloads while a draining run holds the hand-over", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     release();
@@ -678,6 +660,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     const running = liveRegistry().listAgents().find((r) => r.id !== idle)?.id ?? "";
     expect(liveRegistry().listAgents().find((r) => r.id === running)?.status).toBe("running");
 
+    // Settled children hold no live session, so later /reloads never reload them.
     const originalReload = AgentSession.prototype.reload;
     const childReloads: AgentSession[] = [];
     vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
@@ -686,9 +669,10 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
 
     await reloadRoot(root);
-    expect(childReloads).toHaveLength(1);
+    expect(childReloads).toHaveLength(0);
     await reloadRoot(root);
-    expect(childReloads).toHaveLength(2);
+    expect(childReloads).toHaveLength(0);
+    expect(liveRegistry().listAgents().find((r) => r.id === idle)?.status).toBe("completed");
 
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === running)?.status).toBe("completed"), {
@@ -696,35 +680,21 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
   }, 20_000);
 
-  it("keeps a settled subagent in the hand-over when a second /reload lands during its adoption", async () => {
+  it("keeps a settled subagent in the hand-over across a second /reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     await root.prompt("spawn-now");
     const id = liveRegistry().listAgents()[0]?.id ?? "";
     await reloadRoot(root);
-
-    // The draining run settles while its adoption's child reload is held; a second /reload lands mid-adoption.
-    const originalReload = AgentSession.prototype.reload;
-    let openGate: () => void = () => {};
-    const childGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
-    let childReached: () => void = () => {};
-    const reached = new Promise<void>((resolve) => {
-      childReached = resolve;
-    });
-    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
-      if (this === root) return originalReload.call(this);
-      childReached();
-      return childGate.then(() => originalReload.call(this));
-    });
     release();
-    await reached;
-    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
-    openGate();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
+      timeout: 10_000,
+    });
 
-    // The extension module is re-imported on reload, so its ReloadHandover is not this file's class: poll the store.
+    // A second /reload shuts this activation down again. The settled item is handed over from its session file.
+    await root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
     const sid = root.sessionManager.getSessionId();
+    // The extension module is re-imported on reload, so its ReloadHandover is not this file's class: poll the store.
     await vi.waitFor(() => {
       const published = takeHandovers(sid);
       publishHandovers(sid, published);
@@ -732,65 +702,34 @@ describe("subagents across a real /reload (faux provider)", () => {
     }, { timeout: 10_000 });
   }, 20_000);
 
-  it("adopts settled runs one at a time: the second child reload waits for the first adoption", async () => {
+  it("adopts settled runs without reloading their children", async () => {
     const root = session;
     if (!root) throw new Error("no session");
+    release();
     await root.prompt("spawn-now");
     await root.prompt("spawn-now");
-    // A child session is attached once its run starts; the run stays running until the gate opens.
-    const children = await vi.waitFor(
-      () => {
-        const found = liveRegistry().listAgents().flatMap((row) => (row.session ? [row.session] : []));
-        expect(found).toHaveLength(2);
-        return found;
-      },
-      { timeout: 10_000 },
-    );
+    const ids = liveRegistry().listAgents().map((row) => row.id);
+    expect(ids).toHaveLength(2);
+    await vi.waitFor(() => expect(liveRegistry().listAgents().every((row) => row.status === "completed")).toBe(true), {
+      timeout: 10_000,
+    });
 
-    // Both runs settle while their adoptions' child reloads are held; any overlap of those reloads is a race.
+    // Settled children hold no live session, so adoption never reloads a child.
     const originalReload = AgentSession.prototype.reload;
-    let openGate: () => void = () => {};
-    const childGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
-    let firstReached: () => void = () => {};
-    const reached = new Promise<void>((resolve) => {
-      firstReached = resolve;
-    });
     const started: AgentSession[] = [];
-    let active = 0;
-    let overlapped = false;
     vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
-      if (this === root) return originalReload.call(this);
-      started.push(this);
-      active++;
-      if (active > 1) overlapped = true;
-      firstReached();
-      return childGate.then(() => originalReload.call(this)).finally(() => {
-        active--;
-      });
+      if (this !== root) started.push(this);
+      return originalReload.call(this);
     });
 
     await reloadRoot(root);
-    release();
-    await reached;
-    await vi.waitFor(() => expect(children.every((child) => !child.isStreaming)).toBe(true), { timeout: 10_000 });
-    expect(started).toHaveLength(1);
-
-    openGate();
-    await vi.waitFor(() => expect(started).toHaveLength(2), { timeout: 10_000 });
-    await vi.waitFor(
-      () => {
-        const rows = liveRegistry().listAgents();
-        expect(rows).toHaveLength(2);
-        expect(rows.every((row) => row.status === "completed")).toBe(true);
-      },
-      { timeout: 10_000 },
-    );
-    expect(overlapped).toBe(false);
+    const rows = liveRegistry().listAgents().filter((row) => ids.includes(row.id));
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.status === "completed" && row.session === undefined)).toBe(true);
+    expect(started).toHaveLength(0);
   }, 20_000);
 
-  it("rebuilds an idle subagent from its session file when its reload fails inside pi's reload", async () => {
+  it("rebuilds a completed subagent from its session file after a root reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     release();
@@ -799,24 +738,17 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
-    if (!child?.sessionFile) throw new Error("no child session file");
-    const { sessionFile, sessionId } = child;
-    const activeTools = child.getActiveToolNames();
+    const row = liveRegistry().listAgents().find((r) => r.id === id);
+    const sessionFile = row?.sessionFile;
+    if (!sessionFile) throw new Error("no child session file");
+    const sessionId = row?.sessionId;
 
-    // Throw inside the real reload, right after pi invalidated the child's runner (agent-session.js reload()).
-    const invalidate = child.extensionRunner.invalidate.bind(child.extensionRunner);
-    vi.spyOn(child.extensionRunner, "invalidate").mockImplementationOnce(() => {
-      invalidate();
-      throw new Error("child boom");
-    });
     await reloadRoot(root);
 
-    const row = liveRegistry().listAgents().find((r) => r.id === id);
-    expect(row?.status).toBe("error");
-    expect(row?.error).toContain("reload failed: child boom");
-    // The broken session is disposed and dropped; its file keeps the transcript.
-    expect(row?.session).toBeUndefined();
+    const reloaded = liveRegistry().listAgents().find((r) => r.id === id);
+    expect(reloaded?.status).toBe("completed");
+    // A settled subagent holds no session; its file carries the transcript across the reload.
+    expect(reloaded?.session).toBeUndefined();
     expect(existsSync(sessionFile)).toBe(true);
 
     expect(await publishedRoot().manager.restoreSession(id)).toBeDefined();
@@ -824,10 +756,9 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const reopened = liveRegistry().listAgents().find((r) => r.id === id)?.session;
-    expect(reopened?.sessionId).toBe(sessionId);
-    expect(reopened?.getActiveToolNames()).toEqual(activeTools);
-    const transcript = JSON.stringify(reopened?.messages);
+    expect(liveRegistry().listAgents().find((r) => r.id === id)?.sessionId).toBe(sessionId);
+    expect(liveRegistry().listAgents().find((r) => r.id === id)?.session).toBeUndefined();
+    const transcript = JSON.stringify(SessionManager.open(sessionFile).buildSessionContext().messages);
     expect(transcript).toContain(CHILD_TASK);
     expect(transcript).toContain("after-reload");
   }, 20_000);
@@ -843,32 +774,26 @@ describe("subagents across a real /reload (faux provider)", () => {
     return id;
   }
 
-  /** Fails a completed subagent's reload inside the next /reload. Returns its session file and its transcript before the failure. */
-  async function reloadFailsForChild(root: AgentSession, id: string) {
-    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
-    if (!child?.sessionFile) throw new Error("no child session file");
-    const { sessionFile } = child;
-    const before = structuredClone(child.messages);
+  /** Reloads the root while a subagent is completed. Returns its session file and its transcript before the reload. */
+  async function reloadRootWithSettledChild(root: AgentSession, id: string) {
+    const sessionFile = liveRegistry().listAgents().find((r) => r.id === id)?.sessionFile;
+    if (!sessionFile) throw new Error("no child session file");
+    const before = SessionManager.open(sessionFile).buildSessionContext().messages;
 
-    const invalidate = child.extensionRunner.invalidate.bind(child.extensionRunner);
-    vi.spyOn(child.extensionRunner, "invalidate").mockImplementationOnce(() => {
-      invalidate();
-      throw new Error("child boom");
-    });
     await reloadRoot(root);
 
     const row = liveRegistry().listAgents().find((r) => r.id === id);
-    expect(row?.status).toBe("error");
+    expect(row?.status).toBe("completed");
     expect(row?.session).toBeUndefined();
     expect(existsSync(sessionFile)).toBe(true);
     return { sessionFile, before };
   }
 
-  it("resumes a failed-reload subagent from its session file through the Agent tool", async () => {
+  it("resumes a completed subagent from its session file through the Agent tool after a root reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     const id = await spawnIdleChild(root);
-    const { before } = await reloadFailsForChild(root, id);
+    const { sessionFile, before } = await reloadRootWithSettledChild(root, id);
 
     // Hold the resumed run open so the test observes it running before it completes.
     gate = new Promise<void>((resolve) => {
@@ -883,16 +808,16 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const messages = liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages ?? [];
+    const messages = SessionManager.open(sessionFile).buildSessionContext().messages;
     expect(messages.slice(0, before.length)).toEqual(before);
     expect(JSON.stringify(messages.slice(before.length))).toContain("again");
   }, 20_000);
 
-  it("shares one reopen when a failed-reload subagent is restored twice at once", async () => {
+  it("shares one reopen when a completed subagent is restored twice at once", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     const id = await spawnIdleChild(root);
-    const { before } = await reloadFailsForChild(root, id);
+    const { sessionFile, before } = await reloadRootWithSettledChild(root, id);
 
     const manager = publishedRoot().manager;
     const [first, second] = await Promise.all([manager.restoreSession(id), manager.restoreSession(id)]);
@@ -902,16 +827,16 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const messages = liveRegistry().listAgents().find((r) => r.id === id)?.session?.messages ?? [];
+    const messages = SessionManager.open(sessionFile).buildSessionContext().messages;
     expect(messages.slice(0, before.length)).toEqual(before);
     expect(JSON.stringify(messages.slice(before.length))).toContain("after-reload");
   }, 20_000);
 
-  it("removes a failed-reload subagent's session file when its record is cleared", async () => {
+  it("removes a completed subagent's session file when its record is cleared", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     const id = await spawnIdleChild(root);
-    const { sessionFile } = await reloadFailsForChild(root, id);
+    const { sessionFile } = await reloadRootWithSettledChild(root, id);
 
     const manager = publishedRoot().manager;
     manager.clearCompleted();
@@ -919,7 +844,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(existsSync(sessionFile)).toBe(false);
   }, 20_000);
 
-  it("resumes a failed-reload nested subagent through its parent's Agent tool", async () => {
+  it("resumes a completed nested subagent through its parent's Agent tool after a root reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
@@ -939,17 +864,18 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === nestedId)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    const { before } = await reloadFailsForChild(root, nestedId);
+    const { sessionFile, before } = await reloadRootWithSettledChild(root, nestedId);
 
     nestedResumeTarget = nestedId;
     resumeTarget = parentId;
     await root.prompt("resume-now");
-    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === nestedId)?.status).toBe("completed"), {
-      timeout: 10_000,
-    });
-    const messages = liveRegistry().listAgents().find((r) => r.id === nestedId)?.session?.messages ?? [];
+    // The nested status is already completed, so wait for the resumed prompt to reach its session file.
+    await vi.waitFor(() => {
+      const transcript = SessionManager.open(sessionFile).buildSessionContext().messages;
+      expect(JSON.stringify(transcript.slice(before.length))).toContain("again");
+    }, { timeout: 10_000 });
+    const messages = SessionManager.open(sessionFile).buildSessionContext().messages;
     expect(messages.slice(0, before.length)).toEqual(before);
-    expect(JSON.stringify(messages.slice(before.length))).toContain("again");
   }, 20_000);
 
   it("stops a draining subagent when the session quits after a reload", async () => {
@@ -971,33 +897,16 @@ describe("subagents across a real /reload (faux provider)", () => {
     const root = session;
     if (!root) throw new Error("no session");
     const id = await spawnIdleChild(root);
-    const child = liveRegistry().listAgents().find((r) => r.id === id)?.session;
-    if (!child) throw new Error("no child session");
-    const dispose = vi.spyOn(child, "dispose");
+    // A settled subagent holds no live session, so a reload has no child session to dispose.
+    // The record and its file are handed over as they are.
+    const row = liveRegistry().listAgents().find((r) => r.id === id);
+    expect(row?.session).toBeUndefined();
+    const sessionFile = row?.sessionFile;
 
-    // The child's reload is held inside the new activation's adoption, so the quit lands mid-adoption.
-    const originalReload = AgentSession.prototype.reload;
-    let openGate: () => void = () => {};
-    const childGate = new Promise<void>((resolve) => {
-      openGate = resolve;
-    });
-    let childReached: () => void = () => {};
-    const reached = new Promise<void>((resolve) => {
-      childReached = resolve;
-    });
-    vi.spyOn(AgentSession.prototype, "reload").mockImplementation(function (this: AgentSession) {
-      if (this === root) return originalReload.call(this);
-      childReached();
-      return childGate.then(() => originalReload.call(this));
-    });
+    await reloadRoot(root);
 
-    const firstReload = reloadRoot(root);
-    await reached;
-    await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-    openGate();
-    await firstReload;
-
-    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(liveRegistry().listAgents().find((r) => r.id === id)?.sessionFile).toBe(sessionFile);
+    expect(liveRegistry().listAgents().find((r) => r.id === id)?.session).toBeUndefined();
   }, 20_000);
 
   it("stops a run a reload handed over once a session starts that does not adopt it", async () => {
@@ -1098,6 +1007,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.settled).toBe(true), { timeout: 10_000 });
     faux = registerFauxProvider({ api: faux.api, provider: "faux", models: [FAUX_MODEL] });
     faux.setResponses(scripted());
+    expect(await publishedRoot().manager.restoreSession(childId)).toBeDefined();
     expect(publishedRoot().manager.resume(childId, "again")).toBeDefined();
     await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.result).toContain("CHILD-DONE"), { timeout: 10_000 });
   }, 20_000);
@@ -1113,10 +1023,15 @@ describe("subagents across a real /reload (faux provider)", () => {
     });
     parentNests = true;
     parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
     await root.prompt("spawn-parent-now");
     const parentId = liveRegistry().listAgents()[0]?.id ?? "";
-    // The parent completes while its nested child runs: its completion tail aborts the child, which stays unsettled behind the gate.
+    // The parent spawns its child once released and completes only after the child streams behind the gate.
+    releaseParent();
+    await childStarted;
+    // The parent's completion tail aborts the streaming child, which stays unsettled until the gate opens.
     await vi.waitFor(() => expect(publishedRoot().manager.getRecord(parentId)?.settled).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(childSignal?.aborted).toBe(true), { timeout: 10_000 });
     expect(publishedRoot().manager.listAgents().find((r) => r.parentAgentId === parentId)?.settled).toBe(false);
     const parentFile = publishedRoot().manager.getRecord(parentId)?.sessionFile ?? "";
     expect(existsSync(parentFile)).toBe(true);

@@ -408,7 +408,7 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
-  onSessionCreated?: (session: AgentSession) => void;
+  onSessionCreated?: (session: AgentSession, lifecycle: SessionLifecycle) => void;
   /** Called with the resolved child settings before its session is built, so a failed reload can rebuild it. */
   onChildSettings?: (settings: ChildSessionSettings) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
@@ -559,6 +559,162 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   }
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
+}
+
+/** Event hooks of one prompt. The lifecycle forwards each session event to the current prompt's hooks. */
+export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction">;
+
+/** What one prompt needs: its abort signal, its own max_turns budget and its hooks. */
+export interface SessionRun {
+  signal?: AbortSignal;
+  maxTurns?: number;
+  hooks?: SessionHooks;
+}
+
+export interface SessionPromptResult {
+  text: string;
+  failure?: string;
+  aborted: boolean;
+  steered: boolean;
+}
+
+/** One session's persistent subscription and abort forwarding, from attach to teardown. */
+export interface SessionLifecycle {
+  prompt(text: string, run?: SessionRun): Promise<SessionPromptResult>;
+  detach(): void;
+}
+
+const lifecycles = new WeakMap<AgentSession, SessionLifecycle>();
+
+/**
+ * Attach the session's single event subscription and abort forwarder. Idempotent per session.
+ * Turn count, max_turns state and the abort binding are reset per prompt. Runs that pi starts
+ * between prompts still reach the current hooks.
+ */
+export function attachSessionLifecycle(session: AgentSession): SessionLifecycle {
+  const existing = lifecycles.get(session);
+  if (existing) return existing;
+
+  let run: SessionRun = {};
+  let turnCount = 0;
+  let softLimitReached = false;
+  let aborted = false;
+  let currentMessageText = "";
+  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+    const hooks = run.hooks;
+    const maxTurns = run.maxTurns;
+    if (event.type === "turn_end") {
+      turnCount++;
+      hooks?.onTurnEnd?.(turnCount);
+      if (maxTurns != null) {
+        if (!softLimitReached && turnCount >= maxTurns) {
+          softLimitReached = true;
+          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+          aborted = true;
+          session.abort();
+        }
+      }
+    }
+    if (event.type === "message_start") {
+      currentMessageText = "";
+    }
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      currentMessageText += event.assistantMessageEvent.delta;
+      hooks?.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+    }
+    if (event.type === "tool_execution_start") {
+      hooks?.onToolActivity?.({ type: "start", toolName: event.toolName });
+    }
+    if (event.type === "tool_execution_end") {
+      hooks?.onToolActivity?.({ type: "end", toolName: event.toolName });
+    }
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      const u = event.message.usage;
+      if (u)
+        hooks?.onAssistantUsage?.({
+          input: u.input ?? 0,
+          output: u.output ?? 0,
+          cacheWrite: u.cacheWrite ?? 0,
+          cacheRead: u.cacheRead ?? 0,
+          cost: u.cost?.total ?? 0,
+        });
+    }
+    if (event.type === "compaction_end" && !event.aborted && event.result) {
+      hooks?.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+    }
+  });
+
+  let detachAbort = () => {};
+  const lifecycle: SessionLifecycle = {
+    async prompt(text, next = {}) {
+      run = next;
+      turnCount = 0;
+      softLimitReached = false;
+      aborted = false;
+      currentMessageText = "";
+      detachAbort();
+      detachAbort = forwardAbortSignal(session, next.signal);
+      // Boundary for the history fallback: only assistant text produced by this prompt counts.
+      const startLen = session.messages.length;
+      const collector = collectResponseText(session);
+      try {
+        await session.prompt(text);
+      } finally {
+        collector.unsubscribe();
+      }
+      return {
+        text: collector.getText().trim() || getLastAssistantText(session, startLen),
+        aborted,
+        steered: softLimitReached,
+        failure: finalTurnError(session, startLen, collector.getLastAssistant()),
+      };
+    },
+    detach() {
+      lifecycles.delete(session);
+      unsubscribe();
+      detachAbort();
+    },
+  };
+  lifecycles.set(session, lifecycle);
+  return lifecycle;
+}
+
+const TEARDOWN_ABORT_TIMEOUT_MS = 5_000;
+
+/** Abort a session, but stop waiting after `timeoutMs` so a hung run cannot block teardown. */
+async function abortWithTimeout(session: AgentSession, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      session.abort(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Run one teardown step. A failure is logged and never stops the next step. */
+async function teardownStep(name: string, step: () => unknown): Promise<void> {
+  try {
+    await step();
+  } catch (err) {
+    console.warn(`[pi-subagents] child session teardown: ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * End a child session for good: abort, `session_shutdown` (reason quit), abort again if a run is
+ * still streaming, then dispose. Every step is isolated and each abort is bounded by `abortTimeoutMs`.
+ */
+export async function teardownChildSession(session: AgentSession, abortTimeoutMs = TEARDOWN_ABORT_TIMEOUT_MS): Promise<void> {
+  await teardownStep("abort", () => abortWithTimeout(session, abortTimeoutMs));
+  await teardownStep("session_shutdown", () => session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }));
+  if (session.isStreaming) await teardownStep("abort again", () => abortWithTimeout(session, abortTimeoutMs));
+  await teardownStep("dispose", () => session.dispose());
 }
 
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
@@ -1208,56 +1364,8 @@ export async function runAgent(
   options.onChildSettings?.(settings);
   const session = await createChildSession(settings, sessionManager, options);
 
-  options.onSessionCreated?.(session);
-
-  // Track turns for graceful max_turns enforcement
-  let turnCount = 0;
-  const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
-  let softLimitReached = false;
-  let aborted = false;
-
-  let currentMessageText = "";
-  const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "turn_end") {
-      turnCount++;
-      options.onTurnEnd?.(turnCount);
-      if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
-          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
-          aborted = true;
-          session.abort();
-        }
-      }
-    }
-    if (event.type === "message_start") {
-      currentMessageText = "";
-    }
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      currentMessageText += event.assistantMessageEvent.delta;
-      options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
-    }
-    if (event.type === "tool_execution_start") {
-      options.onToolActivity?.({ type: "start", toolName: event.toolName });
-    }
-    if (event.type === "tool_execution_end") {
-      options.onToolActivity?.({ type: "end", toolName: event.toolName });
-    }
-    if (event.type === "message_end" && event.message.role === "assistant") {
-      const u = (event.message as any).usage;
-      if (u) options.onAssistantUsage?.({
-        input: u.input ?? 0,
-        output: u.output ?? 0,
-        cacheWrite: u.cacheWrite ?? 0,
-        cacheRead: u.cacheRead ?? 0,
-        cost: u.cost?.total ?? 0,
-      });
-    }
-    if (event.type === "compaction_end" && !event.aborted && event.result) {
-      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-    }
-  });
+  const lifecycle = attachSessionLifecycle(session);
+  options.onSessionCreated?.(session, lifecycle);
 
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
@@ -1268,27 +1376,14 @@ export async function runAgent(
     }
   }
 
-  // Boundary for the history fallback: only assistant text produced from here
-  // on counts as this run's output (a fresh session, so usually 0).
-  const startLen = session.messages.length;
-  // Subscribed after the parent-context build so a throw there cannot leak them.
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
-  try {
-    await session.prompt(effectivePrompt);
-  } finally {
-    unsubTurns();
-    collector.unsubscribe();
-    cleanupAbort();
-  }
-
-  const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
+  const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
+  const result = await lifecycle.prompt(effectivePrompt, { signal: options.signal, maxTurns, hooks: options });
   return {
-    responseText,
+    responseText: result.text,
     session,
-    aborted,
-    steered: softLimitReached,
-    failure: finalTurnError(session, startLen, collector.getLastAssistant()),
+    aborted: result.aborted,
+    steered: result.steered,
+    failure: result.failure,
   };
 }
 
@@ -1307,61 +1402,8 @@ export async function resumeAgent(
     signal?: AbortSignal;
   } = {},
 ): Promise<{ text: string; failure?: string }> {
-  // Boundary for the history fallback: the session already holds prior turns,
-  // so only assistant text produced by THIS resume prompt counts as its output
-  // — a failed resume must not surface the previous turn's answer (#144).
-  const startLen = session.messages.length;
-  const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
-
-  // Per-message bookkeeping mirrors runAgent: reset the accumulated text on
-  // each new message_start and count completed turns, so the resumed run's
-  // streaming/stat readouts are not stale.
-  let currentMessageText = "";
-  let turnCount = 0;
-  const unsubEvents = (options.onToolActivity || options.onTextDelta || options.onTurnEnd || options.onAssistantUsage || options.onCompaction)
-    ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "turn_end") {
-          turnCount++;
-          options.onTurnEnd?.(turnCount);
-        }
-        if (event.type === "message_start") {
-          currentMessageText = "";
-        }
-        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-          currentMessageText += event.assistantMessageEvent.delta;
-          options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
-        }
-        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
-        if (event.type === "message_end" && event.message.role === "assistant") {
-          const u = (event.message as any).usage;
-          if (u) options.onAssistantUsage?.({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-            cacheRead: u.cacheRead ?? 0,
-            cost: u.cost?.total ?? 0,
-          });
-        }
-        if (event.type === "compaction_end" && !event.aborted && event.result) {
-          options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-        }
-      })
-    : () => {};
-
-  try {
-    await session.prompt(prompt);
-  } finally {
-    collector.unsubscribe();
-    unsubEvents();
-    cleanupAbort();
-  }
-
-  return {
-    text: collector.getText().trim() || getLastAssistantText(session, startLen),
-    failure: finalTurnError(session, startLen, collector.getLastAssistant()),
-  };
+  const result = await attachSessionLifecycle(session).prompt(prompt, { signal: options.signal, hooks: options });
+  return { text: result.text, failure: result.failure };
 }
 
 /**

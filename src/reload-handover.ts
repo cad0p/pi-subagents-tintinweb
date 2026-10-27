@@ -11,6 +11,7 @@
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
+import { teardownChildSession } from "./agent-runner.js";
 import type { AgentRecord, SubagentType } from "./types.js";
 import type { AgentActivity } from "./ui/agent-widget.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -26,7 +27,10 @@ export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 export const HANDOVER_VERSION = 1;
 
 /** A record as plain data: everything except the live run handles. */
-export type AgentDto = Omit<AgentRecord, "abortController" | "promise" | "outputCleanup" | "session">;
+export type AgentDto = Omit<
+  AgentRecord,
+  "abortController" | "promise" | "outputCleanup" | "session" | "lifecycle" | "transition"
+>;
 
 /** One record of a moving subtree, with the session it owns. Parents come before children. */
 export interface HandoverItem {
@@ -64,7 +68,7 @@ export interface DrainingPool {
 
 /** Disposes the sessions of the given items: a hand-over that is stopped holds no one to adopt them. */
 function disposeItems(items: HandoverItem[]): void {
-  for (const item of items) item.session?.dispose();
+  for (const item of items) if (item.session) void teardownChildSession(item.session);
 }
 
 export class ReloadHandover {
@@ -161,13 +165,13 @@ export function toSpawnData(options: SpawnOptions): SpawnData {
 
 /** Plain copy of a record for hand-over. */
 export function toDto(record: AgentRecord): AgentDto {
-  const { abortController: _abort, promise: _promise, outputCleanup: _cleanup, session: _session, ...dto } = record;
+  const { abortController: _abort, promise: _promise, outputCleanup: _cleanup, session: _session, lifecycle: _lifecycle, transition: _transition, ...dto } = record;
   return dto;
 }
 
 /** Record for a new manager: the live handles are created here, the session is the one handed over. */
-export function fromDto(dto: AgentDto, session?: AgentSession): AgentRecord {
-  return { ...dto, session, abortController: new AbortController(), promise: Promise.resolve(dto.result ?? "") };
+export function fromDto(dto: AgentDto): AgentRecord {
+  return { ...dto, abortController: new AbortController(), promise: Promise.resolve(dto.result ?? "") };
 }
 
 /**

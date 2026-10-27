@@ -126,7 +126,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   it("still falls back — and says so — when the setting is unset", async () => {
     const { tools } = boot();
     vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any, aborted: false, steered: false,
+      responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false,
     });
 
     const result = await tools.get("Agent").execute(
@@ -145,7 +145,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   it("says nothing about a blank type, which is not a typo", async () => {
     const { tools } = boot();
     vi.mocked(runAgent).mockResolvedValue({
-      responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any, aborted: false, steered: false,
+      responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false,
     });
 
     const result = await tools.get("Agent").execute(
@@ -223,7 +223,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     // is deleted or disabled — the opposite of what strict dispatch is for.
     const { tools } = boot();
     vi.mocked(runAgent).mockResolvedValue({
-      responseText: "first", session: { dispose: vi.fn(), messages: [], sessionManager: { getSessionFile: () => undefined } } as any, aborted: false, steered: false,
+      responseText: "first", session: { dispose: vi.fn(), messages: [], sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false,
     });
     const spawned = await tools.get("Agent").execute(
       "tc-6",

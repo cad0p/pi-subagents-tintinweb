@@ -140,6 +140,11 @@ export interface RunPrintModeOptions {
    */
   additionalExtensionPaths?: string[];
   /**
+   * Back the host session with a file under the run's agent dir (`SessionManager.create`) instead of
+   * in memory. File-backed hosts give their children session files. Default false.
+   */
+  persistSession?: boolean;
+  /**
    * Isolate global discovery (PI_CODING_AGENT_DIR + HOME → temp) so the dev's
    * real agents/extensions can't bleed into the run. Default true in faux mode,
    * false in live mode (so real auth/config resolve). Restored on `dispose()`.
@@ -476,7 +481,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     // Faux: the faux runtime.
     modelRuntime,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: options.persistSession
+      ? SessionManager.create(cwd, join(agentDir, "sessions"))
+      : SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
     // (settingsManager.getDefaultModel) and retries/compaction match your config.
     // Faux: in-memory, deterministic, no disk.

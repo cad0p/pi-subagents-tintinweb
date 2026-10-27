@@ -25,13 +25,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, initTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(), createChildSession: vi.fn() };
 });
 
 vi.mock("../src/settings.js", async (importOriginal) => {
@@ -51,7 +51,7 @@ vi.mock("../src/settings.js", async (importOriginal) => {
 });
 
 import { AgentManager } from "../src/agent-manager.js";
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension, { WIZARD_MAX_TURNS } from "../src/index.js";
@@ -111,12 +111,32 @@ afterEach(() => {
   rmSync(hermeticHome, { recursive: true, force: true });
 });
 
+/** A child session stub with the fields the lifecycle and the reopen path read. */
+function fakeChild(): AgentSession {
+  return {
+    dispose: vi.fn(),
+    subscribe: () => () => {},
+    sessionId: "child-session",
+    messages: [],
+    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  } as unknown as AgentSession;
+}
+
+/** runAgent that hosts the child as the real runner does (settings, then session), then resolves. */
+function hostedRun(session: AgentSession, responseText: string): void {
+  vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+    opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+    opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+    return { responseText, session, aborted: false, steered: false } as any;
+  });
+}
+
 /** Spawn a background agent whose runAgent resolves immediately; the record
  *  reaches "completed" via microtasks (no timer advance needed). */
 async function spawnCompleting(tools: Map<string, any>, description = "research thing"): Promise<string> {
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "# Report\n\nTHE-RESULT-PAYLOAD",
-    session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
+    session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
     aborted: false,
     steered: false,
   });
@@ -229,13 +249,7 @@ describe("turn-gated completion notifications", () => {
 
     // The prior run completes while the main session is idle, so its nudge is
     // armed as a real 200ms timer (not parked).
-    const childSession = { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined }, sessionId: "child-session", messages: [], subscribe: () => () => {} };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "FIRST-RESULT",
-      session: childSession as any,
-      aborted: false,
-      steered: false,
-    });
+    hostedRun(fakeChild(), "FIRST-RESULT");
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
       { prompt: "go", description: "first task", subagent_type: "general-purpose" },
@@ -245,6 +259,7 @@ describe("turn-gated completion notifications", () => {
     await vi.advanceTimersByTimeAsync(100); // halfway through the hold
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
+    vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
     // Resume before the armed nudge fires; the resumed run is held open.
     let resolveResume!: (v: { text: string }) => void;
     vi.mocked(resumeAgent).mockImplementation(() => new Promise((r) => { resolveResume = r; }));
@@ -275,13 +290,7 @@ describe("turn-gated completion notifications", () => {
 
     // The prior run completes while the main session is idle, so its nudge is
     // armed as a real 200ms timer (not parked).
-    const childSession = { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined }, sessionId: "child-session", messages: [], subscribe: () => () => {} };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "FIRST-RESULT",
-      session: childSession as any,
-      aborted: false,
-      steered: false,
-    });
+    hostedRun(fakeChild(), "FIRST-RESULT");
     const spawn = await tools.get("Agent").execute(
       "tc-spawn",
       { prompt: "go", description: "first task", subagent_type: "general-purpose" },
@@ -292,6 +301,7 @@ describe("turn-gated completion notifications", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
     vi.mocked(resumeAgent).mockClear(); // prior tests' resume calls are still in the history
 
+    vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
     // A throwing started listener (stale extension context) refuses the resume.
     pi.events.emit.mockImplementation((event: string) => {
       if (event === "subagents:started") throw new Error("stale extension context");
@@ -417,7 +427,7 @@ describe("Agent result rendering", () => {
   it("fresh spawn defaults to a background result with no onUpdate streaming", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
-      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
+      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
       aborted: false,
       steered: false,
     });
@@ -614,7 +624,7 @@ describe("Agent result rendering", () => {
 
       vi.mocked(runAgent).mockResolvedValue({
         responseText: "ok",
-        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
+        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
         aborted: false,
         steered: false,
       });
@@ -668,12 +678,7 @@ describe("Agent result rendering", () => {
       );
       process.chdir(dir);
 
-      vi.mocked(runAgent).mockResolvedValue({
-        responseText: "ok",
-        session: { dispose: vi.fn(), messages: [], subscribe: () => () => {} } as any,
-        aborted: false,
-        steered: false,
-      });
+      hostedRun(fakeChild(), "ok");
       const { pi, tools } = makePi();
       // Claim the manager registry for this extension instance so the
       // spawned record is the one this test can look up.
@@ -704,6 +709,7 @@ describe("Agent result rendering", () => {
       expect(record.invocation?.modelName).toBe("tagged model");
       expect(record.invocation?.maxTurns).toBe(3);
 
+      vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
       const resume = await tools.get("Agent").execute(
         "tc-resume",
@@ -903,7 +909,7 @@ describe("Agent result rendering", () => {
 
       vi.mocked(runAgent).mockResolvedValue({
         responseText: "ok",
-        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any,
+        session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
         aborted: false,
         steered: false,
       });
@@ -952,12 +958,7 @@ describe("Agent result rendering", () => {
       );
       process.chdir(dir);
 
-      vi.mocked(runAgent).mockResolvedValue({
-        responseText: "ok",
-        session: { dispose: vi.fn(), messages: [], subscribe: () => () => {} } as any,
-        aborted: false,
-        steered: false,
-      });
+      hostedRun(fakeChild(), "ok");
       const { pi, tools } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
@@ -990,6 +991,7 @@ describe("Agent result rendering", () => {
       // (RPC/scheduler/wizard spawns) is resumed through a differing type.
       record.invocation = undefined;
 
+      vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild());
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
       const resume = await tools.get("Agent").execute(
         "tc-resume",
@@ -1522,7 +1524,7 @@ describe("agents command terminal surfaces", () => {
       vi.mocked(runAgent).mockImplementation(async () => {
         mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
         writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
-        return { responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any, aborted: false, steered: false };
+        return { responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false };
       });
       const { pi, commands } = makePi();
       subagentsExtension(pi);
@@ -1559,7 +1561,7 @@ describe("agents command terminal surfaces", () => {
         if (isGeneratorRun(opts)) {
           mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
           writeFileSync(targetPath, "---\ndescription: ok\n---\n\nbody\n", "utf-8");
-          return Promise.resolve({ responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } } as any, aborted: false, steered: false });
+          return Promise.resolve({ responseText: "created", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false });
         }
         return new Promise((r) => { releaseFiller = r; });
       });
@@ -1586,7 +1588,7 @@ describe("agents command terminal surfaces", () => {
         expect(rec?.status).toBe("queued");
       });
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       expect(
@@ -1640,7 +1642,7 @@ describe("agents command terminal surfaces", () => {
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
       expect(messages.some(m => m.includes("file was not created"))).toBe(false);
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
@@ -1694,7 +1696,7 @@ describe("agents command terminal surfaces", () => {
       expect(messages.some(m => m.startsWith("Created "))).toBe(false);
       expect(messages.some(m => m.includes("file was not created"))).toBe(false);
 
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });
@@ -1784,7 +1786,7 @@ describe("agents command terminal surfaces", () => {
       });
 
       // Freeing the slot drains the queue; the generation's start rejects.
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       const failed = notifications.find(n => n.message.startsWith("Generation failed"));
@@ -1851,7 +1853,7 @@ describe("agents command terminal surfaces", () => {
       });
 
       // Freeing the slot drains the queue; the generator fails to start.
-      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined } }, aborted: false, steered: false });
+      releaseFiller({ responseText: "done", session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }, aborted: false, steered: false });
       await handler;
 
       const record = handle.getRecord(queuedId);

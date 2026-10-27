@@ -81,7 +81,7 @@ describe("output_transcript agent wiring", () => {
         messages: [],
         subscribe: vi.fn(() => vi.fn()),
         dispose: vi.fn(),
-        sessionManager: { getSessionFile: () => undefined },
+        sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
       } as any;
       options.onSessionCreated?.(session);
       return { responseText: "done", session, aborted: false, steered: false };
