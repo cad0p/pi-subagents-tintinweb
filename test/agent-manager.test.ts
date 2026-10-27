@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentManager } from "../src/agent-manager.js";
+import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { toDto } from "../src/reload-handover.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
@@ -35,6 +35,9 @@ import {
 import { getSessionContextPercent } from "../src/usage.js";
 import { isWorktreeIsolationEnabled, pruneWorktrees } from "../src/worktree.js";
 
+// Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
+setQuietMs(20);
+
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 
@@ -44,7 +47,10 @@ const mockSession = () => ({
   dispose: vi.fn(),
   subscribe: () => () => {},
   sessionId: "child-session-id",
-  sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  isStreaming: false,
+  agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+  sendCustomMessage: () => Promise.resolve(),
+  sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
 
 /** Host a child the way the runner does: settings first, then the session with its lifecycle. */
@@ -891,7 +897,7 @@ describe("AgentManager — deliver()", () => {
     captured?.({ prompt, dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } });
 
     expect(await manager.deliver(id, "go left")).toBe("delivered");
-    expect(prompt).toHaveBeenCalledWith("go left", { streamingBehavior: "steer" });
+    expect(prompt).toHaveBeenCalledWith("go left", expect.objectContaining({ streamingBehavior: "steer" }));
   });
 
   it("queues onto pendingSteers when the session isn't ready yet", async () => {
@@ -1077,7 +1083,7 @@ describe("AgentManager — deliver()", () => {
     resolvedRun({ ...mockSession(), extensionRunner: { emit: () => hold } });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
     const record = manager.getRecord(id)!;
-    await vi.waitFor(() => expect(record.transition).toBe("teardown"));
+    await vi.waitFor(() => expect(record.transition).toBe("teardown"), { timeout: 5_000 });
     expect(record.settled).toBe(false);
     vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "after settle" });
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
@@ -1158,7 +1164,7 @@ describe("AgentManager — deliver()", () => {
     expect([...outcomes].sort()).toEqual(["delivered", "resumed"]);
     expect(createChildSession).toHaveBeenCalledTimes(1);
     expect(resumeAgent).toHaveBeenCalledTimes(1);
-    expect(child.prompt).toHaveBeenCalledWith(expect.any(String), { streamingBehavior: "steer" });
+    expect(child.prompt).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ streamingBehavior: "steer" }));
   });
 
   it("logs parked input whose flush is refused", async () => {
@@ -1668,7 +1674,9 @@ describe("AgentManager — session file retention", () => {
       const { session, file } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
       resolve(done(session));
-      await manager.getRecord(id)!.promise;
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
       expect(existsSync(file)).toBe(true);
       // The completion nudge (index.ts) marks it delivered; this manager has no completion surface.
       manager.getRecord(id)!.resultDelivered = true;
@@ -1690,7 +1698,9 @@ describe("AgentManager — session file retention", () => {
       const { session } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
       resolve(done(session));
-      await manager.getRecord(id)!.promise;
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
 
       vi.advanceTimersByTime(11 * 60_000);
       expect(manager.getRecord(id)).toBeDefined();

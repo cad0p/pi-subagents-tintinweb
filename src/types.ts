@@ -4,7 +4,7 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession, FileEntry } from "@earendil-works/pi-coding-agent";
-import type { ChildSessionSettings, SessionLifecycle } from "./agent-runner.js";
+import type { ChildSessionSettings, SessionLifecycle, TurnBudget } from "./agent-runner.js";
 import type { LifetimeUsage, SessionLike } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -166,6 +166,20 @@ export interface AgentRecord {
   pendingSteers?: string[];
   /** Input parked while a teardown runs (`transition`); handed over as one resume when it ends. */
   pendingInput?: string[];
+  /** Counts runs of the session. Increments at each run start; the finish check's quiet ticks must share one value. */
+  runSeq?: number;
+  /** Set at `agent_end`, cleared by the finish check that run scheduled. Input is held while set. */
+  ending?: boolean;
+  /** Input received in the ending window; handed over by the finish check's wake. Blocks finish until then. */
+  held?: string[];
+  /** Deliveries whose `prompt()` has not reported yet (preflight). Blocks finish until they do. */
+  preflight?: number;
+  /** Whether the record holds its pool slot. Only set for records with `occupiesPoolSlot`. */
+  holdsSlot?: boolean;
+  /** Set while the record is idle with pending background work. Its status stays `running`. */
+  waiting?: { since: number; items: string[] };
+  /** The lifecycle's max_turns counter. Counts every run; a resume starts a fresh one. */
+  turnBudget?: TurnBudget;
   /** Set when the owning parent settled and aborted this nested child. Input is refused: nobody can read the answer. */
   ownerAborted?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */

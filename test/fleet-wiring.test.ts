@@ -110,7 +110,7 @@ describe("FleetView wiring (real extension lifecycle)", () => {
   it("registers the belowEditor widget once a spawned agent has a session, then clears it on shutdown", async () => {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
       // The runner hands the live session over before the run settles; the settled record keeps a snapshot of it.
-      const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+      const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       opts.onSessionCreated?.(session, attachSessionLifecycle(session));
       return { responseText: "done", session, aborted: false, steered: false } as any;
     });

@@ -199,10 +199,13 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     const parentSession = run.parentSession;
 
     // Dispose FIRST: session_shutdown aborts running children and clears the
-    // agents map, so a post-dispose waitForAll() cannot await the child.
-    await run.dispose();
+    // agents map, so a post-dispose waitForAll() cannot await the child. A
+    // stopped child settles only when its run ends, and this faux child ignores
+    // abort, so the gate is released while dispose is in flight.
+    const disposed = run.dispose();
     run = undefined;
     releaseChild();
+    await disposed;
     await capturedPromise;
     // Past the notification hold: any armed completion notification would have
     // fired by now. Real timer by necessity — this runs after dispose's

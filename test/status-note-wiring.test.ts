@@ -11,9 +11,12 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import { setQuietMs } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { makePi, textOf } from "./helpers/subagents-harness.js";
+import { makePi, settledRecord, textOf } from "./helpers/subagents-harness.js";
+
+setQuietMs(20);
 
 // The RPC channels are registered on the first bound session_start (#142), so a
 // test that drives them must fire it first — as a real session always does. A
@@ -42,7 +45,7 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background turn-limit abort → get_subagent_result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "partial work so far",
-      session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+      session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
       aborted: true, // hard turn-limit abort
       steered: false,
     });
@@ -57,7 +60,7 @@ describe("status note reaches the parent through the real handlers", () => {
     const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
     expect(id, "spawn should surface an agent id").toBeTruthy();
     // Let the mocked run settle so the record reaches its terminal status.
-    await new Promise((r) => setTimeout(r, 0));
+    await settledRecord(id as string);
 
     const res = await tools.get("get_subagent_result").execute(
       "tc2", { agent_id: id }, undefined, undefined, ctx(),

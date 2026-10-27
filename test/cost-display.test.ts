@@ -23,6 +23,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import { setQuietMs } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension, { formatTaskNotification } from "../src/index.js";
@@ -30,11 +31,13 @@ import type { AgentRecord } from "../src/types.js";
 import { AgentWidget, formatCost } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
+setQuietMs(20);
+
 const COST = 0.0123;
 
 /** A child session stand-in — only the members the manager touches. */
 function fakeSession(): AgentSession {
-  return { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
+  return { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
 }
 
 /** Deterministic record: fixed timestamps → 5.0s duration, fixed usage. */
@@ -220,7 +223,10 @@ describe("get_subagent_result", () => {
       "tc-1", { prompt: "go", description: "spend", subagent_type: "general-purpose" },
       undefined, undefined, spawnCtx(cwd),
     );
-    const id = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY].listAgents()[0].id;
+    const record = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY].listAgents()[0];
+    // The finish check settles the record a quiet tick after the run: read the report once it has finished.
+    await record.promise;
+    const id = record.id;
     const result = tools.get("get_subagent_result") as {
       execute(id: string, params: Record<string, unknown>, s?: unknown, u?: unknown, c?: unknown): Promise<ToolResult>;
     };

@@ -22,9 +22,12 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import { setQuietMs } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { textOf } from "./helpers/subagents-harness.js";
+import { settledRecord, textOf } from "./helpers/subagents-harness.js";
+
+setQuietMs(20);
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -59,18 +62,13 @@ function ctx() {
   } as any;
 }
 
-// Let runAgent's resolved .then() chain settle so the record reaches "completed".
-const flush = async () => {
-  await new Promise((r) => setImmediate(r));
-  await new Promise((r) => setImmediate(r));
-};
 
 // Spawn a real background agent and drive it to status "completed" with
 // resultConsumed=false (only get_subagent_result sets that flag for background).
 async function spawnCompletedBackgroundAgent(tools: Map<string, any>): Promise<string> {
   vi.mocked(runAgent).mockResolvedValue({
     responseText: "THE-RESULT-PAYLOAD",
-    session: { dispose: vi.fn(), sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+    session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
     aborted: false,
     steered: false,
   });
@@ -83,7 +81,7 @@ async function spawnCompletedBackgroundAgent(tools: Map<string, any>): Promise<s
   );
   const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
   expect(id, "background spawn should surface an agent id").toBeTruthy();
-  await flush();
+  await settledRecord(id as string);
   return id as string;
 }
 

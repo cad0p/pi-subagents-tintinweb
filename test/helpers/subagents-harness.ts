@@ -70,6 +70,12 @@ export function makeRootAndChild() {
 /** Pull the text payload out of a tool's `execute` return value. */
 export const textOf = (r: any): string => r.content[0].text;
 
+/** Resolves once the finish check has settled the record: a quiet tick after its run. */
+export function settledRecord(id: string): Promise<string> | undefined {
+  const manager = (globalThis as Record<symbol, { getRecord(id: string): { promise?: Promise<string> } | undefined } | undefined>)[MANAGER_KEY];
+  return manager?.getRecord(id)?.promise;
+}
+
 /** Extract the Agent ID from a background-spawn tool result, asserting it's present. */
 export function agentIdOf(spawn: any): string {
   const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
