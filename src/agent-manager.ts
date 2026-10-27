@@ -312,8 +312,11 @@ export class AgentManager {
   private runningBackground = 0;
   /** Open run lifecycles, keyed by record id. A record has at most one; `abort()` and `dispose()` reach it here. */
   private lives = new Map<string, Life>();
-  /** Records with a wake in flight: sent, and no run has started yet. `decide` treats them as busy. */
-  private waking = new Set<string>();
+  /**
+   * Records with a wake in flight: sent, and no run has started yet. `decide` treats them as busy. The value is the
+   * user input the wake carries, named in the result if the record finishes before the wake is observed.
+   */
+  private waking = new Map<string, string | undefined>();
   /** Pools of older activations whose runs still count against `maxConcurrent`. */
   private drainingPools: DrainingPool[] = [];
   /** Ids whose hand-over item is being adopted: input for them is parked here until `endAdoption`. */
@@ -730,7 +733,7 @@ export class AgentManager {
     if (session && record.held?.length) {
       const held = record.held.join("\n\n");
       record.held = undefined;
-      this.wake(record, session, held);
+      this.wake(record, session, held, { input: true });
       life.quiet = undefined;
       return;
     }
@@ -760,10 +763,15 @@ export class AgentManager {
   /**
    * Starts a run, or steers the running one, with a custom message the fork owns. The record counts as busy from the
    * send until the message's `message_start` is observed on the session, or until the send throws. `delivered` runs at
-   * the observation.
+   * the observation. An `input` wake carries user input, so a finish that drops it names it.
    */
-  private wake(record: AgentRecord, session: AgentSession, content: string, delivered?: () => void): void {
-    this.waking.add(record.id);
+  private wake(
+    record: AgentRecord,
+    session: AgentSession,
+    content: string,
+    { delivered, input = false }: { delivered?: () => void; input?: boolean } = {},
+  ): void {
+    this.waking.set(record.id, input ? content : undefined);
     const off = session.subscribe((event) => {
       if (event.type !== "message_start" || event.message.role !== "custom") return;
       if (event.message.customType !== WAKE_TYPE || event.message.content !== content) return;
@@ -788,8 +796,10 @@ export class AgentManager {
     const parent = child.parentAgentId ? this.agents.get(child.parentAgentId) : undefined;
     const session = parent?.session;
     if (!parent || !session) return;
-    this.wake(parent, session, content, () => {
-      child.resultDelivered = true;
+    this.wake(parent, session, content, {
+      delivered: () => {
+        child.resultDelivered = true;
+      },
     });
   }
 
@@ -814,8 +824,9 @@ export class AgentManager {
     clearInterval(life.tick);
     record.ending = false;
     record.waiting = undefined;
+    const unsent = this.waking.get(record.id);
     this.waking.delete(record.id);
-    const dropped = this.dropUndelivered(record);
+    const dropped = this.dropUndelivered(record, unsent);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
     const text = dropped ? [finished, dropped].filter(Boolean).join("\n\n") : finished;
     if (dropped) record.result = text;
@@ -824,10 +835,11 @@ export class AgentManager {
 
   /**
    * Drops input a finishing record will never run: parked input, input queued before the session existed, and the
-   * session's queued messages. Returns a note naming them for the result, or "" when nothing was dropped.
+   * session's queued messages, and the input an unobserved wake carried. Returns a note naming them for the result, or
+   * "" when nothing was dropped.
    */
-  private dropUndelivered(record: AgentRecord): string {
-    const lost = [...(record.held ?? []), ...(record.pendingSteers ?? [])];
+  private dropUndelivered(record: AgentRecord, unsent?: string): string {
+    const lost = [...(unsent ? [unsent] : []), ...(record.held ?? []), ...(record.pendingSteers ?? [])];
     record.held = undefined;
     record.pendingSteers = undefined;
     const queued = record.session?.clearQueue();

@@ -877,7 +877,7 @@ describe("AgentManager — abort() state machine", () => {
 
 type Internals = {
   lives: Map<string, { lastRun?: unknown; tick?: unknown }>;
-  waking: Set<string>;
+  waking: Map<string, string | undefined>;
   decide(record: AgentRecord, life: unknown): void;
 };
 const internals = (m: AgentManager) => m as unknown as Internals;
@@ -1517,6 +1517,16 @@ describe("AgentManager — finish after a wake steer the aborted run never drain
     endLoop();
     expect(await settlesWithin(record.promise, 1000)).toBe("settled");
     expect(child.resultDelivered).toBe(false);
+  });
+
+  it("names held input whose wake the aborted loop never drained", async () => {
+    const { id, record, endLoop } = await streamingRun();
+    record.held = ["also run the linter"];
+    endLoop();
+    await vi.waitFor(() => expect(internals(manager).waking.has(id)).toBe(true));
+    manager.abort(id);
+    expect(await settlesWithin(record.promise, 1000)).toBe("settled");
+    expect(record.result).toContain('"also run the linter"');
   });
 
   it("settles a soft-limited record whose queued wake the hard stop never drained", async () => {
