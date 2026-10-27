@@ -883,15 +883,22 @@ type Internals = {
 };
 const internals = (m: AgentManager) => m as unknown as Internals;
 
-/** A session the test drives: `emit` reaches its subscribers. Its run settles only when the test settles it. */
+/**
+ * A session the test drives. `emit` walks the live listener array as pi's `_emit` does, so an unsubscribe during an emit
+ * skips the listener after it. Its run settles only when the test settles it.
+ */
 const liveSession = () => {
-  const listeners = new Set<(event: unknown) => void>();
+  const listeners: ((event: unknown) => void)[] = [];
   return {
     ...mockSession(),
     subscribe: (listener: (event: unknown) => void) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
+      listeners.push(listener);
+      return () => {
+        const index = listeners.indexOf(listener);
+        if (index >= 0) listeners.splice(index, 1);
+      };
     },
+    listenerCount: () => listeners.length,
     emit: (event: unknown) => {
       for (const listener of listeners) listener(event);
     },
@@ -2513,6 +2520,19 @@ describe("AgentManager — PR119 r1 findings", () => {
     expect(session.sendCustomMessage).toHaveBeenCalledTimes(2);
     expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "child result" }), expect.anything());
     expect(manager.resultReachedParent(child)).toBe(true);
+  });
+
+  it("a wake's observation does not make the listener after it miss the message_start", async () => {
+    const { id, session } = await parentWithSession();
+    const before = session.listenerCount();
+    manager.deliverNested(nestedChild(id), "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    const seen: string[] = [];
+    session.subscribe((event) => seen.push((event as { type: string }).type));
+    observeLastCustom(session);
+    await flush();
+    expect(seen).toEqual(["message_start"]);
+    expect(session.listenerCount()).toBe(before + 1);
   });
 
   it("a nested result the settled parent refuses is logged and stays pullable", async () => {

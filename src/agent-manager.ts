@@ -961,10 +961,13 @@ export class AgentManager {
     } = {},
   ): void {
     this.waking.set(record.id, input ? content : undefined);
+    let observed = false;
     const off = session.subscribe((event) => {
-      if (event.type !== "message_start" || event.message.role !== "custom") return;
+      if (observed || event.type !== "message_start" || event.message.role !== "custom") return;
       if (event.message.customType !== customType || batchOf(event.message.details) !== batch) return;
-      off();
+      observed = true;
+      // pi's emit walks its live listener array: splicing this listener out mid-emit would skip the one after it.
+      queueMicrotask(off);
       this.waking.delete(record.id);
       delivered?.();
     });
