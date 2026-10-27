@@ -2501,4 +2501,17 @@ describe("AgentManager — PR119 r1 findings", () => {
     expect(child.resultDelivered).toBe(false);
   });
 
+  it("a rejected batch send does not leave its children reading as reached by the parent", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    session.sendCustomMessage.mockImplementationOnce(() => Promise.reject(new Error("boom")));
+    manager.deliverNested(child, "child result");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    await flush();
+    expect(manager.resultReachedParent(child)).toBe(false);
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(2);
+    expect(session.sendCustomMessage).toHaveBeenLastCalledWith(expect.objectContaining({ content: "child result" }), expect.anything());
+    expect(manager.resultReachedParent(child)).toBe(true);
+  });
 });

@@ -936,7 +936,8 @@ export class AgentManager {
   /**
    * Starts a run, or steers the running one, with a custom message the fork owns. The record counts as busy from the
    * send until the message's `message_start` is observed on the session, or until the send throws. `delivered` runs at
-   * the observation. An `input` wake carries user input, so a finish that drops it names it.
+   * the observation; `failed` runs when the send throws. An `input` wake carries user input, so a finish that drops it
+   * names it.
    */
   private wake(
     record: AgentRecord,
@@ -944,11 +945,19 @@ export class AgentManager {
     content: string,
     {
       delivered,
+      failed,
       input = false,
       customType = WAKE_TYPE,
       display = false,
       batch = `${record.id}:${++wakeSeq}`,
-    }: { delivered?: () => void; input?: boolean; customType?: string; display?: boolean; batch?: string } = {},
+    }: {
+      delivered?: () => void;
+      failed?: () => void;
+      input?: boolean;
+      customType?: string;
+      display?: boolean;
+      batch?: string;
+    } = {},
   ): void {
     this.waking.set(record.id, input ? content : undefined);
     const off = session.subscribe((event) => {
@@ -964,6 +973,7 @@ export class AgentManager {
         off();
         this.waking.delete(record.id);
         console.warn(`[pi-subagents] wake ${record.id} failed: ${err instanceof Error ? err.message : String(err)}`);
+        failed?.();
       });
   }
 
@@ -1021,6 +1031,12 @@ export class AgentManager {
         for (const entry of entries) {
           if (!this.nestedInFlight.delete(entry.child)) continue;
           entry.child.resultDelivered = true;
+        }
+      },
+      failed: () => {
+        // A send that never reached the parent: its children go back to a batch, unless the parent's finish named them.
+        for (const entry of entries) {
+          if (this.nestedInFlight.delete(entry.child)) this.deliverNested(entry.child, entry.content);
         }
       },
     });
