@@ -1124,6 +1124,86 @@ describe("AgentManager — deliver()", () => {
     expect(onSteered).toHaveBeenCalledWith(expect.objectContaining({ id }), "kept");
   });
 
+  it("does not report a refused record to onSteered", async () => {
+    const onSteered = vi.fn();
+    manager = new AgentManager(undefined, undefined, undefined, undefined, undefined, onSteered);
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    await manager.getRecord(id)!.promise;
+    manager.getRecord(id)!.ownerAborted = true;
+    expect(await manager.steer(id, "late")).toBe(false);
+    expect(onSteered).not.toHaveBeenCalled();
+  });
+
+  it("shares one reopen between concurrent restores", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    await manager.getRecord(id)!.promise;
+    vi.mocked(createChildSession).mockClear().mockResolvedValue(mockSession());
+    const [a, b] = await Promise.all([manager.restoreSession(id), manager.restoreSession(id)]);
+    expect(createChildSession).toHaveBeenCalledTimes(1);
+    expect(a).toBe(b);
+  });
+
+  it("two concurrent messages to a finished agent: one resumes it, the other steers the resumed run", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    await manager.getRecord(id)!.promise;
+    const child = { ...mockSession(), prompt: vi.fn(() => Promise.resolve()) };
+    vi.mocked(createChildSession).mockClear().mockResolvedValue(child);
+    vi.mocked(resumeAgent).mockClear().mockImplementation(() => new Promise(() => {}));
+    const outcomes = await Promise.all([manager.deliver(id, "one"), manager.deliver(id, "two")]);
+    expect([...outcomes].sort()).toEqual(["delivered", "resumed"]);
+    expect(createChildSession).toHaveBeenCalledTimes(1);
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    expect(child.prompt).toHaveBeenCalledWith(expect.any(String), { streamingBehavior: "steer" });
+  });
+
+  it("logs parked input whose flush is refused", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.transition = "teardown";
+    expect(await manager.deliver(id, "parked")).toBe("held");
+    record.childSettings = undefined; // the reopen will fail
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    (manager as unknown as { endTransition(r: AgentRecord): void }).endTransition(record);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining(`dropped 1 input(s) parked for ${id}`)));
+    warn.mockRestore();
+  });
+
+  it("logs input parked during a teardown when the manager shuts down, and never resumes it", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.transition = "teardown";
+    expect(await manager.deliver(id, "parked")).toBe("held");
+    vi.mocked(resumeAgent).mockClear();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await manager.dispose();
+    (manager as unknown as { endTransition(r: AgentRecord): void }).endTransition(record);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`dropped 1 input(s) parked for ${id} during shutdown`));
+    expect(resumeAgent).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("logs input parked for an adoption that never ends when the manager shuts down", async () => {
+    manager = new AgentManager();
+    manager.beginAdoption("adopt-1");
+    expect(await manager.deliver("adopt-1", "parked")).toBe("held");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await manager.dispose();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("dropped 1 input(s) parked for adopt-1 during shutdown"));
+    warn.mockRestore();
+  });
+
   it("delivers to a draining record through the pool's deliver", async () => {
     manager = new AgentManager();
     const deliver = vi.fn(() => Promise.resolve("delivered" as const));

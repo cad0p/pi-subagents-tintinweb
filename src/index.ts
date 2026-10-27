@@ -946,8 +946,11 @@ export default function (pi: ExtensionAPI) {
    */
   async function adoptItem(item: HandoverItem, notify: boolean): Promise<boolean> {
     if (shutDown) return false;
-    manager.adopt(item, notify);
-    manager.endAdoption(item.dto.id);
+    try {
+      manager.adopt(item, notify);
+    } finally {
+      manager.endAdoption(item.dto.id);
+    }
     agentActivity.delete(item.dto.id);
     widget.markFinished(item.dto.id);
     return true;

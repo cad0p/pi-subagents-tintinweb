@@ -643,7 +643,19 @@ export class AgentManager {
     record.transition = undefined;
     const parked = record.pendingInput;
     record.pendingInput = undefined;
-    if (parked) void this.deliver(record.id, parked.join("\n\n"));
+    if (parked) this.flushParked(record.id, parked);
+  }
+
+  /** Delivers input that was answered "held" earlier. A refusal now cannot reach the sender, so it is logged. */
+  private flushParked(id: string, parked: string[]): void {
+    const warn = (why: string) =>
+      console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id}: ${why}`);
+    this.deliver(id, parked.join("\n\n")).then(
+      (outcome) => {
+        if (outcome === false) warn("refused after the hand-over ended");
+      },
+      (err: unknown) => warn(err instanceof Error ? err.message : String(err)),
+    );
   }
 
   /**
@@ -972,7 +984,7 @@ export class AgentManager {
   endAdoption(id: string): void {
     const parked = this.adopting.get(id) ?? [];
     this.adopting.delete(id);
-    if (parked.length > 0) void this.deliver(id, parked.join("\n\n"));
+    if (parked.length > 0) this.flushParked(id, parked);
   }
 
   isAdopting(id: string): boolean {
@@ -1251,6 +1263,11 @@ export class AgentManager {
       if (parked.length > 0) console.warn(`[pi-subagents] dropped ${parked.length} input(s) parked for ${id} during shutdown`);
     }
     this.adopting.clear();
+    for (const [id, record] of this.agents) {
+      const count = record.pendingInput?.length ?? 0;
+      if (count > 0) console.warn(`[pi-subagents] dropped ${count} input(s) parked for ${id} during shutdown`);
+      record.pendingInput = undefined;
+    }
     // Clear queue
     this.queue = [];
     // An in-flight run keeps its session file for the crash-recovery follow-up;
