@@ -180,6 +180,12 @@ export interface AgentRecord {
   waiting?: { since: number; items: string[] };
   /** The lifecycle's max_turns counter. Counts every run; a resume starts a fresh one. */
   turnBudget?: TurnBudget;
+  /** The working directory the run started in. The run cap reads its background-work policy here, at spawn and at resume. */
+  cwd?: string;
+  /** Set when the run ended at the wall-time cap. The status stays `completed`; the label and notification read this. */
+  limitReason?: "time";
+  /** Set when the cap's heads-up reached the run. The next settle that finds no pending input ends the lifecycle. */
+  capForced?: boolean;
   /** Set when the owning parent settled and aborted this nested child. Input is refused: nobody can read the answer. */
   ownerAborted?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */
