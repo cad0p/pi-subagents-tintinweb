@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Gate provider requests on pool slots so maxConcurrent counts running turns (closes #107) ([#108](https://github.com/cad0p/pi-subagents-tintinweb/pull/108))
 - *(subagents)* Cap every subagent lifecycle at maxBackgroundWait of wall time (closes #110) ([#111](https://github.com/cad0p/pi-subagents-tintinweb/pull/111))
 - *(subagents)* Nested children join the pool, drop the blocking wait, one get_subagent_result (closes #113) ([#114](https://github.com/cad0p/pi-subagents-tintinweb/pull/114))
+- *(subagents)* Nested results reach the parent as the main session's notification, batched (closes #83) ([#119](https://github.com/cad0p/pi-subagents-tintinweb/pull/119))
 
 ### 🐛 Bug Fixes
 
