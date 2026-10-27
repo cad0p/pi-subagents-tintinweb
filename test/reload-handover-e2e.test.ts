@@ -1317,6 +1317,105 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(sent.mock.calls.filter(([message]) => JSON.stringify(message).includes(childId))).toHaveLength(0);
   }, 20_000);
 
+  it("retries a kept nested result whose wake is refused after the reload, and delivers it once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    parentHold = new Promise<void>((resolve) => {
+      releaseParentHold = resolve;
+    });
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.session?.isStreaming).toBe(true), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The reload takes the kept child, then the first wake is refused: the old activation's failure must send it again.
+    let reloading: Promise<void> = Promise.resolve();
+    let refused = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!refused && message.customType === "subagent-notification") {
+        refused = true;
+        reloading = reloadRoot(root);
+        return reloading.then(() => Promise.reject(new Error("wake refused")));
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const starts: Array<{ customType?: string; content: unknown }> = [];
+    parentSession.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom") starts.push(event.message);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(refused).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const child = queued.mock.calls[0]?.[0];
+    if (!child) throw new Error("no child record");
+    const childId = child.id;
+    expect(taken.mock.results[0]?.value).toEqual([]);
+    // The retry reaches the streaming parent through the old activation; the old listener observes it when the parent's turn ends.
+    await vi.waitFor(() => expect(observed.filter((m) => JSON.stringify(m).includes(childId))).toHaveLength(1), { timeout: 10_000 });
+    releaseParentHold();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId))).toHaveLength(1);
+    expect(child.resultDelivered).toBe(true);
+  }, 20_000);
+
+  it("hands a nested result whose wake is refused after the take across /reload to the parent once", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    mkdirSync(join(tmp, "agents"), { recursive: true });
+    writeFileSync(join(tmp, "agents", "nester.md"), "---\ndescription: delegates to general-purpose\nallowed_subagents: general-purpose\n---\nYou delegate.\n");
+    parentNests = true;
+    parentLeavesChild = true;
+    parentSpawnsOnRelease = true;
+    await root.prompt("spawn-parent-now");
+    const parentId = liveRegistry().listAgents()[0]?.id ?? "";
+    const draining = publishedRoot().manager;
+    releaseParent();
+    await childStarted;
+    await vi.waitFor(() => expect(draining.getRecord(parentId)?.waiting).toBeDefined(), { timeout: 10_000 });
+    const parentSession = draining.getRecord(parentId)?.session;
+    if (!parentSession) throw new Error("no parent session");
+    const sendToParent = parentSession.sendCustomMessage.bind(parentSession);
+    // The first batch wake is refused only after the reload has taken the child: the old activation's failure finds nothing in flight.
+    let reloading: Promise<void> = Promise.resolve();
+    let refused = false;
+    const observed: unknown[] = [];
+    vi.spyOn(parentSession, "sendCustomMessage").mockImplementation((message, options) => {
+      if (!refused && message.customType === "subagent-notification") {
+        refused = true;
+        reloading = reloadRoot(root);
+        return reloading.then(() => Promise.reject(new Error("wake refused")));
+      }
+      observed.push(message);
+      return sendToParent(message, options);
+    });
+    const queued = vi.spyOn(draining, "deliverNested");
+    const taken = vi.spyOn(draining, "takeNestedPending");
+    release();
+    await vi.waitFor(() => expect(refused).toBe(true), { timeout: 10_000 });
+    await reloading;
+    const childId = queued.mock.calls[0]?.[0].id ?? "";
+    expect(childId).not.toBe("");
+    expect(taken.mock.results[0]?.value).toEqual([{ id: childId, target: parentId }]);
+    await vi.waitFor(() => expect(publishedRoot().manager.getRecord(childId)?.resultDelivered).toBe(true), { timeout: 10_000 });
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
+    expect(observed.filter((message) => JSON.stringify(message).includes(childId))).toHaveLength(1);
+    // The old activation's failure finds the child taken: it does not hand the child on again, so it stays the one deliverNested call.
+    expect(queued.mock.calls.filter(([record]) => record.id === childId)).toHaveLength(1);
+  }, 20_000);
+
   it("delivers a nested result once when its wake was queued on a streaming parent across /reload", async () => {
     const root = session;
     if (!root) throw new Error("no session");
