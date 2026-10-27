@@ -22,6 +22,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listSubagentWork } from "../src/background-work.js";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
 import { HANDOVER_KEY, type HandoverEvent, publishHandovers, type ReloadHandover, takeHandovers } from "../src/reload-handover.js";
@@ -1362,11 +1363,21 @@ describe("subagents across a real /reload (faux provider)", () => {
     // The wake is queued on the shared, streaming session: the old activation's listener still observes it, so no nudge.
     expect(taken.mock.results[0]?.value).toEqual([]);
     const child = draining.getRecord(childId);
+    if (!child) throw new Error("no child record");
+    // Until this activation's listener observes the queued wake, the old manager holds the child in flight: its parent's pull
+    // answers "already delivered", and the background-work provider still lists it.
+    const sid = child.spawnerSessionId ?? "";
+    const listed = () => listSubagentWork(draining, { sessionId: sid, sessionIds: [sid], nowMs: Date.now() }).map((item) => item.id);
+    expect(draining.resultReachedParent(child)).toBe(true);
+    expect(listed()).toContain(childId);
 
     releaseParentHold();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.status).toBe("completed"), { timeout: 10_000 });
     expect(starts.filter((m) => m.customType === "subagent-notification" && JSON.stringify(m.content).includes(childId))).toHaveLength(1);
-    expect(child?.resultDelivered).toBe(true);
+    expect(child.resultDelivered).toBe(true);
+    expect(listed()).not.toContain(childId);
+    expect(draining.resultReachedParent(child)).toBe(false);
+    expect(liveRegistry().listAgents().find((r) => r.id === parentId)?.result ?? "").not.toContain("not delivered");
   }, 20_000);
 
   it("delivers a nested result once when its wake starts a run on an idle parent across /reload", async () => {
