@@ -177,8 +177,12 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
         fauxAssistantMessage([fauxToolCall("SendMessage", { to: nestedId, message: "STEER-NOTE" })]),
       );
     }
+    if (results.length === 2 && last?.role === "toolResult") {
+      // The child is still gated: the parent ends its turn and is woken when it settles.
+      return fauxAssistantMessage([fauxText("PARENT-WAITING")]);
+    }
     if (results.length === 2) {
-      return fauxAssistantMessage([fauxToolCall("get_subagent_result", { agent_id: nestedId, wait: true })]);
+      return fauxAssistantMessage([fauxToolCall("get_subagent_result", { agent_id: nestedId })]);
     }
     parentSawChild = JSON.stringify(results[2]?.content ?? "").includes("CHILD-DONE");
     return fauxAssistantMessage([fauxText("PARENT-FINISHED")]);

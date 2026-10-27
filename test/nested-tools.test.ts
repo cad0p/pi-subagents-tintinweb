@@ -1,7 +1,7 @@
 /**
  * nested-tools.test.ts — the child-safe delegation tool set: depth gating,
  * the per-agent allowlist, ownership scoping, the shared model scope, usage
- * folding, the abortable wait, and the checkpoint tool.
+ * folding, the result tool, and the checkpoint tool.
  *
  * The manager is faked so each tool's decision is asserted in isolation; the
  * real-session facts (which definition pi keeps, what the child's registry
@@ -302,52 +302,6 @@ describe("nested result / steer / checkpoint tools", () => {
     expect(textOf(await run(1, { agent_id: "foreign" }))).toContain("not owned by this parent");
   });
 
-  it("wait: true resolves once the child settles", async () => {
-    const record = {
-      id: "child-1",
-      type: "scout",
-      description: "d",
-      status: "queued",
-      parentAgentId: "parent-1",
-      result: undefined as string | undefined,
-      promise: undefined as Promise<string> | undefined,
-    } as AgentRecord;
-    records.set("child-1", record);
-    setTimeout(() => {
-      record.status = "running";
-      record.promise = Promise.resolve().then(() => {
-        record.status = "completed";
-        record.result = "queued done";
-        return "queued done";
-      });
-    }, 10);
-
-    const result = await run(1, { agent_id: "child-1", wait: true });
-    expect(textOf(result)).toContain("queued done");
-  });
-
-  it("cancelling the wait does not abort or consume the child", async () => {
-    let settle: (() => void) | undefined;
-    const record = {
-      id: "child-1",
-      status: "running",
-      parentAgentId: "parent-1",
-      promise: new Promise<void>((resolve) => { settle = resolve; }),
-    } as AgentRecord;
-    records.set("child-1", record);
-
-    const controller = new AbortController();
-    const outcome = run(1, { agent_id: "child-1", wait: true }, controller.signal).then(
-      () => "resolved",
-      (err: unknown) => (err as Error).name,
-    );
-    controller.abort();
-
-    expect(await Promise.race([outcome, new Promise((r) => setTimeout(() => r("timed-out"), 100))])).toBe("AbortError");
-    expect(record.status).toBe("running");
-    settle?.();
-  });
-
   it("SendMessage hands the message to manager.deliver and reports the outcome", async () => {
     records.set("ready", { id: "ready", status: "running", parentAgentId: "parent-1" } as AgentRecord);
     records.set("pending", { id: "pending", status: "queued", parentAgentId: "parent-1" } as AgentRecord);
@@ -399,6 +353,11 @@ describe("nested tool set shape", () => {
     const send = tools().find((tool) => tool.name === "SendMessage");
     const schema = send?.parameters as unknown as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(["message", "to"]);
+  });
+
+  it("get_subagent_result takes only agent_id, with no wait option", () => {
+    const schema = tools().find((tool) => tool.name === "get_subagent_result")?.parameters as unknown as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties)).toEqual(["agent_id"]);
   });
 
   it("offers no model, thinking, or run_in_background parameter", () => {

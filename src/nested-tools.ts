@@ -12,16 +12,15 @@
  * branch's own config root instead of the process-global one.
  *
  * This fork launches background runs only, so — unlike upstream's foreground
- * path — the Agent tool always returns an id. `get_subagent_result` therefore
- * keeps the fork's full report (turn/max-turns header, latest checkpoint,
- * artifact paths) and adds an opt-in `wait` so a parent can block on its child
- * without polling; cancelling that wait leaves the child running.
+ * path — the Agent tool always returns an id. Nothing blocks on a child: a
+ * parent ends its turn and is woken with each child's result, or checks it with
+ * `get_subagent_result` without waiting. The report keeps the fork's full format
+ * (turn/max-turns header, latest checkpoint, artifact paths).
  */
 
 import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { abortable } from "./abortable.js";
 import { type ResumeCallbacks } from "./agent-manager.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -137,11 +136,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     label: "Agent",
     description:
       "Launch a child-safe nested subagent for bounded delegated work. Runs in the background and returns an " +
-      "agent ID; poll it with get_subagent_result. Only the agent types this parent is allowed to delegate to " +
+      "agent ID; check it with get_subagent_result. Only the agent types this parent is allowed to delegate to " +
       "are accepted, and nesting is depth-limited.",
     promptSnippet: "Launch a nested subagent for bounded delegated work",
     promptGuidelines: [
-      "Nested subagents run in the background: keep working, then read the result with get_subagent_result (use wait to block).",
+      "Nested subagents run in the background. End your turn after launching them: you are woken when each one settles. Use get_subagent_result to check one without waiting.",
       "Never delegate understanding — hand over the exact task, files, and what you already know.",
     ],
     parameters: Type.Object({
@@ -302,29 +301,16 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     name: "get_subagent_result",
     label: "Get Nested Agent Result",
     description:
-      "Check a nested agent owned by this parent, or block until it settles with wait: true. " +
-      "Cancelling the wait leaves the agent running.",
-    promptSnippet: "Check or wait for a nested subagent's result",
+      "Report a nested agent owned by this parent as it stands now. It never waits: a running agent is " +
+      "reported as running, and the parent is woken when it settles.",
+    promptSnippet: "Check a nested subagent's result without waiting",
     parameters: Type.Object({
       agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool." }),
-      wait: Type.Optional(
-        Type.Boolean({ description: "If true, block until the agent settles before reporting. Default: false." }),
-      ),
     }),
-    execute: async (_toolCallId, params, signal) => {
+    execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
-      }
-      // Cancellation (the parent's tool call is aborted) stops only this wait;
-      // the nested child keeps running and stays fetchable. A queued record has
-      // no promise until the manager starts it, so poll — abortably — until it
-      // leaves the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
-        while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
-        }
-        if (record.promise) await abortable(record.promise, signal);
       }
       // A settled result handed to the parent is delivered.
       if (record.status !== "running" && record.status !== "queued") record.resultDelivered = true;
