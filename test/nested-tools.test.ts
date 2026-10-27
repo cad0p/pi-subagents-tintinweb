@@ -299,7 +299,9 @@ describe("nested result / steer / checkpoint tools", () => {
     records.set("foreign", { id: "foreign", status: "running", parentAgentId: "other", result: "secret" } as AgentRecord);
 
     expect(textOf(await run(1, { agent_id: "child-1" }))).toContain("done");
-    expect(textOf(await run(1, { agent_id: "foreign" }))).toContain("not owned by this parent");
+    const foreign = await run(1, { agent_id: "foreign" });
+    expect(textOf(foreign)).toBe(`Agent not found: "foreign". It may have been cleaned up.`);
+    expect((foreign as { isError?: boolean }).isError).toBe(true);
   });
 
   it("SendMessage hands the message to manager.deliver and reports the outcome", async () => {

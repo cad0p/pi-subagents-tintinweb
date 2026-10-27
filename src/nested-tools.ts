@@ -22,6 +22,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { type ResumeCallbacks } from "./agent-manager.js";
+import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -30,7 +31,6 @@ import { isolationParam, resolveAgentInvocationConfig } from "./invocation-confi
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { renderAgentReport } from "./result-report.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -95,11 +95,6 @@ export interface NestedToolContext {
 
 function textResult(text: string, isError = false) {
   return { content: [{ type: "text" as const, text }], isError, details: undefined };
-}
-
-/** A record is reachable only through the agent that spawned it. */
-function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): record is AgentRecord {
-  return record?.parentAgentId === parentAgentId;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -309,12 +304,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId)) {
-        return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
-      }
-      // A settled result handed to the parent is delivered.
-      if (record.status !== "running" && record.status !== "queued") record.resultDelivered = true;
-      return textResult(renderAgentReport(record), record.status === "error");
+      if (!isOwnedRecord(record, context.parentAgentId)) return agentNotFoundResponse(params.agent_id);
+      consumeResult(record);
+      return agentReportResponse(record);
     },
   });
 
@@ -331,7 +323,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.to);
-      if (!ownsRecord(record, context.parentAgentId)) {
+      if (!isOwnedRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.to}".`, true);
       }
       const outcome = await context.manager.deliver(params.to, params.message, {
