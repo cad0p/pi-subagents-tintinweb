@@ -16,8 +16,10 @@ import { fileURLToPath } from "node:url";
 import type { Context } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
 import {
   agentCall,
+  type FauxReply,
   type ManagerHandle,
   type PrintModeRun,
   routeBySession,
@@ -48,6 +50,12 @@ function manager(): ManagerHandle | undefined {
 /** Pool slots held, read from the records. The published handle has no slot count. */
 function slotsHeld(): number {
   return manager()?.listAgents().filter((r) => r.holdsSlot === true).length ?? 0;
+}
+
+/** The root activation's route: its manager, which owns deliver, and its pi, whose bus carries the stop RPC. */
+function rootRoute(): RootRoute | undefined {
+  const published = Reflect.get(globalThis, IMPL_KEY) as ImplV1 | undefined;
+  return published?.root();
 }
 
 function hook(): BgWakeHook | undefined {
@@ -100,6 +108,41 @@ function watchedRoute(seen: string[], subagent: (context: Context) => string) {
   });
 }
 
+/** Stops an agent through the root bus, the way a cross-extension caller does. */
+function stopAgent(agentId: string): Promise<unknown> {
+  const events = rootRoute()?.pi.events;
+  if (!events) throw new Error("no root route");
+  const requestId = `stop-${agentId}`;
+  return new Promise((resolve) => {
+    events.on(`subagents:rpc:stop:reply:${requestId}`, resolve);
+    events.emit("subagents:rpc:stop", { requestId, agentId });
+  });
+}
+
+/** Whether the calling session already has the answer to its Agent spawn. */
+function spawned(context: Context): boolean {
+  return context.messages.some(
+    (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
+  );
+}
+
+/**
+ * The root delegates to the nester. The nester delegates to the watcher, ends its turn while the watcher runs, and
+ * answers only once the watcher's result reaches it. The root is marked by its own prompt, which the nester never sees.
+ */
+function nestedRespond(context: Context): FauxReply {
+  if (!(context.tools ?? []).some((t) => t.name === "Agent")) return watcherReply(context);
+  if (mentions(context, "ROOT: delegate.")) {
+    return spawned(context)
+      ? "parent done"
+      : agentCall({ description: "nester", prompt: "NESTED: delegate.", subagent_type: "nester" });
+  }
+  if (mentions(context, "wake result")) return "nester final";
+  return spawned(context)
+    ? "nester waits"
+    : agentCall({ description: "watched", prompt: "Work.", subagent_type: "watcher" });
+}
+
 describe("background wake — full stack", () => {
   let run: PrintModeRun | undefined;
   let cwd: string;
@@ -148,5 +191,105 @@ describe("background wake — full stack", () => {
     expect(notifications(session)[0]).toContain("wake result");
   });
 
-  // @@END@@
+  it("T-2: an item removed 300 ms before the wake does not settle the child in between", async () => {
+    const seen: string[] = [];
+    const pending = runPrintMode({
+      prompt: "Delegate.",
+      cwd,
+      persistSession: true,
+      respond: watchedRoute(seen, watcherReply),
+    });
+    try {
+      await waitForSettle(() => expect(liveRecord("watched")?.waiting).toBeDefined());
+      const h = hook();
+      if (h) h.active = false;
+      hook()?.wakeIn(300, "WAKE");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const record = liveRecord("watched");
+      expect(record?.status).toBe("running");
+      expect(record?.settled).not.toBe(true);
+      expect(seen.some((c) => c.includes("wake result"))).toBe(false);
+    } catch (e) {
+      hook()?.wakeIn(0, "WAKE");
+      throw e;
+    } finally {
+      run = await pending;
+    }
+    const session = run.parentSession;
+    await waitForSettle(() => expect(notifications(session)).toHaveLength(1));
+    expect(notifications(session)[0]).toContain("wake result");
+  });
+
+  it("T-3: input delivered during agent_settled is not lost", async () => {
+    const seen: string[] = [];
+    const delivered: Promise<unknown>[] = [];
+    // The child's first reply arms the end-of-run hold: the input lands during agent_settled.
+    const reply = (context: Context): string => {
+      if (mentions(context, "HELD")) return "held result";
+      const h = hook();
+      if (h) {
+        h.onSettled = () => {
+          h.onSettled = undefined;
+          const id = liveRecord("watched")?.id;
+          const manager = rootRoute()?.manager;
+          if (id && manager) delivered.push(manager.deliver(id, "HELD"));
+        };
+      }
+      return "first result";
+    };
+    run = await runPrintMode({ prompt: "Delegate.", cwd, persistSession: true, respond: watchedRoute(seen, reply) });
+    await Promise.all(delivered);
+    const session = run.parentSession;
+    await waitForSettle(() => expect(notifications(session)).toHaveLength(1));
+    expect(notifications(session)[0]).toContain("held result");
+    expect(notifications(session)[0]).not.toContain("first result");
+  });
+
+  it("T-4: abort while waiting settles the child at once as stopped, and frees its slot", async () => {
+    const seen: string[] = [];
+    const pending = runPrintMode({
+      prompt: "Delegate.",
+      cwd,
+      persistSession: true,
+      respond: watchedRoute(seen, watcherReply),
+    });
+    try {
+      await waitForSettle(() => expect(liveRecord("watched")?.waiting).toBeDefined());
+      const record = liveRecord("watched");
+      expect(await stopAgent(String(record?.id))).toEqual({ success: true });
+      await vi.waitFor(() => expect(record?.settled).toBe(true), { timeout: 500 });
+      expect(record?.status).toBe("stopped");
+      expect(record?.waiting).toBeUndefined();
+      expect(slotsHeld()).toBe(0);
+    } catch (e) {
+      hook()?.wakeIn(0, "WAKE");
+      throw e;
+    } finally {
+      run = await pending;
+    }
+    const session = run.parentSession;
+    await waitForSettle(() => expect(notifications(session)).toHaveLength(1));
+    expect(seen.some((c) => c.includes("wake result"))).toBe(false);
+  });
+
+  it("T-5: a nested parent waits on its running child and is woken by the child's result", async () => {
+    const pending = runPrintMode({ prompt: "ROOT: delegate.", cwd, persistSession: true, respond: nestedRespond });
+    try {
+      await waitForSettle(() => expect(liveRecord("watched")?.waiting).toBeDefined());
+      // Past the 1 s quiet window: a parent with no running child would have settled by now.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const parent = liveRecord("nester");
+      expect(parent?.settled).not.toBe(true);
+      expect(parent?.status).toBe("running");
+      hook()?.wakeIn(300, "WAKE");
+    } catch (e) {
+      hook()?.wakeIn(0, "WAKE");
+      throw e;
+    } finally {
+      run = await pending;
+    }
+    const session = run.parentSession;
+    await waitForSettle(() => expect(notifications(session)).toHaveLength(1));
+    expect(notifications(session)[0]).toContain("nester final");
+  });
 });
