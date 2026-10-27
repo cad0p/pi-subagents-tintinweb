@@ -369,6 +369,8 @@ export class AgentManager {
   private nestedBatches = new Map<string, NestedBatch>();
   /** Child records whose result is in a sent nested batch that the parent has not yet observed. */
   private nestedInFlight = new Set<AgentRecord>();
+  /** Parents whose wake pi accepted (queued, or deferred behind agent_settled) and that have not observed it. The session still runs it, so this activation's listener observes it. */
+  private acceptedWakes = new Set<string>();
   /** Consecutive failed nested sends per parent. Reset by an observed send and when the parent finishes. */
   private nestedSendFailures = new Map<string, number>();
   /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
@@ -973,10 +975,14 @@ export class AgentManager {
       // pi's emit walks its live listener array: splicing this listener out mid-emit would skip the one after it.
       queueMicrotask(off);
       this.waking.delete(record.id);
+      this.acceptedWakes.delete(record.id);
       delivered?.();
     });
     session
       .sendCustomMessage({ customType, content, display, details: { batch } }, { triggerTurn: true, deliverAs: "steer" })
+      .then(() => {
+        if (!observed) this.acceptedWakes.add(record.id);
+      })
       .catch((err: unknown) => {
         off();
         this.waking.delete(record.id);
@@ -1100,8 +1106,9 @@ export class AgentManager {
 
   /**
    * Takes the nested results still waiting for a reload hand-over: those debounced in a batch and those in a wake sent but not
-   * observed here. The timers are cleared. A wake sent to a streaming parent sits in that session's queue, or is the run the
-   * session just started, and the session outlives this activation: this activation's listener still observes it. Such a child
+   * observed here. The timers are cleared. A wake pi accepted for a streaming parent sits in that session's queue or is the run it just
+   * started; one deferred behind the parent's agent_settled is accepted at once. The session outlives this activation, so this
+   * activation's listener still observes either. Such a child
    * stays in flight, since a nudge would deliver it twice. Each other one comes back as a `{ id, target }` nudge, so the adopter
    * delivers it to its parent exactly once.
    */
@@ -1116,7 +1123,7 @@ export class AgentManager {
     this.nestedBatches.clear();
     for (const child of this.nestedInFlight) {
       const parentId = child.parentAgentId;
-      if (parentId && this.getRecord(parentId)?.session?.isStreaming) continue;
+      if (parentId && (this.getRecord(parentId)?.session?.isStreaming || this.acceptedWakes.has(parentId))) continue;
       this.nestedInFlight.delete(child);
       if (parentId) taken.push({ id: child.id, target: parentId });
     }
@@ -1155,6 +1162,7 @@ export class AgentManager {
     record.waiting = undefined;
     const unsent = this.waking.get(record.id);
     this.waking.delete(record.id);
+    this.acceptedWakes.delete(record.id);
     this.nestedSendFailures.delete(record.id);
     const notes = [this.dropUndelivered(record, unsent), this.nameUnobservedNested(record.id)].filter(Boolean);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
