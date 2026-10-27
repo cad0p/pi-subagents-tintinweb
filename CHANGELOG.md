@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 - *(reload)* Running subagents survive /reload (closes #90) ([#91](https://github.com/cad0p/pi-subagents-tintinweb/pull/91))
 - *(background-work)* List subagents as pi-subagents background work until delivered (closes #11) ([#96](https://github.com/cad0p/pi-subagents-tintinweb/pull/96))
+- *(lifecycle)* Tear child sessions down at settle and resume from file (closes #98) ([#99](https://github.com/cad0p/pi-subagents-tintinweb/pull/99))
 
 ### 🐛 Bug Fixes
 
