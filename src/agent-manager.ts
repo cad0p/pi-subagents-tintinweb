@@ -1017,9 +1017,10 @@ export class AgentManager {
       customType: NOTIFICATION_TYPE,
       display: true,
       delivered: () => {
+        // A child the parent's finish already named left the in-flight set: it is not delivered by this observation.
         for (const entry of entries) {
+          if (!this.nestedInFlight.delete(entry.child)) continue;
           entry.child.resultDelivered = true;
-          this.nestedInFlight.delete(entry.child);
         }
       },
     });
@@ -1102,11 +1103,26 @@ export class AgentManager {
     const nested = this.nestedBatches.get(record.id);
     if (nested) clearTimeout(nested.timer);
     this.nestedBatches.delete(record.id);
-    const dropped = this.dropUndelivered(record, unsent);
+    const notes = [this.dropUndelivered(record, unsent), this.nameUnobservedNested(record.id)].filter(Boolean);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
-    const text = dropped ? [finished, dropped].filter(Boolean).join("\n\n") : finished;
-    if (dropped) record.result = text;
+    const text = notes.length > 0 ? [finished, ...notes].join("\n\n") : finished;
+    if (notes.length > 0) record.result = text;
     void this.afterRun(record).then(() => life.resolve(text));
+  }
+
+  /**
+   * Names the nested results a finishing parent never got to deliver: those in a batch sent but not yet observed. Each leaves
+   * the in-flight set, so a late observation does not mark it delivered; it stays pullable. Returns a note naming them for
+   * the result, or "" when none.
+   */
+  private nameUnobservedNested(parentId: string): string {
+    const ids: string[] = [];
+    for (const child of this.nestedInFlight) {
+      if (child.parentAgentId !== parentId) continue;
+      this.nestedInFlight.delete(child);
+      ids.push(child.id);
+    }
+    return ids.length > 0 ? `Nested results not delivered because the agent finished first: ${ids.join(", ")}.` : "";
   }
 
   /**

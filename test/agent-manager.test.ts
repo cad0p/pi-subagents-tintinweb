@@ -2454,3 +2454,37 @@ describe("AgentManager — dispose() prunes worktrees only when asked (F5a)", ()
     expect(pruneWorktrees).toHaveBeenCalledWith(process.cwd());
   });
 });
+
+describe("AgentManager — PR119 r1 findings", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    vi.useRealTimers();
+  });
+  const nestedChild = (parentId: string, id = "c1") => ({ id, parentAgentId: parentId, resultDelivered: false, status: "completed" }) as unknown as AgentRecord;
+  const parentWithSession = async () => {
+    manager = new AgentManager();
+    const session = liveSession();
+    const id = spawnHosted(manager, session);
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBe(session));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    return { id, session };
+  };
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r));
+  };
+
+  it("a soft-limit settle names a batch sent but never observed in the parent's result", async () => {
+    const { id, session } = await parentWithSession();
+    const child = nestedChild(id);
+    manager.deliverNested(child, "child result");
+    manager.getRecord(id)!.turnBudget = { turns: 1, softLimitReached: true };
+    settleRun(manager, id);
+    await flush();
+    expect(session.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(manager.getRecord(id)?.settled).toBe(true);
+    expect(manager.resultReachedParent(child)).toBe(false);
+    expect(manager.getRecord(id)?.result ?? "").toContain("c1");
+  });
+
+});
