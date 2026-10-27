@@ -351,6 +351,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
+      // A settled result handed to the parent is delivered.
+      if (record.status !== "running" && record.status !== "queued") record.resultDelivered = true;
       return textResult(renderAgentReport(record), record.status === "error");
     },
   });

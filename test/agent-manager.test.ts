@@ -26,7 +26,7 @@ import { createChildSession, runAgent, setDefaultMaxTurns } from "../src/agent-r
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
-const mockCtx = { cwd: "/tmp" } as any;
+const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 
 /** Fake child session. `sessionManager.getSessionFile` is what the manager
  *  captures as the record's session file (undefined: nothing to retain). */
@@ -1276,11 +1276,34 @@ describe("AgentManager — session file retention", () => {
       resolve(done(session));
       await manager.getRecord(id)!.promise;
       expect(existsSync(file)).toBe(true);
+      // The completion nudge (index.ts) marks it delivered; this manager has no completion surface.
+      manager.getRecord(id)!.resultDelivered = true;
 
       vi.advanceTimersByTime(11 * 60_000);
 
       expect(manager.getRecord(id)).toBeUndefined();
       expect(existsSync(file)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an undelivered record past the grace window, listed as background work, and evicts it once delivered", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const { session } = sessionWithFile();
+      const { id, resolve } = spawnPending("general-purpose", session);
+      resolve(done(session));
+      await manager.getRecord(id)!.promise;
+
+      vi.advanceTimersByTime(11 * 60_000);
+      expect(manager.getRecord(id)).toBeDefined();
+
+      manager.getRecord(id)!.resultDelivered = true;
+      vi.advanceTimersByTime(60_000);
+      expect(manager.getRecord(id)).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

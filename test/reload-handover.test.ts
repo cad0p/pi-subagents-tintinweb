@@ -31,7 +31,7 @@ import { resumeAgent, runAgent } from "../src/agent-runner.js";
 type RunResult = Awaited<ReturnType<typeof runAgent>>;
 
 const mockPi = {} as unknown as ExtensionAPI;
-const mockCtx = { cwd: "/tmp" } as unknown as ExtensionContext;
+const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 
 const fakeSession = () =>
   ({ dispose: vi.fn(), sessionId: "child", sessionManager: { getSessionFile: () => undefined } }) as unknown as AgentSession;

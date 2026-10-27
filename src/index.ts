@@ -12,12 +12,14 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { sessionKey } from "@cad0p/pi-background-work";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, type SpawnOptions } from "./agent-manager.js";
 import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, runInChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -28,7 +30,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
+import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, takeHandovers, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, renderAgentReport, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -453,6 +455,10 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       // Nudge release paths swallow throws; surface the drop with the agent id.
       console.warn(`[pi-subagents] failed to send completion notification for ${record.id}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      // Delivered even when the send threw: a retry could duplicate the notification, and the
+      // pi-subagents background-work provider must not list the record forever.
+      record.resultDelivered = true;
     }
   }
 
@@ -739,7 +745,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
@@ -772,6 +778,7 @@ export default function (pi: ExtensionAPI) {
             if (!record) return false;
             if (record.status === "running" || record.status === "queued") return false;
             record.resultConsumed = true;
+            record.resultDelivered = true;
             cancelNudge(record.id);
             return true;
           },
@@ -785,6 +792,8 @@ export default function (pi: ExtensionAPI) {
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
     if (isRoot) {
+      // The getter reads the live root registry per listing, so a reload's replacement is picked up.
+      registerSubagentProvider(event.reason, () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY]);
       await adoptHandovers(ctx);
       stopStranded(ctx.sessionManager.getSessionId());
     }
@@ -878,8 +887,15 @@ export default function (pi: ExtensionAPI) {
     for (const h of held) {
       const taken = h.take();
       if (taken.unreported) pendingUsage.add(taken.unreported);
+      // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
+      // the idle loop, once this hand-over's pending nudges are known.
+      const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]
+        .filter((record) => record.spawnerSessionId === undefined && record.resultDelivered === undefined)
+        .map((record) => record.id);
       for (const spec of taken.queued) {
         try {
+          // A re-spawned spec takes spawnerSessionId from this session_start context. takeHandovers is keyed by
+          // the same session id, so the record is listed under the key it was handed over under.
           spawnTopLevel(pi, ctx, spec.type, spec.prompt, { ...spec.options, id: spec.id });
         } catch (err) {
           // The spec cannot start here (e.g. its cwd is gone): report it as a failed run rather than dropping it.
@@ -890,7 +906,14 @@ export default function (pi: ExtensionAPI) {
         if (!(await adoptItem(item, false))) return;
         h.removeItem(item);
       }
-      for (const id of h.takeNudged()) {
+      const pending = new Set(h.takeNudged());
+      for (const id of legacyIds) {
+        const record = manager.getRecord(id);
+        if (!record) continue;
+        record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
+        record.resultDelivered = legacyDelivered(record, pending);
+      }
+      for (const id of pending) {
         const record = manager.getRecord(id);
         if (record) sendIndividualNudge(record);
       }
@@ -1699,6 +1722,7 @@ Terse command-style prompts produce shallow, generic work.
       // running/queued one has none to cancel.
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
+        record.resultDelivered = true;
         cancelNudge(params.agent_id);
       }
 

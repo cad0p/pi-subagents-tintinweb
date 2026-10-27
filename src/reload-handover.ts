@@ -170,6 +170,15 @@ export function fromDto(dto: AgentDto, session?: AgentSession): AgentRecord {
   return { ...dto, session, abortController: new AbortController(), promise: Promise.resolve(dto.result ?? "") };
 }
 
+/**
+ * Whether a record from an older activation's hand-over, which carries no `resultDelivered`, is delivered. It is
+ * delivered when its result was consumed, or when it settled, was announced, and its nudge is not still pending in
+ * this hand-over (a nudge that is not pending was already sent). A missing flag never means announced.
+ */
+export function legacyDelivered(record: AgentRecord, pendingNudges: ReadonlySet<string>): boolean {
+  return record.resultConsumed === true || (record.settled === true && record.notified === true && !pendingNudges.has(record.id));
+}
+
 /** Error record for a queued spec the new activation cannot start (e.g. its cwd is gone), so the failure is reported. */
 export function failedSpecDto(spec: QueuedSpec, err: unknown): AgentDto {
   const now = Date.now();

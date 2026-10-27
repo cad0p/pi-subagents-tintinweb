@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createChildSession, getDefaultMaxTurns, normalizeMaxTurns, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
@@ -251,6 +252,14 @@ export class AgentManager {
       id,
       type,
       description: options.description,
+      // Captured once. A nested record is reported under its parent's child session (the parent's finish
+      // check queries that key); every other record under the spawning session. Never the root session:
+      // a spawn from a child-session context must not be listed under the main session's key.
+      // A nested spawn whose parent record is gone gets no key and is never listed; its parent cannot
+      // wait on it anyway.
+      spawnerSessionId: options.parentAgentId
+        ? this.getRecord(options.parentAgentId)?.sessionId
+        : sessionKey(ctx.sessionManager),
       status: "queued",
       toolUses: 0,
       startedAt: Date.now(),
@@ -610,7 +619,10 @@ export class AgentManager {
    */
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
-      if (record.parentAgentId === parentId) this.abort(id);
+      if (record.parentAgentId !== parentId) continue;
+      this.abort(id);
+      // The owning parent settled, so no one can pull this child's result: it is delivered.
+      record.resultDelivered = true;
     }
   }
 
@@ -696,7 +708,10 @@ export class AgentManager {
       return undefined;
     }
     // A resumed run is a new run: it is announced when it settles, whatever the prior run announced.
+    // It is also listed again by the pi-subagents provider until its own result is delivered. Cleared after
+    // onStart: a refused resume returns before this line and keeps the prior run's delivered flag.
     record.notified = false;
+    record.resultDelivered = false;
     // A started listener can stop the record synchronously; settle it through
     // the stopped tail instead of starting — and counting — a run that was
     // already stopped.
@@ -894,6 +909,9 @@ export class AgentManager {
       // run is still writing to, and the file has to outlive the run.
       if (record.settled === false) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
+      // Listed as background work until delivered, so kept until then. Bounded: a top-level result is
+      // delivered by its nudge, a nested one by its parent's pull or by the parent's settle.
+      if (!record.resultDelivered) continue;
       this.removeRecord(id, record);
     }
   }

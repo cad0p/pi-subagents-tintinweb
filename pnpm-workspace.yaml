@@ -19,3 +19,4 @@ minimumReleaseAgeExclude:
   - "@earendil-works/pi-mcp@1.0.4"
   - "@earendil-works/pi-telemetry@1.0.4"
   - "@earendil-works/pi-tui@1.0.4"
+  - "@cad0p/pi-background-work@0.0.1"
