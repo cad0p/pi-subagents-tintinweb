@@ -21,7 +21,7 @@ import subagentsExtension from "../src/index.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 const mockPi = {} as any;
-const mockCtx = { cwd: "/tmp" } as any;
+const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 const mockSession = () => ({
   dispose: vi.fn(),
   sessionId: "child-session-id",

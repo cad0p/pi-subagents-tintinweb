@@ -84,7 +84,7 @@ describe("AgentManager — the model and level the session actually reported", (
       return { responseText: "done", session: reportingSession(CHILD_MODEL, "low"), aborted: false, steered: false };
     });
 
-    const id = manager.spawn({} as never, { cwd: "/tmp" } as never, "general-purpose", "go", {
+    const id = manager.spawn({} as never, { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as never, "general-purpose", "go", {
       description: "clamped",
       thinkingLevel: "max",
       invocation: { thinking: "max", maxTurns: 10 },
@@ -111,7 +111,7 @@ describe("AgentManager — the model and level the session actually reported", (
       return { responseText: "done", session: reportingSession(CHILD_MODEL, "low"), aborted: false, steered: false };
     });
 
-    const id = manager.spawn({} as never, { cwd: "/tmp" } as never, "general-purpose", "go", {
+    const id = manager.spawn({} as never, { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as never, "general-purpose", "go", {
       description: "honored",
       thinkingLevel: "low",
       invocation: { thinking: "low" },
@@ -132,7 +132,7 @@ describe("AgentManager — the model and level the session actually reported", (
       return { responseText: "done", session: reportingSession(CHILD_MODEL, undefined), aborted: false, steered: false };
     });
 
-    const id = manager.spawn({} as never, { cwd: "/tmp" } as never, "general-purpose", "go", {
+    const id = manager.spawn({} as never, { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as never, "general-purpose", "go", {
       description: "no level",
       thinkingLevel: "max",
       invocation: { thinking: "max" },
@@ -153,7 +153,7 @@ describe("AgentManager — the model and level the session actually reported", (
       return { responseText: "done", session: reportingSession(CHILD_MODEL, "low"), aborted: false, steered: false };
     });
 
-    const id = manager.spawn({} as never, { cwd: "/tmp" } as never, "general-purpose", "go", {
+    const id = manager.spawn({} as never, { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as never, "general-purpose", "go", {
       description: "scheduled",
     });
     await manager.getRecord(id)?.promise;

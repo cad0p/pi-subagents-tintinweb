@@ -26,7 +26,7 @@ import { createChildSession, runAgent, setDefaultMaxTurns } from "../src/agent-r
 import { isWorktreeIsolationEnabled } from "../src/worktree.js";
 
 const mockPi = {} as any;
-const mockCtx = { cwd: "/tmp" } as any;
+const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 
 /** Fake child session. `sessionManager.getSessionFile` is what the manager
  *  captures as the record's session file (undefined: nothing to retain). */

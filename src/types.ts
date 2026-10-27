@@ -140,6 +140,12 @@ export interface AgentRecord {
   notified?: boolean;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
   resultConsumed?: boolean;
+  /** Set once the run's result reached its consumer or can no longer reach one: the completion nudge was
+   *  sent (a throwing send counts, so a retry cannot duplicate it), the parent pulled it with
+   *  `get_subagent_result`, or the owning parent settled and aborted this child. Set by `index.ts`
+   *  (nudge/pull) and `agent-manager.ts` (parent settle). Read by the pi-background-work provider, which
+   *  lists a record until this is true. A resume clears it for the new run. */
+  resultDelivered?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
   /** Worktree info if the agent is running in an isolated worktree. */
@@ -189,6 +195,10 @@ export interface AgentRecord {
   /** The child session's ID, set at spawn. The `checkpoint` tool reads
    *  ctx.sessionManager.getSessionId() to find its own record. */
   sessionId?: string;
+  /** Session key of the session that spawned this record, captured once in `AgentManager.spawn()`: the
+   *  parent record's `sessionId` for a nested record, otherwise the main session's id from the spawning
+   *  context. The pi-background-work provider reports the record under this key. Never recomputed. */
+  spawnerSessionId?: string;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
   /** Nesting depth: a top-level subagent is 1, its children 2, and so on. */
