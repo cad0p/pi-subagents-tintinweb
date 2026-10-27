@@ -947,9 +947,7 @@ export default function (pi: ExtensionAPI) {
       const pendingIds = new Set(pending.map((nudge) => nudge.id));
       for (const id of legacyIds) {
         const record = manager.getRecord(id);
-        if (!record) continue;
-        record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
-        record.resultDelivered = legacyDelivered(record, pendingIds);
+        if (record) fixLegacyRecord(record, ctx, pendingIds);
       }
       // A nested child's result is a wake on its parent, never a nudge on the main session.
       for (const { id, target } of pending) {
@@ -977,6 +975,12 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
+  /** Gives a record of an older activation, which carries neither, its spawner key and its delivery state. */
+  function fixLegacyRecord(record: AgentRecord | HandoverItem["dto"], ctx: ExtensionContext, pendingIds: ReadonlySet<string>): void {
+    record.spawnerSessionId = record.parentAgentId ? manager.getRecord(record.parentAgentId)?.sessionId : sessionKey(ctx.sessionManager);
+    record.resultDelivered = legacyDelivered(record, pendingIds);
+  }
+
   /** A draining run settled, or reported usage: the reloaded activation takes it over. */
   function onHandoverEvent(h: ReloadHandover, event: HandoverEvent): void {
     // The items have left the old manager: their input is parked until each one is adopted.
@@ -985,6 +989,11 @@ export default function (pi: ExtensionAPI) {
       .then(async () => {
         if (event.kind === "settled") {
           for (const [i, item] of event.items.entries()) {
+            // A run of an older activation that settled before this one attached left its pool before adoption
+            // fixed it up: fix it here, before adopt reads it. Its nudge is this adoption's, so none is pending.
+            if (item.dto.spawnerSessionId === undefined && item.dto.resultDelivered === undefined && currentCtx) {
+              fixLegacyRecord(item.dto, currentCtx, new Set());
+            }
             if (!(await adoptItem(item, i === 0))) {
               // The items already left the old manager: they go back into the hand-over for the next activation.
               h.keepItems(event.items.slice(i));

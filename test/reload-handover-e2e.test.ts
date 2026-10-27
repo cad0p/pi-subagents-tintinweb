@@ -24,7 +24,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
-import { HANDOVER_KEY, publishHandovers, type ReloadHandover, takeHandovers } from "../src/reload-handover.js";
+import { HANDOVER_KEY, type HandoverEvent, publishHandovers, type ReloadHandover, takeHandovers } from "../src/reload-handover.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
@@ -57,9 +57,10 @@ function liveRegistry(): Registry {
 
 /**
  * Makes every hand-over published from now on look like one from a release before the slot gate (#107): no
- * slotHolders field, nudges as plain ids. Returns the undo.
+ * slotHolders field, nudges as plain ids. With `beforeDelivery`, also like one from before the background-work
+ * provider: its settled records carry no spawnerSessionId or resultDelivered. Returns the undo.
  */
-function publishAsOlderRelease(): () => void {
+function publishAsOlderRelease(beforeDelivery = false): () => void {
   const globals = globalThis as unknown as Record<symbol, Map<string, ReloadHandover[]> | undefined>;
   const previous = globals[HANDOVER_KEY];
   class OlderStore extends Map<string, ReloadHandover[]> {
@@ -68,6 +69,19 @@ function publishAsOlderRelease(): () => void {
         Reflect.deleteProperty(handover, "slotHolders");
         const take = handover.takeNudged.bind(handover);
         Object.assign(handover, { takeNudged: () => take().map((nudge) => nudge.id) });
+        if (!beforeDelivery) continue;
+        const emit = handover.emit.bind(handover);
+        Object.assign(handover, {
+          emit: (event: HandoverEvent) => {
+            if (event.kind === "settled") {
+              for (const item of event.items) {
+                Reflect.deleteProperty(item.dto, "spawnerSessionId");
+                Reflect.deleteProperty(item.dto, "resultDelivered");
+              }
+            }
+            emit(event);
+          },
+        });
       }
       return super.set(key, list);
     }
@@ -429,6 +443,33 @@ describe("subagents across a real /reload (faux provider)", () => {
         timeout: 10_000,
       });
       await vi.waitFor(() => expect(announced()).toHaveLength(1), { timeout: 10_000 });
+    } finally {
+      undo();
+    }
+  }, 20_000);
+
+  it("fixes up a draining run of a release before the provider that settles after the reload, and lists it until delivered", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const undo = publishAsOlderRelease(true);
+    try {
+      await root.prompt("spawn-now");
+      const id = liveRegistry().listAgents()[0]?.id ?? "";
+      vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+
+      await reloadRoot(root);
+      const sent = vi.spyOn(publishedRoot().pi, "sendMessage").mockImplementation(() => {});
+      release();
+      await vi.waitFor(() => expect(publishedRoot().manager.getRecord(id)?.status).toBe("completed"), { timeout: 10_000 });
+      // The settled dto arrived without either field: adoption gave it the main session's key, undelivered until its nudge.
+      const record = publishedRoot().manager.getRecord(id);
+      expect(record?.spawnerSessionId).toBe(root.sessionManager.getSessionId());
+      await vi.waitFor(
+        () =>
+          expect(sent.mock.calls.filter(([message]) => message.customType === "subagent-notification")).toHaveLength(1),
+        { timeout: 10_000 },
+      );
+      expect(publishedRoot().manager.getRecord(id)?.resultDelivered).toBe(true);
     } finally {
       undo();
     }

@@ -191,7 +191,10 @@ export function fromDto(dto: AgentDto): AgentRecord {
  * delivered when its result was consumed, or when it settled, was announced, and its nudge is not still pending in
  * this hand-over (a nudge that is not pending was already sent). A missing flag never means announced.
  */
-export function legacyDelivered(record: AgentRecord, pendingNudges: ReadonlySet<string>): boolean {
+export function legacyDelivered(
+  record: Pick<AgentRecord, "id" | "resultConsumed" | "settled" | "notified">,
+  pendingNudges: ReadonlySet<string>,
+): boolean {
   return record.resultConsumed === true || (record.settled === true && record.notified === true && !pendingNudges.has(record.id));
 }
 
