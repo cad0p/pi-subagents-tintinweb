@@ -28,7 +28,7 @@ import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
-import { routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockReason } from "./impl-route.js";
+import { routedAcquireSlot, routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockReason } from "./impl-route.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
@@ -267,6 +267,37 @@ function scopeGateExtension(gate: NestedCallGate): InlineExtension {
   };
 }
 
+/** Name of the inline slot-gate extension; its loader path is `<inline:${SLOT_GATE_NAME}>`. */
+const SLOT_GATE_NAME = "pi-subagents-slot-gate";
+
+/**
+ * Inline extension that holds a pool member's provider request until the manager grants it a
+ * concurrency slot, so `maxConcurrent` counts running turns rather than spawned agents.
+ *
+ * pi awaits `before_provider_request` handlers before it sends the payload, so a held request is
+ * simply not sent yet. An idle request is a cache-warm replay, not a turn, and passes ungated.
+ * When the run aborts the wait resolves and the request goes out on the aborted signal.
+ */
+export function slotGateExtension(agentId: string): InlineExtension {
+  return {
+    name: SLOT_GATE_NAME,
+    hidden: true,
+    factory: (ext) => {
+      let waiting = false;
+      ext.on("before_provider_request", async (_event, ctx) => {
+        // One wait at a time: a request arriving behind a held one passes instead of queueing again.
+        if (waiting || ctx.isIdle() || !ctx.signal) return;
+        waiting = true;
+        try {
+          await routedAcquireSlot(agentId, ctx.signal);
+        } finally {
+          waiting = false;
+        }
+      });
+    },
+  };
+}
+
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
@@ -368,6 +399,8 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
+  /** Id of the agent that spawned this one. Undefined for a pool member, which holds a manager concurrency slot. */
+  parentAgentId?: string;
   model?: Model<any>;
   maxTurns?: number;
   /** Turns counted across the owner's lifecycle (every run); created by the owner, reset on resume. */
@@ -805,7 +838,7 @@ export interface ChildSessionSettings {
 export async function createChildSession(
   settings: ChildSessionSettings,
   sessionManager: SessionManager,
-  options: Pick<RunOptions, "agentId" | "onToolActivity">,
+  options: Pick<RunOptions, "agentId" | "onToolActivity" | "parentAgentId">,
 ): Promise<AgentSession> {
   const {
     type,
@@ -895,6 +928,7 @@ export async function createChildSession(
             ...base,
             extensions: base.extensions.filter((e) => {
               if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
+              if (e.path === `<inline:${SLOT_GATE_NAME}>`) return true; // ours, not the agent's
               const canons = extensionCanonicalNames(e.path);
               // A discovered copy yields to a loaded parent `-e` extension of the same name. Files the parent
               // or the agent names are never dropped.
@@ -1017,6 +1051,10 @@ export async function createChildSession(
       { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
       // Under `noExtensions` the static allowlist gates the registry itself.
       ...(noExtensions ? [] : [scopeGateExtension(nestedCallGate)]),
+      // Outside the `noExtensions` check: pi loads inline factories under `extensions: false` too.
+      ...(options.agentId !== undefined && options.parentAgentId === undefined
+        ? [slotGateExtension(options.agentId)]
+        : []),
     ],
     // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
     // keeps all the built-ins out. Discovered extensions still follow `extensions:`.

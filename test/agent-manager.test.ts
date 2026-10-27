@@ -2162,7 +2162,7 @@ describe("AgentManager — nested children", () => {
     await reopen(manager, child);
     await manager.resume(child, "more")!.promise;
 
-    expect((manager as unknown as { runningBackground: number }).runningBackground).toBe(0);
+    expect(manager.runningCount()).toBe(0);
   });
 
   it("stops children spawned during a resumed turn when that turn settles", async () => {

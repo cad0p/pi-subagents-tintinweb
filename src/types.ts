@@ -174,8 +174,8 @@ export interface AgentRecord {
   held?: string[];
   /** Deliveries whose `prompt()` has not reported yet (preflight). Blocks finish until they do. */
   preflight?: number;
-  /** Whether the record holds its pool slot. Only set for records with `occupiesPoolSlot`. */
-  holdsSlot?: boolean;
+  /** Set while the run waits at the slot gate for a pool slot. Cleared when the slot is granted or the wait ends. */
+  gated?: boolean;
   /** Set while the record is idle with pending background work. Its status stays `running`. */
   waiting?: { since: number; items: string[] };
   /** The lifecycle's max_turns counter. Counts every run; a resume starts a fresh one. */

@@ -47,9 +47,9 @@ function manager(): ManagerHandle | undefined {
   return Reflect.get(globalThis, MANAGER_KEY) as ManagerHandle | undefined;
 }
 
-/** Pool slots held, read from the records. The published handle has no slot count. */
+/** Pool slots held, approximated from the records: running and not waiting or at the gate. The published handle has no slot count. */
 function slotsHeld(): number {
-  return manager()?.listAgents().filter((r) => r.holdsSlot === true).length ?? 0;
+  return manager()?.listAgents().filter((r) => r.status === "running" && r.waiting === undefined && r.gated !== true).length ?? 0;
 }
 
 /** The root activation's route: its manager, which owns deliver, and its pi, whose bus carries the stop RPC. */

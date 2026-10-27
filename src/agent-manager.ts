@@ -4,10 +4,8 @@
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
  * Nested children are exempt from that pool — see `occupiesPoolSlot`.
- * Resumes are exempt from the admission gate: they start immediately and are
- * counted while they run, so a parent-visible continuation is never silently
- * deferred behind fresh spawns — a burst of resumes can therefore exceed the
- * limit by design.
+ * Resumes take no slot at spawn: their first provider request waits at the
+ * gate like any other run's, so the pool limit counts every sending run.
  */
 
 import { randomUUID } from "node:crypto";
@@ -36,6 +34,7 @@ import {
   teardownChildSession,
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
+import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
 import { describeModel } from "./model-resolver.js";
 import {
   type DrainingPool,
@@ -153,6 +152,17 @@ interface SpawnArgs {
   prompt: string;
   options: SpawnOptions;
 }
+
+/** A run waiting at the provider gate for a pool slot. `resolve` ends the wait; `detach` removes its abort listener. */
+interface GateEntry {
+  kind: "gate";
+  id: string;
+  resolve: (outcome: SlotOutcome) => void;
+  detach: () => void;
+}
+
+/** A pool member waiting for a slot: a queued spawn, or a run at the gate. */
+type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 
 /**
  * Bind a live session to its record: identity, the persistent lifecycle and the model and
@@ -306,10 +316,10 @@ export class AgentManager {
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
 
-  /** Queue of background agents waiting to start. */
-  private queue: { id: string; args: SpawnArgs }[] = [];
-  /** Number of currently running background agents. */
-  private runningBackground = 0;
+  /** Pool members waiting for a slot, in arrival order: queued spawns and runs waiting at the gate. */
+  private slotFifo: SlotEntry[] = [];
+  /** Ids of the runs holding a pool slot. beginDrain hands this set over, so a draining root's releases reach it. */
+  private slotHolders = new Set<string>();
   /** Open run lifecycles, keyed by record id. A record has at most one; `abort()` and `dispose()` reach it here. */
   private lives = new Map<string, Life>();
   /**
@@ -411,9 +421,9 @@ export class AgentManager {
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (occupiesPoolSlot(record) && !options.bypassQueue && this.poolFull()) {
-      // Queue it — will be started when a running agent completes
-      this.queue.push({ id, args });
+    if (occupiesPoolSlot(record) && !options.bypassQueue && (this.slotFifo.length > 0 || this.poolFull())) {
+      // Queue it — will be started when a slot frees, in arrival order
+      this.slotFifo.push({ kind: "spawn", id, args });
       return id;
     }
 
@@ -502,7 +512,7 @@ export class AgentManager {
     // Increment only after every synchronous throw site (cwd/worktree
     // validation, onStart) — the runner calls are async, so any later throw
     // arrives as a rejection through .catch/.finally and cannot leak the slot.
-    this.acquireSlot(record);
+    if (occupiesPoolSlot(record)) this.slotHolders.add(id);
     record.settled = false;
     record.turnBudget = { turns: 0, softLimitReached: false };
     const life = this.openLife(record, (run, failed) => {
@@ -554,6 +564,7 @@ export class AgentManager {
     runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      parentAgentId: record.parentAgentId,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
@@ -612,18 +623,50 @@ export class AgentManager {
       );
   }
 
-  /** Takes the pool slot a run occupies. Idempotent: admission, a resume and a wake from waiting all call it. */
-  private acquireSlot(record: AgentRecord): void {
-    if (!occupiesPoolSlot(record) || record.holdsSlot) return;
-    record.holdsSlot = true;
-    this.runningBackground++;
+  /**
+   * Takes a pool slot for a run at the provider gate. Granted at once when the pool has room and no waiter is ahead;
+   * otherwise the run waits in the FIFO until `drainQueue` grants it or its signal aborts. "reroute" means this
+   * manager was handed over: the caller asks the live root instead. A record this manager does not pool is granted
+   * without a count.
+   */
+  acquireSlot(agentId: string, signal: AbortSignal): Promise<SlotOutcome> {
+    if (this.handover) return Promise.resolve("reroute");
+    if (signal.aborted) return Promise.resolve("aborted");
+    const record = this.getRecord(agentId);
+    if (!record || !occupiesPoolSlot(record) || this.slotHolders.has(agentId)) return Promise.resolve("granted");
+    if (this.slotFifo.length === 0 && !this.poolFull()) {
+      this.slotHolders.add(agentId);
+      return Promise.resolve("granted");
+    }
+    return new Promise((resolve) => {
+      const gate: GateEntry = { kind: "gate", id: agentId, resolve, detach: () => signal.removeEventListener("abort", onAbort) };
+      const onAbort = () => {
+        this.slotFifo = this.slotFifo.filter((entry) => entry !== gate);
+        this.endGate(gate, "aborted");
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.slotFifo.push(gate);
+      record.gated = true;
+    });
   }
 
-  /** Gives the slot back. Only a record that holds one releases one; a record waiting on background work releases it. */
-  private releaseSlot(record: AgentRecord): void {
-    if (!record.holdsSlot) return;
-    record.holdsSlot = false;
-    this.runningBackground--;
+  /** Frees a pool slot and admits the FIFO head. Idempotent: an id that holds no slot releases nothing. */
+  releaseSlot(agentId: string): void {
+    if (!this.slotHolders.delete(agentId)) return;
+    this.drainQueue();
+  }
+
+  /** Frees a run's slot through the live root, which holds it once a reload has handed the run over. */
+  private releaseHeld(agentId: string): void {
+    routedReleaseSlot(agentId, (id) => this.releaseSlot(id));
+  }
+
+  /** Ends a gate wait: the abort listener goes, the record stops reading as gated, and the caller gets its outcome. */
+  private endGate(entry: GateEntry, outcome: SlotOutcome): void {
+    entry.detach();
+    const record = this.getRecord(entry.id);
+    if (record) record.gated = false;
+    entry.resolve(outcome);
   }
 
   /**
@@ -662,7 +705,6 @@ export class AgentManager {
         record.runSeq = (record.runSeq ?? 0) + 1;
         this.waking.delete(record.id);
         record.waiting = undefined;
-        this.acquireSlot(record);
       },
       agentEnded: () => {
         if (open()) record.ending = true;
@@ -746,7 +788,7 @@ export class AgentManager {
     if (items.length > 0) {
       record.waiting = { since: record.waiting?.since ?? Date.now(), items };
       life.quiet = undefined;
-      this.releaseSlot(record);
+      this.releaseHeld(record.id);
       this.drainQueue();
       return;
     }
@@ -869,7 +911,7 @@ export class AgentManager {
    */
   private async afterRun(record: AgentRecord): Promise<void> {
     record.transition = "teardown";
-    this.releaseSlot(record);
+    this.releaseHeld(record.id);
     // Children spawned by this run must not outlive it — they are hidden from
     // every surface and reachable only through this agent, so an orphan would
     // burn tokens unseen. Runs on every settle path, which is what also covers
@@ -1010,8 +1052,13 @@ export class AgentManager {
 
   /** Start queued agents up to the concurrency limit. */
   private drainQueue() {
-    while (this.queue.length > 0 && !this.poolFull()) {
-      const next = this.queue.shift()!;
+    while (this.slotFifo.length > 0 && !this.poolFull()) {
+      const next = this.slotFifo.shift()!;
+      if (next.kind === "gate") {
+        this.slotHolders.add(next.id);
+        this.endGate(next, "granted");
+        continue;
+      }
       const record = this.agents.get(next.id);
       if (record?.status !== "queued") continue;
       try {
@@ -1043,10 +1090,8 @@ export class AgentManager {
    * started listener throws, or when it stops the record during the
    * `subagents:started` emit.
    *
-   * Resumes bypass the maxConcurrent admission gate by design: a continuation
-   * of a parent-visible run must start immediately rather than queue behind
-   * fresh spawns. It still occupies a pool slot while running, so a burst of
-   * resumes can push the actual concurrency above the limit.
+   * Takes no pool slot synchronously: the run's first provider request waits
+   * at the gate for one, like a wake or a scheduled fire.
    */
   resume(id: string, prompt: string, callbacks?: ResumeCallbacks): AgentRecord | undefined {
     const record = this.agents.get(id);
@@ -1104,13 +1149,8 @@ export class AgentManager {
       return undefined;
     }
     record.settled = false;
-    // Occupies a slot but is never gated by maxConcurrent — a burst of resumes
-    // can exceed the cap by design. They share the pool counter, so queued
-    // fresh spawns wait for these resumes to settle before drainQueue admits them.
-    // A nested child is not in the pool (`occupiesPoolSlot`), and afterRun only
-    // decrements for records that are: counting it here leaked a slot per nested
-    // resume until every top-level spawn queued forever.
-    this.acquireSlot(record);
+    // No slot is taken here. The run's first provider request meets the gate (acquireSlot), so a resume
+    // that finds the pool full waits in the same FIFO as a queued spawn.
     record.turnBudget = { turns: 0, softLimitReached: false };
     const life = this.openLife(record, (run, failed) => {
       if (failed) {
@@ -1178,7 +1218,7 @@ export class AgentManager {
         ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
         : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
       // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
-      reopen = createChildSession(childSettings, sessionManager, { agentId: id })
+      reopen = createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
         .then(async (session) => {
           if (this.agents.get(id) !== record) {
             await teardownChildSession(session);
@@ -1344,7 +1384,7 @@ export class AgentManager {
 
     // Remove from queue if queued
     if (record.status === "queued") {
-      this.queue = this.queue.filter(q => q.id !== id);
+      this.slotFifo = this.slotFifo.filter((entry) => entry.kind !== "spawn" || entry.id !== id);
       this.settleStoppedWithoutRun(record);
       return true;
     }
@@ -1441,15 +1481,19 @@ export class AgentManager {
   /** Abort all running and queued agents immediately. */
   abortAll(): number {
     let count = 0;
-    // Clear queued agents first
-    for (const queued of this.queue) {
-      const record = this.agents.get(queued.id);
+    // Clear queued agents first. A gate waiter's run is still running, so only its wait ends here.
+    for (const entry of this.slotFifo) {
+      if (entry.kind === "gate") {
+        this.endGate(entry, "aborted");
+        continue;
+      }
+      const record = this.agents.get(entry.id);
       if (record) {
         this.settleStoppedWithoutRun(record);
         count++;
       }
     }
-    this.queue = [];
+    this.slotFifo = [];
     // Abort running agents
     for (const record of this.agents.values()) {
       if (record.status === "running") {
@@ -1487,17 +1531,23 @@ export class AgentManager {
   /** This manager's runs and those of the draining activations share `maxConcurrent`. */
   private poolFull(): boolean {
     const draining = this.drainingPools.reduce((sum, pool) => sum + pool.runningCount(), 0);
-    return this.runningBackground + draining >= this.maxConcurrent;
+    return this.slotHolders.size + draining >= this.maxConcurrent;
   }
 
+  /** Runs holding a pool slot. A handed-over root reports none: its holders now count on the live root. */
   runningCount(): number {
-    return this.runningBackground;
+    return this.handover ? 0 : this.slotHolders.size;
   }
 
   /** Counts the runs of older draining activations against this manager's slots. */
   setDrainingPools(pools: DrainingPool[]): void {
     this.drainingPools = pools;
     this.drainQueue();
+  }
+
+  /** Counts the runs a handed-over root still holds, so this manager's admissions see them. */
+  adoptSlotHolders(ids: Iterable<string>): void {
+    for (const id of ids) this.slotHolders.add(id);
   }
 
   /**
@@ -1507,18 +1557,25 @@ export class AgentManager {
    */
   beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
-    for (const { id, args } of this.queue) {
-      if (this.agents.get(id)?.status !== "queued") continue;
-      queued.push({ id, type: args.type, prompt: args.prompt, options: toSpawnData(args.options) });
-      this.agents.delete(id);
+    const gated: GateEntry[] = [];
+    for (const entry of this.slotFifo) {
+      if (entry.kind === "gate") {
+        gated.push(entry);
+        continue;
+      }
+      if (this.agents.get(entry.id)?.status !== "queued") continue;
+      queued.push({ id: entry.id, type: entry.args.type, prompt: entry.args.prompt, options: toSpawnData(entry.args.options) });
+      this.agents.delete(entry.id);
     }
-    this.queue = [];
-    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity);
+    this.slotFifo = [];
+    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders);
     this.handover = handover;
     this.onStart = undefined;
     this.onCompact = undefined;
     this.onSteered = undefined;
     this.onUsage = (record, usage) => handover.emit({ kind: "usage", dto: toDto(record), usage });
+    // The waiters' runs ask the live root again: their wait ends here with "reroute".
+    for (const entry of gated) this.endGate(entry, "reroute");
     return handover;
   }
 
@@ -1594,8 +1651,11 @@ export class AgentManager {
       if (count > 0) console.warn(`[pi-subagents] dropped ${count} input(s) parked for ${id} during shutdown`);
       record.pendingInput = undefined;
     }
-    // Clear queue
-    this.queue = [];
+    // Clear the FIFO. A gate waiter's wait ends here, so its run does not hang.
+    for (const entry of this.slotFifo) {
+      if (entry.kind === "gate") this.endGate(entry, "aborted");
+    }
+    this.slotFifo = [];
     // An in-flight run keeps its session file for the crash-recovery follow-up;
     // a settled one is deleted here, because the manager's map is discarded and
     // nothing would ever revisit it.
