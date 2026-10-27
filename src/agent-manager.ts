@@ -37,7 +37,7 @@ import {
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
-import { resumedEntry, spawnedEntry } from "./ledger.js";
+import { type LedgerWriter, resumedEntry, spawnedEntry } from "./ledger.js";
 import { describeModel } from "./model-resolver.js";
 import { currentOwnerStamp } from "./owner-identity.js";
 import {
@@ -345,8 +345,8 @@ export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
   private reopening = new Map<string, Promise<AgentSession | undefined>>();
-  /** The pi each record was spawned by: its ledger entries go into that session's file (see writeLedger). */
-  private ledgerPi = new Map<string, ExtensionAPI>();
+  /** Where each record's ledger entries go: the session file of the run that spawned it (see writeLedger). */
+  private ledgerWriters = new Map<string, LedgerWriter>();
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -475,7 +475,7 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
-    this.ledgerPi.set(id, pi);
+    this.ledgerWriters.set(id, pi);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
@@ -494,7 +494,7 @@ export class AgentManager {
     } catch (err) {
       this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
       this.agents.delete(id);
-      this.ledgerPi.delete(id);
+      this.ledgerWriters.delete(id);
       throw err;
     }
     return id;
@@ -1239,10 +1239,23 @@ export class AgentManager {
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
   }
 
-  /** Appends a ledger entry through the spawner's pi. A failed write is logged; recovery's same-process rule covers it. */
+  /**
+   * A resumed parent takes over its children's ledger: they write into its reopened session file from now on, and an
+   * interrupted child that crashed with it is reported to it now (its settle entry, then the wake).
+   */
+  private reportCrashedChildren(parentId: string, sessionManager: SessionManager): void {
+    const writer: LedgerWriter = { appendEntry: (customType, data) => { sessionManager.appendCustomEntry(customType, data); } };
+    for (const child of this.agents.values()) {
+      if (child.parentAgentId !== parentId) continue;
+      this.ledgerWriters.set(child.id, writer);
+      if (child.status === "interrupted" && !child.notified) this.notifyCompleted(child);
+    }
+  }
+
+  /** Appends a ledger entry through the record's writer. A failed write is logged; recovery's same-process rule covers it. */
   private writeLedger(id: string, customType: string, data: object): void {
     try {
-      this.ledgerPi.get(id)?.appendEntry(customType, data);
+      this.ledgerWriters.get(id)?.appendEntry(customType, data);
     } catch (err) {
       console.warn(`[pi-subagents] ledger write ${customType} for ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1601,6 +1614,7 @@ export class AgentManager {
             return undefined;
           }
           bindSession(record, session, attachSessionLifecycle(session));
+          this.reportCrashedChildren(id, session.sessionManager);
           return session;
         })
         .finally(() => this.reopening.delete(id));
@@ -1731,11 +1745,11 @@ export class AgentManager {
   }
 
   /** Lists the runs a crashed owner left behind. Their sessions load only on a resume. Returns the ones listed here. */
-  adoptInterrupted(records: AgentRecord[], pi: ExtensionAPI): AgentRecord[] {
+  adoptInterrupted(records: AgentRecord[], writer?: LedgerWriter): AgentRecord[] {
     const adopted = records.filter((record) => !this.agents.has(record.id));
     for (const record of adopted) {
       this.agents.set(record.id, record);
-      this.ledgerPi.set(record.id, pi);
+      if (writer) this.ledgerWriters.set(record.id, writer);
     }
     return adopted;
   }
@@ -1810,7 +1824,7 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
-    this.ledgerPi.delete(id);
+    this.ledgerWriters.delete(id);
     this.stopLedgered.delete(id);
     this.clearCap(id);
     // An open lifecycle of a removed record has no tick or decide left to finish it (dispose clears them): close it here so its promise settles.

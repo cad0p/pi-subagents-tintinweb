@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -28,7 +28,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { replayLedger } from "./ledger.js";
+import { type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -560,7 +560,10 @@ export default function (pi: ExtensionAPI) {
     // Nested children report only to their owning parent: the result is a wake on that parent's session. The
     // main session's lifecycle, transcript, notification, and UI channels stay untouched.
     if (record.parentAgentId) {
-      manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+      const text = record.status === "interrupted"
+        ? formatInterruptedNotice([record], new Map([[record.id, crashRecoveryDecision(record.crashCount ?? 1, readPolicy(record.cwd ?? process.cwd()))]]))
+        : formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost);
+      manager.deliverNested(record, text);
       return;
     }
     // Emit lifecycle event based on terminal status
@@ -1050,16 +1053,32 @@ export default function (pi: ExtensionAPI) {
 
   /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
   function recoverCrashed(ctx: ExtensionContext): void {
-    const crashed = replayLedger(ctx.sessionManager.getEntries(), {
+    const options: ReplayOptions = {
       host: localOwnerHost(),
       isLiveHere: (id) => manager.getRecord(id) !== undefined,
       now: Date.now(),
-    });
+    };
+    const spawnerSessionId = sessionKey(ctx.sessionManager);
+    const crashed = replayLedger(ctx.sessionManager.getEntries(), options);
+    for (const record of crashed) record.spawnerSessionId = spawnerSessionId;
     const adopted = manager.adoptInterrupted(crashed, pi);
     if (adopted.length === 0) return;
     const policy = readPolicy(ctx.cwd);
-    for (const record of adopted) scheduleNudge(record, crashRecoveryDecision(record.crashCount ?? 1, policy));
+    for (const record of adopted) {
+      scheduleNudge(record, crashRecoveryDecision(record.crashCount ?? 1, policy));
+      listCrashedChildren(record, options);
+    }
     widget.update();
+  }
+
+  /** Lists the nested runs a crashed parent left in its own session file. They are reported when the parent resumes. */
+  function listCrashedChildren(parent: AgentRecord, options: ReplayOptions): void {
+    if (!parent.sessionFile || !existsSync(parent.sessionFile)) return;
+    const childSessions = SessionManager.open(parent.sessionFile);
+    const children = replayLedger(childSessions.getEntries(), options);
+    const spawnerSessionId = sessionKey(childSessions);
+    for (const child of children) child.spawnerSessionId = spawnerSessionId;
+    for (const child of manager.adoptInterrupted(children)) listCrashedChildren(child, options);
   }
 
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */

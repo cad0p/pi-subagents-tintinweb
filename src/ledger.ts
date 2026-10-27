@@ -69,6 +69,11 @@ interface SettleLedgerEntry {
   status: string;
 }
 
+/** Where a record's ledger entries go: the session file of the pi that spawned it. */
+export interface LedgerWriter {
+  appendEntry(customType: string, data?: unknown): void;
+}
+
 export interface ReplayOptions {
   host: OwnerHost;
   /** True when this process still holds the run live (the same-process rule). */
