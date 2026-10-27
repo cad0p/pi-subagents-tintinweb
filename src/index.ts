@@ -28,10 +28,12 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { localOwnerHost } from "./owner-identity.js";
 import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
@@ -837,6 +839,7 @@ export default function (pi: ExtensionAPI) {
         openSlots();
       }
       stopStranded(ctx.sessionManager.getSessionId());
+      if (event.reason === "startup" || event.reason === "resume") recoverCrashed(ctx);
     }
   });
 
@@ -1019,6 +1022,16 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
+  /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
+  function recoverCrashed(ctx: ExtensionContext): void {
+    const crashed = replayLedger(ctx.sessionManager.getEntries(), {
+      host: localOwnerHost(),
+      isLiveHere: (id) => manager.getRecord(id) !== undefined,
+      now: Date.now(),
+    });
+    manager.adoptInterrupted(crashed, pi);
+  }
+
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
       const unreported = h.take().unreported;

@@ -1730,6 +1730,15 @@ export class AgentManager {
     return outcome;
   }
 
+  /** Lists the runs a crashed owner left behind. Their sessions load only on a resume. */
+  adoptInterrupted(records: AgentRecord[], pi: ExtensionAPI): void {
+    for (const record of records) {
+      if (this.agents.has(record.id)) continue;
+      this.agents.set(record.id, record);
+      this.ledgerPi.set(record.id, pi);
+    }
+  }
+
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
   }

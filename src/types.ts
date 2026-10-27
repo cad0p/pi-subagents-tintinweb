@@ -123,6 +123,10 @@ export interface AgentRecord {
   toolUses: number;
   startedAt: number;
   completedAt?: number;
+  /** Set on a run recovered from a crash: when the crash was detected. */
+  interruptedAt?: number;
+  /** Interrupted settles in a row for this run, including this crash (the crash-loop guard's count). */
+  crashCount?: number;
   /** Live child session. Set while the record runs or is torn down; cleared at settle. */
   session?: AgentSession;
   /** Session file kept after `session` is dropped, so a failed reload can reopen the child. */

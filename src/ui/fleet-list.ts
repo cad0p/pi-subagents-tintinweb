@@ -187,8 +187,8 @@ export class FleetList {
 
   /**
    * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session), so Enter
-   * never dead-ends. Included: running/queued, plus the agent currently being
+   * started sooner sit at the top. Every row is openable (has a session, or is interrupted and reads
+   * its transcript from file), so Enter never dead-ends. Included: running/queued, plus the agent currently being
    * viewed, plus recently-finished ones (they linger briefly before dropping out).
    * Pending agents with no session yet are hidden until they start.
    * (`listAgents()` is newest-first, so we re-sort.)
@@ -196,7 +196,7 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => !a.parentAgentId && (a.session ?? a.sessionSnapshot) !== undefined && (
+      .filter(a => !a.parentAgentId && ((a.session ?? a.sessionSnapshot) !== undefined || a.status === "interrupted") && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
