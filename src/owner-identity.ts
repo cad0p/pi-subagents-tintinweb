@@ -49,6 +49,14 @@ function bootIdForPlatform(): string | undefined {
   return undefined;
 }
 
+let bootIdCache: { id: string | undefined } | undefined;
+
+/** The boot id cannot change within a process, so it is read once, on first use. */
+function cachedBootId(): string | undefined {
+  bootIdCache ??= { id: bootIdForPlatform() };
+  return bootIdCache.id;
+}
+
 /** Field 22 (starttime, clock ticks since boot) of `/proc/<pid>/stat`. */
 function linuxStartTime(pid: number): string | undefined {
   const stat = readTrimmed(`/proc/${pid}/stat`);
@@ -72,7 +80,7 @@ function pidAlive(pid: number): boolean {
 
 export function localOwnerHost(): OwnerHost {
   return {
-    bootId: bootIdForPlatform(),
+    bootId: cachedBootId(),
     startTime: (pid) => (process.platform === "linux" ? linuxStartTime(pid) : undefined),
     pidAlive,
   };

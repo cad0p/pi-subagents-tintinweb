@@ -2,6 +2,11 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentOwnerStamp, localOwnerHost, type OwnerHost, ownerAlive } from "../src/owner-identity.js";
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, spawnSync: vi.fn(actual.spawnSync as typeof spawnSync) };
+});
+
 function fakeHost(overrides: Partial<OwnerHost> = {}): OwnerHost {
   return {
     bootId: "boot-a",
@@ -71,6 +76,24 @@ describe("localOwnerHost pidAlive", () => {
   it("reports a pid that has exited as dead", () => {
     const child = spawnSync(process.execPath, ["-e", ""]);
     expect(localOwnerHost().pidAlive(child.pid ?? 0)).toBe(false);
+  });
+});
+
+describe("localOwnerHost boot id", () => {
+  it("runs the macOS boot-time query once per process, not on every stamp", () => {
+    const original = process.platform;
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    vi.mocked(spawnSync).mockClear();
+    try {
+      currentOwnerStamp();
+      currentOwnerStamp();
+      currentOwnerStamp();
+    } finally {
+      Object.defineProperty(process, "platform", { value: original });
+    }
+    // At most one query: zero when an earlier test already filled the per-process cache.
+    const sysctlCalls = vi.mocked(spawnSync).mock.calls.filter(([command]) => command === "sysctl");
+    expect(sysctlCalls.length).toBeLessThanOrEqual(1);
   });
 });
 
