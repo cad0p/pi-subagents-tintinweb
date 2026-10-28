@@ -43,7 +43,7 @@ import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType } from "./types.js";
 import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme } from "./ui/agent-display.js";
-import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
+import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
@@ -1964,7 +1964,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents().filter(a => !a.parentAgentId);
+    const agents = manager.listAgents();
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -2088,16 +2088,17 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents().filter(a => !a.parentAgentId);
-    if (agents.length === 0) {
+    // Same tree order as FleetView (parents first, children indented); every nested record is listed.
+    const rows = treeOrder(manager.listAgents(), () => true);
+    if (rows.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
     }
 
-    const options = agents.map(a => {
+    const options = rows.map(({ record: a, depth }) => {
       const dn = toSingleLine(getDisplayName(a.type));
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${toSingleLine(a.status)} · ${dur}`;
+      return `${nestIndent(depth)}${dn} (${toSingleLine(a.description)}) · ${a.toolUses} tools · ${toSingleLine(a.status)} · ${dur}`;
     });
 
     const choice = await ctx.ui.select("Running agents", options);
@@ -2106,7 +2107,7 @@ Terse command-style prompts produce shallow, generic work.
     // Find the selected agent by matching the option index
     const idx = options.indexOf(choice);
     if (idx < 0) return;
-    const record = agents[idx];
+    const record = rows[idx].record;
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list

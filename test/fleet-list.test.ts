@@ -154,7 +154,7 @@ describe("FleetList navigation", () => {
     const res = h.press(DOWN);
     expect(res).toEqual({ consume: true });
     // main selected, list active → nav hint shown
-    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+    expect(h.render()[0]).toContain("↑↓ select · → nested · enter view · esc back");
   });
 
   it("also activates on ← (matches the '← for agents' hint)", () => {
@@ -215,8 +215,15 @@ describe("FleetList navigation", () => {
   it("passes non-nav keys through and cancels navigation", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN);
-    expect(h.press(RIGHT)).toBeUndefined();
+    expect(h.press("x")).toBeUndefined();
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("→ on a row without children does nothing and keeps the list active", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("↑↓ select"))).toBe(true);
   });
 
   it("re-arms the refresh timer when the list is re-shown after the roster empties", () => {
@@ -789,5 +796,300 @@ describe("FleetList footer, waiting rows and overflow (#143)", () => {
     const agents = Array.from({ length: 7 }, (_, i) => makeRecord({ id: `o${i}`, description: `over ${i}`, startedAt: 1000 + i }));
     const lines = harness(agents).render(120);
     expect(lines.some((l) => l.includes("↓ 2 more (2 running)"))).toBe(true);
+  });
+});
+
+describe("FleetList nested rows (#146)", () => {
+  const parent = (over: Partial<AgentRecord> = {}) => makeRecord({ id: "p", description: "parent job", startedAt: 1000, ...over });
+  const child = (over: Partial<AgentRecord> = {}) => makeRecord({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", ...over });
+
+  it("hides a child until its parent is expanded, then shows it under the ↳ marker", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); // main
+    h.press(DOWN); // parent
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+    h.press(RIGHT);
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}⏺ {3}↳ /);
+  });
+
+  it("nests a grandchild at depth 2 after two →", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const h = harness([parent(), child(), grand]);
+    h.press(DOWN); h.press(DOWN); // parent
+    h.press(RIGHT); h.press(RIGHT); // child, then grandchild
+    expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
+  });
+
+  it("labels a collapsed parent with every nested category, zero counts omitted", () => {
+    const waiting = child({ id: "w", description: "waiting child", startedAt: 2500, waiting: { since: 0, items: [] } });
+    const queued = child({ id: "q", description: "queued child", startedAt: 2600, status: "queued" });
+    const done = child({ id: "d", description: "done child", startedAt: 2700, status: "completed", completedAt: Date.now() });
+    const line = harness([parent(), child(), waiting, queued, done]).render(120).find(l => l.includes("parent job"));
+    expect(line).toContain("▸ 4 nested (1 running, 1 waiting, 1 queued, 1 finished)");
+  });
+
+  it("shows every ancestor as a context row for a qualifying grandchild at depth 2", () => {
+    const old = Date.now() - 60 * 60_000; // settled long past the linger window: context rows only
+    const top = parent({ id: "gp", description: "top job", startedAt: 1000, status: "completed", completedAt: old });
+    const mid = child({ id: "mid", description: "middle job", startedAt: 2000, parentAgentId: "gp", status: "completed", completedAt: old });
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "mid" });
+    const h = harness([top, mid, grand]);
+    h.press(DOWN); h.press(DOWN); // the only root
+    expect(h.render().find(l => l.includes("top job"))).toContain("▸ 2 nested (1 running, 1 finished)");
+    h.press(RIGHT); // open the top row → middle selected
+    expect(h.render().find(l => l.includes("middle job"))).toContain("⏺");
+    expect(h.render().some(l => l.includes("grand job"))).toBe(false);
+    h.press(RIGHT); // open the middle row → grandchild at depth 2
+    expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
+  });
+
+  it("← on a depth-2 row collapses its parent and selects the parent, not the grandparent", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const h = harness([parent(), child(), grand]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(RIGHT); // both open, grandchild selected
+    expect(h.render().find(l => l.includes("grand job"))).toContain("⏺");
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("child job"))).toMatch(/⏺.*▸ 1 nested/);
+    expect(lines.find(l => l.includes("parent job"))).toContain("◯");
+    expect(lines.some(l => l.includes("grand job"))).toBe(false);
+  });
+
+  it("keeps a grandchild's expand state across collapsing and re-expanding its parent", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const great = makeRecord({ id: "gg", description: "great job", startedAt: 4000, parentAgentId: "g" });
+    const h = harness([parent(), child(), grand, great]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(RIGHT); h.press(RIGHT); // down to the deepest row
+    expect(h.render().find(l => l.includes("great job"))).toContain("⏺");
+    h.press(UP); // the grandchild, which stays open
+    h.press(LEFT); // ← collapses the child, selects it
+    expect(h.render().some(l => l.includes("grand job"))).toBe(false);
+    h.press(RIGHT); // re-open the child → grandchild still open
+    const lines = h.render();
+    expect(lines.find(l => l.includes("grand job"))).toMatch(/⏺.*▾/);
+    expect(lines.some(l => l.includes("great job"))).toBe(true);
+  });
+
+  it("→ on an already-expanded parent is a no-op: the selection stays on the parent", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // expand → child selected
+    h.press(UP); // back on the open parent
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toMatch(/⏺.*▾/);
+    expect(lines.find(l => l.includes("child job"))).toContain("◯");
+  });
+
+  it("counts a collapsed parent's children in the overflow above the window", () => {
+    const agents = [
+      parent({ startedAt: 1000 }),
+      child({ id: "c1", description: "child one", startedAt: 1001 }),
+      child({ id: "c2", description: "child two", startedAt: 1002 }),
+      ...Array.from({ length: 6 }, (_, i) => makeRecord({ id: `root${i}`, description: `root ${i}`, startedAt: 2000 + i })),
+    ];
+    const h = harness(agents);
+    for (let i = 0; i < 8; i++) h.press(DOWN); // main → the last row
+    const lines = h.render(120);
+    expect(lines.some(l => l.includes("↑ 4 more (4 running)"))).toBe(true);
+    expect(lines.some(l => l.includes("root 0"))).toBe(false);
+  });
+
+  it("← on a child collapses its parent and selects the parent", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(h.render().find(l => l.includes("parent job"))).toMatch(/⏺.*▸ 1 nested/);
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("← on a level-1 row does nothing: the parent stays expanded and selected", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(UP); // back on the parent
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toMatch(/⏺.*▾/);
+    expect(lines.some(l => l.includes("child job"))).toBe(true);
+  });
+
+  it("→ on a nested row without children does nothing and keeps it selected", () => {
+    const h = harness([parent(), child(), makeRecord({ id: "z", description: "later job", startedAt: 3000 })]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected, no children of its own
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("later job"))).toContain("◯");
+  });
+
+  it("keeps a settled parent as a context row while its child runs", () => {
+    const settled = parent({ description: "settled parent", status: "completed", completedAt: 1500 });
+    const h = harness([settled, child()]);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("settled parent"))).toContain("▸ 1 nested (1 running)");
+    h.press(RIGHT);
+    expect(h.render().find(l => l.includes("child job"))).toContain("↳ ");
+  });
+
+  it("renders a child whose parent record is gone at depth 1", () => {
+    const h = harness([child({ parentAgentId: "gone" })]);
+    h.press(DOWN);
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}◯ {3}↳ /);
+  });
+
+  it("forgets a parent's expand state once its record is evicted", () => {
+    const agents = [parent(), child()];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT);
+    agents.splice(0, 1); // parent evicted: the child shows at depth 1
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}. {3}↳ /);
+    agents.unshift(parent()); // parent is back, collapsed by default
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("counts a collapsed child in the overflow below the window (seven agents, five rows)", () => {
+    const agents = [
+      ...Array.from({ length: 5 }, (_, i) => makeRecord({ id: `a${i}`, description: `root ${i}`, startedAt: 1000 + i })),
+      parent({ startedAt: 1005 }),
+      child({ startedAt: 1006 }),
+    ];
+    const lines = harness(agents).render(120);
+    expect(lines.some(l => l.includes("↓ 2 more (2 running)"))).toBe(true);
+    expect(lines.some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("puts a parent's activity above its children and none under a waiting child", () => {
+    const agents = [
+      parent(),
+      child(),
+      child({ id: "w", description: "waiting child", startedAt: 3000, waiting: { since: 0, items: [] } }),
+    ];
+    const activity = new Map([
+      ["p", activityFor({ responseText: "parent working" })],
+      ["c", activityFor({ responseText: "child working" })],
+      ["w", activityFor({ responseText: "waiting working" })],
+    ]);
+    const h = harness(agents, [], { activity });
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT);
+    const lines = h.render(120);
+    const p = lines.findIndex(l => l.includes("parent job"));
+    const c = lines.findIndex(l => l.includes("child job"));
+    const w = lines.findIndex(l => l.includes("waiting child"));
+    expect(lines[p + 1]).toMatch(/^ {4}⎿ {2}parent working/);
+    expect(lines[c + 1]).toMatch(/^ {8}⎿ {2}child working/);
+    expect(lines[w + 1] ?? "").not.toContain("⎿");
+  });
+
+  it("does not consume → or ← while the list is inactive, so the editor keeps its cursor keys", () => {
+    const h = harness([parent(), child()]);
+    expect(h.press(RIGHT)).toBeUndefined();
+    h.setEditorText("typing");
+    expect(h.press(LEFT)).toBeUndefined();
+  });
+
+  it("opens the same conversation viewer on Enter over a nested row", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    h.press(ENTER);
+    expect(h.overlayOpened()).toBe(true);
+    expect(h.overlayComponent()).toBeDefined();
+  });
+});
+
+describe("FleetList selection follows the record (#146)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+
+  it("keeps the selection on the same agent when a child spawns above it", () => {
+    const agents = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c1", description: "child one", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(DOWN); // open p, cursor on the sibling
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    agents.push(mk({ id: "c2", description: "child two", startedAt: 2500, parentAgentId: "p" }));
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("child two"))).toContain("◯");
+  });
+
+  it("keeps the selection when a settled parent starts running above it", () => {
+    const settled = mk({ id: "sp", description: "settled parent", startedAt: 1000, status: "completed", completedAt: Date.now() - 600_000 });
+    const agents = [settled, mk({ id: "s", description: "sibling job", startedAt: 3000 })];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); // the sibling is the only row
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    agents.push(mk({ id: "c", description: "late child", startedAt: 2000, parentAgentId: "sp" }));
+    const lines = h.render();
+    expect(lines.find(l => l.includes("sibling job"))).toContain("⏺");
+    expect(lines.find(l => l.includes("settled parent"))).toContain("◯");
+  });
+
+  it("moves the selection to the parent when the selected child lingers out", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+    agents[1] = mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", status: "completed", completedAt: Date.now() - 60_000 });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toContain("⏺");
+    expect(lines.some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("leaves the selection on an orphan row when ← has no parent row to collapse to", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000, status: "completed", completedAt: Date.now() - 600_000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // open the parent, child selected
+    agents.splice(0, 1); // the parent is evicted; the child is now an orphan row
+    h.press(LEFT);
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+  });
+
+  it("opens the record the marker is on, after a row appeared above the selection", () => {
+    const agents = [
+      mk({ id: "a", description: "first job", startedAt: 1000 }),
+      mk({ id: "b", description: "second job", startedAt: 2000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("first job"))).toContain("⏺");
+    agents.unshift(mk({ id: "a0", description: "new job", startedAt: 500 }));
+    expect(h.render().find(l => l.includes("first job"))).toContain("⏺");
+    h.press(ENTER);
+    expect(h.notifications).toEqual([]);
+    expect(h.overlayOpened()).toBe(true);
+    // The opened conversation is the marked record's, not the row the cursor moved to.
+    const viewer = h.overlayComponent() as unknown as { record?: AgentRecord } | undefined;
+    expect(viewer?.record?.id).toBe("a");
+  });
+
+  it("puts the selection back on main on Esc, without waiting for the next activation", () => {
+    const agents = [
+      mk({ id: "a", description: "first job", startedAt: 1000 }),
+      mk({ id: "b", description: "second job", startedAt: 2000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("second job"))).toContain("⏺");
+    h.press(ESC);
+    const lines = h.render();
+    expect(lines.find(l => l.includes("main"))).toContain("⏺");
+    expect(lines.find(l => l.includes("second job"))).toContain("◯");
+  });
+
+  it("stays at the previous position, not on main, when the selected child lingers out with rows below", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    agents[1] = mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", status: "completed", completedAt: Date.now() - 60_000 });
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
   });
 });
