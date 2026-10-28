@@ -949,9 +949,10 @@ export class AgentManager {
    */
   private hardStop(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
-    // A user stop owns the label: abort() marks the record stopped while its run unwinds, and a cap that
-    // fires in that window must not claim the time limit. Every other terminal status is written by
-    // finalize/afterRun, which clear these timers first, so "stopped" is the only reachable case.
+    // An abort owns the label: abort() marks the record stopped while its run unwinds (from the user, a
+    // parent signal, or an owner's stop), and a cap that fires in that window must not claim the time limit.
+    // Every other terminal status is written by finalize/afterRun, which clear these timers first, so
+    // "stopped" is the only reachable case.
     if (record.status !== "stopped") {
       record.limitReason = "time";
       record.timeLimit = "stopped";

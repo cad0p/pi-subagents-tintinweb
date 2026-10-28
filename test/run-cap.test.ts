@@ -9,7 +9,6 @@ import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, 
 import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
 import { renderAgentReport } from "../src/result-report.js";
-import { getStatusNote } from "../src/status-note.js";
 import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
@@ -496,8 +495,12 @@ describe("run cap", () => {
     await settle();
     manager.abort(record.id);
     expect(record.status).toBe("stopped");
+    const sessionAborts = child.abort.mock.calls.length;
     // The run is still streaming (the session's abort lands in a microtask), so the hard stop fires first.
     vi.advanceTimersByTime(CAP_MS);
+    // Pin that the hard stop actually ran: it aborts the still-streaming session a second time. Without this,
+    // a cap that never fires leaves the test green on the quiet-tick settle.
+    expect(child.abort.mock.calls.length).toBe(sessionAborts + 1);
     await settle();
     expect(record.limitReason).toBeUndefined();
     expect(record.timeLimit).toBeUndefined();
@@ -597,6 +600,7 @@ describe("run cap", () => {
     expect(record).toMatchObject({ status: "completed" });
     expect(record.limitReason).toBeUndefined();
     expect(stale).toHaveLength(1);
+    expect(staleLead).toHaveLength(1);
     const resumed = fakeChild();
     vi.mocked(createChildSession).mockResolvedValueOnce(resumed as unknown as AgentSession);
     await manager.restoreSession(record.id);
