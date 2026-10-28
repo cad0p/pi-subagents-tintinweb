@@ -487,12 +487,11 @@ export default function (pi: ExtensionAPI) {
     clearTimeout(batch.timer);
     const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
     if (records.length === 0) return;
-    // A crash-recovered record carries its own notice; a batch takes a turn only if every such record allows one.
+    // A crash-recovered record carries its own notice. The batch takes a turn if it carries a normal completion, or if every crash record allows one.
     const interrupted = records.filter((record) => batch.crash.has(record.id));
-    const triggerTurn = interrupted.every((record) => batch.crash.get(record.id)?.triggerTurn);
-    const sections = records
-      .filter((record) => !batch.crash.has(record.id))
-      .map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+    const completed = records.filter((record) => !batch.crash.has(record.id));
+    const triggerTurn = completed.length > 0 || interrupted.every((record) => batch.crash.get(record.id)?.triggerTurn);
+    const sections = completed.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
     if (interrupted.length > 0) sections.unshift(formatInterruptedNotice(interrupted, batch.crash));
 
     try {

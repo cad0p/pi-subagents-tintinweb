@@ -22,9 +22,12 @@ vi.mock("../src/agent-runner.js", async (importOriginal) => ({
   createChildSession: vi.fn(async (_settings: unknown, sessionManager: unknown) => childSession(sessionManager)),
 }));
 
+import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
+
+setQuietMs(20);
 
 const DEAD_PID = deadPid();
 const NOTE = "interrupted twice by a crash; ask the user before resuming";
@@ -251,6 +254,30 @@ describe("crash recovery — startup report", () => {
     expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
     expect(message.content).toContain('SendMessage({ to: "fresh", message: "continue" })');
     expect(message.content).not.toContain('to: "loop"');
+    expect(message.content).toContain(NOTE);
+  });
+
+  it("a normal completion batched with a crash loop still wakes the main agent; the loop keeps its note", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeChildFiles("loop");
+    writeSession(file, [
+      spawned("loop", DEAD_PID),
+      custom("subagents:record", { id: "loop", status: "interrupted" }),
+      custom("subagent-resumed", { v: 1, id: "loop", ownerPid: DEAD_PID }),
+    ]);
+    const made = boot(file);
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "fresh result", session: childSession(), aborted: false, steered: false });
+
+    await startup(made, file);
+    // A run this process spawns completes inside the same hold window, so it joins the crash batch.
+    await made.tools.get("Agent").execute("tc-fresh", { prompt: "go", description: "fresh task", subagent_type: "general-purpose" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    await quiet();
+    expect(made.pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(message.content).toContain("fresh task");
     expect(message.content).toContain(NOTE);
   });
 
