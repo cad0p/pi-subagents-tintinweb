@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `SendMessage`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4)
-- **FleetView** — always-on, Claude Code-style navigable list of `main` + every running, waiting, queued, and recently finished subagent, rendered below the editor (earliest-launched first, nested subagents under their parent). Each running row shows live tool activity, turns, tool uses, tokens, cost, and elapsed time; there is no separate widget and no footer status. Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `→` to open a parent's nested agents and `←` back out, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output.
+- **FleetView** — always-on, Claude Code-style navigable list of `main` + every running, waiting, queued, and recently finished subagent, rendered below the editor (earliest-launched first, nested subagents under their parent). Each running row shows live tool activity, turns, tool uses, tokens, cost, and elapsed time; there is no separate widget, and the extension itself sets no footer status (with `@cad0p/pi-background-work` installed, its footer names the running subagents). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `→` to open a parent's nested agents and `←` back out, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output.
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for any running agent
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
@@ -106,7 +106,7 @@ The token field is annotated with two optional signals inside parens:
 
 ### FleetView
 
-While subagents are running, a Claude Code-style navigable list renders **below** the editor. It is always on: there is no setting to hide it, and the extension sets no footer status:
+While subagents are running, a Claude Code-style navigable list renders **below** the editor. It is always on: there is no setting to hide it. The extension sets no footer status of its own; the footer segment comes from `@cad0p/pi-background-work` when that package is installed:
 
 ```
   esc to interrupt · ← for agents · ↓ to manage
