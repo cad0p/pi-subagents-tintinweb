@@ -21,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Nested results reach the parent as the main session's notification, batched (closes #83) ([#119](https://github.com/cad0p/pi-subagents-tintinweb/pull/119))
 - *(subagents)* Subagents interrupted by a crash come back resumable; evictAfterMinutes (closes #120) ([#125](https://github.com/cad0p/pi-subagents-tintinweb/pull/125))
 - *(notifications)* The completion header names the agent type (closes #140) ([#141](https://github.com/cad0p/pi-subagents-tintinweb/pull/141))
+- *(subagents)* FleetView shows nested subagents as collapsible rows (closes #146) ([#148](https://github.com/cad0p/pi-subagents-tintinweb/pull/148))
 
 ### 🐛 Bug Fixes
 
