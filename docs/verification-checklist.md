@@ -43,8 +43,8 @@ note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
-`xhigh`; fall back to `opencode-go/deepseek-v4.1-flash` at `max` when Anthropic
-is unavailable. `--no-extensions` drops discovered extensions, so pass the global
+`xhigh`; for checks other than Visual proof runs, fall back to
+`opencode-go/deepseek-v4.1-flash` at `max` when Anthropic is unavailable. `--no-extensions` drops discovered extensions, so pass the global
 ones explicitly with `-e` (the global `system-prompt.ts` is required for native
 Anthropic). Add the branch build with `-e <repo>/src/index.ts`, so the two don't
 collide. Subagents spawned from the session follow the same `-e` flags (#92).
@@ -122,7 +122,8 @@ flows). A test passing is not proof of what the user sees.
 - A capture runs from the step's trigger until the session is idle: the
   editor prompt is back, no tool or spinner is running, and the screen has
   not changed for 30 seconds. A clause stating an absence ("does not ask the
-  user") is shown by that whole window.
+  user") is shown by the capture of that whole window, quoted from trigger
+  to idle, with no line in it showing the absent thing.
 - Quote each line verbatim from the plain-text capture, next to its clause,
   under Evidence. A line that contradicts the outcome is never trimmed as
   unrelated.
@@ -145,7 +146,8 @@ flows). A test passing is not proof of what the user sees.
   Any failed run blocks the head. No one dismisses it. It clears only on a
   new head whose change to the failing step's code path is named under
   Evidence and accepted by the reviewer as addressing the failing clause,
-  and whose after runs of the same sentence all pass; re-running unchanged
+  and which has at least one after run of the same sentence, all of them
+  passing; re-running unchanged
   code, or a change that does not alter that behaviour, does not clear it.
 - Whether Visual proof applies is stated by the reviewer, not the author.
   For any change to what a pi session shows or how it behaves over time, the
@@ -214,8 +216,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   Should-fix and nit findings may stay open if recorded.
 - Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
   no undismissed must-fix findings, from a brief that included the capture
-  check whenever the reviewer found Visual proof applies, and every after run
-  of every step on that head passes.
+  check whenever the reviewer found Visual proof applies, and, when it
+  applies, at least one after run of every step on that head, every after run
+  of every step on that head passing.
 
 ## Fork release rules
 
@@ -232,7 +235,7 @@ In the PR body, record:
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
 - for visual proof, each step's expected outcome with the issue edit that
-  fixed it, the before capture's SHA or version, the head SHA of every after
+  fixed it and the time of the first run, the before capture's SHA or version, the head SHA of every after
   run, the quoted line per clause, the quoted instruction for each
   model-action clause, and any changed code path a cleared failure names;
 - every review round: the head it reviewed, the agent type, the verdict, and
