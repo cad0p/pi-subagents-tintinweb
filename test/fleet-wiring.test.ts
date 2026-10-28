@@ -66,6 +66,16 @@ const flush = async () => {
   await new Promise((r) => setImmediate(r));
 };
 
+/** runAgent stand-in: hands a live session over before the run settles, as the real runner does. */
+function mockRunWithSession(): void {
+  vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+    // The settled record keeps a snapshot of the session it handed over.
+    const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+    opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+    return { responseText: "done", session, aborted: false, steered: false } as any;
+  });
+}
+
 describe("FleetView wiring (real extension lifecycle)", () => {
   let tmpDir: string;
   let agentDir: string;
@@ -108,12 +118,7 @@ describe("FleetView wiring (real extension lifecycle)", () => {
   });
 
   it("registers the belowEditor widget once a spawned agent has a session, then clears it on shutdown", async () => {
-    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
-      // The runner hands the live session over before the run settles; the settled record keeps a snapshot of it.
-      const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
-      opts.onSessionCreated?.(session, attachSessionLifecycle(session));
-      return { responseText: "done", session, aborted: false, steered: false } as any;
-    });
+    mockRunWithSession();
 
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
@@ -136,5 +141,27 @@ describe("FleetView wiring (real extension lifecycle)", () => {
 
     await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
     expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined); // dispose cleared it
+  });
+
+  it("never sets an aboveEditor or agents widget, or the subagents status, across spawn to finish", async () => {
+    mockRunWithSession();
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const ui = uiCtx();
+    await lifecycle.get("tool_execution_start")?.({}, ctxWith(ui));
+    await tools.get("Agent").execute(
+      "tc",
+      { prompt: "go", description: "one run", subagent_type: "general-purpose" },
+      undefined,
+      undefined,
+      ctxWith(ui),
+    );
+    await flush();
+    await lifecycle.get("session_shutdown")?.({}, ctxWith(ui));
+
+    expect(ui.setWidget.mock.calls.some(c => c[0] === "fleet" && typeof c[1] === "function")).toBe(true);
+    expect(ui.setWidget.mock.calls.filter(c => c[0] === "agents" || c[2]?.placement === "aboveEditor")).toEqual([]);
+    expect(ui.setStatus).not.toHaveBeenCalled();
   });
 });
