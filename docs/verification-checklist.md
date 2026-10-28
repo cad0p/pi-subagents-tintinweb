@@ -101,13 +101,14 @@ flows). A test passing is not proof of what the user sees.
   issue or plan: one sentence per step for what happens, not only the
   mechanism that should cause it (a wake, a turn, a row). The last step's
   sentence states the end state the user sees (for example "the main agent
-  resumes both"). There is at least one step. The steps and sentences are
-  the plan's or the maintainer's: an author's sentence counts only once the
-  maintainer has approved it in the issue. They are fixed before the first
-  run of any kind, captured or not; if they are missing or do not state the
-  end state, the maintainer writes them in the issue first. Copy each sentence
-  verbatim under Evidence, with the issue edit that fixed it and the time of
-  the first run, so the order can be checked.
+  resumes both"). There is at least one step. Every sentence, whoever wrote
+  it (plan included), counts only once it is quoted in the issue and the
+  maintainer has approved it there. They are fixed before the first run of
+  any kind, captured or not; if they are missing or do not state the end
+  state, the maintainer writes them in the issue first. A run of a step with
+  no approved sentence fails. Copy each sentence verbatim under Evidence,
+  with the issue edit and the approval that fixed it and the time of the
+  first run, so the order can be checked.
 - From then on, only the maintainer, not the author, may change them,
   recorded in the issue with any failing capture quoted. That is a design
   change: the changed step is a fresh proof on a new head, and the review
@@ -152,9 +153,11 @@ flows). A test passing is not proof of what the user sees.
   and which has at least one after run of the same sentence, all of them
   passing; re-running unchanged
   code, or a change that does not alter that behaviour, does not clear it.
-- Whether Visual proof applies is stated by the reviewer, not the author.
-  For any change to what a pi session shows or how it behaves over time, the
-  brief carries the sentences and captures whatever the author claims.
+- Whether Visual proof applies is stated by the reviewer, not the author:
+  it applies to any change to what a pi session shows or how it behaves over
+  time, and a reviewer finding that it does not apply names what in the diff
+  shows the change is neither. For such a change the brief always carries
+  the sentences and captures.
 
 ## Session-level checks
 
