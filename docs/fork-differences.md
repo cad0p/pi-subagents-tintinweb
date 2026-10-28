@@ -50,4 +50,5 @@ Each of these exists upstream and is not coming here without a new decision.
 
 - **pi peer floor: `>=1.0.4`** for `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui`. `reportUsage` relies on pi folding `AgentToolResult.usage` into `getSessionStats()` (pi 0.81.0), so the floor is comfortably above the release that introduced it.
 - **Settings are a flat list** in `/agents → Settings`, mirroring upstream's shape, and persist in `subagents.json` (global and project).
+- **One subagents extension per pi process.** Installing this fork beside upstream `@tintinweb/pi-subagents` or nicobailon's `pi-subagents` is unsupported: they register the same tool names (`Agent`, `get_subagent_result`) and process-wide state, and the background-work provider is named `pi-subagents` with no guard against a second holder of the name.
 - **Tool names and calling conventions stay Claude Code-compatible** (`Agent`, `get_subagent_result`, `SendMessage`) on purpose, even where this fork's semantics differ from upstream's.
