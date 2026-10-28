@@ -24,6 +24,7 @@ vi.mock("../src/agent-runner.js", async (importOriginal) => ({
 
 import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, resumeAgent, runAgent } from "../src/agent-runner.js";
+import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
@@ -201,6 +202,21 @@ describe("crash recovery — startup report", () => {
     await quiet();
 
     expect(made.pi.sendMessage).not.toHaveBeenCalled();
+    expect(interruptedSettles(file)).toEqual([]);
+  });
+
+  it("a child activation recovers nothing: the root activation owns the crash report", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("kid", DEAD_PID)]);
+    writeChildFiles("kid");
+    const child = makePi();
+    child.pi.appendEntry.mockImplementation((customType: string, data: object) => appendFileSync(file, `${JSON.stringify(custom(customType, data))}\n`));
+    runInChildSessionContext(() => subagentsExtension(child.pi));
+
+    await child.lifecycle.get("session_start")({ reason: "startup" }, { ...spawnCtx(tmpDir), sessionManager: SessionManager.open(file, undefined, tmpDir) });
+    await quiet();
+
+    expect(child.pi.sendMessage).not.toHaveBeenCalled();
     expect(interruptedSettles(file)).toEqual([]);
   });
 
