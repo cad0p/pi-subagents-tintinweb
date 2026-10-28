@@ -487,6 +487,134 @@ describe("run cap", () => {
     expect(child.sendCustomMessage).not.toHaveBeenCalled();
     expect(completions).toHaveLength(0);
   });
+  it("a cap that fires while a user-stopped run unwinds keeps the user's stop", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    manager.abort(record.id);
+    expect(record.status).toBe("stopped");
+    const sessionAborts = child.abort.mock.calls.length;
+    // The run is still streaming (the session's abort lands in a microtask), so the hard stop fires first.
+    vi.advanceTimersByTime(CAP_MS);
+    // Pin that the hard stop actually ran: it aborts the still-streaming session a second time. Without this,
+    // a cap that never fires leaves the test green on the quiet-tick settle.
+    expect(child.abort.mock.calls.length).toBe(sessionAborts + 1);
+    await settle();
+    expect(record.limitReason).toBeUndefined();
+    expect(record.timeLimit).toBeUndefined();
+    expect(completions).toHaveLength(1);
+    // Both rendered surfaces: the notification header/note is what the user sees, the report note is what the parent reads.
+    const notification = formatTaskNotification(record, { failurePreviewMaxChars: 65536 });
+    expect(notification).toContain("STOPPED BY THE USER");
+    expect(notification).not.toContain("time limit");
+    expect(renderAgentReport(record)).toContain("STOPPED BY THE USER");
+  });
+
+  it("a cap that fires after abort, before the run was ever observed, still settles the record", async () => {
+    const child = fakeChild();
+    let releaseSession = () => {};
+    const created = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+      await created;
+      const session = child as unknown as AgentSession;
+      opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+      return { text: "", aborted: true, steered: false } as unknown as Awaited<ReturnType<typeof runAgent>>;
+    });
+    const record = spawnChild(capDir);
+    await settle();
+    manager.abort(record.id);
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    // The guard must not skip the stop path: without life.hardStopped this record never finalizes.
+    expect(completions).toHaveLength(1);
+    expect(record.status).toBe("stopped");
+    expect(record.limitReason).toBeUndefined();
+    expect(record.timeLimit).toBeUndefined();
+    releaseSession();
+    await settle();
+    expect(child.dispose).toHaveBeenCalled();
+  });
+
+  it("the heads-up does not steer over an input wake that has not been observed", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    // The run ends with background work still listed, so the record parks as waiting with an idle session.
+    child.end("first");
+    vi.advanceTimersByTime(50);
+    await settle();
+    expect(record.waiting).toBeDefined();
+    // Input handed to the idle record opens a wake; the child never acknowledges it, so it stays in flight.
+    record.held = ["please also check the logs"];
+    vi.advanceTimersByTime(25);
+    await settle();
+    const wakes = child.sendCustomMessage.mock.calls.length;
+    expect(wakes).toBe(1);
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(wakes);
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record.result).toContain("please also check the logs");
+  });
+
+  it("the heads-up never steers a record the user already stopped", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    manager.abort(record.id);
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(record.limitReason).toBeUndefined();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record.status).toBe("stopped");
+  });
+
+  it("a cap timer left over from a previous lifecycle cannot label a resumed run", async () => {
+    const stale: Array<() => void> = [];
+    const staleLead: Array<() => void> = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, ms?: number, ...args: unknown[]) => {
+      if (ms === CAP_MS) stale.push(() => callback(...(args as [])));
+      if (ms === LEAD_MS) staleLead.push(() => callback(...(args as [])));
+      return realSetTimeout(callback, ms, ...args);
+    }) as typeof setTimeout);
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    // The run settles quietly, which clears the cap timers. The captured callback stands for a timer that
+    // outlived its lifecycle (a reload or a late tick can deliver one).
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "completed" });
+    expect(record.limitReason).toBeUndefined();
+    expect(stale).toHaveLength(1);
+    expect(staleLead).toHaveLength(1);
+    const resumed = fakeChild();
+    vi.mocked(createChildSession).mockResolvedValueOnce(resumed as unknown as AgentSession);
+    await manager.restoreSession(record.id);
+    manager.resume(record.id, "more");
+    expect(record.status).toBe("running");
+    staleLead[0]?.();
+    expect(resumed.sendCustomMessage).not.toHaveBeenCalled();
+    stale[0]?.();
+    expect(record.limitReason).toBeUndefined();
+    expect(record.timeLimit).toBeUndefined();
+    expect(record.status).toBe("running");
+    spy.mockRestore();
+  });
+
   it("a hard stop before the session exists settles at once, and the session that arrives later is torn down", async () => {
     const child = fakeChild();
     let releaseSession = () => {};
