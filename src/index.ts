@@ -22,7 +22,7 @@ import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAM
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
-import { inChildSessionContext } from "./child-context.js";
+import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
@@ -304,6 +304,10 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 }
 
 export default function (pi: ExtensionAPI) {
+  // Read once, while the factory runs: only a child session's construction sets the context, and it ends before
+  // this activation's later callbacks run.
+  const isRoot = !inChildSessionContext();
+  let leakedChildContext = isRoot ? takeLeakedChildContextRead() : undefined;
   // Read directly rather than waiting for applyAndEmitLoaded below: this decides
   // the initial load, which happens hundreds of lines before settings are applied.
   let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
@@ -342,7 +346,7 @@ export default function (pi: ExtensionAPI) {
     // shared with every activation in this process, so a CHILD session's
     // settings load must not clobber the root's decision — the nested
     // `get_subagent_result` renders for the same user, in the same session.
-    if (!inChildSessionContext()) setReportShowCost(b);
+    if (isRoot) setReportShowCost(b);
     widget.update();
     fleet.update();
   }
@@ -681,7 +685,6 @@ export default function (pi: ExtensionAPI) {
   const slotsAdopted = new Promise<void>((resolve) => {
     openSlots = resolve;
   });
-  const isRoot = !inChildSessionContext();
   if (isRoot) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
     // Children reloaded by the new code route their gate, onError and nested calls here.
@@ -741,7 +744,7 @@ export default function (pi: ExtensionAPI) {
    * place that attaches pending subagent spend to a tool result.
    */
   const registerParentTool = (tool: ToolDefinition): void => {
-    if (!inChildSessionContext()) pi.registerTool(withUsageReporting(tool));
+    if (isRoot) pi.registerTool(withUsageReporting(tool));
   };
 
   // --- Cross-extension RPC via pi.events ---
@@ -781,6 +784,11 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
+    if (leakedChildContext) {
+      const frames = leakedChildContext.split("\n").slice(1, 8).join("\n");
+      ctx.ui.notify(`pi-subagents: this load ran inside a finished subagent construction's async context and was loaded as the main session. Please report:\n${frames}`, "warning");
+      leakedChildContext = undefined;
+    }
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.

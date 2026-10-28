@@ -13,18 +13,55 @@
  * Async-context-local so concurrent top-level extension work is unaffected, and
  * so a harness that activates the extension directly (no child context) still
  * gets the parent tools.
+ *
+ * The store is a token that closes when the construction ends. AsyncLocalStorage
+ * hands the store to every timer, promise and handle created inside `run()`, so a
+ * boolean store outlives the construction: a long-lived resource first created
+ * while a child loads (a timer, a worker, a stream) carries it, and a root
+ * `/reload` driven from it would skip the parent tools, silently and for the rest of
+ * the process. A closed token reads as root.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
-const childSessionContext = new AsyncLocalStorage<boolean>();
+interface ChildLoad {
+  open: boolean;
+}
+
+const childSessionContext = new AsyncLocalStorage<ChildLoad>();
+
+/** Stack of the first read that found a closed token, for the root to report. */
+let leakedRead: string | undefined;
 
 /** True while the current async context is building a subagent session. */
 export function inChildSessionContext(): boolean {
-  return childSessionContext.getStore() === true;
+  const load = childSessionContext.getStore();
+  if (!load) return false;
+  if (!load.open) leakedRead ??= new Error("child-session context read after its construction ended").stack ?? "";
+  return load.open;
 }
 
-/** Run `fn` (resource loading / session construction) as a subagent session. */
+/** The first leaked read since the last call, if any. */
+export function takeLeakedChildContextRead(): string | undefined {
+  const stack = leakedRead;
+  leakedRead = undefined;
+  return stack;
+}
+
+/** Run `fn` (resource loading / session construction) as a subagent session, until it returns or settles. */
 export function runInChildSessionContext<T>(fn: () => T): T {
-  return childSessionContext.run(true, fn);
+  const load: ChildLoad = { open: true };
+  const close = () => {
+    load.open = false;
+  };
+  let result: T;
+  try {
+    result = childSessionContext.run(load, fn);
+  } catch (error) {
+    close();
+    throw error;
+  }
+  if (result instanceof Promise) return result.finally(close) as T;
+  close();
+  return result;
 }
