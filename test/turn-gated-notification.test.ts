@@ -1226,6 +1226,51 @@ describe("agents command terminal surfaces", () => {
     expect(joined).not.toContain("\nforged");
   });
 
+  it("lists nested agents under their parent in the running-agents menu (#146)", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
+    const { pi, tools, commands } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+
+    const { c, selects } = commandCtx((title, options) => {
+      if (title === "Agents") {
+        return selects.filter(s => s.title === "Agents").length <= 1
+          ? options.find(o => o.startsWith("Running agents ("))
+          : undefined;
+      }
+      return undefined;
+    });
+
+    const spawnAgent = async (description: string) => {
+      const spawn = await tools.get("Agent").execute(
+        "tc-spawn",
+        { prompt: "go", description, subagent_type: "general-purpose" },
+        undefined, undefined, c,
+      );
+      return textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    };
+    const idA = await spawnAgent("alpha");
+    const idC = await spawnAgent("charlie");
+    const idB = await spawnAgent("bravo");
+
+    // Spawn order differs from startedAt order; bravo is a child of alpha.
+    const manager = (globalThis as Record<symbol, any>)[MANAGER_KEY];
+    const base = Date.now();
+    manager.getRecord(idA).startedAt = base;
+    manager.getRecord(idB).startedAt = base + 1000;
+    manager.getRecord(idB).parentAgentId = idA;
+    manager.getRecord(idC).startedAt = base + 2000;
+
+    await commands.get("agents").handler("", c);
+
+    expect(selects.find(s => s.title === "Agents")?.options.join("\n")).toContain("Running agents (3)");
+    const options = selects.find(s => s.title === "Running agents")?.options ?? [];
+    expect(options).toHaveLength(3);
+    expect(options[0]).toMatch(/^Agent \(alpha\)/);
+    expect(options[1]).toMatch(/^ {2}↳ Agent \(bravo\)/);
+    expect(options[2]).toMatch(/^Agent \(charlie\)/);
+  });
+
   it("collapses a frontmatter display_name in the running-agents menu", async () => {
     const control = "\u001b]52;c;cGF3bmVk\u0007";
     const dir = mkdtempSync(join(tmpdir(), "pi-menu-agent-"));
