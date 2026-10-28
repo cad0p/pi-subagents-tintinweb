@@ -254,6 +254,25 @@ describe("crash recovery — startup report", () => {
     expect(message.content).toContain(NOTE);
   });
 
+  it("settles a crash report that get_subagent_result consumes inside the hold window; a reopen reports nothing", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeChildFiles("held");
+    writeSession(file, [spawned("held", DEAD_PID)]);
+    const made = boot(file);
+
+    await startup(made, file);
+    await made.tools.get("get_subagent_result").execute("tc-held", { agent_id: "held" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(interruptedSettles(file)).toEqual(["held"]));
+    await quiet();
+    expect(made.pi.sendMessage).not.toHaveBeenCalled();
+
+    const reopened = boot(file);
+    await startup(reopened, file);
+    await quiet();
+    expect(reopened.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("stops a run at shutdown as stopped, and does not recover it", async () => {
     const file = join(tmpDir, "parent.jsonl");
     const childFile = join(tmpDir, "stop.jsonl");
