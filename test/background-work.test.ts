@@ -8,8 +8,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  BACKGROUND_WORK_DISPLAY_KEY,
   BACKGROUND_WORK_REGISTRY_KEY,
   type BackgroundWorkItem,
+  listBackgroundWorkDisplayProviders,
   listBackgroundWorkProviders,
   registerBackgroundWorkProvider,
   snapshotBackgroundWork,
@@ -29,7 +31,7 @@ import {
   resumeAgent,
   runAgent,
 } from "../src/agent-runner.js";
-import { registerSubagentProvider } from "../src/background-work.js";
+import { describeSubagentWork, registerSubagentDisplayProvider, registerSubagentProvider } from "../src/background-work.js";
 import subagentsExtension from "../src/index.js";
 import { legacyDelivered } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
@@ -47,6 +49,11 @@ function record(fields: Partial<AgentRecord> & { id: string }): AgentRecord {
 /** Drops the registry slot so each test starts with no providers. */
 function resetRegistry(): void {
   Reflect.deleteProperty(globalThis, Symbol.for(BACKGROUND_WORK_REGISTRY_KEY));
+}
+
+/** Drops the display slot so each test starts with no display providers. */
+function resetDisplayRegistry(): void {
+  Reflect.deleteProperty(globalThis, Symbol.for(BACKGROUND_WORK_DISPLAY_KEY));
 }
 
 /** Registers the provider over a fixed record list, then returns the ids the package snapshot lists. */
@@ -136,6 +143,7 @@ describe("background-work registration — root activation only", () => {
   let prevHome: string | undefined;
 
   const providerNames = (): string[] => listBackgroundWorkProviders().map((provider) => provider.name);
+  const displayNames = (): string[] => listBackgroundWorkDisplayProviders().map((provider) => provider.name);
   const listedNow = (): string[] => snapshotBackgroundWork([MAIN]).items.map((item) => item.id);
 
   beforeEach(() => {
@@ -152,6 +160,7 @@ describe("background-work registration — root activation only", () => {
     writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
     process.chdir(tmpDir);
     resetRegistry();
+    resetDisplayRegistry();
   });
 
   afterEach(() => {
@@ -164,6 +173,7 @@ describe("background-work registration — root activation only", () => {
     rmSync(agentDir, { recursive: true, force: true });
     Reflect.deleteProperty(globalThis, MANAGER_KEY);
     resetRegistry();
+    resetDisplayRegistry();
   });
 
   /** A foreign provider already holding the pi-subagents name, listing one item for the main session. */
@@ -176,6 +186,13 @@ describe("background-work registration — root activation only", () => {
     subagentsExtension(pi);
     await lifecycle.get("session_start")({ reason: "startup" }, spawnCtx(tmpDir));
     expect(providerNames()).toContain("pi-subagents");
+  });
+
+  it("a root startup registers the pi-subagents display provider beside it", async () => {
+    const { pi, lifecycle } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({ reason: "startup" }, spawnCtx(tmpDir));
+    expect(displayNames()).toContain("pi-subagents");
   });
 
   it("a non-reload start keeps an existing pi-subagents provider", async () => {
@@ -199,6 +216,86 @@ describe("background-work registration — root activation only", () => {
     const { child } = makeRootAndChild();
     await child.lifecycle.get("session_start")({ reason: "startup" }, spawnCtx(tmpDir));
     expect(providerNames()).not.toContain("pi-subagents");
+  });
+});
+
+describe("background-work display — the footer counts the listed subagents", () => {
+  beforeEach(() => {
+    resetRegistry();
+    resetDisplayRegistry();
+  });
+  afterEach(() => {
+    resetRegistry();
+    resetDisplayRegistry();
+  });
+
+  const workItem = (id: string): BackgroundWorkItem => ({ id, sessionId: MAIN });
+  const waitingRecord = (id: string, since: number): AgentRecord => record({ id, waiting: { since, items: [] } });
+  const describeCtx = { sessionId: MAIN, sessionIds: [MAIN], nowMs: 0 };
+  const describeWork = (items: BackgroundWorkItem[], records: AgentRecord[]): string | null =>
+    describeSubagentWork(items, describeCtx, { listAgents: () => records });
+  const registered = () => listBackgroundWorkDisplayProviders().find((provider) => provider.name === "pi-subagents");
+  const source = (records: AgentRecord[]) => () => ({ listAgents: () => records });
+  const graphemes = (value: string): number => [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].length;
+
+  it("says 1 agent for one listed record", () => {
+    expect(describeWork([workItem("a")], [record({ id: "a" })])).toBe("1 agent");
+  });
+
+  it("says N agents for several", () => {
+    const ids = ["a", "b", "c"];
+    expect(describeWork(ids.map(workItem), ids.map((id) => record({ id })))).toBe("3 agents");
+  });
+
+  it("appends the waiting count", () => {
+    const ids = ["a", "b"];
+    expect(describeWork(ids.map(workItem), [waitingRecord("a", 1), record({ id: "b" })])).toBe("2 agents (1 waiting)");
+  });
+
+  it("appends a count of two waiting agents", () => {
+    const ids = ["a", "b", "c"];
+    expect(describeWork(ids.map(workItem), [waitingRecord("a", 1), waitingRecord("b", 2), record({ id: "c" })])).toBe("3 agents (2 waiting)");
+  });
+
+  it("returns null when nothing is listed", () => {
+    expect(describeWork([], [record({ id: "a" })])).toBeNull();
+  });
+
+  it("counts a record the source no longer holds as running", () => {
+    expect(describeWork([workItem("a"), workItem("gone")], [record({ id: "a" })])).toBe("2 agents");
+  });
+
+  it("stays under the footer's 48-grapheme cap for twelve agents", () => {
+    const ids = Array.from({ length: 12 }, (_, index) => `a${index}`);
+    const records = ids.map((id, index) => (index < 11 ? waitingRecord(id, index) : record({ id })));
+    const text = describeWork(ids.map(workItem), records) ?? "";
+    expect(text).toBe("12 agents (11 waiting)");
+    expect(graphemes(text)).toBeLessThanOrEqual(48);
+  });
+
+  it("a malformed display registry does not make registration throw", () => {
+    Reflect.set(globalThis, Symbol.for(BACKGROUND_WORK_DISPLAY_KEY), { version: 1, providers: "not a map" });
+    expect(() => registerSubagentDisplayProvider("startup", source([]))).not.toThrow();
+  });
+
+  it("a throwing getSource yields null instead of throwing", () => {
+    registerSubagentDisplayProvider("startup", () => {
+      throw new Error("boom");
+    });
+    expect(registered()?.describe([workItem("a")], describeCtx)).toBeNull();
+  });
+
+  it("a non-reload start keeps an existing pi-subagents display provider", () => {
+    registerSubagentDisplayProvider("startup", source([waitingRecord("a", 1)]));
+    registerSubagentDisplayProvider("startup", source([]));
+    expect(registered()?.describe([workItem("a")], describeCtx)).toBe("1 agent (1 waiting)");
+  });
+
+  it("a reload replaces the display provider with the live source", () => {
+    registerSubagentDisplayProvider("startup", source([waitingRecord("a", 1)]));
+    registerSubagentDisplayProvider("reload", source([]));
+    expect(registered()?.describe([workItem("a")], describeCtx)).toBe("1 agent");
+    expect(listBackgroundWorkDisplayProviders().filter((provider) => provider.name === "pi-subagents")).toHaveLength(1);
   });
 });
 
