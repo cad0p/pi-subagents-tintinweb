@@ -237,7 +237,6 @@ describe("background-work display — the footer counts the listed subagents", (
     describeSubagentWork(items, describeCtx, { listAgents: () => records });
   const registered = () => listBackgroundWorkDisplayProviders().find((provider) => provider.name === "pi-subagents");
   const source = (records: AgentRecord[]) => () => ({ listAgents: () => records });
-  const graphemes = (value: string): number => [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)].length;
 
   it("says 1 agent for one listed record", () => {
     expect(describeWork([workItem("a")], [record({ id: "a" })])).toBe("1 agent");
@@ -266,14 +265,12 @@ describe("background-work display — the footer counts the listed subagents", (
     expect(describeWork([workItem("a"), workItem("gone")], [record({ id: "a" })])).toBe("2 agents");
   });
 
-  // The count leads and the text is bounded by the numbers themselves, so no shape of
-  // this string can reach the footer's 48-grapheme cap: a cut can only ever cost detail.
-  it("leads with the count and cannot reach the footer's 48-grapheme cap", () => {
+  // The count leads and the text is bounded by the numbers themselves: the longest legal
+  // string is under 30 graphemes, so the footer's 48-grapheme cap can only ever cost detail.
+  it("leads with the count, so a cut can only cost detail", () => {
     const ids = Array.from({ length: 1000 }, (_, index) => `a${index}`);
     const records = ids.map((id) => waitingRecord(id, 1));
-    const text = describeWork(ids.map(workItem), records) ?? "";
-    expect(text).toBe("1000 agents (1000 waiting)");
-    expect(graphemes(text)).toBeLessThan(48);
+    expect(describeWork(ids.map(workItem), records)).toBe("1000 agents (1000 waiting)");
   });
 
   it("counts a source whose listAgents throws as running, not as unknown", () => {
@@ -288,7 +285,9 @@ describe("background-work display — the footer counts the listed subagents", (
         throw new Error("boom");
       },
     });
-    expect(describeWork([workItem("a"), workItem("bad")], [waitingRecord("a", 1), corrupt])).toBe("2 agents (1 waiting)");
+    // The corrupt record comes first: with it last, a deleted per-record catch would still pass,
+    // because the throw would leave the loop only after the waiting record was collected.
+    expect(describeWork([workItem("a"), workItem("bad")], [corrupt, waitingRecord("a", 1)])).toBe("2 agents (1 waiting)");
   });
 
   it("a malformed display registry does not make registration throw", () => {
