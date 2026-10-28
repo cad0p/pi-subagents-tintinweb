@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { registerAgents } from "../src/agent-types.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { registerAgents, resolveSpawnType, setDefaultsDisabled, setFallbackSubagent } from "../src/agent-types.js";
 import { effectiveFailurePreviewCap, formatTaskNotification } from "../src/index.js";
 import { FAILURE_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings } from "../src/settings.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
@@ -804,6 +804,38 @@ describe("completion header names the agent type", () => {
     registerCustom({ displayName: "A".repeat(400) });
     const header = formatTaskNotification(createRecord({ type: "reviewer" }), settings).split("\n")[0];
     expect(header).toBe(`**✓ ${"A".repeat(300)}… completed: Test Agent**${BODY}`);
+  });
+
+  describe("fallback dispatch", () => {
+    afterEach(() => {
+      setFallbackSubagent(undefined);
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+    });
+
+    it("names the built-in tier Agent when no general-purpose agent is registered", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+      const dispatch = resolveSpawnType("Explore");
+      expect(dispatch).toMatchObject({ ok: true, type: "general-purpose" });
+      const header = formatTaskNotification(createRecord({ type: "general-purpose" }), settings).split("\n")[0];
+      expect(header).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
+    });
+
+    it("names the configured fallbackSubagent, the agent that ran", () => {
+      registerCustom({ displayName: "Code Reviewer" });
+      setFallbackSubagent("reviewer");
+      const dispatch = resolveSpawnType("removed-agent");
+      if (!dispatch.ok) throw new Error(dispatch.message);
+      const header = formatTaskNotification(createRecord({ type: dispatch.type }), settings).split("\n")[0];
+      expect(header).toBe(`**✓ Code Reviewer completed: Test Agent**${BODY}`);
+    });
+
+    it("uses the name when display_name is blank", () => {
+      registerCustom({ displayName: "   " });
+      const header = formatTaskNotification(createRecord({ type: "REVIEWER" }), settings).split("\n")[0];
+      expect(header).toBe(`**✓ reviewer completed: Test Agent**${BODY}`);
+    });
   });
 
   it("falls back to Agent when the record carries no type string", () => {

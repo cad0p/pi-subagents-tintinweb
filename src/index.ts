@@ -292,7 +292,11 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   // A disabled type whose config is still present keeps its own name; only a type absent from the registry shows its record.type string.
   const rawType = typeof record.type === "string" ? record.type : "";
   const config = getAgentConfig(rawType);
-  const typeName = sanitizeHeaderText(config ? config.displayName ?? config.name : "") || sanitizeHeaderText(rawType);
+  // An unregistered implicit fallback runs getConfig's built-in tier, so it is named as the tool row names it ("Agent").
+  const ownName = config
+    ? sanitizeHeaderText(config.displayName ?? "") || sanitizeHeaderText(config.name)
+    : rawType.toLowerCase() === IMPLICIT_FALLBACK ? sanitizeHeaderText(getDisplayName(rawType)) : "";
+  const typeName = ownName || sanitizeHeaderText(rawType);
   const agentName = headerPreview(typeName) || "Agent";
   let header = `**${getStatusGlyph(String(record.status))} ${agentName} ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
   const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
