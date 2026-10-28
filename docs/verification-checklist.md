@@ -95,16 +95,23 @@ flows). A test passing is not proof of what the user sees.
   sent, prompts typed). Trim unrelated scrollback, never edit captured lines.
 - Say what the reader should see in each capture (the row, the marker, the
   notification), so a reviewer can check it without re-running.
-- Write the expected outcome down before running: the plan's or issue's own
-  sentence for what happens (for example "the main agent resumes both"), not
-  only the mechanism that should cause it (a wake, a turn, a row).
-- The proof passes only when a captured line shows that outcome. Quote the
-  line next to the expected sentence in the PR body. A capture that shows the
-  mechanism working but a different outcome is a failed proof: fix the change,
-  not the expectation.
-- When the outcome depends on what the model chooses to do, the message that
-  reaches the model must tell it what to do. A model making another choice is
-  a failed proof, not model variance.
+- Write the expected outcome down before the first capture, one sentence per
+  captured step, for what happens (for example "the main agent resumes both"),
+  not only the mechanism that should cause it (a wake, a turn, a row). Copy it
+  verbatim from the linked issue or plan; if neither states one, write it
+  under Evidence before capturing. If the sentence itself is wrong, correct
+  the issue or plan first and re-run.
+- The after capture passes only when, for every clause of its sentence, a
+  captured line shows that clause. Quote each line next to its clause under
+  Evidence. A line that contradicts the outcome is never trimmed as
+  unrelated. An after capture that shows the mechanism working but a
+  different outcome is a failed proof: fix the change, not the expectation.
+- When the outcome depends on what the model chooses to do, the message the
+  change sends to the model (a notice, a tool result, a wake) must tell it
+  what to do; a prompt typed during the run does not count. A model making
+  another choice is a failed proof, not model variance.
+- A failed proof cannot be dismissed. It clears only on a new head whose
+  after capture shows every clause.
 
 ## Session-level checks
 
@@ -133,9 +140,11 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   verification notes, and earlier verdicts. Frame it as a completeness
   question: which inputs, callers, settings, or runtime versions would break
   the guarantees while the gates stay green?
-- When the PR has visual proof, the brief also includes the plan's or issue's
-  expected-outcome sentence and the capture files, and asks the reviewer to
-  confirm a captured line shows that outcome. A mismatch is a must-fix.
+- When the PR has visual proof, the brief also includes the expected-outcome
+  sentences (even when they are written in the PR body) and the capture
+  files, and asks the reviewer to check, clause by clause, whether any
+  captured line shows the outcome or contradicts it. A mismatch is a
+  must-fix that cannot be dismissed (see Visual proof).
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers
   (`npm run lint:fix`). It states the turn budget and the way out: reply
   `NO VERDICT` with what was tested if the budget runs out, `HEAD` differs from
