@@ -886,6 +886,7 @@ export class AgentManager {
     // The heads-up reached a run that has now ended: settle, whatever background work is still listed.
     if (record.capForced) {
       record.limitReason = "time";
+      record.timeLimit = "wrapped";
       this.finalize(record, life);
       return;
     }
@@ -949,6 +950,7 @@ export class AgentManager {
   private hardStop(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
     record.limitReason = "time";
+    record.timeLimit = "stopped";
     life.hardStopped = true;
     // A run waiting at the pool gate has no request to abort: its FIFO entry goes now, so the gate neither admits it
     // nor counts it as running.
@@ -1536,6 +1538,7 @@ export class AgentManager {
       turnCount: record.turnCount,
       lastCheckpoint: record.lastCheckpoint,
       limitReason: record.limitReason,
+      timeLimit: record.timeLimit,
       capForced: record.capForced,
     };
     record.status = "running";
@@ -1551,6 +1554,7 @@ export class AgentManager {
     record.lastCheckpoint = undefined;
     // A fresh lifecycle gets a fresh cap: the prior time-limit settle and heads-up do not carry over.
     record.limitReason = undefined;
+    record.timeLimit = undefined;
     record.capForced = undefined;
     record.abortController = new AbortController();
     try {

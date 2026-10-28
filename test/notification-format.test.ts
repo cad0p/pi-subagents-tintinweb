@@ -33,6 +33,12 @@ function sessionWithContext(percent: number | null, contextWindow?: number | nul
 }
 
 describe("markdown completion report", () => {
+  it("keeps the plain time-limit wording for a record without timeLimit", () => {
+    const report = formatTaskNotification(createRecord({ limitReason: "time", capMinutes: 2 }), settings);
+    expect(report.split("\n")[0]).toBe(
+      "**✓ Subagent time limit reached: Test Agent** (time limit reached (2 min); resume with SendMessage to continue) · 2 tool uses · 150 token · 5.0s",
+    );
+  });
   it("renders a completed report with header, metadata, and body last", () => {
     const report = formatTaskNotification(createRecord(), settings);
     expect(report).toBe(

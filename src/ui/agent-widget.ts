@@ -365,7 +365,7 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string; lifetimeUsage?: LifetimeUsage; limitReason?: "time" }, theme: Theme): string {
+  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string; lifetimeUsage?: LifetimeUsage; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" }, theme: Theme): string {
     const name = toSingleLine(getDisplayName(a.type));
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
@@ -374,7 +374,10 @@ export class AgentWidget {
     let statusText: string;
     if (a.status === "completed") {
       icon = theme.fg("success", "✓");
-      statusText = a.limitReason === "time" ? theme.fg("warning", " (time limit)") : "";
+      let timeText = " (time limit)";
+      if (a.timeLimit === "wrapped") timeText = " (wrapped up for the time limit)";
+      else if (a.timeLimit === "stopped") timeText = " (stopped at the time limit)";
+      statusText = a.limitReason === "time" ? theme.fg("warning", timeText) : "";
     } else if (a.status === "steered") {
       icon = theme.fg("warning", "✓");
       statusText = theme.fg("warning", " (turn limit)");

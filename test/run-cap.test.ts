@@ -6,7 +6,9 @@ import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext } 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, runAgent } from "../src/agent-runner.js";
+import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
+import { renderAgentReport } from "../src/result-report.js";
 import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
@@ -176,7 +178,7 @@ describe("run cap", () => {
     child.begin();
     child.end("report");
     await settle();
-    expect(record).toMatchObject({ status: "completed", limitReason: "time", result: "report" });
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
     expect(completions).toHaveLength(1);
     expect(completions[0]).toBe(record);
     expect(pending).toHaveLength(1);
@@ -210,7 +212,7 @@ describe("run cap", () => {
     // The hard stop's session.abort ends the turn; the teardown after the settle aborts again, so the count is not pinned.
     expect(child.abort).toHaveBeenCalled();
     expect(abortById).not.toHaveBeenCalled();
-    expect(record).toMatchObject({ status: "completed", limitReason: "time" });
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     expect(completions).toHaveLength(1);
   });
 
@@ -227,7 +229,7 @@ describe("run cap", () => {
     expect(completions).toHaveLength(0);
     vi.advanceTimersByTime(1000);
     await settle();
-    expect(record).toMatchObject({ status: "completed", limitReason: "time" });
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     expect(completions).toHaveLength(1);
     expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
   });
@@ -263,6 +265,23 @@ describe("run cap", () => {
     expect(manager.runningCount()).toBe(0);
     expect(completions.map((record) => record.id)).toEqual([runA.id, runB.id]);
   });
+  it("a heads-up whose wake is still streaming at the cap reads stopped, not wrapped", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    // The wake's turn never answers: the cap hits while it still streams, so the hard stop wins over the heads-up.
+    child.begin();
+    vi.advanceTimersByTime(LEAD_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(completions).toHaveLength(1);
+  });
   it("a quiet tick between the heads-up and the wake's agent_start does not settle the run", async () => {
     pending = [bgItem];
     const child = fakeChild();
@@ -296,12 +315,12 @@ describe("run cap", () => {
     await settle();
     vi.advanceTimersByTime(CAP_MS);
     await settle();
-    expect(record).toMatchObject({ status: "completed", limitReason: "time" });
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     const resumed = fakeChild();
     vi.mocked(createChildSession).mockResolvedValueOnce(resumed as unknown as AgentSession);
     await manager.restoreSession(record.id);
     manager.resume(record.id, "more");
-    expect(record).toMatchObject({ status: "running", limitReason: undefined, capForced: undefined, turnBudget: { turns: 0, softLimitReached: false } });
+    expect(record).toMatchObject({ status: "running", limitReason: undefined, timeLimit: undefined, capForced: undefined, turnBudget: { turns: 0, softLimitReached: false } });
     // The resumed turn ends idle with the background work still listed, so the run waits again.
     resumed.end("second");
     await settle();
@@ -316,6 +335,58 @@ describe("run cap", () => {
     await settle();
     expect(record).toMatchObject({ status: "completed", limitReason: "time", result: "report" });
     expect(completions).toHaveLength(2);
+  });
+  it("a refused resume keeps the time-limit settle it was refused over", async () => {
+    await manager.dispose(false);
+    const onStart = vi.fn();
+    manager = new AgentManager((record) => completions.push(record), undefined, onStart);
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped" });
+    vi.mocked(createChildSession).mockResolvedValueOnce(fakeChild() as unknown as AgentSession);
+    await manager.restoreSession(record.id);
+    onStart.mockImplementationOnce(() => {
+      throw new Error("stale extension context");
+    });
+    expect(manager.resume(record.id, "more")).toBeUndefined();
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped" });
+  });
+  it("a settle after the heads-up reads wrapped up, in the notification header and the result note", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+  });
+  it("a hard stop reads stopped at the time limit, in the notification header and the result note", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
     const halfDir = policyDir(0.5);

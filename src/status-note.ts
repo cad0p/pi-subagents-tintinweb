@@ -18,8 +18,12 @@ import type { AgentRecord } from "./types.js";
  * turn limit was hit) — the parent should treat human intervention differently
  * from a budget cutoff.
  */
-export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number): string {
+export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number, timeLimit?: "wrapped" | "stopped"): string {
   if (limitReason === "time") {
+    const minutes = capMinutes === undefined ? "" : ` ${capMinutes} min`;
+    if (timeLimit === "wrapped") return ` (wrapped up for the${minutes} time limit; resume with SendMessage to continue)`;
+    if (timeLimit === "stopped") return ` (stopped at the${minutes} time limit; resume with SendMessage to continue)`;
+    // A record without `timeLimit` predates the wrapped/stopped split and keeps the plain wording.
     const cap = capMinutes === undefined ? "" : ` (${capMinutes} min)`;
     return ` (time limit reached${cap}; resume with SendMessage to continue)`;
   }

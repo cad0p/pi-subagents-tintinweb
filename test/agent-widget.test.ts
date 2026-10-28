@@ -221,6 +221,19 @@ describe("AgentWidget", () => {
     expect(finishedLines).toContain("error: errtail");
   });
 
+  it("labels a finished time-limit row by how the run ended, and keeps the plain label without the field", () => {
+    const timeLimitRow = (fields: object) => {
+      const manager = {
+        isDraining: () => false,
+        listAgents: () => [{ ...makeRecord("timed"), status: "completed", completedAt: Date.now(), limitReason: "time", ...fields }],
+      };
+      return renderLines(manager, "timed", () => "all");
+    };
+    expect(timeLimitRow({ timeLimit: "wrapped" })).toContain("(wrapped up for the time limit)");
+    expect(timeLimitRow({ timeLimit: "stopped" })).toContain("(stopped at the time limit)");
+    expect(timeLimitRow({})).toContain("(time limit)");
+  });
+
   it("collapses newlines and tabs in the record description on running and finished rows", () => {
     const running = {
       isDraining: () => false, listAgents: () => [{

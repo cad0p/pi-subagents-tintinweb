@@ -128,8 +128,12 @@ function createActivityTracker(agentId: () => string | undefined, maxTurns?: num
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Human-readable status word for the completion report header. */
-function getStatusWord(status: string, limitReason?: "time"): string {
-  if (limitReason === "time") return "time limit reached";
+function getStatusWord(status: string, limitReason?: "time", timeLimit?: "wrapped" | "stopped"): string {
+  if (limitReason === "time") {
+    if (timeLimit === "wrapped") return "wrapped up for the time limit";
+    if (timeLimit === "stopped") return "stopped at the time limit";
+    return "time limit reached";
+  }
   switch (status) {
     case "completed": return "completed";
     case "error": return "error";
@@ -284,13 +288,13 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
-  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason)}: ${description}**`;
+  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
   const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
     ? sanitizeHeaderText(String(record.error))
     : "";
   const errorPreview = headerPreview(errorText);
   if (errorPreview) header += ` — ${errorPreview}`;
-  header += getStatusNote(record.status, record.limitReason, record.capMinutes);
+  header += getStatusNote(record.status, record.limitReason, record.capMinutes, record.timeLimit);
   if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
 
   const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];

@@ -199,6 +199,8 @@ export interface AgentRecord {
   cwd?: string;
   /** Set when the run ended at the wall-time cap. The status stays `completed`; the label and notification read this. */
   limitReason?: "time";
+  /** Which cap event ended the run: `wrapped` after the heads-up's wrap-up settle, `stopped` at the hard stop. Unset on a record from an older release, which reads the plain time-limit label. */
+  timeLimit?: "wrapped" | "stopped";
   /** The run cap in minutes, stored when the cap is armed, so the notification can name it. */
   capMinutes?: number;
   /** Set when the cap's heads-up reached the run. The next settle that finds no pending input ends the lifecycle. */
