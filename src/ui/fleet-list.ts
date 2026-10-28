@@ -93,12 +93,16 @@ function rowKind(record: AgentRecord): RowKind {
   return "finished";
 }
 
-/** `↓ 3 more (2 running, 1 finished)`; zero counts are omitted. */
-function overflowLabel(arrow: string, hidden: AgentRecord[]): string {
+/** `2 running, 1 finished`; zero counts are omitted. */
+function countsText(records: AgentRecord[]): string {
   const counts: Record<RowKind, number> = { queued: 0, waiting: 0, running: 0, finished: 0 };
-  for (const record of hidden) counts[rowKind(record)] += 1;
-  const parts = ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`);
-  return `${arrow} ${hidden.length} more (${parts.join(", ")})`;
+  for (const record of records) counts[rowKind(record)] += 1;
+  return ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`).join(", ");
+}
+
+/** `↓ 3 more (2 running, 1 finished)`. */
+function overflowLabel(arrow: string, hidden: AgentRecord[]): string {
+  return `${arrow} ${hidden.length} more (${countsText(hidden)})`;
 }
 
 /**
@@ -316,7 +320,7 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
+    // Active — arrows navigate, → / ← expand and collapse nested rows, Enter opens, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
@@ -327,6 +331,27 @@ export class FleetList {
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
       this.update();
+      return { consume: true };
+    }
+    if (matchesKey(data, "right")) {
+      const entry = this.roster()[this.selectedIndex];
+      if (entry?.kind === "agent" && entry.nested.length > 0) {
+        this.expanded.add(entry.record.id);
+        this.selectedIndex += 1; // its first child is the next row
+        this.update();
+      }
+      return { consume: true };
+    }
+    if (matchesKey(data, "left")) {
+      const roster = this.roster();
+      const entry = roster[this.selectedIndex];
+      const parentId = entry?.kind === "agent" ? entry.record.parentAgentId : undefined;
+      const parentIdx = roster.findIndex(e => e.kind === "agent" && e.record.id === parentId);
+      if (parentId && parentIdx > 0) {
+        this.expanded.delete(parentId);
+        this.selectedIndex = parentIdx;
+        this.update();
+      }
       return { consume: true };
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
@@ -445,7 +470,7 @@ export class FleetList {
     if (hiddenAbove.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↑", hiddenAbove)), width));
     for (let a = start; a < start + visible; a++) {
       const record = agents[a].record;
-      lines.push(this.renderAgentRow(a + 1, sel, record, width, theme));
+      lines.push(this.renderAgentRow(a + 1, sel, agents[a], width, theme));
       if (rowKind(record) === "running") lines.push(this.activityLine(record, width, theme));
     }
     if (hiddenBelow.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↓", hiddenBelow)), width));
@@ -457,13 +482,15 @@ export class FleetList {
     return rosterIndex === sel ? theme.fg("accent", "⏺") : theme.fg("dim", "◯");
   }
 
-  private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
+  private renderAgentRow(rosterIndex: number, sel: number, entry: AgentEntry, width: number, theme: Theme): string {
+    const { record } = entry;
     const kind = rowKind(record);
     const icon = kind === "finished" ? `${finishedStatus(record, theme).icon} ` : "";
     const modeLabel = getPromptModeLabel(record.type);
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const drainTag = this.manager.isDraining(record.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
-    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${icon}${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${modeTag}${drainTag}`;
+    const nestTag = entry.nested.length === 0 ? "" : ` ${theme.fg("dim", entry.expanded ? "▾" : `▸ ${entry.nested.length} nested (${countsText(entry.nested)})`)}`;
+    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${icon}${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${modeTag}${drainTag}${nestTag}`;
     const left = `${prefix}  ${toSingleLine(record.description)}`;
     return rightAlign(left, this.rowStats(record, kind, prefix, width, theme), width);
   }

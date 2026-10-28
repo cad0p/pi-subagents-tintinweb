@@ -215,8 +215,15 @@ describe("FleetList navigation", () => {
   it("passes non-nav keys through and cancels navigation", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN);
-    expect(h.press(RIGHT)).toBeUndefined();
+    expect(h.press("x")).toBeUndefined();
     expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+  });
+
+  it("→ on a row without children does nothing and keeps the list active", () => {
+    const h = harness([makeRecord()]);
+    h.press(DOWN);
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    expect(h.render().some(l => l.includes("↑↓ select"))).toBe(true);
   });
 
   it("re-arms the refresh timer when the list is re-shown after the roster empties", () => {
