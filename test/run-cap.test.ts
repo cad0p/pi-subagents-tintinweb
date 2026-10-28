@@ -6,7 +6,9 @@ import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext } 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, runAgent } from "../src/agent-runner.js";
+import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
+import { renderAgentReport } from "../src/result-report.js";
 import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
@@ -359,6 +361,32 @@ describe("run cap", () => {
     expect(manager.resume(record.id, "more")).toBeUndefined();
     await settle();
     expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped" });
+  });
+  it("a settle after the heads-up reads wrapped up, in the notification header and the result note", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+  });
+  it("a hard stop reads stopped at the time limit, in the notification header and the result note", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
     const halfDir = policyDir(0.5);
