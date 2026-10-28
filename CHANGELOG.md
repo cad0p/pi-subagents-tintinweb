@@ -22,6 +22,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Subagents interrupted by a crash come back resumable; evictAfterMinutes (closes #120) ([#125](https://github.com/cad0p/pi-subagents-tintinweb/pull/125))
 - *(notifications)* The completion header names the agent type (closes #140) ([#141](https://github.com/cad0p/pi-subagents-tintinweb/pull/141))
 - *(subagents)* FleetView shows nested subagents as collapsible rows (closes #146) ([#148](https://github.com/cad0p/pi-subagents-tintinweb/pull/148))
+- *(subagents)* The footer names running and waiting subagents (closes #149) ([#150](https://github.com/cad0p/pi-subagents-tintinweb/pull/150))
 
 ### 🐛 Bug Fixes
 
