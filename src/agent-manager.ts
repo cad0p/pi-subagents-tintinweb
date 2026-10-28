@@ -11,9 +11,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rmSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
+import { type BackgroundWorkPolicy, listBackgroundWorkProviders, readBackgroundWorkPolicy, sessionIdentityForms, sessionKey } from "@cad0p/pi-background-work";
 import type { Model } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   attachSessionLifecycle,
+  type ChildSessionSettings,
   createChildSession,
   getDefaultMaxTurns,
   normalizeMaxTurns,
@@ -37,7 +38,9 @@ import {
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
+import { type LedgerWriter, openChildSession, resumedEntry, spawnedEntry } from "./ledger.js";
 import { describeModel } from "./model-resolver.js";
+import { currentOwnerStamp } from "./owner-identity.js";
 import {
   type DrainingPool,
   fromDto,
@@ -90,15 +93,15 @@ const HEADS_UP_LEAD_MS = 60_000;
 /** Distinct background-work policy warnings already logged, so a warning is shown once per process. */
 const policyWarnings = new Set<string>();
 
-/** The run cap in minutes: `maxBackgroundWait` from the background-work policy at `cwd`. */
-function readCapMinutes(cwd: string = process.cwd()): number {
+/** The background-work policy at `cwd`. Its config warnings are logged once per process, whichever reader asks. */
+export function readPolicy(cwd: string): BackgroundWorkPolicy {
   const { policy, warnings } = readBackgroundWorkPolicy({ cwd });
   for (const warning of warnings) {
     if (policyWarnings.has(warning)) continue;
     policyWarnings.add(warning);
     console.warn(`[pi-subagents] ${warning}`);
   }
-  return policy.maxBackgroundWait;
+  return policy;
 }
 
 /** Wake text for a finished subagent that has queued input or background work to pick up. */
@@ -148,6 +151,7 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
+const DEFAULT_EVICT_AFTER_MINUTES = 60;
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -339,10 +343,26 @@ export type ResumeCallbacks = Pick<
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
 
+/** The prefix a resumed interrupted run carries; names the worktree's fate when it is gone (its run then uses the parent cwd). */
+function crashNote(record: AgentRecord, text: string): string {
+  const when =
+    record.crashedAt === undefined
+      ? `The crash time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
+      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the crash came after it.`;
+  const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
+  return `You were interrupted by a crash. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
+}
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
   private reopening = new Map<string, Promise<AgentSession | undefined>>();
+  /** Where each record's ledger entries go: the session file of the run that spawned it (see writeLedger). */
+  private ledgerWriters = new Map<string, LedgerWriter>();
+  /** Supplied by the extension: re-derives the child settings of a recovered record, which has none until its run starts. */
+  resolveSettings?: (record: AgentRecord) => Promise<ChildSessionSettings>;
+  /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
+  private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -350,6 +370,7 @@ export class AgentManager {
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
   private maxConcurrent: number;
+  private evictAfterMinutes = DEFAULT_EVICT_AFTER_MINUTES;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -399,7 +420,7 @@ export class AgentManager {
     this.onUsage = onUsage;
     this.onSteered = onSteered;
     this.maxConcurrent = maxConcurrent;
-    // Cleanup completed agents after 10 minutes (but keep sessions for resume)
+    // Evict settled agents after evictAfterMinutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
   }
@@ -413,6 +434,15 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  /** Update how long a settled record stays resumable before eviction removes it. */
+  setEvictAfterMinutes(n: number) {
+    this.evictAfterMinutes = Math.max(1, n);
+  }
+
+  getEvictAfterMinutes(): number {
+    return this.evictAfterMinutes;
   }
 
   /**
@@ -469,6 +499,7 @@ export class AgentManager {
       rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
+    this.ledgerWriters.set(id, pi);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
@@ -487,6 +518,7 @@ export class AgentManager {
     } catch (err) {
       this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
       this.agents.delete(id);
+      this.ledgerWriters.delete(id);
       throw err;
     }
     return id;
@@ -674,6 +706,9 @@ export class AgentManager {
           return;
         }
         bindSession(record, session, lifecycle);
+        if (record.sessionFile) {
+          this.writeLedger(id, "subagent-spawned", spawnedEntry(record, record.sessionFile, currentOwnerStamp()));
+        }
         options.onSessionCreated?.(session);
       },
     })
@@ -876,7 +911,7 @@ export class AgentManager {
    * at the cap. Both are unref'd and cleared by `clearCap` at the lifecycle's final settle.
    */
   private armCap(record: AgentRecord, life: Life): void {
-    const capMinutes = readCapMinutes(record.cwd);
+    const capMinutes = readPolicy(record.cwd ?? process.cwd()).maxBackgroundWait;
     record.capMinutes = capMinutes;
     const capMs = capMinutes * 60_000;
     const leadMs = capMs <= 2 * HEADS_UP_LEAD_MS ? capMs / 2 : capMs - HEADS_UP_LEAD_MS;
@@ -1223,7 +1258,40 @@ export class AgentManager {
     if (!this.onComplete || record.notified) return;
     if (this.handover && !record.parentAgentId) return;
     record.notified = true;
+    // A shutdown stop already wrote its settle entry (abortAll); every other settle writes it here.
+    if (!this.stopLedgered.delete(record.id)) this.ledgerSettle(record);
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
+  }
+
+  /**
+   * A resumed parent takes over its children's ledger: they write into its reopened session file from now on, and an
+   * interrupted child that crashed with it is reported to it now (its settle entry, then the wake).
+   */
+  private reportCrashedChildren(parentId: string, sessionManager: SessionManager): void {
+    const writer: LedgerWriter = { appendEntry: (customType, data) => { sessionManager.appendCustomEntry(customType, data); } };
+    for (const child of this.agents.values()) {
+      if (child.parentAgentId !== parentId) continue;
+      this.ledgerWriters.set(child.id, writer);
+      if (child.status === "interrupted" && !child.notified) this.notifyCompleted(child);
+    }
+  }
+
+  /** Appends a ledger entry through the record's writer. A failed write is logged; recovery's same-process rule covers it. */
+  private writeLedger(id: string, customType: string, data: object): void {
+    try {
+      this.ledgerWriters.get(id)?.appendEntry(customType, data);
+    } catch (err) {
+      console.warn(`[pi-subagents] ledger write ${customType} for ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The settle entry: the record's final status, written into the spawner's session. */
+  ledgerSettle(record: AgentRecord): void {
+    this.writeLedger(record.id, "subagents:record", {
+      id: record.id, type: record.type, description: record.description,
+      status: record.status, result: record.result, error: record.error,
+      startedAt: record.startedAt, completedAt: record.completedAt,
+    });
   }
 
   /**
@@ -1492,6 +1560,7 @@ export class AgentManager {
       return undefined;
     }
     record.settled = false;
+    this.writeLedger(id, "subagent-resumed", resumedEntry(id, currentOwnerStamp()));
     // No slot is taken here. The run's first provider request meets the gate (acquireSlot), so a resume
     // that finds the pool full waits in the same FIFO as a queued spawn.
     record.turnBudget = { turns: 0, softLimitReached: false };
@@ -1554,27 +1623,40 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record || record.transition) return undefined;
     if (record.session) return record.session;
-    const { sessionFile, childSettings, memoryEntries } = record;
-    if (!childSettings || (!sessionFile && !memoryEntries)) return undefined;
+    const { sessionFile, memoryEntries } = record;
+    if (!sessionFile && !memoryEntries) return undefined;
     let reopen = this.reopening.get(id);
     if (!reopen) {
-      const sessionManager = sessionFile
-        ? SessionManager.open(sessionFile, undefined, childSettings.effectiveCwd)
-        : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
-      // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
-      reopen = createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
-        .then(async (session) => {
-          if (this.agents.get(id) !== record) {
-            await teardownChildSession(session);
-            return undefined;
-          }
-          bindSession(record, session, attachSessionLifecycle(session));
-          return session;
+      // Settings are resolved inside the shared promise, so concurrent callers share one resolution and one reopen.
+      reopen = this.childSettingsOf(record)
+        .then((childSettings) => {
+          if (!childSettings) return undefined;
+          const sessionManager = sessionFile
+            ? openChildSession(sessionFile, childSettings.effectiveCwd)
+            : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
+          if (!sessionManager) throw new Error(`Cannot resume ${id}: its session file ${sessionFile} is missing or unreadable.`);
+          // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
+          return createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
+            .then(async (session) => {
+              if (this.agents.get(id) !== record) {
+                await teardownChildSession(session);
+                return undefined;
+              }
+              bindSession(record, session, attachSessionLifecycle(session));
+              this.reportCrashedChildren(id, session.sessionManager);
+              return session;
+            });
         })
         .finally(() => this.reopening.delete(id));
       this.reopening.set(id, reopen);
     }
     return reopen;
+  }
+
+  /** The settings a child is built from: the ones its run recorded, else re-derived for a recovered record. */
+  private async childSettingsOf(record: AgentRecord): Promise<ChildSessionSettings | undefined> {
+    if (!record.childSettings && this.resolveSettings) record.childSettings = await this.resolveSettings(record);
+    return record.childSettings;
   }
 
   /**
@@ -1636,12 +1718,19 @@ export class AgentManager {
     }
     // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
     if (record.settled === false) return false;
-    const reopened = await this.restoreSession(id);
+    // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the log, and callers get false.
+    const reopened = await this.restoreSession(id).catch((err: unknown) => {
+      console.warn(`[pi-subagents] ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    });
     const current = this.agents.get(id);
     if (!reopened || !current) return false;
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
-    return this.resume(id, text, callbacks) ? "resumed" : false;
+    const interrupted = current.status === "interrupted";
+    const prompt = interrupted ? crashNote(current, text) : text;
+    if (!this.resume(id, prompt, callbacks)) return false;
+    return interrupted ? "resumedAfterCrash" : "resumed";
   }
 
   /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */
@@ -1698,6 +1787,16 @@ export class AgentManager {
     return outcome;
   }
 
+  /** Lists the runs a crashed owner left behind. Their sessions load only on a resume. Returns the ones listed here. */
+  adoptInterrupted(records: AgentRecord[], writer?: LedgerWriter): AgentRecord[] {
+    const adopted = records.filter((record) => !this.agents.has(record.id));
+    for (const record of adopted) {
+      this.agents.set(record.id, record);
+      if (writer) this.ledgerWriters.set(record.id, writer);
+    }
+    return adopted;
+  }
+
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
   }
@@ -1747,7 +1846,7 @@ export class AgentManager {
    * Dispose a record's session and remove it from the map.
    *
    * The record's removal is also the child session file's disposal point: the
-   * 10-minute eviction and `clearCompleted()` on session switch are the grace
+   * eviction (`evictAfterMinutes`) and `clearCompleted()` on session switch are the grace
    * window in which a live record can still resume the agent, so nothing may
    * delete the file earlier. A `persist_session` agent keeps its file
    * indefinitely; every other settled agent's file goes here.
@@ -1768,6 +1867,8 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    this.ledgerWriters.delete(id);
+    this.stopLedgered.delete(id);
     this.clearCap(id);
     // An open lifecycle of a removed record has no tick or decide left to finish it (dispose clears them): close it here so its promise settles.
     const life = this.lives.get(id);
@@ -1786,7 +1887,7 @@ export class AgentManager {
   }
 
   private cleanup() {
-    const cutoff = Date.now() - 10 * 60_000;
+    const cutoff = Date.now() - this.evictAfterMinutes * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       // Stopped but still unwinding: removing it would dispose a session a live
@@ -1804,7 +1905,7 @@ export class AgentManager {
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
-   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * (resultConsumed=false) — they will be evicted by the cleanup timer instead.
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
@@ -1845,6 +1946,9 @@ export class AgentManager {
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
+        // A shutdown stop is deliberate, not a crash: its settle entry goes out now, before the session is replaced.
+        this.ledgerSettle(record);
+        this.stopLedgered.add(record.id);
         count++;
       }
     }
@@ -1938,8 +2042,12 @@ export class AgentManager {
     this.onUsage?.(record, usage);
   }
 
-  /** Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining. */
-  adopt(item: HandoverItem, notify: boolean): AgentRecord {
+  /**
+   * Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining.
+   * Its settle writes through `writer`, this activation's session: the hand-over is keyed by that session, so it is
+   * the spawner session of every adopted record. The record's spawn entry stays with the old activation's session.
+   */
+  adopt(item: HandoverItem, notify: boolean, writer: LedgerWriter): AgentRecord {
     const record = fromDto(item.dto);
     // An older activation can hand over a settled record that still holds its session. Tear it down here, so no
     // settled record keeps a live session. Only an in-memory child (no file) needs its entries kept for a reopen.
@@ -1953,6 +2061,7 @@ export class AgentManager {
     }
     record.settled = true;
     this.agents.set(record.id, record);
+    this.ledgerWriters.set(record.id, writer);
     if (notify) this.notifyCompleted(record);
     return record;
   }

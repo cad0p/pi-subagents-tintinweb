@@ -46,6 +46,8 @@ export function fallbackRow(
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
+  /** Minutes a settled run stays resumable before eviction removes its record. Integer, minimum 1. */
+  evictAfterMinutes?: number;
   /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
@@ -239,6 +241,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
+  setEvictAfterMinutes: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setSchedulingEnabled: (b: boolean) => void;
@@ -293,6 +296,9 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrent = r.maxConcurrent as number;
+  }
+  if (Number.isInteger(r.evictAfterMinutes) && (r.evictAfterMinutes as number) >= 1) {
+    out.evictAfterMinutes = r.evictAfterMinutes as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -419,6 +425,7 @@ export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()):
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
 export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers): void {
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
+  if (typeof s.evictAfterMinutes === "number") appliers.setEvictAfterMinutes(s.evictAfterMinutes);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);

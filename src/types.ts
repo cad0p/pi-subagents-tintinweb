@@ -60,7 +60,7 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Keep this subagent's pi session file after the run settles. Every run
    *  writes a session file while it runs (crash recovery); without this the file
-   *  is deleted when the agent record is removed — the 10-minute eviction or a
+   *  is deleted when the agent record is removed — the eviction (`evictAfterMinutes`) or a
    *  session switch. */
   persistSession?: boolean;
   /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
@@ -107,21 +107,33 @@ export type WidgetMode = 'all' | 'off';
 
 /**
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
- * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "held" (parked until a
- * teardown or a hand-over's adoption ends), or false (unknown, still settling, or aborted by its owner).
+ * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "resumedAfterCrash" (an
+ * interrupted record restarted from its file with a crash note), "held" (parked until a teardown or a hand-over's
+ * adoption ends), or false (unknown, still settling, or aborted by its owner).
  */
-export type DeliverOutcome = "delivered" | "queued" | "resumed" | "held" | false;
+export type DeliverOutcome = "delivered" | "queued" | "resumed" | "resumedAfterCrash" | "held" | false;
 
 export interface AgentRecord {
   id: string;
   type: SubagentType;
   description: string;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+  /** `interrupted`: a run cut short by a crash and rebuilt from the ledger. A final, resumable status that behaves like `stopped`. */
+  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "interrupted";
   result?: string;
   error?: string;
   toolUses: number;
   startedAt: number;
   completedAt?: number;
+  /** Set on a run recovered from a crash: when the crash was detected. */
+  interruptedAt?: number;
+  /** Set on a run recovered from a crash: when its session file last saved anything (the crash came after it); unset when unreadable. */
+  crashedAt?: number;
+  /** Interrupted settles in a row for this run, including this crash (the crash-loop guard's count). */
+  crashCount?: number;
+  /** Directory the run executed in (its worktree for an isolated run). A recovered run restores it when it still exists. */
+  runCwd?: string;
+  /** Directory the run loaded its agent config from. */
+  configCwd?: string;
   /** Live child session. Set while the record runs or is torn down; cleared at settle. */
   session?: AgentSession;
   /** Session file kept after `session` is dropped, so a failed reload can reopen the child. */

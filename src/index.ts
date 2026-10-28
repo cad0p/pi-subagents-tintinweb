@@ -12,13 +12,13 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { sessionKey } from "@cad0p/pi-background-work";
+import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { AgentManager, NUDGE_HOLD_MS, type SpawnOptions } from "./agent-manager.js";
+import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
-import { getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
+import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -28,10 +28,12 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { localOwnerHost } from "./owner-identity.js";
 import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
@@ -132,6 +134,7 @@ function getStatusWord(status: string, limitReason?: "time"): string {
     case "completed": return "completed";
     case "error": return "error";
     case "stopped": return "stopped";
+    case "interrupted": return "interrupted";
     case "aborted": return "aborted";
     case "steered": return "wrapped up (turn limit)";
     default: return sanitizeHeaderText(String(status)) || "unknown";
@@ -145,6 +148,7 @@ function getStatusGlyph(status: string): string {
     case "steered": return "✓";
     case "error":
     case "stopped":
+    case "interrupted":
     case "aborted": return "✗";
     default: return "○";
   }
@@ -231,7 +235,7 @@ function failurePreviewCap(settings: SubagentsSettings): number {
 
 /** Build the `Result:` body. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
-  const isFailure = record.status === "error" || record.status === "stopped";
+  const isFailure = record.status === "error" || record.status === "stopped" || record.status === "interrupted";
   // Terminal-safety strip only: markdown structure and XML-ish text pass
   // through untouched, while escape/control bytes (OSC clipboard writes and
   // links, CSI screen clears, C0/C1, invisible format characters) never reach
@@ -281,7 +285,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
   let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason)}: ${description}**`;
-  const errorText = record.error && (record.status === "error" || record.status === "stopped")
+  const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
     ? sanitizeHeaderText(String(record.error))
     : "";
   const errorPreview = headerPreview(errorText);
@@ -386,6 +390,8 @@ export default function (pi: ExtensionAPI) {
   /** The open batch of top-level completions. A parked batch waits for the next main-session message boundary. */
   interface NudgeBatch {
     records: Map<string, AgentRecord>;
+    /** Records recovered after a crash, with the decision that sets whether the batch takes a turn. */
+    crash: Map<string, CrashRecoveryDecision>;
     timer?: ReturnType<typeof setTimeout>;
     parked: boolean;
   }
@@ -397,12 +403,13 @@ export default function (pi: ExtensionAPI) {
   let mainTurnActive = false;
 
   /** Queue a settled top-level record into the open batch. The window is fixed at the batch's first record, not trailing. */
-  function scheduleNudge(record: AgentRecord) {
+  function scheduleNudge(record: AgentRecord, crash?: CrashRecoveryDecision) {
     if (!nudgeBatch) {
-      nudgeBatch = { records: new Map(), parked: mainTurnActive };
+      nudgeBatch = { records: new Map(), crash: new Map(), parked: mainTurnActive };
       if (!mainTurnActive) armNudgeWindow(nudgeBatch);
     }
     nudgeBatch.records.set(record.id, record);
+    if (crash) nudgeBatch.crash.set(record.id, crash);
   }
 
   function armNudgeWindow(batch: NudgeBatch) {
@@ -417,6 +424,11 @@ export default function (pi: ExtensionAPI) {
   /** Drop a record from the open batch (a pull, or a run that resumed). An emptied batch sends nothing. */
   function cancelNudge(id: string) {
     const batch = nudgeBatch;
+    const record = batch?.records.get(id);
+    // A crash-recovered record consumed before its batch went out is settled here, or a later recovery reports it again.
+    // A resume drops it without a settle: the subagent-resumed entry written at resume is the newer fact.
+    if (record && batch?.crash.has(id) && record.resultConsumed) manager.ledgerSettle(record);
+    batch?.crash.delete(id);
     if (!batch?.records.delete(id) || batch.records.size > 0) return;
     clearTimeout(batch.timer);
     nudgeBatch = undefined;
@@ -448,6 +460,25 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- Completion notification ----
+  /**
+   * One notice for the crash-recovered records of a batch: their ids, the resume each one allows, then each note the policy gave.
+   * A first interruption is resumed by the main agent at once; a crash loop waits for the user, and its note says so.
+   */
+  function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
+    const names = records.map((record) => `${record.id} (${sanitizeHeaderText(record.description)})`).join(", ");
+    const lines = [`${records.length} ${records.length === 1 ? "subagent was" : "subagents were"} interrupted by a crash: ${names}`];
+    const resumable = records.filter((record) => crash.get(record.id)?.triggerTurn).map((record) => record.id);
+    if (resumable.length > 0) {
+      const calls = resumable.map((id) => `SendMessage({ to: "${id}", message: "continue" })`).join(", ");
+      lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a crash note. Do not start a new Agent for them.`);
+    }
+    for (const record of records) {
+      const note = crash.get(record.id)?.note;
+      if (note) lines.push(`${record.id}: ${note}`);
+    }
+    return lines.join("\n");
+  }
+
   /** Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them. */
   function emitNudgeBatch() {
     const batch = nudgeBatch;
@@ -456,13 +487,19 @@ export default function (pi: ExtensionAPI) {
     clearTimeout(batch.timer);
     const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
     if (records.length === 0) return;
+    // A crash-recovered record carries its own notice. The batch takes a turn if it carries a normal completion, or if every crash record allows one.
+    const interrupted = records.filter((record) => batch.crash.has(record.id));
+    const completed = records.filter((record) => !batch.crash.has(record.id));
+    const triggerTurn = completed.length > 0 || interrupted.every((record) => batch.crash.get(record.id)?.triggerTurn);
+    const sections = completed.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+    if (interrupted.length > 0) sections.unshift(formatInterruptedNotice(interrupted, batch.crash));
 
     try {
       pi.sendMessage({
         customType: "subagent-notification",
-        content: records.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost)).join("\n\n"),
+        content: sections.join("\n\n"),
         display: true,
-      }, { deliverAs: "steer", triggerTurn: true });
+      }, triggerTurn ? { deliverAs: "steer", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: false });
     } catch (err) {
       // Nudge release paths swallow throws; surface the drop with the agent ids.
       console.warn(`[pi-subagents] failed to send completion notification for ${records.map((record) => record.id).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
@@ -470,6 +507,7 @@ export default function (pi: ExtensionAPI) {
       // Delivered even when the send threw: a retry could duplicate the notification, and the
       // pi-subagents background-work provider must not list the records forever.
       for (const record of records) record.resultDelivered = true;
+      for (const record of interrupted) manager.ledgerSettle(record);
     }
   }
 
@@ -529,24 +567,20 @@ export default function (pi: ExtensionAPI) {
     // Nested children report only to their owning parent: the result is a wake on that parent's session. The
     // main session's lifecycle, transcript, notification, and UI channels stay untouched.
     if (record.parentAgentId) {
-      manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+      const text = record.status === "interrupted"
+        ? formatInterruptedNotice([record], new Map([[record.id, crashRecoveryDecision(record.crashCount ?? 1, readPolicy(record.cwd ?? process.cwd()))]]))
+        : formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost);
+      manager.deliverNested(record, text);
       return;
     }
     // Emit lifecycle event based on terminal status
-    const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+    const isError = record.status === "error" || record.status === "stopped" || record.status === "interrupted" || record.status === "aborted";
     const eventData = buildEventData(record);
     if (isError) {
       pi.events.emit("subagents:failed", eventData);
     } else {
       pi.events.emit("subagents:completed", eventData);
     }
-
-    // Persist final record for cross-extension history reconstruction
-    pi.appendEntry("subagents:record", {
-      id: record.id, type: record.type, description: record.description,
-      status: record.status, result: record.result, error: record.error,
-      startedAt: record.startedAt, completedAt: record.completedAt,
-    });
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
@@ -633,6 +667,8 @@ export default function (pi: ExtensionAPI) {
     if (record.parentAgentId) return;
     pi.events.emit("subagents:steered", { id: record.id, message });
   });
+
+  manager.resolveSettings = recoveredSettings;
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -842,6 +878,7 @@ export default function (pi: ExtensionAPI) {
         openSlots();
       }
       stopStranded(ctx.sessionManager.getSessionId());
+      if (event.reason === "startup" || event.reason === "resume") recoverCrashed(ctx);
     }
   });
 
@@ -948,7 +985,7 @@ export default function (pi: ExtensionAPI) {
           spawnTopLevel(pi, ctx, spec.type, spec.prompt, { ...spec.options, id: spec.id });
         } catch (err) {
           // The spec cannot start here (e.g. its cwd is gone): report it as a failed run rather than dropping it.
-          manager.adopt({ dto: failedSpecDto(spec, err) }, true);
+          manager.adopt({ dto: failedSpecDto(spec, err) }, true, pi);
         }
       }
       for (const item of h.idleItems()) manager.beginAdoption(item.dto.id);
@@ -981,7 +1018,7 @@ export default function (pi: ExtensionAPI) {
   async function adoptItem(item: HandoverItem, notify: boolean): Promise<boolean> {
     if (shutDown) return false;
     try {
-      manager.adopt(item, notify);
+      manager.adopt(item, notify, pi);
     } finally {
       manager.endAdoption(item.dto.id);
     }
@@ -1021,6 +1058,77 @@ export default function (pi: ExtensionAPI) {
         retireDrained();
       })
       .catch((err) => console.warn("[pi-subagents] Could not take over a draining subagent after reload:", err));
+  }
+
+  /**
+   * Re-derives the settings of a recovered run from what its ledger entries kept. A worktree that is gone
+   * runs in the parent's cwd (the crash note says so); a missing agent type cannot resume.
+   */
+  async function recoveredSettings(record: AgentRecord): Promise<ChildSessionSettings> {
+    const ctx = currentCtx;
+    if (!ctx) throw new Error(`Cannot resume "${record.description}": no session is active.`);
+    if (!getAgentConfig(record.type)) {
+      throw new Error(`Agent type "${record.type}" is no longer defined; the interrupted run cannot resume.`);
+    }
+    const modelId = record.invocation?.modelId ?? "";
+    const slash = modelId.indexOf("/");
+    const model = slash > 0 ? ctx.modelRegistry.find(modelId.slice(0, slash), modelId.slice(slash + 1)) : undefined;
+    const requested = record.invocation?.requestedThinking;
+    const parentCwd = record.cwd ?? ctx.cwd;
+    const cwd = record.runCwd && existsSync(record.runCwd) ? record.runCwd : parentCwd;
+    return resolveChildSettings(ctx, record.type, {
+      pi,
+      agentId: record.id,
+      parentAgentId: record.parentAgentId,
+      model,
+      isolated: record.invocation?.isolated,
+      thinkingLevel: requested === "off" ? undefined : requested,
+      cwd,
+      configCwd: record.configCwd && existsSync(record.configCwd) ? record.configCwd : cwd,
+      worktree: record.worktree && existsSync(record.worktree.path) ? { path: record.worktree.path, parentCwd } : undefined,
+    });
+  }
+
+  /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
+  function recoverCrashed(ctx: ExtensionContext): void {
+    const options: ReplayOptions = {
+      host: localOwnerHost(),
+      isLiveHere: (id) => manager.getRecord(id) !== undefined,
+      lastActivity: lastActivityOf,
+      now: Date.now(),
+    };
+    const spawnerSessionId = sessionKey(ctx.sessionManager);
+    const crashed = replayLedger(ctx.sessionManager.getEntries(), options);
+    for (const record of crashed) record.spawnerSessionId = spawnerSessionId;
+    const adopted = manager.adoptInterrupted(crashed, pi);
+    if (adopted.length === 0) return;
+    const policy = readPolicy(ctx.cwd);
+    for (const record of adopted) {
+      scheduleNudge(record, crashRecoveryDecision(record.crashCount ?? 1, policy));
+      listCrashedChildren(record, options);
+    }
+    // No tool has run yet in a reopened session, so the surfaces have no UI context: give it here, so the
+    // interrupted rows show at once instead of after the main agent's first tool call.
+    if (ctx.hasUI) {
+      widget.setUICtx(ctx.ui as UICtx);
+      fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+    }
+    widget.update();
+    fleet.update();
+  }
+
+  /** Lists the nested runs a crashed parent left in its own session file. They are reported when the parent resumes. */
+  function listCrashedChildren(parent: AgentRecord, options: ReplayOptions): void {
+    if (!parent.sessionFile) return;
+    const childSessions = openChildSession(parent.sessionFile);
+    if (!childSessions) {
+      console.warn(`[pi-subagents] ${parent.id}: session file ${parent.sessionFile} cannot be read; its nested runs are not listed`);
+      return;
+    }
+    const children = replayLedger(childSessions.getEntries(), options);
+    const spawnerSessionId = sessionKey(childSessions);
+    for (const child of children) child.spawnerSessionId = spawnerSessionId;
+    for (const child of manager.adoptInterrupted(children)) listCrashedChildren(child, options);
   }
 
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
@@ -1162,6 +1270,7 @@ export default function (pi: ExtensionAPI) {
   applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+      setEvictAfterMinutes: (n) => manager.setEvictAfterMinutes(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setSchedulingEnabled,
@@ -1791,7 +1900,7 @@ Terse command-style prompts produce shallow, generic work.
       if (outcome === false) return sendResult(deliveryText(params.to, false), "failed");
       const current = manager.getRecord(params.to);
       // A resumed run already has its session: seed the row's activity, as the Agent resume path did.
-      if (outcome === "resumed" && current?.session) {
+      if ((outcome === "resumed" || outcome === "resumedAfterCrash") && current?.session) {
         sendState.session = current.session;
         agentActivity.set(params.to, sendState);
       }
@@ -2443,6 +2552,7 @@ ${systemPrompt}
   function snapshotSettings(): SubagentsSettings {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
+      evictAfterMinutes: manager.getEvictAfterMinutes(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -2469,11 +2579,12 @@ ${systemPrompt}
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth", "failurePreviewMaxChars"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "evictAfterMinutes", "defaultMaxTurns", "graceTurns", "maxSubagentDepth", "failurePreviewMaxChars"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
+      const ev = manager.getEvictAfterMinutes();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -2500,6 +2611,13 @@ ${systemPrompt}
           description: "Max concurrent background agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
+        },
+        {
+          id: "evictAfterMinutes",
+          label: "Evict after minutes",
+          description: "Minutes a settled run stays resumable before its record is removed (Enter to type)",
+          currentValue: String(ev),
+          values: [String(ev)],
         },
         {
           id: "defaultMaxTurns",
@@ -2637,6 +2755,12 @@ ${systemPrompt}
         if (n >= 1) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
+        }
+      } else if (id === "evictAfterMinutes") {
+        const n = parseInt(value, 10);
+        if (n >= 1) {
+          manager.setEvictAfterMinutes(n);
+          notifyApplied(ctx, `Evict after minutes set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -2815,6 +2939,7 @@ ${systemPrompt}
     if (result && NUMERIC_IDS.has(result)) {
       const numericPrompt: Record<string, { current: string; label: string }> = {
         maxConcurrent: { current: String(manager.getMaxConcurrent()), label: "Max concurrency (1+)" },
+        evictAfterMinutes: { current: String(manager.getEvictAfterMinutes()), label: "Evict after minutes (1+)" },
         defaultMaxTurns: { current: String(getDefaultMaxTurns() ?? 0), label: "Default max turns (0 = unlimited)" },
         graceTurns: { current: String(getGraceTurns()), label: "Grace turns (1+)" },
         maxSubagentDepth: { current: String(getMaxSubagentDepth()), label: "Nested depth (0/1 = nesting off)" },

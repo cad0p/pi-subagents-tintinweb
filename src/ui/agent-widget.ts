@@ -21,7 +21,7 @@ const MAX_WIDGET_LINES = 12;
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** Statuses that indicate an error/non-success outcome (used for linger behavior and icon rendering). */
-export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped"]);
+export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped", "interrupted"]);
 
 /** Tool name → human-readable action for activity descriptions. */
 const TOOL_DISPLAY: Record<string, string> = {
@@ -72,7 +72,7 @@ export interface AgentDetails {
   toolUses: number;
   tokens: string;
   durationMs: number;
-  status: "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
+  status: "running" | "completed" | "steered" | "aborted" | "stopped" | "interrupted" | "error" | "background";
   /** Short label for the model the run used, e.g. "haiku 4.5". */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
@@ -381,6 +381,9 @@ export class AgentWidget {
     } else if (a.status === "stopped") {
       icon = theme.fg("dim", "■");
       statusText = theme.fg("dim", " stopped");
+    } else if (a.status === "interrupted") {
+      icon = theme.fg("warning", "■");
+      statusText = theme.fg("warning", " interrupted");
     } else if (a.status === "error") {
       icon = theme.fg("error", "✗");
       const err = a.error ? toSingleLine(a.error) : "";

@@ -500,7 +500,7 @@ describe("AgentManager hand-over", () => {
 
     const onComplete = vi.fn();
     const next = track(new AgentManager(onComplete));
-    const adopted = next.adopt(item, false);
+    const adopted = next.adopt(item, false, { appendEntry: () => undefined });
     expect(next.getRecord(idle)).toBe(adopted);
     expect(adopted.settled).toBe(true);
     // The old run tore its child down at settle, so the handed-over item carries no live session.
@@ -508,7 +508,7 @@ describe("AgentManager hand-over", () => {
     expect(adopted.session).toBeUndefined();
     expect(onComplete).not.toHaveBeenCalled();
 
-    next.adopt({ dto: { ...item.dto, id: "other" } }, true);
+    next.adopt({ dto: { ...item.dto, id: "other" } }, true, { appendEntry: () => undefined });
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
@@ -526,7 +526,7 @@ describe("AgentManager hand-over", () => {
       agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => header, getEntries: () => [entry] },
     };
     const next = track(new AgentManager());
-    const adopted = next.adopt({ dto: dtoOf("late"), session: session as unknown as AgentSession }, false);
+    const adopted = next.adopt({ dto: dtoOf("late"), session: session as unknown as AgentSession }, false, { appendEntry: () => undefined });
     expect(adopted.session).toBeUndefined();
     expect(adopted.sessionSnapshot).toBeDefined();
     expect(adopted.memoryEntries).toEqual([header, entry]);
@@ -547,7 +547,7 @@ describe("AgentManager hand-over", () => {
       sessionManager: { getSessionFile: () => "/tmp/adopted.jsonl", getHeader: () => undefined, getEntries: () => [] },
     };
     const next = track(new AgentManager());
-    const adopted = next.adopt({ dto: { ...dtoOf("late"), sessionFile: "/tmp/adopted.jsonl" }, session: session as unknown as AgentSession }, false);
+    const adopted = next.adopt({ dto: { ...dtoOf("late"), sessionFile: "/tmp/adopted.jsonl" }, session: session as unknown as AgentSession }, false, { appendEntry: () => undefined });
     expect(adopted.transition).toBe("teardown");
     expect(await next.restoreSession(adopted.id)).toBeUndefined();
     finishAbort();
@@ -579,7 +579,7 @@ describe("AgentManager hand-over", () => {
 
     const next = track(new AgentManager());
     next.setDrainingPools([handover.draining]);
-    const adopted = next.adopt({ dto: dtoOf(busy) }, false);
+    const adopted = next.adopt({ dto: dtoOf(busy) }, false, { appendEntry: () => undefined });
     expect(next.listAgents()).toEqual([adopted]);
     expect(next.getRecord(busy)).toBe(adopted);
     finish();
@@ -608,7 +608,7 @@ describe("AgentManager hand-over", () => {
         throw new Error("surface");
       }),
     );
-    expect(() => manager.adopt({ dto: dtoOf("late") }, true)).not.toThrow();
+    expect(() => manager.adopt({ dto: dtoOf("late") }, true, { appendEntry: () => undefined })).not.toThrow();
     expect(manager.getRecord("late")?.settled).toBe(true);
   });
 

@@ -315,9 +315,11 @@ describe("AgentManager — restoreSession", () => {
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
     const record = manager.getRecord(id)!;
     await record.promise;
-    // A settled record that lost its live session, as a failed reload leaves it.
+    // A settled record that lost its live session, as a failed reload leaves it. An in-memory child keeps the
+    // reopen off the file, which eviction deletes while the reopen is in flight.
     record.session = undefined;
-    record.sessionFile = join(tmpdir(), `restore-evicted-${id}.jsonl`);
+    record.sessionFile = undefined;
+    record.memoryEntries = [];
     record.childSettings = { effectiveCwd: tmpdir() } as NonNullable<AgentRecord["childSettings"]>;
 
     let finishReopen!: (session: AgentSession) => void;
@@ -1227,7 +1229,7 @@ describe("AgentManager — deliver()", () => {
     });
     vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "adopted" });
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
-    manager.adopt({ dto, session: { ...mockSession(), extensionRunner: { emit: () => hold } } }, false);
+    manager.adopt({ dto, session: { ...mockSession(), extensionRunner: { emit: () => hold } } }, false, { appendEntry: () => undefined });
 
     expect(await manager.deliver(id, "during")).toBe("held");
     release();
@@ -2142,7 +2144,7 @@ describe("AgentManager — session file retention", () => {
     expect(existsSync(file)).toBe(true);
   });
 
-  it("evicts the default agent's file after the 10-minute grace window", async () => {
+  it("evicts the default agent's file after the 60-minute grace window", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
     try {
@@ -2157,7 +2159,30 @@ describe("AgentManager — session file retention", () => {
       // The completion nudge (index.ts) marks it delivered; this manager has no completion surface.
       manager.getRecord(id)!.resultDelivered = true;
 
-      vi.advanceTimersByTime(11 * 60_000);
+      vi.advanceTimersByTime(61 * 60_000);
+
+      expect(manager.getRecord(id)).toBeUndefined();
+      expect(existsSync(file)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts after evictAfterMinutes: 1 and deletes the file", async () => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      manager.setEvictAfterMinutes(1);
+      const { session, file } = sessionWithFile();
+      const { id, resolve } = spawnPending("general-purpose", session);
+      resolve(done(session));
+      const finished = manager.getRecord(id)!.promise;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await finished;
+      manager.getRecord(id)!.resultDelivered = true;
+
+      vi.advanceTimersByTime(3 * 60_000);
 
       expect(manager.getRecord(id)).toBeUndefined();
       expect(existsSync(file)).toBe(false);
@@ -2178,7 +2203,7 @@ describe("AgentManager — session file retention", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await finished;
 
-      vi.advanceTimersByTime(11 * 60_000);
+      vi.advanceTimersByTime(61 * 60_000);
       expect(manager.getRecord(id)).toBeDefined();
 
       manager.getRecord(id)!.resultDelivered = true;
