@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BACKGROUND_WORK_REGISTRY_KEY,
+  type BackgroundWorkItem,
   listBackgroundWorkProviders,
   registerBackgroundWorkProvider,
   snapshotBackgroundWork,
@@ -264,6 +265,102 @@ describe("background-work delivered flag — manager records", () => {
     await settledRecord(manager);
     manager.clearCompleted();
     expect(listedNow()).toEqual([]);
+    manager.dispose();
+  });
+});
+
+describe("background-work broken provider — pendingWork warns once per name", () => {
+  const session = { sessionManager: { getSessionId: () => MAIN, getSessionFile: () => MAIN_FILE } };
+  /** pendingWork is private; the cast reaches it the way agent-manager.test.ts reaches endTransition. */
+  const pendingWork = (manager: AgentManager): string[] =>
+    (manager as unknown as { pendingWork(session: unknown): string[] }).pendingWork(session);
+
+  beforeEach(resetRegistry);
+  afterEach(() => {
+    // A failed assertion skips the mockRestore below; this keeps a leaked console.warn spy from reaching the next test.
+    vi.restoreAllMocks();
+    resetRegistry();
+  });
+
+  it("a throwing provider warns once across several checks, and a new activation warns again", () => {
+    registerBackgroundWorkProvider({
+      name: "flaky",
+      listActiveWork: () => {
+        throw new Error("boom");
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager = new AgentManager();
+    expect(pendingWork(manager)).toEqual([]);
+    expect(pendingWork(manager)).toEqual([]);
+    expect(pendingWork(manager)).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    const next = new AgentManager();
+    expect(pendingWork(next)).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+    manager.dispose();
+    next.dispose();
+  });
+
+  it("names the provider and the error in the warning", () => {
+    registerBackgroundWorkProvider({
+      name: "kaboom-provider",
+      listActiveWork: () => {
+        throw new Error("disk gone");
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager = new AgentManager();
+    pendingWork(manager);
+    expect(warn).toHaveBeenCalledWith(
+      '[pi-subagents] background-work provider "kaboom-provider" failed (disk gone); treating it as nothing pending',
+    );
+    warn.mockRestore();
+    manager.dispose();
+  });
+
+  it.each([null, 5])("a non-iterable return (%s) warns once and counts nothing", (value) => {
+    registerBackgroundWorkProvider({
+      name: "odd",
+      listActiveWork: () => value as unknown as readonly BackgroundWorkItem[],
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager = new AgentManager();
+    expect(pendingWork(manager)).toEqual([]);
+    expect(pendingWork(manager)).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"odd" failed (listActiveWork() returned no iterable list)'));
+    warn.mockRestore();
+    manager.dispose();
+  });
+
+  it("an item without a string id is skipped and warned about; the rest of the provider still counts", () => {
+    const noId = { sessionId: MAIN } as unknown as BackgroundWorkItem;
+    registerBackgroundWorkProvider({ name: "sloppy", listActiveWork: () => [noId, { id: "kept", sessionId: MAIN }] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager = new AgentManager();
+    expect(pendingWork(manager)).toEqual(["kept"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"sloppy" returned an item without a string id'));
+    warn.mockRestore();
+    manager.dispose();
+  });
+
+  it("a good provider's items still count while a bad one fails, and the bad one is warned about", () => {
+    registerBackgroundWorkProvider({
+      name: "broken",
+      listActiveWork: () => {
+        throw new Error("boom");
+      },
+    });
+    registerBackgroundWorkProvider({ name: "good", listActiveWork: () => [{ id: "good-work", sessionId: MAIN }] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const manager = new AgentManager();
+    expect(pendingWork(manager)).toEqual(["good-work"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('"broken" failed (boom)'));
+    warn.mockRestore();
     manager.dispose();
   });
 });
