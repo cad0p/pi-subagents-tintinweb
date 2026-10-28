@@ -820,10 +820,27 @@ describe("FleetList nested rows (#146)", () => {
     expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
   });
 
-  it("labels a collapsed parent with its nested counts, zero counts omitted", () => {
-    const done = child({ id: "d", description: "done child", startedAt: 2500, status: "completed", completedAt: Date.now() });
-    const line = harness([parent(), child(), done]).render(120).find(l => l.includes("parent job"));
-    expect(line).toContain("▸ 2 nested (1 running, 1 finished)");
+  it("labels a collapsed parent with every nested category, zero counts omitted", () => {
+    const waiting = child({ id: "w", description: "waiting child", startedAt: 2500, waiting: { since: 0, items: [] } });
+    const queued = child({ id: "q", description: "queued child", startedAt: 2600, status: "queued" });
+    const done = child({ id: "d", description: "done child", startedAt: 2700, status: "completed", completedAt: Date.now() });
+    const line = harness([parent(), child(), waiting, queued, done]).render(120).find(l => l.includes("parent job"));
+    expect(line).toContain("▸ 4 nested (1 running, 1 waiting, 1 queued, 1 finished)");
+  });
+
+  it("shows every ancestor as a context row for a qualifying grandchild at depth 2", () => {
+    const old = Date.now() - 60 * 60_000; // settled long past the linger window: context rows only
+    const top = parent({ id: "gp", description: "top job", startedAt: 1000, status: "completed", completedAt: old });
+    const mid = child({ id: "mid", description: "middle job", startedAt: 2000, parentAgentId: "gp", status: "completed", completedAt: old });
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "mid" });
+    const h = harness([top, mid, grand]);
+    h.press(DOWN); h.press(DOWN); // the only root
+    expect(h.render().find(l => l.includes("top job"))).toContain("▸ 2 nested (1 running, 1 finished)");
+    h.press(RIGHT); // open the top row → middle selected
+    expect(h.render().find(l => l.includes("middle job"))).toContain("⏺");
+    expect(h.render().some(l => l.includes("grand job"))).toBe(false);
+    h.press(RIGHT); // open the middle row → grandchild at depth 2
+    expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
   });
 
   it("← on a child collapses its parent and selects the parent", () => {
