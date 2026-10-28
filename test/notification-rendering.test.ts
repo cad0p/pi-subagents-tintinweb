@@ -51,7 +51,7 @@ describe("default custom-message rendering", () => {
   it("renders the report in pi's standard box with the customType label", () => {
     const rendered = renderCustomMessage(formatTaskNotification(createRecord(), settings));
     expect(rendered).toContain("[subagent-notification]");
-    expect(rendered).toContain("Subagent completed: Find auth files");
+    expect(rendered).toContain("Agent completed: Find auth files");
     expect(rendered).toContain("Agent: 56493b20-4d5d-4de");
     expect(rendered).toContain("Result:");
     expect(rendered).toContain("Found 5 files related to authentication:");
@@ -59,7 +59,7 @@ describe("default custom-message rendering", () => {
     // Markdown transform: the bold markers are consumed by the renderer, and
     // the report carries no collapse affordance.
     const stripped = stripAnsi(rendered);
-    expect(stripped).toContain("✓ Subagent completed: Find auth files");
+    expect(stripped).toContain("✓ Agent completed: Find auth files");
     expect(stripped).not.toContain("**✓");
     expect(stripped).not.toContain("ctrl+O");
     expect(stripped).not.toContain("more lines");
@@ -78,7 +78,7 @@ describe("default custom-message rendering", () => {
     expect(rendered).toContain("Transcript: /tmp/tasks/56493b20-4d5d-4de.output");
     expect(rendered).toContain("Result:");
     expect(rendered).toContain("Heading");
-    expect(stripAnsi(rendered)).toContain("✓ Subagent completed: Find auth files");
+    expect(stripAnsi(rendered)).toContain("✓ Agent completed: Find auth files");
   });
 
   it("renders a markdown table and list body", () => {

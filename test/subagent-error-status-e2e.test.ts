@@ -51,8 +51,8 @@ describe("issue #144 — empty-error final turns must not be 'completed'", () =>
       expect(conversationText(run!.parentSession)).toContain(FATAL);
     });
     const transcript = conversationText(run.parentSession);
-    expect(transcript).toMatch(/\*\*✗ Subagent error: doomed\*\*/);
-    expect(transcript).not.toMatch(/\*\*✓ Subagent completed: doomed\*\*/);
+    expect(transcript).toMatch(/\*\*✗ Agent error: doomed\*\*/);
+    expect(transcript).not.toMatch(/\*\*✓ Agent completed: doomed\*\*/);
   });
 
   it("an earlier turn's text must not mask a failed final turn as a fresh success", async () => {

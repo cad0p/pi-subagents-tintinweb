@@ -1048,7 +1048,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload.customType).toBe("subagent-notification");
-    expect(payload.content).toContain("**✗ Subagent stopped: pending task**");
+    expect(payload.content).toContain("**✗ Agent stopped: pending task**");
     expect(payload.content).toContain("No output.");
     // Never ran a turn: the report must not claim the presumed first one.
     expect(payload.content).not.toContain("↻");

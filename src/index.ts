@@ -288,7 +288,18 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
-  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
+  // getAgentConfig, not getConfig: getConfig falls back to general-purpose for an unregistered or disabled type, which would name the wrong agent.
+  // A disabled type whose config is still present keeps its own name; only a type absent from the registry shows its record.type string.
+  const rawType = typeof record.type === "string" ? record.type : "";
+  const config = getAgentConfig(rawType);
+  // general-purpose is named as the tool row names it (getConfig): its own display_name when enabled, else the built-in tier
+  // ("Agent") that an implicit fallback with no enabled general-purpose actually runs.
+  const ownName = rawType.toLowerCase() === IMPLICIT_FALLBACK
+    ? sanitizeHeaderText(getDisplayName(rawType))
+    : config ? sanitizeHeaderText(config.displayName ?? "") || sanitizeHeaderText(config.name) : "";
+  const typeName = ownName || sanitizeHeaderText(rawType);
+  const agentName = headerPreview(typeName) || "Agent";
+  let header = `**${getStatusGlyph(String(record.status))} ${agentName} ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
   const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
     ? sanitizeHeaderText(String(record.error))
     : "";

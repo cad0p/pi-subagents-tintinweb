@@ -375,7 +375,7 @@ describe("run cap", () => {
     child.begin();
     child.end("report");
     await settle();
-    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(wrapped up for the 2 min time limit; resume with SendMessage to continue)");
   });
   it("a hard stop reads stopped at the time limit, in the notification header and the result note", async () => {
@@ -385,7 +385,7 @@ describe("run cap", () => {
     await settle();
     vi.advanceTimersByTime(CAP_MS);
     await settle();
-    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Subagent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
