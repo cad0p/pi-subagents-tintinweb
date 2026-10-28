@@ -843,6 +843,47 @@ describe("FleetList nested rows (#146)", () => {
     expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
   });
 
+  it("← on a depth-2 row collapses its parent and selects the parent, not the grandparent", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const h = harness([parent(), child(), grand]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(RIGHT); // both open, grandchild selected
+    expect(h.render().find(l => l.includes("grand job"))).toContain("⏺");
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("child job"))).toMatch(/⏺.*▸ 1 nested/);
+    expect(lines.find(l => l.includes("parent job"))).toContain("◯");
+    expect(lines.some(l => l.includes("grand job"))).toBe(false);
+  });
+
+  it("keeps a grandchild's expand state across collapsing and re-expanding its parent", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const great = makeRecord({ id: "gg", description: "great job", startedAt: 4000, parentAgentId: "g" });
+    const h = harness([parent(), child(), grand, great]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(RIGHT); h.press(RIGHT); // down to the deepest row
+    expect(h.render().find(l => l.includes("great job"))).toContain("⏺");
+    h.press(UP); // the grandchild, which stays open
+    h.press(LEFT); // ← collapses the child, selects it
+    expect(h.render().some(l => l.includes("grand job"))).toBe(false);
+    h.press(RIGHT); // re-open the child → grandchild still open
+    const lines = h.render();
+    expect(lines.find(l => l.includes("grand job"))).toMatch(/⏺.*▾/);
+    expect(lines.some(l => l.includes("great job"))).toBe(true);
+  });
+
+  it("counts a collapsed parent's children in the overflow above the window", () => {
+    const agents = [
+      parent({ startedAt: 1000 }),
+      child({ id: "c1", description: "child one", startedAt: 1001 }),
+      child({ id: "c2", description: "child two", startedAt: 1002 }),
+      ...Array.from({ length: 6 }, (_, i) => makeRecord({ id: `root${i}`, description: `root ${i}`, startedAt: 2000 + i })),
+    ];
+    const h = harness(agents);
+    for (let i = 0; i < 8; i++) h.press(DOWN); // main → the last row
+    const lines = h.render(120);
+    expect(lines.some(l => l.includes("↑ 4 more (4 running)"))).toBe(true);
+    expect(lines.some(l => l.includes("root 0"))).toBe(false);
+  });
+
   it("← on a child collapses its parent and selects the parent", () => {
     const h = harness([parent(), child()]);
     h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected

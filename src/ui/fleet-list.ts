@@ -1,10 +1,13 @@
 /**
  * fleet-list.ts — Claude Code-style "FleetView" list rendered below the editor.
  *
- * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
- * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ⏺ marker),
- * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
- * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
+ * Shows `main` plus each running/queued subagent as a navigable tree: an agent spawned by
+ * another one is nested under its parent (↳, two spaces per level), and a collapsed parent
+ * carries a `▸ N nested (…)` label. Pressing ↓ (or ←) at an empty prompt activates the list;
+ * ↑/↓ move the selection (filled ⏺ marker), → expands a parent and selects its first child,
+ * ← collapses the selected row's parent and selects it, Enter opens the selected agent's live
+ * conversation overlay, Esc returns to the prompt. A viewer stays open when its agent finishes;
+ * finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
