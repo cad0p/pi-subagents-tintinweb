@@ -7,8 +7,8 @@ import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
-import { getDisplayName } from "../src/ui/agent-display.js";
-import { FleetList, type FleetUICtx, formatFleetElapsed, formatFleetTokens } from "../src/ui/fleet-list.js";
+import { type AgentActivity, getDisplayName } from "../src/ui/agent-display.js";
+import { FleetList, type FleetUICtx, formatFleetElapsed } from "../src/ui/fleet-list.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -20,7 +20,8 @@ const ENTER = "\r";
 // Kitty-protocol key-RELEASE for ↓ (event type 3) — listeners receive these too.
 const DOWN_RELEASE = "\x1b[1;1:3B";
 
-const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
+/** Plain text: markup tags would count toward visibleWidth and skew the fit rules. */
+const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
 /** A no-op session so a record is "openable" by default (the list hides session-less agents). */
 const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
@@ -74,7 +75,13 @@ interface Harness {
   notifications: string[];
 }
 
-function harness(agents: AgentRecord[], draining: string[] = []): Harness {
+interface HarnessOptions {
+  activity?: Map<string, AgentActivity>;
+  showCost?: () => boolean;
+  showModel?: () => boolean;
+}
+
+function harness(agents: AgentRecord[], draining: string[] = [], options: HarnessOptions = {}): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
@@ -103,7 +110,7 @@ function harness(agents: AgentRecord[], draining: string[] = []): Harness {
   };
 
   const manager = fakeManager(agents, draining);
-  const fleet = new FleetList(manager, new Map());
+  const fleet = new FleetList(manager, options.activity ?? new Map(), options.showCost, options.showModel);
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -132,14 +139,6 @@ describe("formatFleetElapsed", () => {
   });
   it("floors negatives to 0s", () => {
     expect(formatFleetElapsed(-500)).toBe("0s");
-  });
-});
-
-describe("formatFleetTokens", () => {
-  it("prefixes a down-arrow and uses plural 'tokens'", () => {
-    expect(formatFleetTokens(13_100)).toBe("↓ 13.1k tokens");
-    expect(formatFleetTokens(950)).toBe("↓ 950 tokens");
-    expect(formatFleetTokens(1_200_000)).toBe("↓ 1.2M tokens");
   });
 });
 
@@ -312,8 +311,8 @@ describe("FleetList rendering", () => {
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
     expect(agentLine).toContain("◯");
     expect(agentLine).toContain(getDisplayName("general-purpose"));
-    expect(agentLine).toContain("↓ 13.1k tokens");
-    expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
+    expect(agentLine).toContain("13.1k token");
+    expect(agentLine).toMatch(/13\.1k token · \d+s/); // "<tokens> · <seconds>s" (timing-agnostic)
   });
 
   it("marks a running row as draining while the manager holds it in a draining pool", () => {
@@ -324,11 +323,13 @@ describe("FleetList rendering", () => {
     expect(live).not.toContain("(draining)");
   });
 
-  it("shows a waiting row as waiting · item · elapsed instead of its tokens", () => {
+  it("shows a waiting row as waiting, figures and run clock, with no item ids or connector line", () => {
     const waiting = makeRecord({ id: "w1", description: "waiting one", waiting: { since: Date.now() - 5000, items: ["timer:abc", "bg:x"] } });
-    const line = harness([waiting]).render().find((l) => l.includes("waiting one"));
-    expect(line).toContain("waiting · timer:abc (+1) · ");
-    expect(line).not.toContain("tokens");
+    const lines = harness([waiting]).render();
+    const line = lines.find((l) => l.includes("waiting one"));
+    expect(line).toContain("waiting · 13.1k token · ");
+    expect(line).not.toContain("timer:abc");
+    expect(lines.some((l) => l.includes("⎿"))).toBe(false);
   });
 
   it("orders agents earliest-launched first (top)", () => {
@@ -343,14 +344,14 @@ describe("FleetList rendering", () => {
     expect(oldIdx).toBeLessThan(newIdx); // earliest sits above the later one
   });
 
-  it("hides agents that have no session yet (pending)", () => {
+  it("shows a sessionless queued agent as a queued row", () => {
     const agents = [
       makeRecord({ id: "live", description: "running one" }),
       makeRecord({ id: "pending", description: "queued one", status: "queued", session: undefined }),
     ];
     const lines = harness(agents).render();
     expect(lines.some(l => l.includes("running one"))).toBe(true);
-    expect(lines.some(l => l.includes("queued one"))).toBe(false);
+    expect(lines.find(l => l.includes("queued one"))).toContain("queued · turn 0");
   });
 
   it("collapses overflow into a '↓ N more' indicator", () => {
@@ -359,7 +360,7 @@ describe("FleetList rendering", () => {
     const h = harness(agents);
     const lines = h.render(120);
     // 8 agents, cap 5 visible → "↓ 3 more"
-    expect(lines.some(l => l.includes("↓ 3 more"))).toBe(true);
+    expect(lines.some(l => l.includes("↓ 3 more (3 running)"))).toBe(true);
   });
 
   it("never emits a line wider than the terminal (guards wrap-induced flicker)", () => {
@@ -383,6 +384,84 @@ describe("FleetList rendering", () => {
     const lines = h.render(120);
     expect(lines.find(l => l.includes("report 7"))).toContain("⏺");
     expect(lines.some(l => l.includes("↑"))).toBe(true); // hidden-above indicator
+  });
+});
+
+/** Activity for a running row; only the fields the row figures read are set. */
+function activityFor(over: Partial<AgentActivity>): AgentActivity {
+  return { activeTools: new Map(), toolUses: 0, responseText: "", turnCount: 0, lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 }, ...over };
+}
+
+describe("FleetList row figures", () => {
+  it("shows the model and thinking level only when showModel is on", () => {
+    const rec = makeRecord({ id: "m1", description: "model one", invocation: { modelName: "sonnet 4.6", thinking: "high" } });
+    const on = harness([rec], [], { showModel: () => true }).render(120).find(l => l.includes("model one"));
+    expect(on).toContain("sonnet 4.6 · thinking: high");
+    const off = harness([rec]).render(120).find(l => l.includes("model one"));
+    expect(off).not.toContain("sonnet 4.6");
+  });
+
+  it("shows turns against the cap and tool uses on a running row", () => {
+    const rec = makeRecord({ id: "t1", description: "turns one", toolUses: 3 });
+    const activity = new Map([["t1", activityFor({ turnCount: 2, maxTurns: 5, toolUses: 3 })]]);
+    const line = harness([rec], [], { activity }).render(120).find(l => l.includes("turns one"));
+    expect(line).toContain("↻2≤5");
+    expect(line).toContain("3 tool uses");
+  });
+
+  it("puts the running agent's activity on a dim line under its row", () => {
+    const rec = makeRecord({ id: "r1", description: "active one" });
+    const activity = new Map([["r1", activityFor({ responseText: "reading the spec" })]]);
+    const lines = harness([rec], [], { activity }).render(120);
+    const idx = lines.findIndex(l => l.includes("active one"));
+    expect(lines[idx + 1]).toContain("⎿");
+    expect(lines[idx + 1]).toContain("reading the spec");
+  });
+
+  it("renders a finished row with status, turns, tool uses and duration, and no tokens", () => {
+    const now = Date.now();
+    const rec = makeRecord({ id: "f1", description: "done one", status: "completed", startedAt: now - 3000, completedAt: now, toolUses: 2 });
+    const line = harness([rec]).render(120).find(l => l.includes("done one"));
+    expect(line).toContain("✓");
+    expect(line).toMatch(/2 tool uses · \d+s/);
+    expect(line).not.toContain("token");
+  });
+
+  it("counts hidden agents by status in the overflow line", () => {
+    const now = Date.now();
+    const running = Array.from({ length: 5 }, (_, i) => makeRecord({ id: `r${i}`, description: `run ${i}`, startedAt: 1000 + i }));
+    const hidden = [
+      makeRecord({ id: "w", description: "wait", startedAt: 1010, waiting: { since: 1010, items: ["timer:x"] } }),
+      makeRecord({ id: "q", description: "pend", startedAt: 1011, status: "queued", session: undefined }),
+      makeRecord({ id: "f", description: "fin", startedAt: 1012, status: "completed", completedAt: now }),
+    ];
+    const lines = harness([...running, ...hidden]).render(120);
+    expect(lines.some(l => l.includes("↓ 3 more (1 waiting, 1 queued, 1 finished)"))).toBe(true);
+  });
+
+  it("drops model, then tool uses, when the row is too narrow, keeping tokens", () => {
+    const rec = makeRecord({ id: "n1", description: "narrow one", toolUses: 2, invocation: { modelName: "sonnet 4.6" } });
+    const h = harness([rec], [], { showModel: () => true });
+    const wide = h.render(120).find(l => l.includes("narrow one"));
+    expect(wide).toContain("sonnet 4.6");
+    expect(wide).toContain("2 tool uses");
+    const narrow = h.render(45).find(l => l.includes("narrow one"));
+    expect(narrow).not.toContain("sonnet 4.6");
+    expect(narrow).not.toContain("2 tool uses");
+    expect(narrow).toContain("13.1k token");
+  });
+
+  it("Enter on a queued row notifies that the agent has not started", () => {
+    const h = harness([
+      makeRecord({ id: "live", description: "live one", startedAt: 1000 }),
+      makeRecord({ id: "q", description: "queued two", status: "queued", session: undefined, startedAt: 2000 }),
+    ]);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN);
+    h.press(DOWN); // the queued row
+    h.press(ENTER);
+    expect(h.notifications).toEqual(["Agent is queued, not started yet."]);
+    expect(h.overlayOpened()).toBe(false);
   });
 });
 

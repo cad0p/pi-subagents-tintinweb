@@ -81,13 +81,6 @@ export interface AgentDetails {
 
 // ---- Formatting helpers ----
 
-/** `waiting · timer:abc (+1) · 0:05`: a run idle on pending background work, shown in place of its activity. */
-export function waitingLabel(waiting: { since: number; items: string[] }, elapsed: string): string {
-  const [first = "background work"] = waiting.items;
-  const more = waiting.items.length > 1 ? ` (+${waiting.items.length - 1})` : "";
-  return `waiting · ${toSingleLine(first)}${more} · ${elapsed}`;
-}
-
 /** Queued for a slot: a spawn not yet admitted, or a run held at the provider gate. */
 export function isQueued(record: AgentRecord): boolean {
   return record.status === "queued" || (record.status === "running" && record.gated === true);
@@ -166,6 +159,29 @@ export function formatSessionTokens(
 /** Format turn count with optional max limit: "↻5≤30" or "↻5". */
 export function formatTurns(turnCount: number, maxTurns?: number | null): string {
   return maxTurns != null ? `↻${turnCount}≤${maxTurns}` : `↻${turnCount}`;
+}
+
+/** Icon and trailing status text for a finished agent (shared by the widget and FleetView rows). */
+export function finishedStatus(
+  a: { status: string; error?: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" },
+  theme: Theme,
+): { icon: string; statusText: string } {
+  if (a.status === "completed") {
+    let timeText = " (time limit)";
+    if (a.timeLimit === "wrapped") timeText = " (wrapped up for the time limit)";
+    else if (a.timeLimit === "stopped") timeText = " (stopped at the time limit)";
+    return { icon: theme.fg("success", "✓"), statusText: a.limitReason === "time" ? theme.fg("warning", timeText) : "" };
+  }
+  if (a.status === "steered") return { icon: theme.fg("warning", "✓"), statusText: theme.fg("warning", " (turn limit)") };
+  if (a.status === "stopped") return { icon: theme.fg("dim", "■"), statusText: theme.fg("dim", " stopped") };
+  if (a.status === "interrupted") return { icon: theme.fg("warning", "■"), statusText: theme.fg("warning", " interrupted") };
+  if (a.status === "error") {
+    const err = a.error ? toSingleLine(a.error) : "";
+    const errMsg = err ? `: ${safeTruncate(err, 60)}` : "";
+    return { icon: theme.fg("error", "✗"), statusText: theme.fg("error", ` error${errMsg}`) };
+  }
+  // aborted
+  return { icon: theme.fg("error", "✗"), statusText: theme.fg("warning", " aborted") };
 }
 
 /** Format milliseconds as human-readable duration. */

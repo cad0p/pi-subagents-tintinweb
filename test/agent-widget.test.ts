@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, describeActivity, fgPreservingNestedStyles, formatSessionTokens, waitingLabel } from "../src/ui/agent-display.js";
+import { type AgentActivity, describeActivity, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-display.js";
 import { AgentWidget } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
@@ -105,15 +105,10 @@ describe("AgentWidget", () => {
     expect(renderLines(manager, "agent", () => "off")).toBe("");
   });
 
-  it("labels a waiting run with its first item, extra count and elapsed time", () => {
-    expect(waitingLabel({ since: 0, items: ["timer:abc", "bg:x"] }, "0:05")).toBe("waiting · timer:abc (+1) · 0:05");
-    expect(waitingLabel({ since: 0, items: [] }, "0:05")).toBe("waiting · background work · 0:05");
-  });
-
   it("shows a waiting run in place of its activity line", () => {
     const waiting = { ...makeRecord("waiter"), waiting: { since: Date.now() - 5000, items: ["timer:abc"] } };
     const manager = { isDraining: () => false, listAgents: () => [waiting] };
-    expect(renderLines(manager, "waiter")).toContain("waiting · timer:abc · ");
+    expect(renderLines(manager, "waiter")).toContain("⎿  waiting");
   });
 
   it("counts waiting runs apart from running ones in the status bar", () => {

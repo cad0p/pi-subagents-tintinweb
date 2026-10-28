@@ -7,10 +7,10 @@
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
-import { safeTruncate, toSingleLine } from "../text-safety.js";
+import { toSingleLine } from "../text-safety.js";
 import type { SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "../usage.js";
-import { type AgentActivity, buildInvocationTags, describeActivity, ERROR_STATUSES, fgPreservingNestedStyles, formatCost, formatMs, formatSessionTokens, formatTurns, getDisplayName, getPromptModeLabel, isQueued, SPINNER, type Theme, type UICtx, waitingLabel } from "./agent-display.js";
+import { type AgentActivity, buildInvocationTags, describeActivity, ERROR_STATUSES, fgPreservingNestedStyles, finishedStatus, formatCost, formatMs, formatSessionTokens, formatTurns, getDisplayName, getPromptModeLabel, isQueued, SPINNER, type Theme, type UICtx } from "./agent-display.js";
 
 /** Maximum number of rendered lines before overflow collapse kicks in. */
 const MAX_WIDGET_LINES = 12;
@@ -127,33 +127,7 @@ export class AgentWidget {
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
 
-    let icon: string;
-    let statusText: string;
-    if (a.status === "completed") {
-      icon = theme.fg("success", "✓");
-      let timeText = " (time limit)";
-      if (a.timeLimit === "wrapped") timeText = " (wrapped up for the time limit)";
-      else if (a.timeLimit === "stopped") timeText = " (stopped at the time limit)";
-      statusText = a.limitReason === "time" ? theme.fg("warning", timeText) : "";
-    } else if (a.status === "steered") {
-      icon = theme.fg("warning", "✓");
-      statusText = theme.fg("warning", " (turn limit)");
-    } else if (a.status === "stopped") {
-      icon = theme.fg("dim", "■");
-      statusText = theme.fg("dim", " stopped");
-    } else if (a.status === "interrupted") {
-      icon = theme.fg("warning", "■");
-      statusText = theme.fg("warning", " interrupted");
-    } else if (a.status === "error") {
-      icon = theme.fg("error", "✗");
-      const err = a.error ? toSingleLine(a.error) : "";
-      const errMsg = err ? `: ${safeTruncate(err, 60)}` : "";
-      statusText = theme.fg("error", ` error${errMsg}`);
-    } else {
-      // aborted
-      icon = theme.fg("error", "✗");
-      statusText = theme.fg("warning", " aborted");
-    }
+    const { icon, statusText } = finishedStatus(a, theme);
 
     const parts: string[] = [];
     const activity = this.agentActivity.get(a.id);
@@ -240,7 +214,7 @@ export class AgentWidget {
       const statsText = parts.join(" · ");
 
       const activity = a.waiting
-        ? waitingLabel(a.waiting, formatMs(Date.now() - a.waiting.since))
+        ? "waiting"
         : toSingleLine(bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…");
 
       runningLines.push([

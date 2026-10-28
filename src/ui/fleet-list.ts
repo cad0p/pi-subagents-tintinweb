@@ -16,8 +16,21 @@ import type { AgentManager } from "../agent-manager.js";
 import { deliveryText } from "../delivery-text.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
-import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, getDisplayName, isQueued, type Theme, waitingLabel } from "./agent-display.js";
+import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import {
+  type AgentActivity,
+  buildInvocationTags,
+  describeActivity,
+  fgPreservingNestedStyles,
+  finishedStatus,
+  formatCost,
+  formatSessionTokens,
+  formatTurns,
+  getDisplayName,
+  getPromptModeLabel,
+  isQueued,
+  type Theme,
+} from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -54,15 +67,6 @@ export function formatFleetElapsed(ms: number): string {
   return `${Math.max(0, Math.round(ms / 1000))}s`;
 }
 
-/** `↓ 13.1k tokens` — down-arrow prefix, compact magnitude, plural "tokens". */
-export function formatFleetTokens(count: number): string {
-  let compact: string;
-  if (count >= 1_000_000) compact = `${(count / 1_000_000).toFixed(1)}M`;
-  else if (count >= 1_000) compact = `${(count / 1_000).toFixed(1)}k`;
-  else compact = `${count}`;
-  return `↓ ${compact} tokens`;
-}
-
 /**
  * Place `right` flush to `width`, truncating `left` first so the stats survive.
  * The final clamp guarantees the line never exceeds `width` (which would wrap and
@@ -74,6 +78,38 @@ function rightAlign(left: string, right: string, width: number): string {
   const leftClamped = truncateToWidth(left, maxLeft);
   const gap = Math.max(1, width - visibleWidth(leftClamped) - rightW);
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
+}
+
+type RowKind = "queued" | "waiting" | "running" | "finished";
+/** Display order for overflow counts. */
+const ROW_KINDS: RowKind[] = ["running", "waiting", "queued", "finished"];
+
+/** Disjoint row categories, checked in order: queued, waiting, running, finished. */
+function rowKind(record: AgentRecord): RowKind {
+  if (isQueued(record)) return "queued";
+  if (record.status === "running") return record.waiting ? "waiting" : "running";
+  return "finished";
+}
+
+/** `↓ 3 more (2 running, 1 finished)`; zero counts are omitted. */
+function overflowLabel(arrow: string, hidden: AgentRecord[]): string {
+  const counts: Record<RowKind, number> = { queued: 0, waiting: 0, running: 0, finished: 0 };
+  for (const record of hidden) counts[rowKind(record)] += 1;
+  const parts = ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`);
+  return `${arrow} ${hidden.length} more (${parts.join(", ")})`;
+}
+
+/**
+ * Joins the row's figures. Optional figures drop front to back (model, turns,
+ * tool uses) until the row fits `width`; `kept` figures always stay.
+ */
+function fitStats(prefix: string, width: number, lead: string[], optional: string[], kept: string[]): string {
+  let stats = "";
+  for (let drop = 0; drop <= optional.length; drop++) {
+    stats = [...lead, ...optional.slice(drop), ...kept].filter(part => part !== "").join(" · ");
+    if (visibleWidth(prefix) + visibleWidth(stats) + 1 <= width) break;
+  }
+  return stats;
 }
 
 export class FleetList {
@@ -101,6 +137,8 @@ export class FleetList {
      * `showCost` setting.
      */
     private showCost: () => boolean = () => false,
+    /** Read live at render time. Whether each running row shows its model and thinking level. */
+    private showModel: () => boolean = () => false,
   ) {}
 
   // ---- Lifecycle ----
@@ -187,16 +225,16 @@ export class FleetList {
 
   /**
    * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row is openable (has a session, or is interrupted and reads
+   * started sooner sit at the top. Every row but a queued one is openable (has a session, or is interrupted and reads
    * its transcript from file), so Enter never dead-ends. Included: running/queued, plus the agent currently being
    * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Pending agents with no session yet are hidden until they start.
+   * Queued agents show without a session (Enter notifies instead); other pending agents are hidden until they start.
    * (`listAgents()` is newest-first, so we re-sort.)
    */
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => !a.parentAgentId && ((a.session ?? a.sessionSnapshot) !== undefined || a.status === "interrupted") && (
+      .filter(a => !a.parentAgentId && (isQueued(a) || (a.session ?? a.sessionSnapshot) !== undefined || a.status === "interrupted") && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
@@ -297,7 +335,8 @@ export class FleetList {
     if (!this.ui) return;
     const session = record.session ?? this.manager.settledTranscript(record.id);
     if (!session) {
-      this.ui.notify(`Agent is ${toSingleLine(record.status)} — no session available.`, "info");
+      const message = isQueued(record) ? "Agent is queued, not started yet." : `Agent is ${toSingleLine(record.status)} — no session available.`;
+      this.ui.notify(message, "info");
       return;
     }
     const activity = this.agentActivity.get(record.id);
@@ -366,13 +405,16 @@ export class FleetList {
     const visible = Math.min(MAX_AGENT_ROWS, agents.length);
     const selAgent = Math.max(0, sel - 1);
     const start = selAgent < visible ? 0 : selAgent - visible + 1;
-    const hiddenBelow = agents.length - (start + visible);
+    const hiddenAbove = agents.slice(0, start).map(e => e.record);
+    const hiddenBelow = agents.slice(start + visible).map(e => e.record);
 
-    if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
+    if (hiddenAbove.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↑", hiddenAbove)), width));
     for (let a = start; a < start + visible; a++) {
-      lines.push(this.renderAgentRow(a + 1, sel, agents[a].record, width, theme));
+      const record = agents[a].record;
+      lines.push(this.renderAgentRow(a + 1, sel, record, width, theme));
+      if (rowKind(record) === "running") lines.push(this.activityLine(record, width, theme));
     }
-    if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+    if (hiddenBelow.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↓", hiddenBelow)), width));
 
     return lines;
   }
@@ -382,19 +424,45 @@ export class FleetList {
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
+    const kind = rowKind(record);
+    const icon = kind === "finished" ? `${finishedStatus(record, theme).icon} ` : "";
+    const modeLabel = getPromptModeLabel(record.type);
+    const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const drainTag = this.manager.isDraining(record.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${drainTag}  ${toSingleLine(record.description)}`;
-    const usage = this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage;
-    const tokens = getLifetimeTotal(usage);
-    const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
+    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${icon}${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${modeTag}${drainTag}`;
+    const left = `${prefix}  ${toSingleLine(record.description)}`;
+    return rightAlign(left, this.rowStats(record, kind, prefix, width, theme), width);
+  }
+
+  /** Right-aligned figures for a row. Each kind keeps the figures the widget showed for it. */
+  private rowStats(record: AgentRecord, kind: RowKind, prefix: string, width: number, theme: Theme): string {
+    const activity = this.agentActivity.get(record.id);
+    const usage = activity?.lifetimeUsage ?? record.lifetimeUsage;
+    const turnCount = activity?.turnCount ?? record.turnCount;
+    const maxTurns = activity?.maxTurns ?? record.invocation?.maxTurns;
+    const toolUses = activity?.toolUses ?? record.toolUses;
+    const toolText = toolUses > 0 ? `${toolUses} tool use${toolUses === 1 ? "" : "s"}` : "";
     const cost = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
-    const turn = this.agentActivity.get(record.id)?.turnCount ?? record.turnCount ?? 0;
-    const stats = isQueued(record)
-      ? `queued · turn ${turn}`
-      : record.waiting
-        ? waitingLabel(record.waiting, formatFleetElapsed(Date.now() - record.waiting.since))
-        : `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
-    const right = theme.fg("dim", stats);
-    return rightAlign(left, right, width);
+    const elapsed = formatFleetElapsed((record.completedAt ?? Date.now()) - record.startedAt); // freezes once finished
+    const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
+    if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
+    if (kind === "finished") {
+      const stats = [turns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
+      return theme.fg("dim", stats) + finishedStatus(record, theme).statusText;
+    }
+    const tokens = getLifetimeTotal(usage);
+    const tokenText = tokens > 0 ? formatSessionTokens(tokens, getSessionContextPercent(activity?.session ?? record.sessionSnapshot), theme, record.compactionCount) : "";
+    const { modelName, tags } = buildInvocationTags(record.invocation);
+    const thinking = tags.find(tag => tag.startsWith("thinking: "));
+    const model = this.showModel() ? [modelName, thinking].filter(Boolean).join(" · ") : "";
+    const lead = kind === "waiting" ? ["waiting"] : [];
+    return fgPreservingNestedStyles(theme, "dim", fitStats(prefix, width, lead, [model, turns, toolText], [tokenText, cost, elapsed]));
+  }
+
+  /** Dim sub-line under a running row: what the agent is doing right now. */
+  private activityLine(record: AgentRecord, width: number, theme: Theme): string {
+    const activity = this.agentActivity.get(record.id);
+    const text = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
+    return truncateToWidth(theme.fg("dim", `    ⎿  ${toSingleLine(text)}`), width);
   }
 }
