@@ -96,34 +96,45 @@ flows). A test passing is not proof of what the user sees.
 - Say what the reader should see in each capture (the row, the marker, the
   notification), so a reviewer can check it without re-running.
 - Each flow step has an expected outcome: one sentence for what happens,
-  ending with the end state the user sees (for example "the main agent
-  resumes both"), not only the mechanism that should cause it (a wake, a
-  turn, a row). Copy it verbatim from the linked issue or plan, under
-  Evidence, before the first capture; if neither states one, add it to the
-  issue first. It is never edited after a capture. A changed expected outcome
-  needs the issue changed, a new head and new captures, and the review brief
-  quotes the original sentence next to the new one.
+  not only the mechanism that should cause it (a wake, a turn, a row). The
+  last step's sentence states the end state the user sees (for example "the
+  main agent resumes both"); a sentence set without one is rejected and the
+  issue is changed first. Copy each sentence verbatim from the linked issue
+  or plan, under Evidence, before the first capture; if neither states one,
+  add it to the issue first.
+- Once a step has an after capture, its sentence is fixed. Only the
+  maintainer, not the author, may replace it, recorded in the issue with the
+  failing capture quoted; the new sentence is a fresh proof on a new head,
+  and the review brief quotes both sentences.
 - The before capture shows the old behaviour and is not judged against the
-  expected outcome. Each step's after capture passes only when every clause
-  of its expected outcome has a captured line showing it and no captured line
-  contradicts it; any end state other than the stated one contradicts it. The
-  capture runs from the step's trigger until the session is idle, and a
-  clause stating an absence ("does not ask the user") is shown by that whole
-  window. Quote
-  each line verbatim from the plain-text capture, next to its clause, under
-  Evidence. A line that contradicts the outcome is never trimmed as unrelated.
-- An after capture that does not pass is a failed proof: fix the change, not
-  the expected outcome. A failed proof cannot be dismissed; it clears only on
-  a new head whose after captures pass.
-- Any clause about what the model does (resumes, asks, retries) needs the
-  change to tell the model what to do, in what the change puts in front of it
-  (a notice, a tool result, a wake, a tool description, prompt text). Quote
-  that instruction under Evidence. Without it the step fails, whatever the
-  model chose in the run. A prompt typed during the run does not count. A
-  model making another choice is a failed proof, not model variance.
-- The proof needs at least one passing after capture per step with the
-  reference setup above (native Anthropic); if it is unavailable, wait. A
-  failing capture on any setup blocks the head.
+  expected outcome. Every after run of a step is captured and quoted; none is
+  discarded. A run passes only when every clause of its expected outcome has
+  a captured line showing it and no captured line contradicts it; any end
+  state other than the stated one contradicts it.
+- A showing line records an effect: a tool call, a row or status change, a
+  notification, a session-file entry. Model prose, a plan or a question does
+  not show a clause.
+- A capture runs from the step's trigger until the session is idle: the
+  editor prompt is back, no tool or spinner is running, and the screen has
+  not changed for 30 seconds. A clause stating an absence ("does not ask the
+  user") is shown by that whole window.
+- Quote each line verbatim from the plain-text capture, next to its clause,
+  under Evidence. A line that contradicts the outcome is never trimmed as
+  unrelated.
+- Any clause about what the model does or does not do (resumes, asks,
+  retries) needs the change to tell the model what to do, in what the change
+  puts in front of it (a notice, a tool result, a wake, a tool description,
+  prompt text). The instruction must appear in the capture or the run's
+  session file; quote it under Evidence. Without it the step fails, whatever
+  the model chose. A prompt typed during the run does not count. A model
+  making another choice is a failed proof, not model variance.
+- After runs use native Anthropic from the reference setup above. The
+  fallback model is for the manual TUI checks only; if Anthropic is
+  unavailable, wait.
+- A run that does not pass is a failed proof: fix the change, not the
+  expected outcome. Any failed run blocks the head. Neither author nor
+  maintainer can dismiss it; it clears only on a new head whose after runs
+  all pass.
 
 ## Session-level checks
 
@@ -153,13 +164,13 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   question: which inputs, callers, settings, or runtime versions would break
   the guarantees while the gates stay green?
 - When Visual proof applies to the PR, the brief also includes each step's
-  expected outcome and the raw after-capture files, not the author's quotes,
-  and asks the reviewer to check, clause by clause, whether a captured line
-  shows it and whether any line contradicts it, and whether each model-action
-  clause has its quoted instruction. A failing step is a must-fix. It is
-  dismissed only when the reviewer misread the capture: quote a showing line
-  for every clause, and show that no line contradicts it. Otherwise it
-  follows the failed-proof rule in Visual proof.
+  expected outcome and the raw after-capture and session files, not the
+  author's quotes, and asks the reviewer to check, clause by clause, whether
+  a captured line shows it, whether any line contradicts it, and whether each
+  model-action clause has its instruction in the capture or session file. A
+  failing step is a must-fix. If the author says the reviewer misread, a new
+  reviewer on the same head re-checks that step; only its pass clears the
+  finding. Otherwise it follows the failed-proof rule in Visual proof.
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers
   (`npm run lint:fix`). It states the turn budget and the way out: reply
   `NO VERDICT` with what was tested if the budget runs out, `HEAD` differs from
@@ -169,7 +180,8 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   should-fix, or nit. A run that hit its turn limit, was aborted, or ends
   without a first-line verdict counts as `NO VERDICT`.
 - After a `NO VERDICT`, retry `general-purpose` once with a narrower brief,
-  or a higher `max_turns` if the task needs it.
+  or a higher `max_turns` if the task needs it. A narrower brief keeps the
+  capture check.
 - Escalate to the user-defined `smart` agent only when the review makes claims
   that are easily shown wrong by facts (a misread API, code that doesn't exist,
   behaviour the source contradicts). Don't escalate over opinionated findings
@@ -181,8 +193,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   finding. A later verdict on the same head does not clear it by itself.
   Should-fix and nit findings may stay open if recorded.
 - Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
-  no undismissed must-fix findings, and every step has a passing reference
-  after capture on that head and no failing capture.
+  no undismissed must-fix findings, from a brief that included the capture
+  check when Visual proof applies, and every after run of every step on that
+  head passes.
 
 ## Fork release rules
 
@@ -198,5 +211,7 @@ In the PR body, record:
 - the pi version and platform used for the live checks;
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
+- for visual proof, each step's expected outcome, the quoted line per
+  clause, and the quoted instruction for each model-action clause;
 - every review round: the head it reviewed, the agent type, and the verdict;
 - any check that does not apply, and why.
