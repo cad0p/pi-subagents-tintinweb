@@ -583,6 +583,12 @@ describe("settings persistence", () => {
       expect(appliers.setFailurePreviewMaxChars).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
+    it("applies evictAfterMinutes from the settings file", () => {
+      writeProject({ evictAfterMinutes: 5 });
+      applySettings(loadSettings(projectDir), appliers);
+      expect(appliers.setEvictAfterMinutes).toHaveBeenCalledWith(5);
+    });
+
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
       applySettings({ defaultMaxTurns: 0 }, appliers);
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(0);
