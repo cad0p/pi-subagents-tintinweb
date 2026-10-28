@@ -493,7 +493,7 @@ export class FleetList {
     const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
+      ? "↑↓ select · → nested · enter view · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));

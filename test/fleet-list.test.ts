@@ -154,7 +154,7 @@ describe("FleetList navigation", () => {
     const res = h.press(DOWN);
     expect(res).toEqual({ consume: true });
     // main selected, list active → nav hint shown
-    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+    expect(h.render()[0]).toContain("↑↓ select · → nested · enter view · esc back");
   });
 
   it("also activates on ← (matches the '← for agents' hint)", () => {
