@@ -403,6 +403,8 @@ export class AgentManager {
   private drainingPools: DrainingPool[] = [];
   /** Ids whose hand-over item is being adopted: input for them is parked here until `endAdoption`. */
   private adopting = new Map<string, string[]>();
+  /** Background-work provider names already warned about this activation, so a broken provider warns once, not on every check. */
+  private brokenProviders = new Set<string>();
   /** Set once this activation shuts down for a reload: its draining runs settle into it. */
   private handover?: ReloadHandover;
 
@@ -1171,21 +1173,36 @@ export class AgentManager {
     return timer;
   }
 
-  /** Background work the session's providers still report. A provider that throws holds nothing open, and a nested result its parent refused (`nestedStalled`) does not hold the parent open. */
+  /** Background work the session's providers still report. A provider that throws or returns unusable output holds nothing open (warned once per name), and a nested result its parent refused (`nestedStalled`) does not hold the parent open. */
   private pendingWork(session: AgentSession): string[] {
     const sessionIds = sessionIdentityForms(session.sessionManager);
     const context = { sessionId: sessionIds[0] ?? "", sessionIds, nowMs: Date.now() };
     const items: string[] = [];
     for (const provider of listBackgroundWorkProviders()) {
+      const own: string[] = [];
       try {
-        for (const work of provider.listActiveWork(context)) {
-          if (!this.getRecord(work.id)?.nestedStalled) items.push(work.id);
+        const listed = provider.listActiveWork(context);
+        if (typeof listed?.[Symbol.iterator] !== "function") throw new TypeError("listActiveWork() returned no iterable list");
+        for (const work of listed) {
+          if (typeof work?.id !== "string") {
+            this.warnBrokenProvider(provider.name, "returned an item without a string id; skipping that item");
+            continue;
+          }
+          if (!this.getRecord(work.id)?.nestedStalled) own.push(work.id);
         }
-      } catch {
-        // Same as snapshotSession: a provider that throws reports nothing for this check.
+        items.push(...own);
+      } catch (err) {
+        this.warnBrokenProvider(provider.name, `failed (${err instanceof Error ? err.message : String(err)}); treating it as nothing pending`);
       }
     }
     return items;
+  }
+
+  /** Logs a broken provider once per name for this activation. */
+  private warnBrokenProvider(name: string, problem: string): void {
+    if (this.brokenProviders.has(name)) return;
+    this.brokenProviders.add(name);
+    console.warn(`[pi-subagents] background-work provider "${name}" ${problem}`);
   }
 
   /** Ends the lifecycle: the terminal state, then afterRun (slot, teardown), then the record's promise. */
