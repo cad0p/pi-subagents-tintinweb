@@ -573,8 +573,14 @@ describe("subagents across a real /reload (faux provider)", () => {
     childToolStep = Promise.resolve();
     childHeldCommand = `for i in $(seq 200); do [ -f ${gateFile} ] && break; sleep 0.05; done`;
     await root.prompt("spawn-now");
-    await vi.waitFor(() => expect(renderedWidget("fleet")).toContain("running command"), { timeout: 10_000 });
-    expect(renderedWidget("fleet")).toContain("1 tool use");
+    // The first call (bash `true`) also reads as "running command" while it runs, so wait for its end ("1 tool use") too.
+    await vi.waitFor(
+      () => {
+        expect(renderedWidget("fleet")).toContain("running command");
+        expect(renderedWidget("fleet")).toContain("1 tool use");
+      },
+      { timeout: 10_000 },
+    );
 
     await reloadRoot(root);
     expect(renderedWidget("fleet")).toContain("(draining)");
