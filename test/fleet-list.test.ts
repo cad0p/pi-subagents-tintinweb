@@ -798,3 +798,129 @@ describe("FleetList footer, waiting rows and overflow (#143)", () => {
     expect(lines.some((l) => l.includes("↓ 2 more (2 running)"))).toBe(true);
   });
 });
+
+describe("FleetList nested rows (#146)", () => {
+  const parent = (over: Partial<AgentRecord> = {}) => makeRecord({ id: "p", description: "parent job", startedAt: 1000, ...over });
+  const child = (over: Partial<AgentRecord> = {}) => makeRecord({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", ...over });
+
+  it("hides a child until its parent is expanded, then shows it under the ↳ marker", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); // main
+    h.press(DOWN); // parent
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+    h.press(RIGHT);
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}⏺ {3}↳ /);
+  });
+
+  it("nests a grandchild at depth 2 after two →", () => {
+    const grand = makeRecord({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const h = harness([parent(), child(), grand]);
+    h.press(DOWN); h.press(DOWN); // parent
+    h.press(RIGHT); h.press(RIGHT); // child, then grandchild
+    expect(h.render().find(l => l.includes("grand job"))).toMatch(/^ {2}⏺ {5}↳ /);
+  });
+
+  it("labels a collapsed parent with its nested counts, zero counts omitted", () => {
+    const done = child({ id: "d", description: "done child", startedAt: 2500, status: "completed", completedAt: Date.now() });
+    const line = harness([parent(), child(), done]).render(120).find(l => l.includes("parent job"));
+    expect(line).toContain("▸ 2 nested (1 running, 1 finished)");
+  });
+
+  it("← on a child collapses its parent and selects the parent", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(h.render().find(l => l.includes("parent job"))).toMatch(/⏺.*▸ 1 nested/);
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("← on a level-1 row does nothing: the parent stays expanded and selected", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(UP); // back on the parent
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toMatch(/⏺.*▾/);
+    expect(lines.some(l => l.includes("child job"))).toBe(true);
+  });
+
+  it("→ on a nested row without children does nothing and keeps it selected", () => {
+    const h = harness([parent(), child(), makeRecord({ id: "z", description: "later job", startedAt: 3000 })]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected, no children of its own
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("later job"))).toContain("◯");
+  });
+
+  it("keeps a settled parent as a context row while its child runs", () => {
+    const settled = parent({ description: "settled parent", status: "completed", completedAt: 1500 });
+    const h = harness([settled, child()]);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("settled parent"))).toContain("▸ 1 nested (1 running)");
+    h.press(RIGHT);
+    expect(h.render().find(l => l.includes("child job"))).toContain("↳ ");
+  });
+
+  it("renders a child whose parent record is gone at depth 1", () => {
+    const h = harness([child({ parentAgentId: "gone" })]);
+    h.press(DOWN);
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}◯ {3}↳ /);
+  });
+
+  it("forgets a parent's expand state once its record is evicted", () => {
+    const agents = [parent(), child()];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT);
+    agents.splice(0, 1); // parent evicted: the child shows at depth 1
+    expect(h.render().find(l => l.includes("child job"))).toMatch(/^ {2}. {3}↳ /);
+    agents.unshift(parent()); // parent is back, collapsed by default
+    expect(h.render().some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("counts a collapsed child in the overflow below the window (seven agents, five rows)", () => {
+    const agents = [
+      ...Array.from({ length: 5 }, (_, i) => makeRecord({ id: `a${i}`, description: `root ${i}`, startedAt: 1000 + i })),
+      parent({ startedAt: 1005 }),
+      child({ startedAt: 1006 }),
+    ];
+    const lines = harness(agents).render(120);
+    expect(lines.some(l => l.includes("↓ 2 more (2 running)"))).toBe(true);
+    expect(lines.some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("puts a parent's activity above its children and none under a waiting child", () => {
+    const agents = [
+      parent(),
+      child(),
+      child({ id: "w", description: "waiting child", startedAt: 3000, waiting: { since: 0, items: [] } }),
+    ];
+    const activity = new Map([
+      ["p", activityFor({ responseText: "parent working" })],
+      ["c", activityFor({ responseText: "child working" })],
+      ["w", activityFor({ responseText: "waiting working" })],
+    ]);
+    const h = harness(agents, [], { activity });
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT);
+    const lines = h.render(120);
+    const p = lines.findIndex(l => l.includes("parent job"));
+    const c = lines.findIndex(l => l.includes("child job"));
+    const w = lines.findIndex(l => l.includes("waiting child"));
+    expect(lines[p + 1]).toMatch(/^ {4}⎿ {2}parent working/);
+    expect(lines[c + 1]).toMatch(/^ {8}⎿ {2}child working/);
+    expect(lines[w + 1] ?? "").not.toContain("⎿");
+  });
+
+  it("does not consume → or ← while the list is inactive, so the editor keeps its cursor keys", () => {
+    const h = harness([parent(), child()]);
+    expect(h.press(RIGHT)).toBeUndefined();
+    h.setEditorText("typing");
+    expect(h.press(LEFT)).toBeUndefined();
+  });
+
+  it("opens the same conversation viewer on Enter over a nested row", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    h.press(ENTER);
+    expect(h.overlayOpened()).toBe(true);
+    expect(h.overlayComponent()).toBeDefined();
+  });
+});
