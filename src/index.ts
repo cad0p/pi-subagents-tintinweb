@@ -34,6 +34,7 @@ import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
+import { ProgramStatusReporter } from "./program-status.js";
 import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
@@ -357,6 +358,18 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; fleet.update(); }
+
+  // ---- Program Status Protocol (OSC 7501) ----
+  /** Widget key for the zero-line capture point that hands us pi's terminal. */
+  const PROGRAM_STATUS_WIDGET_KEY = "pi-subagents-program-status";
+  let programStatusEnabled = true;
+  function isProgramStatusEnabled(): boolean { return programStatusEnabled; }
+  function setProgramStatus(b: boolean): void {
+    programStatusEnabled = b;
+    programStatus?.setEnabled(b);
+  }
+  /** The context the capture widget was registered on; the shutdown handler has no ctx of its own in tests. */
+  let programStatusUi: ExtensionContext | undefined;
   /**
    * Subagent spend the parent session has not been told about yet. Fed from the
    * manager's per-message hook (the one place each message is seen exactly once)
@@ -561,6 +574,8 @@ export default function (pi: ExtensionAPI) {
     // handle too, so the child session is unreachable once its teardown ran.
     const activity = agentActivity.get(record.id);
     if (activity) activity.session = undefined;
+    // The row a settle creates (done, error, or clear) without waiting for the reporter's next tick.
+    programStatus?.sync();
     // Nested children report only to their owning parent: the result is a wake on that parent's session. The
     // main session's lifecycle, transcript, notification, and UI channels stay untouched.
     if (record.parentAgentId) {
@@ -606,6 +621,7 @@ export default function (pi: ExtensionAPI) {
     if (record.session) {
       fleet.ensureTimer();
       fleet.update();
+      programStatus?.sync();
     }
   }, (record, info) => {
     if (record.parentAgentId) return;
@@ -663,6 +679,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   manager.resolveSettings = recoveredSettings;
+
+  // ---- Program Status Protocol (OSC 7501) ----
+  // One child record per subagent in the terminal's own status UI. Root only: a child session loads
+  // this extension too, and a second reporter would duplicate every write and every SIGCONT re-send.
+  // Constructed here, after the manager every pass reads.
+  const programStatus = isRoot ? new ProgramStatusReporter({ records: () => manager.listAgents() }) : undefined;
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
@@ -864,6 +886,19 @@ export default function (pi: ExtensionAPI) {
     }
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
     if (isRoot) {
+      // A zero-line below-editor widget is the capture point for pi's terminal: pi calls the factory
+      // synchronously on registration and adds no spacer for an empty below widget (an above widget
+      // would add a line). Captured once per activation and kept until shutdown — the reporter must
+      // outlive the FleetView, whose own widget unmounts whenever the list empties.
+      if (ctx.hasUI) {
+        ctx.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, (tui) => {
+          // pi-tui keeps `programStatusSupported` private in its type; the field is a normal property
+          // at runtime, and it is the only way to read the support flag. Absent reads as unsupported.
+          programStatus?.attach(tui.terminal);
+          return { render: () => [], invalidate: () => {} };
+        }, { placement: "belowEditor" });
+        programStatusUi = ctx;
+      }
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
       const getSource = () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY];
       registerSubagentProvider(event.reason, getSource);
@@ -922,6 +957,12 @@ export default function (pi: ExtensionAPI) {
     nudgeBatch = undefined;
     mainTurnActive = false;
     fleet.dispose();
+    // Clear the OSC 7501 child records after the FleetView let go of its widget, then remove the
+    // capture point. `quit` writes nothing: pi stops the terminal before this handler runs, and its
+    // root-less clear already removed every record (see ProgramStatusReporter.dispose).
+    programStatus?.dispose(event.reason);
+    programStatusUi?.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, undefined);
+    programStatusUi = undefined;
     // Every agent is stopped and every child session has shut down, so no more
     // `subagents:usage` can arrive from THIS session. A ledger flushing in its
     // own `session_shutdown` may have run before this handler aborted the agents
@@ -1265,6 +1306,7 @@ export default function (pi: ExtensionAPI) {
       setReportUsage,
       setShowCost,
       setShowModel,
+      setProgramStatus,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1721,6 +1763,7 @@ Terse command-style prompts produce shallow, generic work.
           agentActivity.set(id, bgState);
           fleet.ensureTimer();
           fleet.update();
+          programStatus?.sync();
         }
 
         // Emit created event
@@ -2549,6 +2592,7 @@ ${systemPrompt}
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
+      programStatus: isProgramStatusEnabled(),
     };
   }
 
@@ -2699,6 +2743,14 @@ ${systemPrompt}
           values: ["on", "off"],
         },
         {
+          id: "programStatus",
+          label: "Program status",
+          description:
+            "Report each subagent to the terminal as an OSC 7501 child record (Program Status Protocol), so a supporting terminal lists `subagents/<id>` rows beside pi's own session status. Applied live; turning it off clears the rows.",
+          currentValue: isProgramStatusEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "toolDescriptionMode",
           label: "Tool description",
           description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
@@ -2840,6 +2892,10 @@ ${systemPrompt}
         const enabled = value === "on";
         setShowModel(enabled);
         notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "programStatus") {
+        const enabled = value === "on";
+        setProgramStatus(enabled);
+        notifyApplied(ctx, `Program status reporting ${enabled ? "enabled" : "disabled"}`);
       }
     }
 

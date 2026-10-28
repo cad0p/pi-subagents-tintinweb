@@ -220,6 +220,17 @@ export interface SubagentsSettings {
    * to themselves.
    */
   showModel?: boolean;
+  /**
+   * Whether each subagent is reported to the terminal as an OSC 7501 child record
+   * (`subagents/<id>`) — a Program Status Protocol terminal then lists the agents
+   * beside pi's own session record. Defaults to `true`. Applied live: turning it
+   * off clears the records this session wrote.
+   *
+   * On by default because a terminal that does not implement the protocol ignores
+   * the sequences, and one that does exists to show exactly this. Only the root
+   * activation writes: a child session that loads this extension reports nothing.
+   */
+  programStatus?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -243,6 +254,7 @@ export interface SettingsAppliers {
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
+  setProgramStatus: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -341,6 +353,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.showModel === "boolean") {
     out.showModel = r.showModel;
   }
+  if (typeof r.programStatus === "boolean") {
+    out.programStatus = r.programStatus;
+  }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -418,6 +433,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
+  if (typeof s.programStatus === "boolean") appliers.setProgramStatus(s.programStatus);
 }
 
 /**
