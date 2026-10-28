@@ -191,6 +191,19 @@ describe("crash recovery — startup report", () => {
     expect(made.pi.sendMessage).not.toHaveBeenCalled();
   });
 
+  it("does not recover on a reload: a reload's live runs are handed over, not reported as crashed", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("rl", DEAD_PID)]);
+    writeChildFiles("rl");
+    const made = boot(file);
+
+    await made.lifecycle.get("session_start")({ reason: "reload" }, { ...spawnCtx(tmpDir), sessionManager: SessionManager.open(file, undefined, tmpDir) });
+    await quiet();
+
+    expect(made.pi.sendMessage).not.toHaveBeenCalled();
+    expect(interruptedSettles(file)).toEqual([]);
+  });
+
   it("recovers a run owned by this pid when this process no longer holds it (F4)", async () => {
     const file = join(tmpDir, "parent.jsonl");
     writeSession(file, [spawned("mine", process.pid)]);
