@@ -870,6 +870,16 @@ describe("FleetList nested rows (#146)", () => {
     expect(lines.some(l => l.includes("great job"))).toBe(true);
   });
 
+  it("→ on an already-expanded parent is a no-op: the selection stays on the parent", () => {
+    const h = harness([parent(), child()]);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // expand → child selected
+    h.press(UP); // back on the open parent
+    expect(h.press(RIGHT)).toEqual({ consume: true });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toMatch(/⏺.*▾/);
+    expect(lines.find(l => l.includes("child job"))).toContain("◯");
+  });
+
   it("counts a collapsed parent's children in the overflow above the window", () => {
     const agents = [
       parent({ startedAt: 1000 }),

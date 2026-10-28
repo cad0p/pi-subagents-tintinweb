@@ -142,6 +142,8 @@ export function treeOrder(records: AgentRecord[], isExpanded: (id: string) => bo
   const roots: AgentRecord[] = [];
   for (const record of [...records].sort((a, b) => a.startedAt - b.startedAt)) {
     const parent = record.parentAgentId;
+    // A record whose parent is itself, or a parent cycle, only ever lands in `children` and no root
+    // reaches it, so it drops out of the tree — a decision, not an accident.
     if (parent && ids.has(parent)) children.set(parent, [...(children.get(parent) ?? []), record]);
     else roots.push(record);
   }
@@ -371,9 +373,10 @@ export class FleetList {
       return { consume: true };
     }
     if (matchesKey(data, "right")) {
+      // Only a collapsed parent expands (→ on an open one is a no-op, not a ↓).
       const roster = this.roster();
       const entry = roster[this.resolveIndex(roster)];
-      if (entry?.kind === "agent" && entry.nested.length > 0) {
+      if (entry?.kind === "agent" && entry.nested.length > 0 && !entry.expanded) {
         this.expanded.add(entry.record.id);
         const opened = this.roster(); // its first child is the next row
         this.moveSelection(opened, this.resolveIndex(opened) + 1);
