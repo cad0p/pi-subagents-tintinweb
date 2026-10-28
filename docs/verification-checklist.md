@@ -3,7 +3,8 @@
 Automated checks are necessary but not sufficient. This checklist is what a PR
 author runs before requesting review. Record the evidence in the PR body so a
 reviewer can see what was verified, on which setup. Skip a section only when it
-does not apply, and say so explicitly.
+does not apply, and say so explicitly; for Visual proof the reviewer decides
+that, not the author.
 
 ## Workspace
 
@@ -102,15 +103,17 @@ flows). A test passing is not proof of what the user sees.
   resumes both"). The steps and sentences are fixed before the first run of
   any kind, captured or not; if they are missing or do not state the end
   state, the maintainer writes them in the issue first. Copy each sentence
-  verbatim under Evidence.
+  verbatim under Evidence, with the issue edit that fixed it and the time of
+  the first run, so the order can be checked.
 - From then on, only the maintainer, not the author, may change them,
-  recorded in the issue with any failing capture quoted. That is a design change: the changed step
-  is a fresh proof on a new head, and the review brief quotes the old and
-  new sentences.
-- The before capture is taken on main or the released build, with its SHA
-  under Evidence, and goes into the review brief; it shows the old behaviour
-  and is not judged against the expected outcome. Every run of the branch is
-  an after run: it is captured and quoted, and none is discarded. A run passes only when every clause of its expected outcome has
+  recorded in the issue with any failing capture quoted. That is a design
+  change: the changed step is a fresh proof on a new head, and the review
+  brief quotes the old and new sentences.
+- The before capture is taken on main or a released version, with its SHA
+  or version under Evidence, and goes into the review brief; it shows the
+  old behaviour and is not judged against the expected outcome. Every run of
+  the branch is an after run: it is captured and quoted, and none is
+  discarded. A run passes only when every clause of its expected outcome has
   a captured line showing it and no captured line contradicts it; any end
   state other than the stated one contradicts it.
 - A showing line records an effect: a tool call, a row or status change, a
@@ -133,15 +136,17 @@ flows). A test passing is not proof of what the user sees.
   step fails, whatever the model chose. A prompt typed during the run does
   not count. A model making another choice is a failed proof, not model
   variance.
-- After runs use native Anthropic from the reference setup above. The
-  fallback model is for the manual TUI checks only; if Anthropic is
+- Only runs on native Anthropic from the reference setup above can pass. A
+  run of the flow on any other model, logged anywhere (manual TUI checks
+  included), is still an after run, and it fails. If Anthropic is
   unavailable, wait.
 - A run that does not pass is a failed proof: the author fixes the change,
   never the expected outcome (only the maintainer changes that, as above).
   Any failed run blocks the head. No one dismisses it. It clears only on a
-  new head that changes the failing step's code path, named under Evidence,
+  new head whose change to the failing step's code path is named under
+  Evidence and accepted by the reviewer as addressing the failing clause,
   and whose after runs of the same sentence all pass; re-running unchanged
-  code does not clear it.
+  code, or a change that does not alter that behaviour, does not clear it.
 - Whether Visual proof applies is stated by the reviewer, not the author.
   For any change to what a pi session shows or how it behaves over time, the
   brief carries the sentences and captures whatever the author claims.
@@ -181,8 +186,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   a captured line shows it, whether any line contradicts it, and whether each
   model-action clause has its instruction where Visual proof requires it. A
   failing step is a must-fix and follows the failed-proof rule in Visual
-  proof. The reviewer states whether Visual proof applies. A reviewer who
-  misread is answered by the next reviewer re-reading the same captures.
+  proof. The reviewer states whether Visual proof applies. A failing step
+  found by a reviewer is not overturned by another reading of the same
+  captures.
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers
   (`npm run lint:fix`). It states the turn budget and the way out: reply
   `NO VERDICT` with what was tested if the budget runs out, `HEAD` differs from
@@ -225,7 +231,10 @@ In the PR body, record:
 - the pi version and platform used for the live checks;
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
-- for visual proof, each step's expected outcome, the quoted line per
-  clause, and the quoted instruction for each model-action clause;
-- every review round: the head it reviewed, the agent type, and the verdict;
+- for visual proof, each step's expected outcome with the issue edit that
+  fixed it, the before capture's SHA or version, the head SHA of every after
+  run, the quoted line per clause, the quoted instruction for each
+  model-action clause, and any changed code path a cleared failure names;
+- every review round: the head it reviewed, the agent type, the verdict, and
+  whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
