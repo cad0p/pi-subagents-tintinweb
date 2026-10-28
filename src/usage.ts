@@ -157,7 +157,7 @@ export function getSessionContextPercent(session: SessionLike | undefined): numb
   try {
     const percent = session.getSessionStats().contextUsage?.percent;
     // A non-finite/negative percent would render `Context: NaN%` (or a nonsense
-    // negative) in the tool text and skew the widget/viewer thresholds.
+    // negative) in the tool text and skew the fleet/viewer thresholds.
     return typeof percent === "number" && Number.isFinite(percent) && percent >= 0 ? percent : null;
   } catch { return null; }
 }

@@ -33,15 +33,6 @@ export type Theme = {
   bold(text: string): string;
 };
 
-export type UICtx = {
-  setStatus(key: string, text: string | undefined): void;
-  setWidget(
-    key: string,
-    content: undefined | ((tui: any, theme: Theme) => { render(): string[]; invalidate(): void }),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ): void;
-};
-
 /** Per-agent live activity state. */
 export interface AgentActivity {
   activeTools: Map<string, string>;
@@ -161,7 +152,7 @@ export function formatTurns(turnCount: number, maxTurns?: number | null): string
   return maxTurns != null ? `↻${turnCount}≤${maxTurns}` : `↻${turnCount}`;
 }
 
-/** Icon and trailing status text for a finished agent (shared by the widget and FleetView rows). */
+/** Icon and trailing status text for a finished agent (shared by the FleetView rows and the result views). */
 export function finishedStatus(
   a: { status: string; error?: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" },
   theme: Theme,

@@ -212,7 +212,7 @@ export interface SubagentsSettings {
   reportUsage?: boolean;
   /**
    * Whether the subagent surfaces show an estimated dollar cost next to their
-   * token counts (widget, FleetView, conversation viewer, `get_subagent_result`,
+   * token counts (FleetView, conversation viewer, `get_subagent_result`,
    * completion notifications). Defaults to `true`. Applied live.
    *
    * Rendered as `~$0.0042` — the tilde marks it as pi's reported estimate rather
@@ -224,10 +224,10 @@ export interface SubagentsSettings {
    */
   showCost?: boolean;
   /**
-   * Whether the widget's running rows name the model driving each agent and the
+   * Whether FleetView's running rows name the model driving each agent and the
    * thinking level it is running at. Defaults to `false`.
    *
-   * Off by default because the widget row already carries the description,
+   * Off by default because the FleetView row already carries the description,
    * turns, tool uses, tokens and elapsed time, and every character it gains is
    * one the description loses on a narrow terminal. The conversation viewer and
    * the `get_subagent_result` header show the pair either way — they have a line

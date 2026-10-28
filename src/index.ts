@@ -42,8 +42,7 @@ import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILIN
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType, type WidgetMode } from "./types.js";
-import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme, type UICtx } from "./ui/agent-display.js";
-import { AgentWidget } from "./ui/agent-widget.js";
+import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme } from "./ui/agent-display.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -327,7 +326,7 @@ export default function (pi: ExtensionAPI) {
   // session on the next unrelated spawn, so every later reload keeps warning.
   reloadCustomAgents(strictAgentFiles);
 
-  // ---- Agent activity tracking + widget ----
+  // ---- Agent activity tracking ----
   const agentActivity = new Map<string, AgentActivity>();
 
   // ---- Usage reporting (`reportUsage`/`showCost` default on, `showModel` off; see SubagentsSettings) ----
@@ -352,13 +351,12 @@ export default function (pi: ExtensionAPI) {
     // settings load must not clobber the root's decision — the nested
     // `get_subagent_result` renders for the same user, in the same session.
     if (isRoot) setReportShowCost(b);
-    widget.update();
     fleet.update();
   }
-  /** Name the model and thinking level on the widget's running rows. */
+  /** Name the model and thinking level on FleetView's running rows. */
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; fleet.update(); }
   /**
    * Subagent spend the parent session has not been told about yet. Fed from the
    * manager's per-message hook (the one place each message is seen exactly once)
@@ -514,10 +512,8 @@ export default function (pi: ExtensionAPI) {
 
   function sendIndividualNudge(record: AgentRecord) {
     agentActivity.delete(record.id);
-    widget.markFinished(record.id);
     fleet.onAgentFinished(record.id);
     scheduleNudge(record);
-    widget.update();
   }
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
@@ -561,7 +557,7 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
-    // A settled record keeps a snapshot, not the live session: drop the widget's
+    // A settled record keeps a snapshot, not the live session: drop the activity
     // handle too, so the child session is unreachable once its teardown ran.
     const activity = agentActivity.get(record.id);
     if (activity) activity.session = undefined;
@@ -586,14 +582,11 @@ export default function (pi: ExtensionAPI) {
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
       agentActivity.delete(record.id);
-      widget.markFinished(record.id);
       fleet.onAgentFinished(record.id);
-      widget.update();
       return;
     }
 
     sendIndividualNudge(record);
-    widget.update();
   }, undefined, (record) => {
     if (record.parentAgentId) return;
     // Emit started event when agent transitions to running (including from queue)
@@ -611,8 +604,8 @@ export default function (pi: ExtensionAPI) {
       record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, record.childSettings.effectiveCwd, record.session.messages.length);
     }
     if (record.session) {
-      widget.markRunning(record.id);
-      widget.ensureTimer(); widget.update(); fleet.ensureTimer(); fleet.update();
+      fleet.ensureTimer();
+      fleet.update();
     }
   }, (record, info) => {
     if (record.parentAgentId) return;
@@ -903,7 +896,6 @@ export default function (pi: ExtensionAPI) {
     const nudged = [...(nudgeBatch?.records.keys() ?? [])].map((id) => ({ id, target: manager.getRecord(id)?.parentAgentId }));
     if (event.reason === "reload") {
       // Nothing is aborted: runs still going move to the reloaded activation (reload-handover.ts).
-      widget.dispose();
       if (isRoot) {
         for (const h of held) h.detach();
         // Nested results still waiting in a batch ride the hand-over as targeted nudges, so the new activation delivers them.
@@ -954,7 +946,6 @@ export default function (pi: ExtensionAPI) {
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
       // A draining run has no activity entry in this activation: take the one it had at the hand-over, or seed one.
-      widget.setUICtx(ctx.ui as UICtx);
       fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
       const carried = new Map(held.flatMap((h) => [...h.activity]));
       for (const record of manager.listAgents()) {
@@ -969,7 +960,7 @@ export default function (pi: ExtensionAPI) {
           lifetimeUsage: record.lifetimeUsage,
         });
       }
-      widget.ensureTimer();
+      fleet.ensureTimer();
     }
     for (const h of held) {
       const taken = h.take();
@@ -1024,7 +1015,7 @@ export default function (pi: ExtensionAPI) {
       manager.endAdoption(item.dto.id);
     }
     agentActivity.delete(item.dto.id);
-    widget.markFinished(item.dto.id);
+    fleet.onAgentFinished(item.dto.id);
     return true;
   }
 
@@ -1111,10 +1102,8 @@ export default function (pi: ExtensionAPI) {
     // No tool has run yet in a reopened session, so the surfaces have no UI context: give it here, so the
     // interrupted rows show at once instead of after the main agent's first tool call.
     if (ctx.hasUI) {
-      widget.setUICtx(ctx.ui as UICtx);
       fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
     }
-    widget.update();
     fleet.update();
   }
 
@@ -1152,17 +1141,12 @@ export default function (pi: ExtensionAPI) {
     }
     held = held.filter((h) => h.draining.ownAgents().length > 0);
     manager.setDrainingPools(held.map((h) => h.draining));
-    widget.update();
     fleet.update();
   }
 
-  // Live widget: show running agents above editor.
-  // widgetMode (default "all") selects what the widget shows: "all" = every
-  // agent; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "all";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
-  function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
+  function setWidgetMode(m: WidgetMode): void { widgetMode = m; }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled);
@@ -1215,11 +1199,9 @@ export default function (pi: ExtensionAPI) {
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
 
-  // Grab UI context from first tool execution + clear lingering widget on new turn
+  // Grab UI context from first tool execution
   pi.on("tool_execution_start", async (_event, ctx) => {
-    widget.setUICtx(ctx.ui as UICtx);
     fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
-    widget.onTurnStart();
   });
 
   /** Format an agent's tool scope: "*" when it has all built-ins, else a comma-separated list. */
@@ -1536,9 +1518,6 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-      // Ensure we have UI context for widget rendering
-      widget.setUICtx(ctx.ui as UICtx);
-
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 
@@ -1740,12 +1719,10 @@ Terse command-style prompts produce shallow, generic work.
         // listener stopping it, or an already-aborted parent signal. The
         // completion callback already removed its activity entry, so re-adding
         // one would render a `↻1` finished row for a run that never executed a
-        // turn, and the widget timers have no live run to update. The stop
+        // turn, and the FleetView timers have no live run to update. The stop
         // notification remains the delivery for these runs.
         if (record && record.settled !== true) {
           agentActivity.set(id, bgState);
-          widget.ensureTimer();
-          widget.update();
           fleet.ensureTimer();
           fleet.update();
         }
@@ -2714,7 +2691,7 @@ ${systemPrompt}
           id: "showCost",
           label: "Show cost",
           description:
-            "Show an estimated `~$0.0042` beside subagent token counts in the widget, fleet view, conversation viewer, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
+            "Show an estimated `~$0.0042` beside subagent token counts in the fleet view, conversation viewer, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
           currentValue: isShowCostEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -2722,7 +2699,7 @@ ${systemPrompt}
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The conversation viewer shows the pair either way — this adds it to the widget, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on the fleet view's running rows. The conversation viewer shows the pair either way — this adds it to the fleet view, where the row is already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
