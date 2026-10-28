@@ -168,9 +168,10 @@ export function clearProgramStatus(id: string): ProgramStatusReport {
 }
 
 /**
- * Whether a settled record's result already left this extension: pulled (`resultConsumed`),
+ * Whether a settled record's result already reached its consumer: pulled (`resultConsumed`),
  * announced (`resultDelivered`), or named by its parent's finish / refused by its parent and left
- * pullable (`nestedStalled`). No new reader is coming for any of those, so the row is cleared.
+ * pullable (`nestedStalled`). A stalled child is still pullable, but its parent already knows the
+ * result exists, so the terminal row has done its job (FleetView keeps the row).
  */
 function resultGone(record: AgentRecord): boolean {
 	return record.resultDelivered === true || record.resultConsumed === true || record.nestedStalled === true;
@@ -318,7 +319,8 @@ export class ProgramStatusReporter {
 		if (enabled === this.enabled) return;
 		this.enabled = enabled;
 		if (enabled) {
-			this.armTimer(true);
+			// A reporter that lost its terminal has nothing to tick for; the next attach() arms it.
+			if (this.terminal) this.armTimer(true);
 			this.pass();
 			return;
 		}
@@ -461,8 +463,10 @@ export class ProgramStatusReporter {
 			terminal.write(sequence);
 			return true;
 		} catch {
-			// stdout is closed; drop the reference so the next pass does not try again.
+			// stdout is closed: drop the reference and stop ticking, so a dead terminal costs no scans.
+			// A later attach() re-arms.
 			this.terminal = undefined;
+			this.armTimer(false);
 			return false;
 		}
 	}

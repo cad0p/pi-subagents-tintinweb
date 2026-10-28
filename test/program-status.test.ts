@@ -315,6 +315,9 @@ describe("ProgramStatusReporter", () => {
 		const states = written.map((sequence) => parse(sequence).state);
 		expect(states.filter((state) => state === "clear")).toHaveLength(2);
 		expect(states).toHaveLength(4);
+		// The bookkeeping is the point of the fold: every departed id must be gone, not merely suppressed.
+		const kept = (r as unknown as { written: Map<string, unknown> }).written;
+		expect(kept.size).toBe(0);
 	});
 
 	it("clears every id it wrote, and then writes nothing more", () => {
@@ -403,12 +406,14 @@ describe("ProgramStatusReporter", () => {
 		expect(written).toHaveLength(2);
 	});
 
-	it("drops the terminal when a write throws, and never throws out of the timer", () => {
+	it("drops the terminal when a write throws, stops the timer, and never throws out of it", () => {
 		const r = reporter();
 		r.attach({ programStatusSupported: true, write: () => { throw new Error("closed"); } });
 		expect(() => r.sync()).not.toThrow();
+		expect(vi.getTimerCount()).toBe(0);
 		records = [makeRecord({ id: "aaaa", status: "completed" })];
 		expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+		expect(written).toEqual([]);
 	});
 
 	it("owns a timer only while it holds a terminal", () => {
@@ -417,6 +422,11 @@ describe("ProgramStatusReporter", () => {
 		r.attach(terminal);
 		expect(vi.getTimerCount()).toBe(1);
 		r.dispose("quit");
+		expect(vi.getTimerCount()).toBe(0);
+		// Enabling without a terminal arms nothing: attach() is the only place a timer can start.
+		const terminalLess = reporter();
+		terminalLess.setEnabled(false);
+		terminalLess.setEnabled(true);
 		expect(vi.getTimerCount()).toBe(0);
 	});
 });
