@@ -433,7 +433,7 @@ export class FleetList {
     const activity = this.agentActivity.get(record.id);
     const usage = activity?.lifetimeUsage ?? record.lifetimeUsage;
     const turnCount = activity?.turnCount ?? record.turnCount;
-    const maxTurns = activity?.maxTurns ?? record.invocation?.maxTurns;
+    const maxTurns = activity?.maxTurns ?? (Number.isFinite(record.effectiveMaxTurns) ? record.effectiveMaxTurns : undefined);
     const toolUses = activity?.toolUses ?? record.toolUses;
     const toolText = toolUses > 0 ? `${toolUses} tool use${toolUses === 1 ? "" : "s"}` : "";
     const cost = this.showCost() ? formatCost(getLifetimeCost(usage)) : "";
@@ -441,9 +441,8 @@ export class FleetList {
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
     if (kind === "finished") {
-      // Turns come from the activity tracker alone; a finished run's record count is not shown.
-      const finishedTurns = activity ? formatTurns(activity.turnCount, activity.maxTurns) : "";
-      const stats = [finishedTurns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
+      // The activity tracker is dropped at finish, so turns fall back to the record, as the notification does.
+      const stats = [turns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
       return theme.fg("dim", stats) + finishedStatus(record, theme).statusText;
     }
     const tokens = getLifetimeTotal(usage);

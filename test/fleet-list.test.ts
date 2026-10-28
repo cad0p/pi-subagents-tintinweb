@@ -434,10 +434,11 @@ describe("FleetList row figures", () => {
 
   it("renders a finished row with status, turns, tool uses and duration, and no tokens", () => {
     const now = Date.now();
-    const rec = makeRecord({ id: "f1", description: "done one", status: "completed", startedAt: now - 3000, completedAt: now, toolUses: 2 });
+    // No activity entry: the activity tracker is dropped at finish, so turns come from the record.
+    const rec = makeRecord({ id: "f1", description: "done one", status: "completed", startedAt: now - 3000, completedAt: now, toolUses: 2, turnCount: 3, effectiveMaxTurns: 5 });
     const line = harness([rec]).render(120).find(l => l.includes("done one"));
     expect(line).toContain("✓");
-    expect(line).toMatch(/2 tool uses · \d+s/);
+    expect(line).toMatch(/↻3≤5 · 2 tool uses · \d+s/);
     expect(line).not.toContain("token");
   });
 
@@ -466,7 +467,7 @@ describe("FleetList row figures", () => {
   });
 
   it("drops model first, then turns, then tool uses, as the row narrows", () => {
-    const rec = makeRecord({ id: "d1", description: "drop one", toolUses: 3, turnCount: 2, invocation: { modelName: "sonnet 4.6", thinking: "high", maxTurns: 5 } });
+    const rec = makeRecord({ id: "d1", description: "drop one", toolUses: 3, turnCount: 2, effectiveMaxTurns: 5, invocation: { modelName: "sonnet 4.6", thinking: "high" } });
     const h = harness([rec], [], { showModel: () => true });
     // 80 cols: the full row does not fit, so only the model goes.
     const modelDropped = h.render(80).find(l => l.includes("◯"));
