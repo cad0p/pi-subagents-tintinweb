@@ -36,9 +36,9 @@ describe("ownerAlive", () => {
     expect(ownerAlive(owner, fakeHost({ startTime: () => "9999" }))).toBe(false);
   });
 
-  it("is dead when the start time can no longer be read for a recorded start time", () => {
+  it("is alive when the pid is alive but its start time cannot be read", () => {
     const owner = { pid: 4242, startTime: "100" };
-    expect(ownerAlive(owner, fakeHost({ startTime: () => undefined }))).toBe(false);
+    expect(ownerAlive(owner, fakeHost({ startTime: () => undefined }))).toBe(true);
   });
 
   it("compares pid only when the owner stamp has no boot id (off Linux and macOS)", () => {

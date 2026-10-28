@@ -86,7 +86,8 @@ export function currentOwnerStamp(host: OwnerHost = localOwnerHost()): OwnerStam
 /**
  * An owner is dead when its boot id differs from the host's, its pid is gone,
  * or its pid now belongs to a process that started later (pid reuse). Each
- * check applies only when both sides recorded the value.
+ * check applies only when both sides recorded the value. A live pid whose start
+ * time cannot be read counts as alive: a possibly live run is never recovered.
  */
 export function ownerAlive(owner: OwnerStamp, host: OwnerHost): boolean {
   if (owner.bootId !== undefined && host.bootId !== undefined && owner.bootId !== host.bootId) {
@@ -95,8 +96,6 @@ export function ownerAlive(owner: OwnerStamp, host: OwnerHost): boolean {
   if (!host.pidAlive(owner.pid)) {
     return false;
   }
-  if (owner.startTime !== undefined && host.startTime(owner.pid) !== owner.startTime) {
-    return false;
-  }
-  return true;
+  const startTime = owner.startTime === undefined ? undefined : host.startTime(owner.pid);
+  return startTime === undefined || startTime === owner.startTime;
 }
