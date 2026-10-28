@@ -1062,6 +1062,9 @@ describe("FleetList selection follows the record (#146)", () => {
     h.press(ENTER);
     expect(h.notifications).toEqual([]);
     expect(h.overlayOpened()).toBe(true);
+    // The opened conversation is the marked record's, not the row the cursor moved to.
+    const viewer = h.overlayComponent() as unknown as { record?: AgentRecord } | undefined;
+    expect(viewer?.record?.id).toBe("a");
   });
 
   it("puts the selection back on main on Esc, without waiting for the next activation", () => {

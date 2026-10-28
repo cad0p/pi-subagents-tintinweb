@@ -303,13 +303,15 @@ export class FleetList {
     return [{ kind: "main" }, ...this.agentRows()];
   }
 
-  /** Row of the selected record in `roster`, or the nearest row at the previous position once that record is gone. */
+  /**
+   * Row of the selected record in `roster`, always a valid index: the record's row, or
+   * the nearest row at the previous position once that record has left the roster (it
+   * lingered out, or its parent collapsed) — never a jump back to `main`.
+   */
   private resolveIndex(roster: FleetEntry[]): number {
     if (this.selectedId === undefined) return 0; // `main`
     const idx = roster.findIndex(e => e.kind === "agent" && e.record.id === this.selectedId);
-    // The record left the roster (it lingered out, or its parent collapsed): stay at the
-    // previous position instead of jumping back to `main`.
-    return idx >= 0 ? idx : this.selectedIndex;
+    return idx >= 0 ? idx : Math.min(this.selectedIndex, roster.length - 1);
   }
 
   /** Point the cursor at `index` in `roster` (clamped) and record which record that is. */
@@ -493,8 +495,7 @@ export class FleetList {
     if (agents.length === 0) return [];
     // Resolve locally so a render between a roster change and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
-    const roster: FleetEntry[] = [{ kind: "main" }, ...agents];
-    const sel = Math.min(this.resolveIndex(roster), roster.length - 1);
+    const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
     const hint = this.active
       ? "↑↓ select · → nested · enter view · esc back"
