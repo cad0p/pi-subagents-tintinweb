@@ -569,6 +569,20 @@ describe("FleetList overlay lifecycle", () => {
     const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000 });
     expect(harness([old]).render().some(l => l.includes("old done"))).toBe(false);
   });
+
+  it("keeps a finished row for 4000 ms after completion, then drops it", () => {
+    vi.useFakeTimers();
+    try {
+      const completedAt = Date.now();
+      const h = harness([makeRecord({ id: "l", description: "linger one", status: "completed", completedAt })]);
+      vi.setSystemTime(completedAt + 3999);
+      expect(h.render().some(l => l.includes("linger one"))).toBe(true);
+      vi.setSystemTime(completedAt + 4000);
+      expect(h.render().some(l => l.includes("linger one"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("FleetList sanitization", () => {
