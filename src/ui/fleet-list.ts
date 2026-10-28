@@ -220,13 +220,13 @@ export class FleetList {
    * started sooner sit at the top. Every row but a queued one is openable (has a session, or is interrupted and reads
    * its transcript from file), so Enter never dead-ends. Included: running/queued, plus the agent currently being
    * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Queued agents show without a session (Enter notifies instead); other pending agents are hidden until they start.
+   * Queued and finished agents show without a session (Enter notifies instead); other pending agents are hidden until they start.
    * (`listAgents()` is newest-first, so we re-sort.)
    */
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => !a.parentAgentId && (isQueued(a) || (a.session ?? a.sessionSnapshot) !== undefined || a.status === "interrupted") && (
+      .filter(a => !a.parentAgentId && (isQueued(a) || a.completedAt != null || a.status === "interrupted" || this.manager.isDraining(a.id) || (a.session ?? a.sessionSnapshot) !== undefined) && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
@@ -327,7 +327,9 @@ export class FleetList {
     if (!this.ui) return;
     const session = record.session ?? this.manager.settledTranscript(record.id);
     if (!session) {
-      const message = isQueued(record) ? "Agent is queued, not started yet." : `Agent is ${toSingleLine(record.status)} — no session available.`;
+      const message = isQueued(record) ? "queued, not started yet"
+        : record.status === "stopped" && record.completedAt != null ? "stopped before it started"
+        : `Agent is ${toSingleLine(record.status)} — no session available.`;
       this.ui.notify(message, "info");
       return;
     }
@@ -439,7 +441,9 @@ export class FleetList {
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
     if (kind === "finished") {
-      const stats = [turns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
+      // Turns come from the activity tracker alone, as the widget read them; a finished run's record count is not shown.
+      const finishedTurns = activity ? formatTurns(activity.turnCount, activity.maxTurns) : "";
+      const stats = [finishedTurns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
       return theme.fg("dim", stats) + finishedStatus(record, theme).statusText;
     }
     const tokens = getLifetimeTotal(usage);

@@ -1195,6 +1195,7 @@ export default function (pi: ExtensionAPI) {
   // Grab UI context from first tool execution
   pi.on("tool_execution_start", async (_event, ctx) => {
     fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+    fleet.update();
   });
 
   /** Format an agent's tool scope: "*" when it has all built-ins, else a comma-separated list. */
@@ -1677,6 +1678,8 @@ Terse command-style prompts produce shallow, generic work.
         const origBgOnSession = bgCallbacks.onSessionCreated;
         bgCallbacks.onSessionCreated = (session: any) => {
           origBgOnSession(session);
+          // FleetView lists a fresh run only once its session exists, and nothing else redraws at that point.
+          fleet.update();
           const rec = manager.getRecord(id);
           if (rec?.outputFile) {
             rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, sessionCwd);

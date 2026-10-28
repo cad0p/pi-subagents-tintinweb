@@ -455,7 +455,7 @@ describe("FleetList row figures", () => {
     h.press(DOWN);
     h.press(DOWN); // the queued row
     h.press(ENTER);
-    expect(h.notifications).toEqual(["Agent is queued, not started yet."]);
+    expect(h.notifications).toEqual(["queued, not started yet"]);
     expect(h.overlayOpened()).toBe(false);
   });
 });
@@ -598,5 +598,145 @@ describe("FleetList sanitization", () => {
       registerAgents(new Map());
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("FleetList rows keep the widget's sanitizing and labels (#143)", () => {
+  it("strips terminal controls from the live activity line", () => {
+    const activity = new Map([["agent", activityFor({ responseText: "x\u001b[2Jy\u001b]8;;https://evil.example\u0007link" })]]);
+    const text = harness([makeRecord({ id: "agent", description: "control activity" })], [], { activity }).render(120).join("\n");
+    expect(text).toContain("xylink");
+    expect(text).not.toContain("\u001b");
+    expect(text).not.toContain("[2J");
+    expect(text).not.toContain("]8;;");
+  });
+
+  it("truncates the activity line on a code-point boundary", () => {
+    const activity = new Map([["agent", activityFor({ responseText: `${"a".repeat(59)}😀tail` })]]);
+    const lines = harness([makeRecord({ id: "agent" })], [], { activity }).render(120);
+    expect(lines.some(l => l.includes(`⎿  ${"a".repeat(59)}…`))).toBe(true);
+    expect(lines.join("\n")).not.toContain("\uFFFD");
+  });
+
+  it("strips terminal controls from record descriptions and errors", () => {
+    const control = "\u001b]52;c;aGFjaw==\u0007\u001b[2J";
+    const running = harness([makeRecord({ id: "running", description: `desc${control}tail` })]).render(200).join("\n");
+    expect(running).toContain("desctail");
+    expect(running).not.toContain("\u001b");
+    expect(running).not.toContain("[2J");
+    expect(running).not.toContain("]52;");
+
+    const finishedRec = makeRecord({ id: "finished", description: `desc${control}tail`, status: "error", completedAt: Date.now(), error: `err${control}tail` });
+    const finished = harness([finishedRec]).render(200).join("\n");
+    expect(finished).toContain("desctail");
+    expect(finished).toContain("error: errtail");
+    expect(finished).not.toContain("\u001b");
+    expect(finished).not.toContain("[2J");
+    expect(finished).not.toContain("]52;");
+  });
+
+  it("labels a finished time-limit row by how the run ended, and keeps the plain label without the field", () => {
+    const timeLimitRow = (fields: Partial<AgentRecord>) =>
+      harness([makeRecord({ id: "timed", status: "completed", completedAt: Date.now(), limitReason: "time", ...fields })]).render(200).join("\n");
+    expect(timeLimitRow({ timeLimit: "wrapped" })).toContain("(wrapped up for the time limit)");
+    expect(timeLimitRow({ timeLimit: "stopped" })).toContain("(stopped at the time limit)");
+    expect(timeLimitRow({})).toContain("(time limit)");
+  });
+
+  it("collapses newlines and tabs in the record description on running and finished rows", () => {
+    const running = harness([makeRecord({ id: "multiline", description: "line one\nline two\tend" })]).render(200).join("\n");
+    expect(running).toContain("line one line two end");
+
+    const finishedRec = makeRecord({ id: "multiline-finished", status: "error", completedAt: Date.now(), description: "line one\nline two\tend", error: "err\nsecond line" });
+    const finished = harness([finishedRec]).render(200).join("\n");
+    expect(finished).toContain("line one line two end");
+    expect(finished).toContain("error: err second line");
+  });
+
+  it("collapses a newline in the tool activity line", () => {
+    const activity = new Map([["running", activityFor({ activeTools: new Map([["t1", "read\nforged"]]) })]]);
+    const text = harness([makeRecord({ id: "running" })], [], { activity }).render(120).join("\n");
+    expect(text).toContain("read forged…");
+    expect(text).not.toContain("\nforged");
+  });
+
+  it("tolerates non-string record descriptions and errors", () => {
+    const running = harness([Object.assign(makeRecord({ id: "running" }), { description: 42 })]).render(200).join("\n");
+    expect(running).not.toContain("42");
+
+    const finishedRec = Object.assign(makeRecord({ id: "finished", status: "error", completedAt: Date.now() }), { description: 42, error: { message: "boom" } });
+    const finished = harness([finishedRec]).render(200).join("\n");
+    expect(finished).not.toContain("42");
+    expect(finished).toContain("error");
+    expect(finished).not.toContain("[object Object]");
+  });
+
+  it("truncates the error preview without splitting a surrogate pair", () => {
+    const finishedRec = makeRecord({ id: "finished", status: "error", completedAt: Date.now(), error: `${"e".repeat(59)}🚀tail` });
+    const lines = harness([finishedRec]).render(200).join("\n");
+    expect(lines).toContain(`error: ${"e".repeat(59)}`);
+    // A naive slice(0, 60) would keep the rocket's lone high surrogate at index 59.
+    expect(lines).not.toContain("\ud83d");
+  });
+});
+
+describe("FleetList footer, waiting rows and overflow (#143)", () => {
+  it("never writes a footer status, whatever the roster holds", () => {
+    const setStatus = vi.fn();
+    const ui = { setStatus, setWidget: vi.fn(), onTerminalInput: vi.fn(() => () => {}), getEditorText: () => "", notify: vi.fn(), custom: vi.fn() };
+    const agents = [
+      makeRecord({ id: "r", description: "run" }),
+      makeRecord({ id: "w", description: "wait", waiting: { since: Date.now(), items: ["timer:x"] } }),
+      makeRecord({ id: "f", description: "fin", status: "completed", completedAt: Date.now() }),
+    ];
+    const fleet = new FleetList(fakeManager(agents), new Map());
+    fleet.setUICtx(ui);
+    fleet.update();
+    fleet.dispose();
+    expect(setStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps the model and turns on a waiting row, after the waiting label", () => {
+    const rec = makeRecord({ id: "w2", description: "waiting model", invocation: { modelName: "sonnet 4.6", thinking: "high" }, waiting: { since: Date.now() - 5000, items: ["timer:x"] } });
+    const activity = new Map([["w2", activityFor({ turnCount: 2, maxTurns: 5 })]]);
+    const line = harness([rec], [], { activity, showModel: () => true }).render(200).find((l) => l.includes("waiting model"));
+    expect(line).toContain("↻2≤5");
+    expect(line!.indexOf("sonnet 4.6")).toBeGreaterThan(line!.indexOf("waiting"));
+  });
+
+  it("puts no activity line under queued or finished rows", () => {
+    const now = Date.now();
+    const agents = [
+      makeRecord({ id: "q", description: "queued row", status: "queued", session: undefined, startedAt: 1000 }),
+      makeRecord({ id: "f", description: "finished row", status: "completed", completedAt: now, startedAt: now - 2000 }),
+    ];
+    const activity = new Map([["q", activityFor({ responseText: "stale queued" })], ["f", activityFor({ responseText: "stale finished" })]]);
+    const lines = harness(agents, [], { activity }).render(120);
+    expect(lines.some((l) => l.includes("⎿"))).toBe(false);
+  });
+
+  it("shows a resumed run's completion after the earlier completion aged out", () => {
+    const now = Date.now();
+    const rec = makeRecord({ id: "re", description: "resumed run", status: "completed", startedAt: now - 90_000, completedAt: now - 60_000 });
+    const h = harness([rec]);
+    expect(h.render(200).some((l) => l.includes("resumed run"))).toBe(false);
+
+    rec.status = "running";
+    rec.completedAt = undefined;
+    h.fleet.update();
+    const running = h.render(200).find((l) => l.includes("resumed run"));
+    expect(running).toBeDefined();
+    expect(running).not.toContain("✓");
+
+    rec.status = "completed";
+    rec.completedAt = Date.now();
+    h.fleet.update();
+    expect(h.render(200).find((l) => l.includes("resumed run"))).toContain("✓");
+  });
+
+  it("breaks the overflow down by status in a seven-agent roster", () => {
+    const agents = Array.from({ length: 7 }, (_, i) => makeRecord({ id: `o${i}`, description: `over ${i}`, startedAt: 1000 + i }));
+    const lines = harness(agents).render(120);
+    expect(lines.some((l) => l.includes("↓ 2 more (2 running)"))).toBe(true);
   });
 });
