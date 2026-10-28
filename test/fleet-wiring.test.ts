@@ -12,6 +12,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -70,9 +71,9 @@ const flush = async () => {
 function mockRunWithSession(): void {
   vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
     // The settled record keeps a snapshot of the session it handed over.
-    const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
+    const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
     opts.onSessionCreated?.(session, attachSessionLifecycle(session));
-    return { responseText: "done", session, aborted: false, steered: false } as any;
+    return { responseText: "done", session, aborted: false, steered: false };
   });
 }
 

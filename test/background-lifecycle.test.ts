@@ -1266,7 +1266,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     // FleetView clears its widget once no row remains: the latest call decides what shows.
     const renderAgents = (): string => {
       const fleetCalls = ui.setWidget.mock.calls.filter(([key]: [string, unknown]) => key === "fleet");
-      const factory = fleetCalls[fleetCalls.length - 1]?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
+      const factory = fleetCalls[fleetCalls.length - 1]?.[1] as ((tui: unknown, theme: unknown) => { render(): string[] }) | undefined;
       if (!factory) return "";
       return factory({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme).render().join("\n");
     };
