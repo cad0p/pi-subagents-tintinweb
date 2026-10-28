@@ -1036,6 +1036,48 @@ describe("FleetList selection follows the record (#146)", () => {
     expect(lines.some(l => l.includes("child job"))).toBe(false);
   });
 
+  it("leaves the selection on an orphan row when ← has no parent row to collapse to", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000, status: "completed", completedAt: Date.now() - 600_000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // open the parent, child selected
+    agents.splice(0, 1); // the parent is evicted; the child is now an orphan row
+    h.press(LEFT);
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+  });
+
+  it("opens the record the marker is on, after a row appeared above the selection", () => {
+    const agents = [
+      mk({ id: "a", description: "first job", startedAt: 1000 }),
+      mk({ id: "b", description: "second job", startedAt: 2000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("first job"))).toContain("⏺");
+    agents.unshift(mk({ id: "a0", description: "new job", startedAt: 500 }));
+    expect(h.render().find(l => l.includes("first job"))).toContain("⏺");
+    h.press(ENTER);
+    expect(h.notifications).toEqual([]);
+    expect(h.overlayOpened()).toBe(true);
+  });
+
+  it("puts the selection back on main on Esc, without waiting for the next activation", () => {
+    const agents = [
+      mk({ id: "a", description: "first job", startedAt: 1000 }),
+      mk({ id: "b", description: "second job", startedAt: 2000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN);
+    expect(h.render().find(l => l.includes("second job"))).toContain("⏺");
+    h.press(ESC);
+    const lines = h.render();
+    expect(lines.find(l => l.includes("main"))).toContain("⏺");
+    expect(lines.find(l => l.includes("second job"))).toContain("◯");
+  });
+
   it("stays at the previous position, not on main, when the selected child lingers out with rows below", () => {
     const agents: AgentRecord[] = [
       mk({ id: "p", description: "parent job", startedAt: 1000 }),

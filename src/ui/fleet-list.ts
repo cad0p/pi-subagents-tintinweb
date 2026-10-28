@@ -309,7 +309,7 @@ export class FleetList {
     const idx = roster.findIndex(e => e.kind === "agent" && e.record.id === this.selectedId);
     // The record left the roster (it lingered out, or its parent collapsed): stay at the
     // previous position instead of jumping back to `main`.
-    return idx >= 0 ? idx : Math.min(Math.max(0, this.selectedIndex), Math.max(0, roster.length - 1));
+    return idx >= 0 ? idx : this.selectedIndex;
   }
 
   /** Point the cursor at `index` in `roster` (clamped) and record which record that is. */
@@ -391,7 +391,10 @@ export class FleetList {
       if (parentId) {
         this.expanded.delete(parentId);
         const collapsed = this.roster();
-        this.moveSelection(collapsed, collapsed.findIndex(e => e.kind === "agent" && e.record.id === parentId));
+        const parentIdx = collapsed.findIndex(e => e.kind === "agent" && e.record.id === parentId);
+        // An orphan row (its parent was evicted) has no row to collapse to, so ← stays put
+        // instead of falling back to the nearest row.
+        if (parentIdx >= 0) this.moveSelection(collapsed, parentIdx);
         this.update();
       }
       return { consume: true };
@@ -490,7 +493,8 @@ export class FleetList {
     if (agents.length === 0) return [];
     // Resolve locally so a render between a roster change and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
-    const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
+    const roster: FleetEntry[] = [{ kind: "main" }, ...agents];
+    const sel = Math.min(this.resolveIndex(roster), roster.length - 1);
 
     const hint = this.active
       ? "↑↓ select · → nested · enter view · esc back"
