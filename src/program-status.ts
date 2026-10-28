@@ -306,18 +306,19 @@ export class ProgramStatusReporter {
 	 */
 	attach(terminal: ProgramStatusTerminal): void {
 		this.terminal = terminal;
-		this.armTimer(true);
+		if (this.enabled) this.armTimer(true);
 		// Registered here, not in the constructor: a session with no terminal never writes, so it has
 		// nothing to re-send, and a process that loads this extension many times (a subagent activation,
 		// a test) must not accumulate one listener per factory call.
 		if (!this.removeSigcont) this.removeSigcont = this.sigcontHook(() => this.onSigcont());
 	}
 
-	/** Master switch. Turning it off clears what this activation wrote; turning it on reports at once. */
+	/** Master switch. Turning it off clears what this activation wrote and stops the timer; turning it on restarts both. */
 	setEnabled(enabled: boolean): void {
 		if (enabled === this.enabled) return;
 		this.enabled = enabled;
 		if (enabled) {
+			this.armTimer(true);
 			this.pass();
 			return;
 		}
@@ -371,6 +372,7 @@ export class ProgramStatusReporter {
 
 	/** One reconcile: what the listing says versus what the terminal was last told. */
 	private pass(): void {
+		if (!this.enabled) return;
 		const now = this.now();
 		const supported = programStatusSupported(this.terminal);
 		// Support coming back is the event itself, not a 10-second guess: pi's `stop()` cleared every
@@ -392,17 +394,20 @@ export class ProgramStatusReporter {
 			desired.push({ recordId: record.id, report: programStatusFor(record, id) });
 		}
 
-		if (!this.enabled) {
-			this.armTimer(false);
-			return;
-		}
 		if (!supported) return;
 
 		// A record that left the listing (evicted, cleared, or its parent dropped out of the tree) is
 		// cleared under the id it was written with — the id is deterministic, so this is exact.
 		const listed = new Set(desired.map((entry) => entry.recordId));
 		for (const [recordId, entry] of this.written) {
-			if (!listed.has(recordId)) desired.push({ recordId, report: clearProgramStatus(entry.id) });
+			if (listed.has(recordId)) continue;
+			// Already cleared on screen: forget it instead of re-formatting its clear on every tick for the rest of
+			// the session. A record that comes back is a new report and gets a fresh entry.
+			if (entry.sequence === formatProgramStatus(clearProgramStatus(entry.id))) {
+				this.written.delete(recordId);
+				continue;
+			}
+			desired.push({ recordId, report: clearProgramStatus(entry.id) });
 		}
 
 		for (const { recordId, report } of desired) {

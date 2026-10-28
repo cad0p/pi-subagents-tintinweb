@@ -305,6 +305,18 @@ describe("ProgramStatusReporter", () => {
 		expect(written).toHaveLength(1);
 	});
 
+	it("forgets a departed record after its clear instead of re-formatting it every tick", () => {
+		records = [makeRecord({ id: "aaaa", status: "running" }), makeRecord({ id: "bbbb", status: "running" })];
+		const r = reporter();
+		r.attach(terminal);
+		r.sync();
+		records = [];
+		vi.advanceTimersByTime(6000);
+		const states = written.map((sequence) => parse(sequence).state);
+		expect(states.filter((state) => state === "clear")).toHaveLength(2);
+		expect(states).toHaveLength(4);
+	});
+
 	it("clears every id it wrote, and then writes nothing more", () => {
 		const r = reporter();
 		r.attach(terminal);
@@ -328,15 +340,24 @@ describe("ProgramStatusReporter", () => {
 		expect(ids()).toEqual(["subagents/aaaa"]);
 	});
 
-	it("clears on disable and reports again on enable", () => {
+	it("clears on disable and reports again on enable, timer included", () => {
 		const r = reporter();
 		r.attach(terminal);
 		r.sync();
 		r.setEnabled(false);
 		expect(parse(written[1]!).state).toBe("clear");
 		expect(vi.getTimerCount()).toBe(0);
+		// A tick must not write while disabled, even with a changed record.
+		records = [makeRecord({ id: "aaaa", status: "completed" })];
+		vi.advanceTimersByTime(5000);
+		expect(written).toHaveLength(2);
 		r.setEnabled(true);
-		expect(parse(written[2]!).state).toBe("working");
+		expect(parse(written[2]!).state).toBe("done");
+		expect(vi.getTimerCount()).toBe(1);
+		// The timer is back: a later change is reported without another sync().
+		records = [makeRecord({ id: "aaaa", status: "error", error: "boom" })];
+		vi.advanceTimersByTime(1000);
+		expect(parse(written[3]!).state).toBe("error");
 	});
 
 	it("writes nothing on quit, and clears on the other shutdown reasons", () => {
