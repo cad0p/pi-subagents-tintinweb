@@ -1,0 +1,137 @@
+name: Upstream fork probe
+
+# The extension allows @earendil-works/pi-coding-agent >=1.4.0 as a peer and pins 1.4.0 for
+# development, so a pi release only surfaces when someone bumps the dev pin. This probe runs the
+# type-level and behavioural checks against the release published today, every day, and raises one
+# issue when something breaks. It is a notification, not a gate: an issue on a breakage, never a red
+# build on main (issue #156).
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }} # gh reads the token from the environment; it does not inherit one
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      # A bare assignment, not echo "$(…)" > "$GITHUB_OUTPUT": there the step's status is echo's, so a
+      # registry outage would leave the version empty and every later step would "pass" against the
+      # pinned 1.4.0 while the alarm closed itself.
+      - id: pi
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(npm view @earendil-works/pi-coding-agent version)
+          if [ -z "$version" ]; then echo "the registry returned no pi version" >&2; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # Exact key = pi version + fork SHA: a hit means this version, on this commit, was already
+      # probed. restore-keys is a prefix, so the newest pass is restored on a miss too — it is the
+      # "last pass" line in the alarm, not a bypass of the gate.
+      - id: gate
+        uses: actions/cache/restore@v4
+        with:
+          path: .probe-pass
+          key: pi-probe-${{ steps.pi.outputs.version }}-${{ github.sha }}
+          restore-keys: pi-probe-
+      - id: install
+        if: steps.gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p .probe
+          { pnpm install --frozen-lockfile
+            # All three at one version: pi pins pi-ai/pi-tui exactly, so pi-coding-agent alone splits
+            # the graph (vitest.config.ts); minimum-release-age=0 skips pnpm's quarantine so a release
+            # from an hour ago — the one this probe exists to test — is installable.
+            pnpm add --config.minimum-release-age=0 @earendil-works/pi-coding-agent@${{ steps.pi.outputs.version }} @earendil-works/pi-ai@${{ steps.pi.outputs.version }} @earendil-works/pi-tui@${{ steps.pi.outputs.version }}
+            # Physical copies, not version count: the invariant in vitest.config.ts is "one pi-ai per
+            # peer combination", and two same-version copies would still read "Found 1 version" in pnpm why.
+            # -L follows the pnpm symlinks, readlink -f collapses them, so this counts distinct directories.
+            copies=$(find -L node_modules -maxdepth 8 -type f -path '*/@earendil-works/pi-ai/package.json' -exec readlink -f {} + 2>/dev/null | sort -u | wc -l)
+            if [ "$copies" != 1 ]; then echo "expected one physical pi-ai copy, found $copies" >&2; exit 1; fi
+          } 2>&1 | tee .probe/install.log
+      # shell: bash is bash -eo pipefail on GitHub, but the pipefail is stated here because the tee is
+      # the point: without it a failing pnpm run would be masked by tee's exit status.
+      - id: typecheck
+        if: steps.gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p .probe
+          pnpm run typecheck 2>&1 | tee .probe/typecheck.log
+      - id: suite
+        if: steps.gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm run test 2>&1 | tee .probe/test.log
+      - id: internals
+        if: steps.gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          npx vitest run test/compat/pi-internals.test.ts 2>&1 | tee .probe/internals.log
+      - id: pass
+        if: success() && steps.gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p .probe-pass && printf '{"version":"%s","forkSha":"%s"}\n' "${{ steps.pi.outputs.version }}" "$GITHUB_SHA" > .probe-pass/pass.json
+          gh label create upstream-probe --force
+          for n in $(gh issue list --label upstream-probe --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Probe passes against pi ${{ steps.pi.outputs.version }}."
+          done
+      - uses: actions/cache/save@v4
+        if: success() && steps.gate.outputs.cache-hit != 'true'
+        with:
+          path: .probe-pass
+          key: pi-probe-${{ steps.pi.outputs.version }}-${{ github.sha }}
+      # Restricted to the probe body: a registry outage or a cache error is a red run, not an issue.
+      # Only a failed probe body files an issue: a cache-save or pass-step failure is a red run, not news
+      # about pi, so the condition names the four steps that are the probe.
+      - id: alarm
+        if: >-
+          failure() && steps.pi.outcome == 'success' && steps.gate.outcome == 'success' &&
+          steps.gate.outputs.cache-hit != 'true' &&
+          (steps.install.outcome == 'failure' || steps.typecheck.outcome == 'failure' ||
+           steps.suite.outcome == 'failure' || steps.internals.outcome == 'failure')
+        shell: bash
+        env:
+          VERSION: ${{ steps.pi.outputs.version }}
+          INSTALL: ${{ steps.install.outcome }}
+          TYPE: ${{ steps.typecheck.outcome }}
+          SUITE: ${{ steps.suite.outcome }}
+          INTERNALS: ${{ steps.internals.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$INSTALL" != success ]; then step=install; log=.probe/install.log
+          elif [ "$TYPE" != success ]; then step=typecheck; log=.probe/typecheck.log
+          elif [ "$SUITE" != success ]; then step="test suite"; log=.probe/test.log
+          elif [ "$INTERNALS" != success ]; then step="internals row"; log=.probe/internals.log
+          else step="publish pass"; log=/dev/null; fi
+          body=$(printf 'pi %s, fork %s\n\nfailing step: %s\n\n%s\n\n%s' "$VERSION" "$GITHUB_SHA" "$step" "$(tail -n 40 "$log" 2>/dev/null || echo 'no log - the step did not run')" "$RUN_URL")
+          if [ -f .probe-pass/pass.json ]; then body="$body"$'\n\nlast pass: '"$(cat .probe-pass/pass.json)"; fi
+          gh label create upstream-probe --force
+          # Every open probe issue, the same set the pass step closes: a human-opened duplicate must not
+          # go stale while only the first one is updated.
+          ns=$(gh issue list --label upstream-probe --state open --json number --jq '.[].number')
+          if [ -n "$ns" ]; then for n in $ns; do gh issue comment "$n" --body "$body"; done
+          else gh issue create --title "Upstream probe: pi $VERSION" --label upstream-probe --body "$body"; fi

@@ -989,7 +989,7 @@ export default function (pi: ExtensionAPI) {
     manager.setDrainingPools(held.map((h) => h.draining));
     if (held.length > 0) {
       // A draining run has no activity entry in this activation: take the one it had at the hand-over, or seed one.
-      fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+      fleet.setUICtx(ctx.ui as FleetUICtx);
       const carried = new Map(held.flatMap((h) => [...h.activity]));
       for (const record of manager.listAgents()) {
         if (record.status !== "running") continue;
@@ -1145,7 +1145,7 @@ export default function (pi: ExtensionAPI) {
     // No tool has run yet in a reopened session, so the surfaces have no UI context: give it here, so the
     // interrupted rows show at once instead of after the main agent's first tool call.
     if (ctx.hasUI) {
-      fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+      fleet.setUICtx(ctx.ui as FleetUICtx);
     }
     fleet.update();
   }
@@ -1237,7 +1237,7 @@ export default function (pi: ExtensionAPI) {
 
   // Grab UI context from first tool execution
   pi.on("tool_execution_start", async (_event, ctx) => {
-    fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+    fleet.setUICtx(ctx.ui as FleetUICtx);
     fleet.update();
   });
 

@@ -702,6 +702,10 @@ src/
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
 ```
 
+## Development
+
+A daily workflow (`.github/workflows/upstream-probe.yml`) probes the latest `@earendil-works/pi-*` release — `pnpm run typecheck`, the full suite, and the one internals row in `test/compat/pi-internals.test.ts` — and opens or closes a single `upstream-probe` issue; a break there is an issue, not a red build.
+
 ## License
 
 MIT — [tintinweb](https://github.com/tintinweb)
