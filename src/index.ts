@@ -1893,7 +1893,7 @@ Terse command-style prompts produce shallow, generic work.
       if (outcome === false) return sendResult(deliveryText(params.to, false), "failed");
       const current = manager.getRecord(params.to);
       // A resumed run already has its session: seed the row's activity, as the Agent resume path did.
-      if (outcome === "resumed" && current?.session) {
+      if ((outcome === "resumed" || outcome === "resumedAfterCrash") && current?.session) {
         sendState.session = current.session;
         agentActivity.set(params.to, sendState);
       }

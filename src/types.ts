@@ -107,10 +107,11 @@ export type WidgetMode = 'all' | 'off';
 
 /**
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
- * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "held" (parked until a
- * teardown or a hand-over's adoption ends), or false (unknown, still settling, or aborted by its owner).
+ * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "resumedAfterCrash" (an
+ * interrupted record restarted from its file with a crash note), "held" (parked until a teardown or a hand-over's
+ * adoption ends), or false (unknown, still settling, or aborted by its owner).
  */
-export type DeliverOutcome = "delivered" | "queued" | "resumed" | "held" | false;
+export type DeliverOutcome = "delivered" | "queued" | "resumed" | "resumedAfterCrash" | "held" | false;
 
 export interface AgentRecord {
   id: string;

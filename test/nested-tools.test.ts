@@ -273,6 +273,14 @@ describe("nested Agent tool", () => {
     expect(manager.deliver).toHaveBeenCalledTimes(1);
   });
 
+  it("tells a nested parent that an interrupted child was resumed after a crash", async () => {
+    records.set("child-3", { id: "child-3", status: "interrupted", parentAgentId: "parent-1" } as AgentRecord);
+    vi.mocked(manager.deliver).mockResolvedValueOnce("resumedAfterCrash");
+    const result = await run(2, { to: "child-3", message: "continue" });
+    expect(textOf(result)).toContain("was interrupted by a crash; resumed it from its transcript with a crash note");
+    expect(textOf(result)).not.toContain("had finished");
+  });
+
   it("reports a delivery the manager refuses as an error", async () => {
     records.set("child-2", { id: "child-2", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
     vi.mocked(manager.deliver).mockResolvedValueOnce(false);

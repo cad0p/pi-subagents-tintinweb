@@ -1727,8 +1727,10 @@ export class AgentManager {
     if (!reopened || !current) return false;
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
-    const prompt = current.status === "interrupted" ? crashNote(current, text) : text;
-    return this.resume(id, prompt, callbacks) ? "resumed" : false;
+    const interrupted = current.status === "interrupted";
+    const prompt = interrupted ? crashNote(current, text) : text;
+    if (!this.resume(id, prompt, callbacks)) return false;
+    return interrupted ? "resumedAfterCrash" : "resumed";
   }
 
   /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */

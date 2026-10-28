@@ -367,8 +367,12 @@ describe("crash recovery — resume", () => {
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
     vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
 
-    await made.tools.get("SendMessage").execute("tc-resume", { to: "res", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+    const sent = await made.tools.get("SendMessage").execute("tc-resume", { to: "res", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
 
+    // The tool answer says the run was interrupted, not that it had finished.
+    expect(sent.details).toEqual({ sendOutcome: "resumedAfterCrash" });
+    expect(sent.content[0].text).toContain("Agent res was interrupted by a crash; resumed it from its transcript with a crash note");
+    expect(sent.content[0].text).not.toContain("had finished");
     await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
     const prompt = vi.mocked(resumeAgent).mock.calls[0][1] as string;
     expect(prompt).toMatch(/^You were interrupted by a crash\. /);
