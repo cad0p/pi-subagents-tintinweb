@@ -20,7 +20,7 @@ import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./ag
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
-import { type BackgroundWorkSource, registerSubagentProvider } from "./background-work.js";
+import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -865,7 +865,9 @@ export default function (pi: ExtensionAPI) {
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
     if (isRoot) {
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
-      registerSubagentProvider(event.reason, () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY]);
+      const getSource = () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY];
+      registerSubagentProvider(event.reason, getSource);
+      registerSubagentDisplayProvider(event.reason, getSource);
       try {
         await adoptHandovers(ctx);
       } finally {
