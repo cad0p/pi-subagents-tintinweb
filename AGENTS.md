@@ -20,7 +20,7 @@
 - Match the surrounding code style — it is enforced by biome (`biome.json`).
 - Always ask before removing functionality or code that appears intentional.
 - Do not preserve backward compatibility unless the user asks for it.
-- Invariant: only one subagents extension is loaded per pi process. Do not design guards, detection or fallbacks for a second one (another fork, nicobailon's `pi-subagents`, upstream `@tintinweb/pi-subagents`); installing two is unsupported and documented as such in the README. Keeping this extension's own registrations single across its activations and sessions in one process (for example the `pi-subagents` provider's same-name check in `src/background-work.ts`) is not such a guard.
+- Invariant: only one subagents extension is installed per pi process. Do not design guards, detection or fallbacks for a second one (another fork, nicobailon's `pi-subagents`, upstream `@tintinweb/pi-subagents`); installing two is unsupported and documented as such in the README. The `pi-subagents` provider's registration rule in `src/background-work.ts` (on reload replace, otherwise register only if the name is absent) is `@cad0p/pi-background-work`'s rule for every provider, kept as is; it is not a handling of a second extension.
 - This is a pi extension. Respect the Claude Code-compatible tool names, calling conventions, and UI patterns the extension deliberately mirrors; don't diverge from them without a stated reason.
 - When reviewing a diff, favor solutions that are elegant, not overengineered — flag needless abstraction, layering, or defensive code that the change doesn't warrant.
 
