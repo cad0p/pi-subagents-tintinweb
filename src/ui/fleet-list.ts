@@ -59,7 +59,9 @@ export type FleetUICtx = {
 };
 
 type MainEntry = { kind: "main" };
-type AgentEntry = { kind: "agent"; record: AgentRecord };
+/** One visible agent row: its depth in the tree, every descendant under it, and whether it is open. */
+export type TreeRow = { record: AgentRecord; depth: number; nested: AgentRecord[]; expanded: boolean };
+type AgentEntry = { kind: "agent" } & TreeRow;
 type FleetEntry = MainEntry | AgentEntry;
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
@@ -112,6 +114,31 @@ function fitStats(prefix: string, width: number, lead: string[], optional: strin
   return stats;
 }
 
+/**
+ * Depth-first agent tree for the list and `/agents`: top-level records by `startedAt`, each followed by its
+ * children (by `startedAt`, recursively). Only expanded rows show their children. A record whose parent is not
+ * in `records` (evicted) is shown at depth 1. `nested` lists every descendant in `records`, shown or not.
+ */
+export function treeOrder(records: AgentRecord[], isExpanded: (id: string) => boolean): TreeRow[] {
+  const ids = new Set(records.map(record => record.id));
+  const children = new Map<string, AgentRecord[]>();
+  const roots: AgentRecord[] = [];
+  for (const record of [...records].sort((a, b) => a.startedAt - b.startedAt)) {
+    const parent = record.parentAgentId;
+    if (parent && ids.has(parent)) children.set(parent, [...(children.get(parent) ?? []), record]);
+    else roots.push(record);
+  }
+  const descendants = (id: string): AgentRecord[] => (children.get(id) ?? []).flatMap(kid => [kid, ...descendants(kid.id)]);
+  const rows: TreeRow[] = [];
+  const visit = (record: AgentRecord, depth: number): void => {
+    const expanded = isExpanded(record.id);
+    rows.push({ record, depth, nested: descendants(record.id), expanded });
+    if (expanded) for (const kid of children.get(record.id) ?? []) visit(kid, depth + 1);
+  };
+  for (const root of roots) visit(root, root.parentAgentId ? 1 : 0);
+  return rows;
+}
+
 export class FleetList {
   private ui: FleetUICtx | undefined;
   private tui: any | undefined;
@@ -126,6 +153,8 @@ export class FleetList {
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
+  /** Parents whose nested rows are shown, by parent id; dropped once the parent is evicted. */
+  private expanded = new Set<string>();
 
   constructor(
     private manager: AgentManager,
@@ -182,7 +211,7 @@ export class FleetList {
   /** Re-register/refresh the below-editor widget; clears it when no agents remain. */
   update(): void {
     if (!this.ui) return;
-    const hasAgents = this.agentRecords().length > 0;
+    const hasAgents = this.agentRows().length > 0;
 
     if (!hasAgents) {
       if (this.widgetRegistered) {
@@ -216,26 +245,37 @@ export class FleetList {
   // ---- Roster ----
 
   /**
-   * Agents shown in the list, ordered earliest-launched first so the ones you
-   * started sooner sit at the top. Every row but a queued one is openable (has a session, or is interrupted and reads
-   * its transcript from file), so Enter never dead-ends. Included: running/queued, plus the agent currently being
-   * viewed, plus recently-finished ones (they linger briefly before dropping out).
-   * Queued and finished agents show without a session (Enter notifies instead); other pending agents are hidden until they start.
-   * (`listAgents()` is newest-first, so we re-sort.)
+   * Agent rows in tree order (`treeOrder`), visible rows only. A record earns a row when it is running or queued,
+   * being viewed, or lingering after finish, and is openable (a queued one has no session yet; Enter notifies).
+   * A qualifying child brings its ancestors along as context rows, so an indented row always has its parent above.
+   * Expand state is dropped once a parent is no longer in `listAgents()` (evicted).
    */
-  private agentRecords(): AgentRecord[] {
+  private agentRows(): AgentEntry[] {
     const now = Date.now();
-    return this.manager.listAgents()
-      .filter(a => !a.parentAgentId && (isQueued(a) || a.completedAt != null || a.status === "interrupted" || this.manager.isDraining(a.id) || (a.session ?? a.sessionSnapshot) !== undefined) && (
-        a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
-        || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
-      ))
-      .sort((a, b) => a.startedAt - b.startedAt);
+    const all = this.manager.listAgents();
+    for (const id of this.expanded) {
+      if (!all.some(a => a.id === id)) this.expanded.delete(id);
+    }
+    const qualifying = all.filter(a => (isQueued(a) || a.completedAt != null || a.status === "interrupted" || this.manager.isDraining(a.id) || (a.session ?? a.sessionSnapshot) !== undefined) && (
+      a.status === "running" || a.status === "queued"
+      || a.id === this.viewingAgentId
+      || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+    ));
+    const byId = new Map(all.map(a => [a.id, a] as const));
+    const shown = new Set<string>();
+    for (const a of qualifying) {
+      let cur: AgentRecord | undefined = a;
+      while (cur && !shown.has(cur.id)) {
+        shown.add(cur.id);
+        cur = cur.parentAgentId ? byId.get(cur.parentAgentId) : undefined;
+      }
+    }
+    return treeOrder(all.filter(a => shown.has(a.id)), id => this.expanded.has(id))
+      .map(row => ({ kind: "agent" as const, ...row }));
   }
 
   private roster(): FleetEntry[] {
-    return [{ kind: "main" }, ...this.agentRecords().map(record => ({ kind: "agent" as const, record }))];
+    return [{ kind: "main" }, ...this.agentRows()];
   }
 
   private clampSelection(): void {
@@ -267,7 +307,7 @@ export class FleetList {
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
-      if (isActivator && this.agentRecords().length > 0 && this.ui.getEditorText() === "") {
+      if (isActivator && this.agentRows().length > 0 && this.ui.getEditorText() === "") {
         this.active = true;
         this.selectedIndex = 0;
         this.update();
@@ -381,7 +421,7 @@ export class FleetList {
   // ---- Rendering ----
 
   private renderBar(width: number, theme: Theme): string[] {
-    const agents = this.roster().slice(1) as AgentEntry[];
+    const agents = this.agentRows();
     if (agents.length === 0) return [];
     // Clamp locally so a render between a roster shrink and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
