@@ -14,8 +14,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `SendMessage`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4)
-- **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (default — every agent) or `off` (hide the widget)
-- **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
+- **FleetView** — always-on, Claude Code-style navigable list of `main` + every running, waiting, queued, and recently finished subagent, rendered below the editor (earliest-launched first). Each running row shows live tool activity, turns, tool uses, tokens, cost, and elapsed time; there is no separate widget and no footer status. Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output.
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for any running agent
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
@@ -99,18 +98,7 @@ Restrictions:
 
 ## UI
 
-The extension renders a persistent widget above the editor showing active agents. It defaults to `all` (every agent); switch to `off` to hide the widget via `/agents → Settings → Widget`:
-
-```
-● Agents
-├─ ⠹ Agent  Refactor auth module · ↻5≤30 · 5 tool uses · 33.8k token (62%) · 12.3s
-│    ⎿  editing 2 files…
-├─ ⠹ Explore  Find auth files · ↻3 · 3 tool uses · 12.4k token (8%) · 4.1s
-│    ⎿  searching…
-├─ ⠹ Agent  Long-running task · ↻42 · 38 tool uses · 91.0k token (84% · ⇊2) · 2m17s
-│    ⎿  reading…
-└─ 2 queued
-```
+Running subagents are listed in [FleetView](#fleetview) below the editor. Each row shows the agent's description, turns, tool uses, tokens, cost (when `showCost` is on), and elapsed time.
 
 The token field is annotated with two optional signals inside parens:
 - **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
@@ -118,18 +106,19 @@ The token field is annotated with two optional signals inside parens:
 
 ### FleetView
 
-While subagents are running, a Claude Code-style navigable list renders **below** the editor:
+While subagents are running, a Claude Code-style navigable list renders **below** the editor. It is always on: there is no setting to hide it, and the extension sets no footer status:
 
 ```
   esc to interrupt · ← for agents · ↓ to manage
 
   ⏺ main
-  ◯ general-purpose  Sleep then report 1                                11s · ↓ 13.1k tokens
-  ◯ general-purpose  Sleep then report 2                                11s · ↓ 13.1k tokens
-                                                                                   ↓ 3 more
+  ◯ general-purpose  Sleep then report 1                  ↻3 · 3 tool uses · 13.1k token · 0:11
+      ⎿  running command…
+  ◯ general-purpose  Sleep then report 2                  waiting · 0:30
+  ◯ general-purpose  Sleep then report 3                  queued · turn 0
 ```
 
-The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `⏺`, the rest `◯`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `SendMessage` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+The list is ordered earliest-launched first. It shows running, waiting, and queued agents, and finished agents while they linger. A finished row shows its outcome (`stopped`, `interrupted`, `error`, and so on). A waiting row reads `waiting` with its figures and run clock and shows no wait details. A queued row reads `queued · turn N`; other agents that have not started yet stay hidden until they start. At most five agents show; the rest collapse into an overflow line such as `↓ 2 more (1 running, 1 finished)`, with zero counts omitted. At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `⏺`, the rest `◯`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `SendMessage` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Pressing `Enter` on a queued agent notifies `queued, not started yet`; on a stopped agent that never started, it notifies `stopped before it started`.
 
 Individual agent results render Claude Code-style in the conversation:
 
@@ -218,7 +207,7 @@ All fields are optional — sensible defaults for everything.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
-| `display_name` | — | Display name for UI (e.g. widget, agent list) |
+| `display_name` | — | Display name for UI (e.g. FleetView, agent list) |
 | `tools` | all 7 | Which tools the agent can call. Built-in names (`read, grep, …`), `*` / `all` (all built-ins), `none`, and `ext:<extension>` / `ext:<extension>/<tool>` selectors for extension tools. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `extensions` | `true` | Which extensions to load for the agent. `true` (all defaults), `false` (none), or an explicit list: `[mcp, "/abs/path.ts", "*"]`. See [Tool & extension scoping](#tool--extension-scoping) below |
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
@@ -350,7 +339,7 @@ The `/agents` command opens an interactive menu:
 Running agents (2) — 1 running, 1 done     ← only shown when agents exist
 Agent types (6)                             ← unified list: defaults + custom
 Create new agent                            ← manual wizard or AI-generated
-Settings                                    ← concurrency, turns, scheduling, failure preview, fleet view, widget, …
+Settings                                    ← concurrency, turns, scheduling, failure preview, …
 ```
 
 - **Running agents** — select one to open its live conversation viewer. Press `Enter` to open the steering composer, then `Enter` again to send a message (a running agent is redirected, a finished one is resumed; same mechanism as the `SendMessage` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it. A stopped agent reports its partial output flagged as incomplete, not as a completion.
@@ -362,7 +351,7 @@ Settings                                    ← concurrency, turns, scheduling, 
 - **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
-- **Settings** — runtime tuning for max concurrency, default max turns, grace turns, scheduling, scope models, failure preview max chars, disable defaults, output transcript, fleet view, widget, and tool description
+- **Settings** — runtime tuning for max concurrency, default max turns, grace turns, scheduling, scope models, failure preview max chars, disable defaults, output transcript, and tool description
 
 ## Graceful Max Turns
 
@@ -394,7 +383,7 @@ Why 30 minutes: pi keeps an idle session's prompt cache warm for 30 minutes afte
 
 ## Concurrency
 
-Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
+Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. FleetView lists each queued agent as a `queued · turn N` row.
 
 The limit counts running turns, nested children included: a child takes a slot when it starts, like any other agent, and queues behind a full pool. A parent waiting on a child or a timer holds no slot, because it ends its turn and is woken with the result. A woken or resumed agent (a timer, a nested result, a `SendMessage` to a finished agent) takes a slot when its next provider request is sent, and shows as queued until one is free. Scheduled fires still start immediately and can exceed the limit.
 
@@ -448,7 +437,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, scheduling on/off, scope models on/off, strict agent files on/off, fallback agent, disable defaults on/off, output transcript on/off, worktree isolation on/off, report usage on/off, show cost on/off, show model on/off, fleet view on/off, failure preview max chars, tool description full/compact/custom, widget all/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, scheduling on/off, scope models on/off, strict agent files on/off, fallback agent, disable defaults on/off, output transcript on/off, worktree isolation on/off, report usage on/off, show cost on/off, show model on/off, failure preview max chars, tool description full/compact/custom) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -469,9 +458,9 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Report usage** (`reportUsage`, default `true`): subagents run in their own pi session, so without this the parent's footer, statusline and `/cost` show only what the main model spent — a session that delegated most of its work reads as nearly free. With this on, each `Agent` / `get_subagent_result` / `SendMessage` result carries the spend accumulated since the last one, and pi folds it into the session totals under `/cost`'s "Tools/summaries" bucket. Tokens include `cacheRead` (pi bills the cached prefix on every call), cost is pi's own per-message figure, and the context-window percentage is unaffected. Two consequences worth knowing: an agent that finishes in the background has no result of its own to ride on, so its spend lands on the **next** call rather than the moment it finishes, and a session that ends with nothing pending reports nothing. Nested children are counted once each, on the top-level result. On by default here, unlike upstream: a session total that omits the delegated work is wrong about what the session cost, and the setting stays available for anyone tracking the old numbers. Turning it on does move numbers a statusline may already be reading, which is the one reason it is a setting rather than unconditional.
 
-**Show cost** (`showCost`, default `true`): `~$0.0042` beside the subagent token counts in the widget, FleetView, the conversation viewer, `get_subagent_result` and completion notifications. Independent of `reportUsage`: that one changes the session's totals, this one is what a human reads. Omitted entirely when pi has no pricing data for the model, so `$0.00` never means "measured, free".
+**Show cost** (`showCost`, default `true`): `~$0.0042` beside the subagent token counts in FleetView, the conversation viewer, `get_subagent_result` and completion notifications. Independent of `reportUsage`: that one changes the session's totals, this one is what a human reads. Omitted entirely when pi has no pricing data for the model, so `$0.00` never means "measured, free".
 
-**Show model** (`showModel`, default `false`): name the model and thinking level in the widget's running rows. Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal; the conversation viewer and the `Agent` result row show the pair either way (the result row names the model the spawn resolved, not the child's read-back). What they show is the *effective* value, read back from the child session rather than re-derived from the request — and when pi clamps a level the request is kept beside it (`low (asked max)`), so a clamp is never presented as what was asked for.
+**Show model** (`showModel`, default `false`): name the model and thinking level in FleetView's running rows. Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal; the conversation viewer and the `Agent` result row show the pair either way (the result row names the model the spawn resolved, not the child's read-back). What they show is the *effective* value, read back from the child session rather than re-derived from the request — and when pi clamps a level the request is kept beside it (`low (asked max)`), so a clamp is never presented as what was asked for.
 
 **Evict after** (`evictAfterMinutes`, default `60`, minimum `1`): how long a settled run stays in memory, resumable with `SendMessage`, before it is evicted. Its session file goes with it unless `persist_session` is set. Also in `/agents` → Settings as *Evict after minutes*.
 
@@ -526,7 +515,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
 
-`tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
+`tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it. Use `contextUsage.percent` (surfaced as `(NN%)` in FleetView) for current context size.
 
 ## Cross-Extension RPC
 
@@ -704,7 +693,8 @@ src/
   context.ts          # Parent conversation context for inherit_context
   env.ts              # Environment detection (git, platform)
   ui/
-    agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
+    agent-display.ts      # Shared display helpers: status icons, figures, token and cost text
+    fleet-list.ts         # FleetView: below-editor list of running, waiting, queued, and finished agents
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
 ```
 

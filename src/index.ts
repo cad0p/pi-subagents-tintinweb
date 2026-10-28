@@ -2683,7 +2683,7 @@ ${systemPrompt}
           id: "showCost",
           label: "Show cost",
           description:
-            "Show an estimated `~$0.0042` beside subagent token counts in the fleet view, conversation viewer, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
+            "Show an estimated `~$0.0042` beside subagent token counts in FleetView, conversation viewer, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
           currentValue: isShowCostEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -2691,7 +2691,7 @@ ${systemPrompt}
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the fleet view's running rows. The conversation viewer shows the pair either way — this adds it to the fleet view, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on FleetView's running rows. The conversation viewer shows the pair either way — this adds it to FleetView, where the row is already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },

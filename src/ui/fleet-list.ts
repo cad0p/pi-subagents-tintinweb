@@ -428,7 +428,7 @@ export class FleetList {
     return rightAlign(left, this.rowStats(record, kind, prefix, width, theme), width);
   }
 
-  /** Right-aligned figures for a row. Each kind keeps the figures the widget showed for it. */
+  /** Right-aligned figures for a row. Figures differ by kind. */
   private rowStats(record: AgentRecord, kind: RowKind, prefix: string, width: number, theme: Theme): string {
     const activity = this.agentActivity.get(record.id);
     const usage = activity?.lifetimeUsage ?? record.lifetimeUsage;
@@ -441,7 +441,7 @@ export class FleetList {
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
     if (kind === "finished") {
-      // Turns come from the activity tracker alone, as the widget read them; a finished run's record count is not shown.
+      // Turns come from the activity tracker alone; a finished run's record count is not shown.
       const finishedTurns = activity ? formatTurns(activity.turnCount, activity.maxTurns) : "";
       const stats = [finishedTurns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
       return theme.fg("dim", stats) + finishedStatus(record, theme).statusText;
