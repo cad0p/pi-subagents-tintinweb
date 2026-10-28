@@ -125,7 +125,8 @@ flows). A test passing is not proof of what the user sees.
   retries) needs the change to tell the model what to do, in what the change
   puts in front of it (a notice, a tool result, a wake, a tool description,
   prompt text). The instruction must appear in the capture or the run's
-  session file; quote it under Evidence. Without it the step fails, whatever
+  session file, or, for a tool description or prompt text, in the source at
+  the head; quote it under Evidence with where it was found. Without it the step fails, whatever
   the model chose. A prompt typed during the run does not count. A model
   making another choice is a failed proof, not model variance.
 - After runs use native Anthropic from the reference setup above. The
@@ -134,7 +135,8 @@ flows). A test passing is not proof of what the user sees.
 - A run that does not pass is a failed proof: fix the change, not the
   expected outcome. Any failed run blocks the head. Neither author nor
   maintainer can dismiss it; it clears only on a new head whose after runs
-  all pass.
+  all pass, or when a same-head re-check finds the reviewer misread (see
+  Independent agent review).
 
 ## Session-level checks
 
@@ -167,10 +169,11 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   expected outcome and the raw after-capture and session files, not the
   author's quotes, and asks the reviewer to check, clause by clause, whether
   a captured line shows it, whether any line contradicts it, and whether each
-  model-action clause has its instruction in the capture or session file. A
+  model-action clause has its instruction where Visual proof requires it. A
   failing step is a must-fix. If the author says the reviewer misread, a new
-  reviewer on the same head re-checks that step; only its pass clears the
-  finding. Otherwise it follows the failed-proof rule in Visual proof.
+  `general-purpose` reviewer on the same head re-checks that step; only its
+  pass clears the finding. Otherwise it follows the failed-proof rule in
+  Visual proof.
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers
   (`npm run lint:fix`). It states the turn budget and the way out: reply
   `NO VERDICT` with what was tested if the budget runs out, `HEAD` differs from
@@ -191,6 +194,8 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   (reviewed by a new `general-purpose` agent) or dismissed with the
   maintainer's reason recorded in the PR body, citing the facts for a wrong
   finding. A later verdict on the same head does not clear it by itself.
+  A failing visual-proof step is the exception: no one dismisses it, and it
+  clears only on a new head or by the same-head re-check above.
   Should-fix and nit findings may stay open if recorded.
 - Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
   no undismissed must-fix findings, from a brief that included the capture
