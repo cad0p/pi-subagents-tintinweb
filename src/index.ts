@@ -460,10 +460,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- Completion notification ----
-  /** One notice for the crash-recovered records of a batch: their ids, then each note the policy gave. */
+  /**
+   * One notice for the crash-recovered records of a batch: their ids, the resume each one allows, then each note the policy gave.
+   * A first interruption is resumed by the main agent at once; a crash loop waits for the user, and its note says so.
+   */
   function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
     const names = records.map((record) => `${record.id} (${sanitizeHeaderText(record.description)})`).join(", ");
     const lines = [`${records.length} ${records.length === 1 ? "subagent was" : "subagents were"} interrupted by a crash: ${names}`];
+    const resumable = records.filter((record) => crash.get(record.id)?.triggerTurn).map((record) => record.id);
+    if (resumable.length > 0) {
+      const calls = resumable.map((id) => `SendMessage({ to: "${id}", message: "continue" })`).join(", ");
+      lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a crash note. Do not start a new Agent for them.`);
+    }
     for (const record of records) {
       const note = crash.get(record.id)?.note;
       if (note) lines.push(`${record.id}: ${note}`);

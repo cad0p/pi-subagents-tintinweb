@@ -216,6 +216,42 @@ describe("crash recovery — startup report", () => {
     const [message, options] = made.pi.sendMessage.mock.calls[0];
     expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
     expect(message.content).toContain(NOTE);
+    expect(message.content).not.toContain("SendMessage(");
+  });
+
+  it("tells the main agent to resume a first interruption itself with SendMessage, naming its id", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeChildFiles("first");
+    writeSession(file, [spawned("first", DEAD_PID)]);
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message] = made.pi.sendMessage.mock.calls[0];
+    expect(message.content).toContain('Resume first now: SendMessage({ to: "first", message: "continue" }) without asking the user');
+    expect(message.content).not.toContain(NOTE);
+  });
+
+  it("names only the first interruption in a mixed batch as resumable; the crash loop keeps its note", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeChildFiles("loop", "fresh");
+    writeSession(file, [
+      spawned("loop", DEAD_PID),
+      custom("subagents:record", { id: "loop", status: "interrupted" }),
+      custom("subagent-resumed", { v: 1, id: "loop", ownerPid: DEAD_PID }),
+      spawned("fresh", DEAD_PID),
+    ]);
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    expect(message.content).toContain('SendMessage({ to: "fresh", message: "continue" })');
+    expect(message.content).not.toContain('to: "loop"');
+    expect(message.content).toContain(NOTE);
   });
 
   it("stops a run at shutdown as stopped, and does not recover it", async () => {
