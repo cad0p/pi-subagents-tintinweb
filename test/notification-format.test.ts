@@ -799,4 +799,15 @@ describe("completion header names the agent type", () => {
     const emptyType = formatTaskNotification(createRecord({ type: "\n" }), settings);
     expect(emptyType.split("\n")[0]).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
   });
+
+  it("bounds a long display name like the description", () => {
+    registerCustom({ displayName: "A".repeat(400) });
+    const header = formatTaskNotification(createRecord({ type: "reviewer" }), settings).split("\n")[0];
+    expect(header).toBe(`**✓ ${"A".repeat(300)}… completed: Test Agent**${BODY}`);
+  });
+
+  it("falls back to Agent when the record carries no type string", () => {
+    const header = formatTaskNotification(createRecord({ type: undefined as unknown as string }), settings).split("\n")[0];
+    expect(header).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
+  });
 });
