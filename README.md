@@ -112,7 +112,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
   esc to interrupt · ← for agents · ↓ to manage
 
   ⏺ main
-  ◯ general-purpose  Sleep then report 1                  ↻3 · 3 tool uses · 13.1k token · 0:11
+  ◯ general-purpose  Sleep then report 1                  ↻3 · 3 tool uses · 13.1k token · 11s
       ⎿  running command…
   ◯ general-purpose  Sleep then report 2                  waiting · 0:30
   ◯ general-purpose  Sleep then report 3                  queued · turn 0
@@ -460,7 +460,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Show cost** (`showCost`, default `true`): `~$0.0042` beside the subagent token counts in FleetView, the conversation viewer, `get_subagent_result` and completion notifications. Independent of `reportUsage`: that one changes the session's totals, this one is what a human reads. Omitted entirely when pi has no pricing data for the model, so `$0.00` never means "measured, free".
 
-**Show model** (`showModel`, default `false`): name the model and thinking level in FleetView's running rows. Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal; the conversation viewer and the `Agent` result row show the pair either way (the result row names the model the spawn resolved, not the child's read-back). What they show is the *effective* value, read back from the child session rather than re-derived from the request — and when pi clamps a level the request is kept beside it (`low (asked max)`), so a clamp is never presented as what was asked for.
+**Show model** (`showModel`, default `false`): name the model and thinking level in FleetView's running and waiting rows. Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal; the conversation viewer and the `Agent` result row show the pair either way (the result row names the model the spawn resolved, not the child's read-back). What they show is the *effective* value, read back from the child session rather than re-derived from the request — and when pi clamps a level the request is kept beside it (`low (asked max)`), so a clamp is never presented as what was asked for.
 
 **Evict after** (`evictAfterMinutes`, default `60`, minimum `1`): how long a settled run stays in memory, resumable with `SendMessage`, before it is evicted. Its session file goes with it unless `persist_session` is set. Also in `/agents` → Settings as *Evict after minutes*.
 
