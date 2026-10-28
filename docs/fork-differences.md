@@ -50,6 +50,6 @@ Each of these exists upstream and is not coming here without a new decision.
 
 ## Compatibility
 
-- **pi peer floor: `>=1.0.4`** for `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui`. `reportUsage` relies on pi folding `AgentToolResult.usage` into `getSessionStats()` (pi 0.81.0), so the floor is comfortably above the release that introduced it.
+- **pi peer floor: `>=1.4.0`** for `@earendil-works/pi-ai`, `pi-coding-agent` and `pi-tui`. `reportUsage` relies on pi folding `AgentToolResult.usage` into `getSessionStats()` (pi 0.81.0), so the floor is comfortably above the release that introduced it.
 - **Settings are a flat list** in `/agents → Settings`, mirroring upstream's shape, and persist in `subagents.json` (global and project).
 - **Tool names and calling conventions stay Claude Code-compatible** (`Agent`, `get_subagent_result`, `SendMessage`) on purpose, even where this fork's semantics differ from upstream's.
