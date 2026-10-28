@@ -1107,7 +1107,14 @@ export default function (pi: ExtensionAPI) {
       scheduleNudge(record, crashRecoveryDecision(record.crashCount ?? 1, policy));
       listCrashedChildren(record, options);
     }
+    // No tool has run yet in a reopened session, so the surfaces have no UI context: give it here, so the
+    // interrupted rows show at once instead of after the main agent's first tool call.
+    if (ctx.hasUI) {
+      widget.setUICtx(ctx.ui as UICtx);
+      fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
+    }
     widget.update();
+    fleet.update();
   }
 
   /** Lists the nested runs a crashed parent left in its own session file. They are reported when the parent resumes. */

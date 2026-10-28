@@ -166,6 +166,21 @@ describe("crash recovery — startup report", () => {
     await vi.waitFor(() => expect(interruptedSettles(file)).toEqual(["a1", "a2"]));
   });
 
+  it("shows the interrupted rows at reopen, before any tool has run", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("r1", DEAD_PID)]);
+    writeChildFiles("r1");
+    const made = boot(file);
+    const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => () => {}) };
+    const ctx = { ...spawnCtx(tmpDir), sessionManager: SessionManager.open(file, undefined, tmpDir), hasUI: true, ui };
+
+    await made.lifecycle.get("session_start")({ reason: "startup" }, ctx);
+
+    const keys = ui.setWidget.mock.calls.filter(([, content]) => content !== undefined).map(([key]) => key);
+    expect(keys).toContain("agents");
+    expect(keys).toContain("fleet");
+  });
+
   it("reports nothing on a reopen after the report settled the runs", async () => {
     const file = join(tmpDir, "parent.jsonl");
     writeSession(file, [spawned("b1", DEAD_PID)]);
