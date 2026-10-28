@@ -132,8 +132,9 @@ flows). A test passing is not proof of what the user sees.
 - After runs use native Anthropic from the reference setup above. The
   fallback model is for the manual TUI checks only; if Anthropic is
   unavailable, wait.
-- A run that does not pass is a failed proof: fix the change, not the
-  expected outcome. Any failed run blocks the head. Neither author nor
+- A run that does not pass is a failed proof: the author fixes the change,
+  never the expected outcome (only the maintainer replaces a sentence, as
+  above, and that is a design change, not a way to clear a run). Any failed run blocks the head. Neither author nor
   maintainer can dismiss it; it clears only on a new head whose after runs
   all pass, or when a same-head re-check finds the reviewer misread (see
   Independent agent review).
@@ -171,7 +172,8 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   a captured line shows it, whether any line contradicts it, and whether each
   model-action clause has its instruction where Visual proof requires it. A
   failing step is a must-fix. If the author says the reviewer misread, a new
-  `general-purpose` reviewer on the same head re-checks that step; only its
+  `general-purpose` reviewer on the same head re-checks that step, briefed
+  with the sentence and the raw files only, not the author's claim; only its
   pass clears the finding. Otherwise it follows the failed-proof rule in
   Visual proof.
 - The brief forbids edits, commits, pushes, branch switches, and auto-fixers
@@ -195,7 +197,8 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   maintainer's reason recorded in the PR body, citing the facts for a wrong
   finding. A later verdict on the same head does not clear it by itself.
   A failing visual-proof step is the exception: no one dismisses it, and it
-  clears only on a new head or by the same-head re-check above.
+  clears only on a new head whose after runs all pass, or by the same-head
+  re-check above.
   Should-fix and nit findings may stay open if recorded.
 - Merge only when the current head has a `CLEAN` or `FINDINGS(n)` verdict with
   no undismissed must-fix findings, from a brief that included the capture
