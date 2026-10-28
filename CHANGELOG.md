@@ -27,10 +27,12 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Children follow the parent's --no-extensions and -e (closes #92) ([#94](https://github.com/cad0p/pi-subagents-tintinweb/pull/94))
 - *(reload)* Adopt hand-overs from releases before the slot gate (closes #116) ([#117](https://github.com/cad0p/pi-subagents-tintinweb/pull/117))
 - *(subagents)* A leaked child context reads as root, so a /reload never drops the parent tools (closes #122) ([#123](https://github.com/cad0p/pi-subagents-tintinweb/pull/123))
+- *(subagents)* Name a broken background-work provider in a warning (closes #135) ([#136](https://github.com/cad0p/pi-subagents-tintinweb/pull/136))
 
 ### 📚 Documentation
 
 - One subagents extension per process (closes #131) ([#132](https://github.com/cad0p/pi-subagents-tintinweb/pull/132))
+- *(verification)* A live proof must show the planned outcome, not only the mechanism (closes #126) ([#127](https://github.com/cad0p/pi-subagents-tintinweb/pull/127))
 
 
 ## [0.22.0] - 2026-10-21
