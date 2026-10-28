@@ -131,8 +131,9 @@ function displayProviderPresent(): boolean {
 
 /**
  * Registers the footer string beside the listing provider, with the same reload rule. `describe` reads the
- * live source per call, so a reload's replacement manager is counted, and returns `null` when the source
- * itself throws, so the footer falls back to `N pi-subagents` rather than a count it cannot vouch for.
+ * live source per call, so a reload's replacement manager is counted, and returns `null` when `getSource`
+ * throws, so the footer falls back to `N pi-subagents` rather than a count it cannot vouch for. A source
+ * whose `listAgents()` throws is not that case: the listed items are still listed, so they count as running.
  */
 export function registerSubagentDisplayProvider(reason: string, getSource: () => BackgroundWorkSource | undefined): void {
   if (reason !== "reload" && displayProviderPresent()) return;

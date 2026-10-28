@@ -212,10 +212,11 @@ describe("background-work registration — root activation only", () => {
     expect(providerNames().filter((name) => name === "pi-subagents")).toHaveLength(1);
   });
 
-  it("a child activation never registers", async () => {
+  it("a child activation never registers, listing or display", async () => {
     const { child } = makeRootAndChild();
     await child.lifecycle.get("session_start")({ reason: "startup" }, spawnCtx(tmpDir));
     expect(providerNames()).not.toContain("pi-subagents");
+    expect(displayNames()).not.toContain("pi-subagents");
   });
 });
 
@@ -265,12 +266,29 @@ describe("background-work display — the footer counts the listed subagents", (
     expect(describeWork([workItem("a"), workItem("gone")], [record({ id: "a" })])).toBe("2 agents");
   });
 
-  it("stays under the footer's 48-grapheme cap for twelve agents", () => {
-    const ids = Array.from({ length: 12 }, (_, index) => `a${index}`);
-    const records = ids.map((id, index) => (index < 11 ? waitingRecord(id, index) : record({ id })));
+  // The count leads and the text is bounded by the numbers themselves, so no shape of
+  // this string can reach the footer's 48-grapheme cap: a cut can only ever cost detail.
+  it("leads with the count and cannot reach the footer's 48-grapheme cap", () => {
+    const ids = Array.from({ length: 1000 }, (_, index) => `a${index}`);
+    const records = ids.map((id) => waitingRecord(id, 1));
     const text = describeWork(ids.map(workItem), records) ?? "";
-    expect(text).toBe("12 agents (11 waiting)");
-    expect(graphemes(text)).toBeLessThanOrEqual(48);
+    expect(text).toBe("1000 agents (1000 waiting)");
+    expect(graphemes(text)).toBeLessThan(48);
+  });
+
+  it("counts a source whose listAgents throws as running, not as unknown", () => {
+    const throwing = { listAgents: (): AgentRecord[] => { throw new Error("boom"); } };
+    expect(describeSubagentWork([workItem("a"), workItem("b")], describeCtx, throwing)).toBe("2 agents");
+  });
+
+  it("a corrupt record does not hide another record's waiting state", () => {
+    const corrupt = record({ id: "bad" });
+    Object.defineProperty(corrupt, "waiting", {
+      get() {
+        throw new Error("boom");
+      },
+    });
+    expect(describeWork([workItem("a"), workItem("bad")], [waitingRecord("a", 1), corrupt])).toBe("2 agents (1 waiting)");
   });
 
   it("a malformed display registry does not make registration throw", () => {
