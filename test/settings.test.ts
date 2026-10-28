@@ -106,25 +106,12 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
-  it("round-trips fleetView (true and false); keeps boolean, drops non-boolean", () => {
-    saveSettings({ fleetView: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ fleetView: false });
-    saveSettings({ fleetView: true }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ fleetView: true });
-    writeProject({ fleetView: "on" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
-  });
-
-  it("keeps valid widgetMode values; drops the removed 'background' and invalid values", () => {
-    saveSettings({ widgetMode: "off" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
-    saveSettings({ widgetMode: "all" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ widgetMode: "all" });
-    // The retired "background" mode is dropped by the sanitizer; the code default (all) applies.
-    writeProject({ widgetMode: "background" } as any);
-    expect(loadSettings(projectDir)).toEqual({});
-    writeProject({ widgetMode: "sideways" } as any);
-    expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
+  it("drops the removed fleetView and widgetMode keys silently; other keys still load", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    writeProject({ fleetView: false, widgetMode: "off", maxConcurrent: 5 });
+    expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 5 });
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("round-trips outputTranscript; drops non-boolean", () => {
@@ -463,8 +450,6 @@ describe("settings persistence", () => {
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
-        setFleetView: vi.fn(),
-        setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setFallbackSubagent: vi.fn(),
@@ -503,8 +488,6 @@ describe("settings persistence", () => {
           scopeModels: true,
           disableDefaultAgents: true,
           toolDescriptionMode: "compact",
-          fleetView: false,
-          widgetMode: "off",
         },
         appliers,
       );
@@ -515,22 +498,6 @@ describe("settings persistence", () => {
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
-      expect(appliers.setFleetView).toHaveBeenCalledWith(false);
-      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
-    });
-
-    it("applies widgetMode; skips it when absent", () => {
-      applySettings({ widgetMode: "off" }, appliers);
-      expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
-      applySettings({}, appliers);
-      expect(appliers.setWidgetMode).toHaveBeenCalledTimes(1); // absence is "use default"
-    });
-
-    it("applies fleetView (true and false); skips it when absent", () => {
-      applySettings({ fleetView: true }, appliers);
-      expect(appliers.setFleetView).toHaveBeenCalledWith(true);
-      applySettings({}, appliers);
-      expect(appliers.setFleetView).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
     it("applies scopeModels: false", () => {
@@ -647,8 +614,6 @@ describe("settings persistence", () => {
         setFailurePreviewMaxChars: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
-        setFleetView: vi.fn(),
-        setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setFallbackSubagent: vi.fn(),
@@ -684,24 +649,6 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
-    });
-
-    it("keeps the runtime widget default when a stored 'background' is dropped", () => {
-      writeProject({ widgetMode: "background" } as any);
-      // Mirrors the extension's runtime state (`let widgetMode = "all"`): a
-      // dropped/absent widgetMode must leave the current mode untouched.
-      let runtimeMode = "all";
-      const runtimeAppliers: SettingsAppliers = {
-        ...appliers,
-        setWidgetMode: (m) => { runtimeMode = m; appliers.setWidgetMode(m); },
-      };
-      const emit = vi.fn();
-
-      const result = applyAndEmitLoaded(runtimeAppliers, emit, projectDir);
-
-      expect(result).toEqual({}); // retired value dropped by the sanitizer
-      expect(appliers.setWidgetMode).not.toHaveBeenCalled();
-      expect(runtimeMode).toBe("all");
     });
   });
 

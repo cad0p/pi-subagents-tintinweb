@@ -6,7 +6,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { IMPLICIT_FALLBACK, NO_FALLBACK } from "./agent-types.js";
-import type { WidgetMode } from "./types.js";
 
 /**
  * What the `fallbackSubagent` row shows and offers.
@@ -114,19 +113,6 @@ export interface SubagentsSettings {
    * next pi session.
    */
   toolDescriptionMode?: ToolDescriptionMode;
-  /**
-   * Whether the Claude Code-style FleetView (the navigable main+subagents list
-   * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
-   * the list never registers and the global key handler never captures input.
-   */
-  fleetView?: boolean;
-  /**
-   * Display mode for the persistent above-editor agent widget:
-   *   - `all`: show every agent.
-   *   - `off`: hide the widget entirely.
-   * Defaults to `all`. Pure-UI and applied live (toggling refreshes the widget).
-   */
-  widgetMode?: WidgetMode;
   /**
    * Project/global default for writing each subagent's `.output` transcript
    * (a JSON-lines copy of the run, stored under the OS temp dir).
@@ -250,8 +236,6 @@ export interface SettingsAppliers {
   setFailurePreviewMaxChars: (chars: number) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
-  setFleetView: (b: boolean) => void;
-  setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
   setWorktreeIsolation: (b: boolean) => void;
@@ -265,7 +249,6 @@ export interface SettingsAppliers {
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
-const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "off"]);
 
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
@@ -280,7 +263,7 @@ export const FAILURE_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
 /**
  * Shipped default for `showCost`. Named because the report renderer keeps its
  * own copy of the flag (see `result-report.ts`): a file that omits the key
- * applies nothing, so both copies must start from the same value or the widget
+ * applies nothing, so both copies must start from the same value or FleetView
  * and the result report disagree about showing a cost.
  */
 export const DEFAULT_SHOW_COST = true;
@@ -342,12 +325,6 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
     out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
-  }
-  if (typeof r.fleetView === "boolean") {
-    out.fleetView = r.fleetView;
-  }
-  if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
-    out.widgetMode = r.widgetMode as WidgetMode;
   }
   if (typeof r.outputTranscript === "boolean") {
     out.outputTranscript = r.outputTranscript;
@@ -435,8 +412,6 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.failurePreviewMaxChars === "number") appliers.setFailurePreviewMaxChars(s.failurePreviewMaxChars);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
-  if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
-  if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);

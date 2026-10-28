@@ -98,12 +98,6 @@ export interface AgentConfig {
   sourcePath?: string;
 }
 
-/**
- * Display mode for the persistent above-editor agent widget.
- * - `all`: show every agent.
- * - `off`: hide the widget entirely.
- */
-export type WidgetMode = 'all' | 'off';
 
 /**
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running

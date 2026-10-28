@@ -1322,17 +1322,16 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
-  it("shows the widget default 'all' after a stored 'background' is dropped", async () => {
+  it("keeps the removed fleetView and widgetMode keys out of the settings menu", async () => {
     initTheme("dark");
     const dir = mkdtempSync(join(tmpdir(), "pi-widget-default-"));
     const previousCwd = process.cwd();
     try {
       process.chdir(dir);
       mkdirSync(join(dir, ".pi"), { recursive: true });
-      // "background" was removed from the valid widget modes with the
-      // background-only migration; the settings menu must still render the
-      // extension's "all" default.
-      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ widgetMode: "background" }), "utf-8");
+      // fleetView and widgetMode are retired: a file still holding them loads
+      // silently, and the menu has no Widget or FleetView row.
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ fleetView: false, widgetMode: "background" }), "utf-8");
       const { pi, commands } = makePi();
       delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
       subagentsExtension(pi);
@@ -1351,10 +1350,8 @@ describe("agents command terminal surfaces", () => {
 
       await commands.get("agents").handler("", c);
 
-      const widgetRow = settingsScreen.split("\n").find(line => line.includes("Widget"));
-      expect(widgetRow).toBeDefined();
-      expect(widgetRow).toContain("all");
-      expect(widgetRow).not.toContain("background");
+      expect(settingsScreen).toContain("Max concurrency");
+      expect(settingsScreen).not.toMatch(/Widget|Fleet ?View/);
     } finally {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
