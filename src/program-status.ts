@@ -262,10 +262,12 @@ function defaultSigcontHook(listener: () => void): () => void {
 /**
  * Writes OSC 7501 child records for the records the agent manager lists, one per root activation.
  *
- * It owns a one-second timer, armed only while a record is live and disarmed once there is
- * nothing left to report: a session that never spawns a subagent never ticks. A report replaces
- * its record whole, so a pass that produces the same sequence writes nothing, and the terminal
- * sees a write only when a record actually changes.
+ * It owns a one-second timer for the life of the attachment. A report replaces its record whole,
+ * so a pass that produces the same sequence writes nothing, and the terminal sees a write only when
+ * a record actually changes. The tick is not armed by the spawn paths on purpose: there are five of
+ * them (the Agent tool, the registry, RPC, the scheduler, nested tools), and a record that appears
+ * through one that forgot to poke the reporter would never be shown. An idle pass scans an empty
+ * listing and writes nothing.
  *
  * `stop()` on suspend writes a root-less clear (every record goes) and resets
  * `programStatusSupported` to false; `start()` leaves it false until the terminal answers the
@@ -276,7 +278,8 @@ export class ProgramStatusReporter {
 	private terminal: ProgramStatusTerminal | undefined;
 	/**
 	 * The last sequence written per record id: the change detector, and the ids to clear on the way
-	 * out. Only live reports are held — a cleared record is deleted, so no re-send can resurrect it.
+	 * out. A clear is recorded like any other report, so a record that stays listed in a cleared
+	 * state is written once rather than once per tick; `clearAll` retires the entry.
 	 */
 	private readonly written = new Map<string, { id: string; sequence: string }>();
 	private enabled = true;
@@ -303,6 +306,7 @@ export class ProgramStatusReporter {
 	 */
 	attach(terminal: ProgramStatusTerminal): void {
 		this.terminal = terminal;
+		this.armTimer(true);
 		// Registered here, not in the constructor: a session with no terminal never writes, so it has
 		// nothing to re-send, and a process that loads this extension many times (a subagent activation,
 		// a test) must not accumulate one listener per factory call.
@@ -329,11 +333,16 @@ export class ProgramStatusReporter {
 		this.pass();
 	}
 
-	/** Clear every id this activation wrote. Safe to call more than once; a failed write keeps the rest. */
+	/**
+	 * Clear every id this activation still shows. An entry whose last write already was its clear is
+	 * retired without a second write. Safe to call more than once; a dead terminal ends the loop,
+	 * because every remaining write would reach the same dead handle.
+	 */
 	clearAll(): void {
 		if (!programStatusSupported(this.terminal)) return;
 		for (const [recordId, entry] of [...this.written]) {
-			if (!this.write(formatProgramStatus(clearProgramStatus(entry.id)))) return;
+			const clear = formatProgramStatus(clearProgramStatus(entry.id));
+			if (entry.sequence !== clear && !this.write(clear)) return;
 			this.written.delete(recordId);
 		}
 		this.resendPending = false;
@@ -349,6 +358,8 @@ export class ProgramStatusReporter {
 	 * cleared one id at a time.
 	 */
 	dispose(reason: "quit" | "reload" | "new" | "resume" | "fork"): void {
+		// A clear is skipped while support is false: pi's `stop()` already wiped every record in that
+		// state, and a write from here would reach nothing.
 		if (reason !== "quit") this.clearAll();
 		this.armTimer(false);
 		this.removeSigcont?.();
@@ -385,10 +396,6 @@ export class ProgramStatusReporter {
 			this.armTimer(false);
 			return;
 		}
-		// Armed while anything in the listing is worth reporting, not only while something was
-		// written: before the terminal confirms support nothing is written, and the pass that sees
-		// support arrive is the timer's.
-		this.armTimer(desired.some((entry) => entry.report.state !== "clear"));
 		if (!supported) return;
 
 		// A record that left the listing (evicted, cleared, or its parent dropped out of the tree) is
@@ -411,8 +418,7 @@ export class ProgramStatusReporter {
 			if (!sequence) continue;
 			if (!this.resendPending && this.written.get(recordId)?.sequence === sequence) continue;
 			if (!this.write(sequence)) return;
-			if (report.state === "clear") this.written.delete(recordId);
-			else this.written.set(recordId, { id: report.id, sequence });
+			this.written.set(recordId, { id: report.id, sequence });
 		}
 		// A completed pass is the re-send: every record this activation still holds was rewritten (or
 		// would have produced the same sequence), and support is confirmed again.

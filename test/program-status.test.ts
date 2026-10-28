@@ -284,7 +284,28 @@ describe("ProgramStatusReporter", () => {
 		]);
 	});
 
-	it("clears every id it wrote, and stops its timer when nothing is live", () => {
+	it("writes a clear once while the record stays listed", () => {
+		records = [makeRecord({ id: "aaaa", status: "stopped" })];
+		const r = reporter();
+		r.attach(terminal);
+		r.sync();
+		r.sync();
+		vi.advanceTimersByTime(5000);
+		expect(written).toHaveLength(1);
+		expect(parse(written[0]!).state).toBe("clear");
+	});
+
+	it("does not clear an id twice when it is already gone from the terminal", () => {
+		records = [makeRecord({ id: "aaaa", status: "completed", resultDelivered: true })];
+		const r = reporter();
+		r.attach(terminal);
+		r.sync();
+		expect(written).toHaveLength(1);
+		r.dispose("reload");
+		expect(written).toHaveLength(1);
+	});
+
+	it("clears every id it wrote, and then writes nothing more", () => {
 		const r = reporter();
 		r.attach(terminal);
 		r.sync();
@@ -292,7 +313,19 @@ describe("ProgramStatusReporter", () => {
 		records = [];
 		r.sync();
 		expect(written.map((sequence) => parse(sequence).state)).toEqual(["working", "clear"]);
-		expect(vi.getTimerCount()).toBe(0);
+		vi.advanceTimersByTime(5000);
+		expect(written).toHaveLength(2);
+	});
+
+	it("reports a record that appears without a sync call", () => {
+		records = [];
+		const r = reporter();
+		r.attach(terminal);
+		vi.advanceTimersByTime(1000);
+		expect(written).toEqual([]);
+		records = [makeRecord({ id: "aaaa", status: "running" })];
+		vi.advanceTimersByTime(1000);
+		expect(ids()).toEqual(["subagents/aaaa"]);
 	});
 
 	it("clears on disable and reports again on enable", () => {
@@ -357,8 +390,12 @@ describe("ProgramStatusReporter", () => {
 		expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
 	});
 
-	it("constructs no timer before anything is reported", () => {
-		reporter();
+	it("owns a timer only while it holds a terminal", () => {
+		const r = reporter();
+		expect(vi.getTimerCount()).toBe(0);
+		r.attach(terminal);
+		expect(vi.getTimerCount()).toBe(1);
+		r.dispose("quit");
 		expect(vi.getTimerCount()).toBe(0);
 	});
 });
