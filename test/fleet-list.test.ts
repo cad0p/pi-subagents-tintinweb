@@ -9,6 +9,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-display.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed } from "../src/ui/fleet-list.js";
+import { paintedScreen } from "./helpers/painted-screen.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -379,6 +380,24 @@ describe("FleetList rendering", () => {
     const lines = h.render(120);
     expect(lines.find(l => l.includes("report 7"))).toContain("⏺");
     expect(lines.some(l => l.includes("↑"))).toBe(true); // hidden-above indicator
+  });
+
+  it("repaints a finished row at once when the agent finishes, without waiting for the tick", () => {
+    vi.useFakeTimers();
+    try {
+      const rec = makeRecord({ id: "r", description: "repaint one", startedAt: Date.now() });
+      const screen = paintedScreen();
+      const fleet = new FleetList(fakeManager([rec]), new Map());
+      fleet.setUICtx(screen.ui);
+      fleet.update();
+      expect(screen.painted().find(l => l.includes("repaint one"))).toContain("◯");
+      rec.status = "completed";
+      rec.completedAt = Date.now();
+      fleet.onAgentFinished(rec.id); // no timer advance: only the refresh can repaint
+      expect(screen.painted().find(l => l.includes("repaint one"))).toContain("✓");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

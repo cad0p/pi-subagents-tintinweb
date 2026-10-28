@@ -12,7 +12,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { stripVTControlCharacters } from "node:util";
+import { type AgentSession, initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -22,6 +23,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { paintedScreen } from "./helpers/painted-screen.js";
 import { textOf } from "./helpers/subagents-harness.js";
 
 function makePi() {
@@ -50,7 +52,7 @@ function uiCtx() {
   };
 }
 
-function ctxWith(ui: ReturnType<typeof uiCtx>) {
+function ctxWith(ui: unknown) {
   return {
     hasUI: true,
     ui,
@@ -67,12 +69,39 @@ const flush = async () => {
   await new Promise((r) => setImmediate(r));
 };
 
-/** runAgent stand-in: hands a live session over before the run settles, as the real runner does. */
-function mockRunWithSession(): void {
+type AgentsHandler = (args: string, ctx: unknown) => Promise<void>;
+
+/** Opens /agents → Settings, moves the SettingsList cursor onto "Show model" and presses Enter (off → on). */
+async function toggleShowModel(agents: AgentsHandler): Promise<void> {
+  initTheme("dark"); // the real SettingsList reads the theme
+  type Panel = { render(width: number): string[]; handleInput(data: string): void };
+  const slot: { panel?: Panel; close?: () => void } = {};
+  const ctx = ctxWith({
+    select: vi.fn().mockResolvedValueOnce("Settings"), // the next select is undefined: the Agents menu closes
+    notify: vi.fn(),
+    custom: (factory: (...args: unknown[]) => Panel) => new Promise<undefined>((done) => {
+      slot.close = () => done(undefined);
+      slot.panel = factory(undefined, undefined, undefined, done);
+    }),
+  });
+  const run = agents("", ctx);
+  for (let i = 0; !slot.panel && i < 20; i++) await flush();
+  const panel = slot.panel;
+  if (!panel) throw new Error("the settings panel did not open");
+  const onShowModel = () => panel.render(120).map(stripVTControlCharacters).some(l => l.includes("Show model") && !l.startsWith(" "));
+  for (let i = 0; i < 60 && !onShowModel(); i++) panel.handleInput("\x1b[B"); // down
+  panel.handleInput("\r"); // enter
+  slot.close?.();
+  await run;
+}
+
+/** runAgent stand-in: hands a live session over before the run settles, as the real runner does; `hang` keeps the run unsettled. */
+function mockRunWithSession(hang = false): void {
   vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
     // The settled record keeps a snapshot of the session it handed over.
-    const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
+    const session = { dispose: vi.fn(), subscribe: () => () => {}, getSessionStats: () => ({}), isStreaming: false, model: { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" }, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s-fleet", getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
     opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+    if (hang) return new Promise<never>(() => {});
     return { responseText: "done", session, aborted: false, steered: false };
   });
 }
@@ -142,6 +171,57 @@ describe("FleetView wiring (real extension lifecycle)", () => {
 
     await lifecycle.get("session_shutdown")?.({}, ctxWith(uiCtx()));
     expect(ui.setWidget).toHaveBeenCalledWith("fleet", undefined); // dispose cleared it
+  });
+
+  it("paints a running row at once when a tool starts under a UI the fleet has not seen", async () => {
+    mockRunWithSession(true);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] }); // no tick: only the refresh can paint
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      await lifecycle.get("tool_execution_start")?.({}, ctxWith(uiCtx())); // fleet captures UI A
+      await tools.get("Agent").execute(
+        "tc",
+        { prompt: "go", description: "hung one", subagent_type: "general-purpose" },
+        undefined,
+        undefined,
+        ctxWith(uiCtx()),
+      );
+      await flush(); // the run hands over its session and never settles
+      const screen = paintedScreen();
+      await lifecycle.get("tool_execution_start")?.({}, ctxWith(screen.ui)); // fleet re-captures UI B
+      expect(screen.painted().find(l => l.includes("hung one"))).toContain("◯");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("repaints a running row with its model at once when Show model is toggled in /agents", async () => {
+    mockRunWithSession(true);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] }); // no tick: only the toggle's refresh can paint
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      await tools.get("Agent").execute(
+        "tc",
+        { prompt: "go", description: "hung one", subagent_type: "general-purpose" },
+        undefined,
+        undefined,
+        ctxWith(uiCtx()),
+      );
+      await flush(); // the run hands over its session and never settles
+      const screen = paintedScreen();
+      await lifecycle.get("tool_execution_start")?.({}, ctxWith(screen.ui)); // fleet captures the screen
+      const row = () => screen.painted().find(l => l.includes("hung one")) ?? "";
+      expect(row()).toContain("◯");
+      expect(row()).not.toContain("sonnet 4.5");
+
+      const agents: AgentsHandler = pi.registerCommand.mock.calls.find((c: unknown[]) => c[0] === "agents")?.[1].handler;
+      await toggleShowModel(agents);
+      expect(row()).toContain("sonnet 4.5");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("never sets an aboveEditor or agents widget, or the subagents status, across spawn to finish", async () => {
