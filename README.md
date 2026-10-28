@@ -114,7 +114,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
   ⏺ main
   ◯ general-purpose  Sleep then report 1                  ↻3 · 3 tool uses · 13.1k token · 11s
       ⎿  running command…
-  ◯ general-purpose  Sleep then report 2                  waiting · 0:30
+  ◯ general-purpose  Sleep then report 2                  waiting · 30s
   ◯ general-purpose  Sleep then report 3                  queued · turn 0
 ```
 
