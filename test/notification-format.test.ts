@@ -822,6 +822,18 @@ describe("completion header names the agent type", () => {
       expect(header).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
     });
 
+    it("names the built-in tier Agent when the registered general-purpose is disabled", () => {
+      registerCustom({ name: "general-purpose", displayName: "Code Reviewer", enabled: false });
+      const header = formatTaskNotification(createRecord({ type: "General-Purpose" }), settings).split("\n")[0];
+      expect(header).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
+    });
+
+    it("names an enabled project general-purpose by its display_name", () => {
+      registerCustom({ name: "general-purpose", displayName: "Code Reviewer" });
+      const header = formatTaskNotification(createRecord({ type: "general-purpose" }), settings).split("\n")[0];
+      expect(header).toBe(`**✓ Code Reviewer completed: Test Agent**${BODY}`);
+    });
+
     it("names the configured fallbackSubagent, the agent that ran", () => {
       registerCustom({ displayName: "Code Reviewer" });
       setFallbackSubagent("reviewer");
