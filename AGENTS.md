@@ -20,6 +20,7 @@
 - Match the surrounding code style — it is enforced by biome (`biome.json`).
 - Always ask before removing functionality or code that appears intentional.
 - Do not preserve backward compatibility unless the user asks for it.
+- Invariant: only one subagents extension is installed per pi process. Do not design guards, detection or fallbacks for a second one (another fork, nicobailon's `pi-subagents`, upstream `@tintinweb/pi-subagents`); installing two is unsupported and documented as such in the README.
 - This is a pi extension. Respect the Claude Code-compatible tool names, calling conventions, and UI patterns the extension deliberately mirrors; don't diverge from them without a stated reason.
 - When reviewing a diff, favor solutions that are elegant, not overengineered — flag needless abstraction, layering, or defensive code that the change doesn't warrant.
 

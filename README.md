@@ -46,6 +46,8 @@ Or load directly for development:
 pi -e ./src/index.ts
 ```
 
+Install only one subagents extension. Running this one alongside another (for example `pi-subagents` or `@tintinweb/pi-subagents`) is unsupported: they register overlapping tools and process-wide state.
+
 ## Quick Start
 
 The parent agent spawns sub-agents using the `Agent` tool:
