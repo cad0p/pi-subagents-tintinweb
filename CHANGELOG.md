@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* FleetView shows nested subagents as collapsible rows (closes #146) ([#148](https://github.com/cad0p/pi-subagents-tintinweb/pull/148))
 - *(subagents)* The footer names running and waiting subagents (closes #149) ([#150](https://github.com/cad0p/pi-subagents-tintinweb/pull/150))
 - *(subagents)* Report subagents through the terminal's program status (closes #152) ([#153](https://github.com/cad0p/pi-subagents-tintinweb/pull/153))
+- *(probe)* A daily, gated upstream compatibility probe (closes #156) ([#157](https://github.com/cad0p/pi-subagents-tintinweb/pull/157))
 
 ### 🐛 Bug Fixes
 
