@@ -441,8 +441,9 @@ export class FleetList {
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
     if (kind === "finished") {
-      // The activity tracker is dropped at finish, so turns fall back to the record, as the notification does.
-      const stats = [turns, toolText, cost, elapsed].filter(part => part !== "").join(" · ");
+      // The activity tracker is dropped at finish, so turns fall back to the record, as the notification
+      // does; a run stopped before it started has no turn to show.
+      const stats = [turnCount ? turns : "", toolText, cost, elapsed].filter(part => part !== "").join(" · ");
       return theme.fg("dim", stats) + finishedStatus(record, theme).statusText;
     }
     const tokens = getLifetimeTotal(usage);
