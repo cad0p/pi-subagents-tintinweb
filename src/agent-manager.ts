@@ -949,8 +949,15 @@ export class AgentManager {
    */
   private hardStop(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
-    record.limitReason = "time";
-    record.timeLimit = "stopped";
+    // A user stop owns the label: abort() marks the record stopped while its run unwinds, and a cap that
+    // fires in that window must not claim the time limit. Every other terminal status is written by
+    // finalize/afterRun, which clear these timers first, so "stopped" is the only reachable case.
+    if (record.status !== "stopped") {
+      record.limitReason = "time";
+      record.timeLimit = "stopped";
+    }
+    // Still a hard stop for the lifecycle: a record aborted before its run was observed settles only
+    // because this flag lets decide() through (nothing else marks the run finished).
     life.hardStopped = true;
     // A run waiting at the pool gate has no request to abort: its FIFO entry goes now, so the gate neither admits it
     // nor counts it as running.
