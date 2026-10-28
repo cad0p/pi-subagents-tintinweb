@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - *(reload)* Adopt hand-overs from releases before the slot gate (closes #116) ([#117](https://github.com/cad0p/pi-subagents-tintinweb/pull/117))
 - *(subagents)* A leaked child context reads as root, so a /reload never drops the parent tools (closes #122) ([#123](https://github.com/cad0p/pi-subagents-tintinweb/pull/123))
 - *(subagents)* Name a broken background-work provider in a warning (closes #135) ([#136](https://github.com/cad0p/pi-subagents-tintinweb/pull/136))
+- *(subagents)* The time-limit label says whether the agent wrapped up or was stopped (closes #134) ([#138](https://github.com/cad0p/pi-subagents-tintinweb/pull/138))
 
 ### 📚 Documentation
 
