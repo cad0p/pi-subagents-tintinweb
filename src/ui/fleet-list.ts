@@ -111,7 +111,7 @@ function hiddenRecords(entries: AgentEntry[]): AgentRecord[] {
 }
 
 /** Tree marker before a row's type: two spaces per level, then `↳ ` from level 1 down. */
-function nestIndent(depth: number): string {
+export function nestIndent(depth: number): string {
   return depth === 0 ? "" : `${"  ".repeat(depth)}↳ `;
 }
 
