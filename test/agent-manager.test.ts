@@ -1229,7 +1229,7 @@ describe("AgentManager — deliver()", () => {
     });
     vi.mocked(resumeAgent).mockClear().mockResolvedValue({ text: "adopted" });
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
-    manager.adopt({ dto, session: { ...mockSession(), extensionRunner: { emit: () => hold } } }, false);
+    manager.adopt({ dto, session: { ...mockSession(), extensionRunner: { emit: () => hold } } }, false, { appendEntry: () => undefined });
 
     expect(await manager.deliver(id, "during")).toBe("held");
     release();

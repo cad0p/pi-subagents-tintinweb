@@ -112,6 +112,15 @@ function hasToolResult(session: { messages: readonly { role: string }[] }, toolN
   return session.messages.some((m) => m.role === "toolResult" && "toolName" in m && m.toolName === toolName);
 }
 
+/** The statuses of the settle entries (subagents:record) a session holds for one run. */
+function settleStatuses(session: AgentSession, id: string): string[] {
+  return session.sessionManager.getEntries().flatMap((entry) => {
+    if (entry.type !== "custom" || entry.customType !== "subagents:record") return [];
+    const data = entry.data as { id?: string; status?: string } | undefined;
+    return data?.id === id && data.status ? [data.status] : [];
+  });
+}
+
 /** Steer over the same bus a cross-extension caller uses (subagents:rpc:steer). */
 function steerOverBus(events: EventBus, agentId: string, message: string): Promise<RpcReply> {
   const requestId = `steer-${agentId}`;
@@ -428,6 +437,19 @@ describe("subagents across a real /reload (faux provider)", () => {
       },
       { timeout: 10_000 },
     );
+  }, 20_000);
+
+  it("writes the settle of a run that settled while its root drained into the reloaded session", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+
+    await reloadRoot(root);
+
+    release();
+    // Without the settle entry, a later startup or resume in this process reports the delivered run as interrupted.
+    await vi.waitFor(() => expect(settleStatuses(root, id)).toEqual(["completed"]), { timeout: 10_000 });
   }, 20_000);
 
   it("adopts a running subagent from a release that published no slotHolders and announces its result once", async () => {

@@ -978,7 +978,7 @@ export default function (pi: ExtensionAPI) {
           spawnTopLevel(pi, ctx, spec.type, spec.prompt, { ...spec.options, id: spec.id });
         } catch (err) {
           // The spec cannot start here (e.g. its cwd is gone): report it as a failed run rather than dropping it.
-          manager.adopt({ dto: failedSpecDto(spec, err) }, true);
+          manager.adopt({ dto: failedSpecDto(spec, err) }, true, pi);
         }
       }
       for (const item of h.idleItems()) manager.beginAdoption(item.dto.id);
@@ -1011,7 +1011,7 @@ export default function (pi: ExtensionAPI) {
   async function adoptItem(item: HandoverItem, notify: boolean): Promise<boolean> {
     if (shutDown) return false;
     try {
-      manager.adopt(item, notify);
+      manager.adopt(item, notify, pi);
     } finally {
       manager.endAdoption(item.dto.id);
     }

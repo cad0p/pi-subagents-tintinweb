@@ -2040,8 +2040,12 @@ export class AgentManager {
     this.onUsage?.(record, usage);
   }
 
-  /** Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining. */
-  adopt(item: HandoverItem, notify: boolean): AgentRecord {
+  /**
+   * Takes a record handed over by a reloaded activation. `notify` announces a run that settled while draining.
+   * Its settle writes through `writer`, this activation's session: the hand-over is keyed by that session, so it is
+   * the spawner session of every adopted record. The record's spawn entry stays with the old activation's session.
+   */
+  adopt(item: HandoverItem, notify: boolean, writer: LedgerWriter): AgentRecord {
     const record = fromDto(item.dto);
     // An older activation can hand over a settled record that still holds its session. Tear it down here, so no
     // settled record keeps a live session. Only an in-memory child (no file) needs its entries kept for a reopen.
@@ -2055,6 +2059,7 @@ export class AgentManager {
     }
     record.settled = true;
     this.agents.set(record.id, record);
+    this.ledgerWriters.set(record.id, writer);
     if (notify) this.notifyCompleted(record);
     return record;
   }
