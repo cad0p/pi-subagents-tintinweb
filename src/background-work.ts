@@ -6,7 +6,9 @@
 import {
   type BackgroundWorkItem,
   type BackgroundWorkListContext,
+  listBackgroundWorkDisplayProviders,
   listBackgroundWorkProviders,
+  registerBackgroundWorkDisplayProvider,
   registerBackgroundWorkProvider,
 } from "@cad0p/pi-background-work";
 import type { AgentRecord } from "./types.js";
@@ -63,6 +65,34 @@ export function listSubagentWork(source: BackgroundWorkSource | undefined, conte
   return items;
 }
 
+/**
+ * The footer's segment for the listed items: a record with `waiting` set counts as waiting, anything else,
+ * including an id the source no longer holds, as running, so the count never disagrees with the registry.
+ * `context` is the display provider's; the count needs only the items and the records. Never throws.
+ */
+export function describeSubagentWork(
+  items: readonly BackgroundWorkItem[],
+  _context: BackgroundWorkListContext | undefined,
+  source: BackgroundWorkSource | undefined,
+): string | null {
+  if (items.length === 0) return null;
+  const waiting = new Set<string>();
+  try {
+    for (const record of source?.listAgents() ?? []) {
+      try {
+        if (record.waiting) waiting.add(record.id);
+      } catch {
+        // One corrupt record must not hide the others' waiting state.
+      }
+    }
+  } catch {
+    // Manager unreadable: every listed item still counts as running.
+  }
+  const waitingCount = items.filter((item) => waiting.has(item.id)).length;
+  const count = items.length === 1 ? "1 agent" : `${items.length} agents`;
+  return waitingCount === 0 ? count : `${count} (${waitingCount} waiting)`;
+}
+
 function providerPresent(): boolean {
   try {
     return listBackgroundWorkProviders().some((provider) => provider.name === PROVIDER_NAME);
@@ -87,5 +117,39 @@ export function registerSubagentProvider(reason: string, getSource: () => Backgr
     registerBackgroundWorkProvider({ name: PROVIDER_NAME, listActiveWork: (context) => listSubagentWork(getSource(), context) });
   } catch {
     // A malformed provider from another extension must not break session binding.
+  }
+}
+
+function displayProviderPresent(): boolean {
+  try {
+    return listBackgroundWorkDisplayProviders().some((provider) => provider.name === PROVIDER_NAME);
+  } catch {
+    // A malformed display provider from another extension makes the list throw. Treat that as absent so registration still runs.
+    return false;
+  }
+}
+
+/**
+ * Registers the footer string beside the listing provider, with the same reload rule. `describe` reads the
+ * live source per call, so a reload's replacement manager is counted, and returns `null` when `getSource`
+ * throws, so the footer falls back to `N pi-subagents` rather than a count it cannot vouch for. A source
+ * whose `listAgents()` throws is not that case: the listed items are still listed, so they count as running.
+ */
+export function registerSubagentDisplayProvider(reason: string, getSource: () => BackgroundWorkSource | undefined): void {
+  if (reason !== "reload" && displayProviderPresent()) return;
+  try {
+    registerBackgroundWorkDisplayProvider({
+      name: PROVIDER_NAME,
+      describe(items, context) {
+        try {
+          return describeSubagentWork(items, context, getSource());
+        } catch {
+          // A throwing source cannot be counted; let the footer name the provider instead.
+          return null;
+        }
+      },
+    });
+  } catch {
+    // A malformed display registry from another extension must not break session binding.
   }
 }
