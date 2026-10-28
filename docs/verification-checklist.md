@@ -43,8 +43,9 @@ note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
-`xhigh`; for checks other than Visual proof runs, fall back to
-`opencode-go/deepseek-v4.1-flash` at `max` when Anthropic is unavailable. `--no-extensions` drops discovered extensions, so pass the global
+`xhigh`; for checks that do not exercise a Visual proof step, fall back to
+`opencode-go/deepseek-v4.1-flash` at `max` when Anthropic is unavailable.
+`--no-extensions` drops discovered extensions, so pass the global
 ones explicitly with `-e` (the global `system-prompt.ts` is required for native
 Anthropic). Add the branch build with `-e <repo>/src/index.ts`, so the two don't
 collide. Subagents spawned from the session follow the same `-e` flags (#92).
@@ -100,9 +101,11 @@ flows). A test passing is not proof of what the user sees.
   issue or plan: one sentence per step for what happens, not only the
   mechanism that should cause it (a wake, a turn, a row). The last step's
   sentence states the end state the user sees (for example "the main agent
-  resumes both"). The steps and sentences are fixed before the first run of
-  any kind, captured or not; if they are missing or do not state the end
-  state, the maintainer writes them in the issue first. Copy each sentence
+  resumes both"). There is at least one step. The steps and sentences are
+  the plan's or the maintainer's: an author's sentence counts only once the
+  maintainer has approved it in the issue. They are fixed before the first
+  run of any kind, captured or not; if they are missing or do not state the
+  end state, the maintainer writes them in the issue first. Copy each sentence
   verbatim under Evidence, with the issue edit that fixed it and the time of
   the first run, so the order can be checked.
 - From then on, only the maintainer, not the author, may change them,
