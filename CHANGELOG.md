@@ -28,6 +28,10 @@ All notable changes to this project will be documented in this file.
 - *(reload)* Adopt hand-overs from releases before the slot gate (closes #116) ([#117](https://github.com/cad0p/pi-subagents-tintinweb/pull/117))
 - *(subagents)* A leaked child context reads as root, so a /reload never drops the parent tools (closes #122) ([#123](https://github.com/cad0p/pi-subagents-tintinweb/pull/123))
 
+### 📚 Documentation
+
+- One subagents extension per process (closes #131) ([#132](https://github.com/cad0p/pi-subagents-tintinweb/pull/132))
+
 
 ## [0.22.0] - 2026-10-21
 
