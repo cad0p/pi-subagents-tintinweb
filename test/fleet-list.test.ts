@@ -611,11 +611,14 @@ describe("FleetList rows keep the widget's sanitizing and labels (#143)", () => 
     expect(text).not.toContain("]8;;");
   });
 
-  it("truncates the activity line on a code-point boundary", () => {
+  it("truncates the activity line to the row width on a code-point boundary", () => {
     const activity = new Map([["agent", activityFor({ responseText: `${"a".repeat(59)}😀tail` })]]);
     const lines = harness([makeRecord({ id: "agent" })], [], { activity }).render(120);
     expect(lines.some(l => l.includes(`⎿  ${"a".repeat(59)}…`))).toBe(true);
     expect(lines.join("\n")).not.toContain("\uFFFD");
+    const narrowLine = harness([makeRecord({ id: "agent" })], [], { activity }).render(40).find(l => l.includes("⎿"));
+    expect(narrowLine).toBeDefined();
+    expect(visibleWidth(narrowLine ?? "")).toBeLessThanOrEqual(40);
   });
 
   it("strips terminal controls from record descriptions and errors", () => {
