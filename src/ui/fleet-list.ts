@@ -17,7 +17,7 @@ import { deliveryText } from "../delivery-text.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, getDisplayName, isQueued, type Theme, waitingLabel } from "./agent-widget.js";
+import { type AgentActivity, formatCost, getDisplayName, isQueued, type Theme, waitingLabel } from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */

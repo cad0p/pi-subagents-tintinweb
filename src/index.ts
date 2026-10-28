@@ -42,22 +42,8 @@ import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILIN
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType, type WidgetMode } from "./types.js";
-import {
-  type AgentActivity,
-  type AgentDetails,
-  AgentWidget,
-  buildInvocationTags,
-  fgPreservingNestedStyles,
-  formatCost,
-  formatDuration,
-  formatMs,
-  formatTokens,
-  formatTurns,
-  getDisplayName,
-  getPromptModeLabel,
-  type Theme,
-  type UICtx,
-} from "./ui/agent-widget.js";
+import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme, type UICtx } from "./ui/agent-display.js";
+import { AgentWidget } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";

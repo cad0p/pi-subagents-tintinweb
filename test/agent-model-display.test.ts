@@ -43,7 +43,8 @@ import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentWidget, buildInvocationTags, type Theme } from "../src/ui/agent-widget.js";
+import { buildInvocationTags, type Theme } from "../src/ui/agent-display.js";
+import { AgentWidget } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).

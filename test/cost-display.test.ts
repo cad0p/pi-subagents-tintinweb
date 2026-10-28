@@ -28,7 +28,8 @@ import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension, { formatTaskNotification } from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentWidget, formatCost } from "../src/ui/agent-widget.js";
+import { formatCost } from "../src/ui/agent-display.js";
+import { AgentWidget } from "../src/ui/agent-widget.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);

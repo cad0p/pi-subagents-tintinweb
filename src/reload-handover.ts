@@ -13,7 +13,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
 import { teardownChildSession } from "./agent-runner.js";
 import type { AgentRecord, DeliverOutcome, SubagentType } from "./types.js";
-import type { AgentActivity } from "./ui/agent-widget.js";
+import type { AgentActivity } from "./ui/agent-display.js";
 import type { LifetimeUsage } from "./usage.js";
 
 /**

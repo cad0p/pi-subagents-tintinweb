@@ -56,7 +56,7 @@ import { isDefaultsDisabled, registerAgents, setDefaultsDisabled } from "../src/
 import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension, { WIZARD_MAX_TURNS } from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
-import type { AgentDetails } from "../src/ui/agent-widget.js";
+import type { AgentDetails } from "../src/ui/agent-display.js";
 import { MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);

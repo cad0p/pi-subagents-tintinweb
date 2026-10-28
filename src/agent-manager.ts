@@ -52,7 +52,7 @@ import {
   toSpawnData,
 } from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
-import type { AgentActivity } from "./ui/agent-widget.js";
+import type { AgentActivity } from "./ui/agent-display.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 

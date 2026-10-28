@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatSessionTokens, waitingLabel } from "../src/ui/agent-widget.js";
+import { type AgentActivity, describeActivity, fgPreservingNestedStyles, formatSessionTokens, waitingLabel } from "../src/ui/agent-display.js";
+import { AgentWidget } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
