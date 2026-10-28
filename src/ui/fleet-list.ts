@@ -105,6 +105,16 @@ function overflowLabel(arrow: string, hidden: AgentRecord[]): string {
   return `${arrow} ${hidden.length} more (${countsText(hidden)})`;
 }
 
+/** Records behind an overflow arrow: each hidden row, plus its nested rows when it is collapsed (open rows show their own). */
+function hiddenRecords(entries: AgentEntry[]): AgentRecord[] {
+  return entries.flatMap(e => [e.record, ...(e.expanded ? [] : e.nested)]);
+}
+
+/** Tree marker before a row's type: two spaces per level, then `↳ ` from level 1 down. */
+function nestIndent(depth: number): string {
+  return depth === 0 ? "" : `${"  ".repeat(depth)}↳ `;
+}
+
 /**
  * Joins the row's figures. Optional figures drop front to back (model, turns,
  * tool uses) until the row fits `width`; `kept` figures always stay.
@@ -464,14 +474,14 @@ export class FleetList {
     const visible = Math.min(MAX_AGENT_ROWS, agents.length);
     const selAgent = Math.max(0, sel - 1);
     const start = selAgent < visible ? 0 : selAgent - visible + 1;
-    const hiddenAbove = agents.slice(0, start).map(e => e.record);
-    const hiddenBelow = agents.slice(start + visible).map(e => e.record);
+    const hiddenAbove = hiddenRecords(agents.slice(0, start));
+    const hiddenBelow = hiddenRecords(agents.slice(start + visible));
 
     if (hiddenAbove.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↑", hiddenAbove)), width));
     for (let a = start; a < start + visible; a++) {
       const record = agents[a].record;
       lines.push(this.renderAgentRow(a + 1, sel, agents[a], width, theme));
-      if (rowKind(record) === "running") lines.push(this.activityLine(record, width, theme));
+      if (rowKind(record) === "running") lines.push(this.activityLine(record, agents[a].depth, width, theme));
     }
     if (hiddenBelow.length > 0) lines.push(rightAlign("", theme.fg("dim", overflowLabel("↓", hiddenBelow)), width));
 
@@ -490,7 +500,7 @@ export class FleetList {
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const drainTag = this.manager.isDraining(record.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
     const nestTag = entry.nested.length === 0 ? "" : ` ${theme.fg("dim", entry.expanded ? "▾" : `▸ ${entry.nested.length} nested (${countsText(entry.nested)})`)}`;
-    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${icon}${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${modeTag}${drainTag}${nestTag}`;
+    const prefix = `  ${this.bullet(rosterIndex, sel, theme)} ${nestIndent(entry.depth)}${icon}${theme.fg("muted", toSingleLine(getDisplayName(record.type)))}${modeTag}${drainTag}${nestTag}`;
     const left = `${prefix}  ${toSingleLine(record.description)}`;
     return rightAlign(left, this.rowStats(record, kind, prefix, width, theme), width);
   }
@@ -523,9 +533,10 @@ export class FleetList {
   }
 
   /** Dim sub-line under a running row: what the agent is doing right now. */
-  private activityLine(record: AgentRecord, width: number, theme: Theme): string {
+  private activityLine(record: AgentRecord, depth: number, width: number, theme: Theme): string {
     const activity = this.agentActivity.get(record.id);
     const text = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
-    return truncateToWidth(theme.fg("dim", `    ⎿  ${toSingleLine(text)}`), width);
+    const indent = " ".repeat(4 + nestIndent(depth).length);
+    return truncateToWidth(theme.fg("dim", `${indent}⎿  ${toSingleLine(text)}`), width);
   }
 }
