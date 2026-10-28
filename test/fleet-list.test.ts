@@ -446,6 +446,20 @@ describe("FleetList row figures", () => {
     expect(narrow).toContain("13.1k token");
   });
 
+  it("drops model first, then turns, then tool uses, as the row narrows", () => {
+    const rec = makeRecord({ id: "d1", description: "drop one", toolUses: 3, turnCount: 2, invocation: { modelName: "sonnet 4.6", thinking: "high", maxTurns: 5 } });
+    const h = harness([rec], [], { showModel: () => true });
+    // 80 cols: the full row does not fit, so only the model goes.
+    const modelDropped = h.render(80).find(l => l.includes("◯"));
+    expect(modelDropped).not.toContain("sonnet");
+    expect(modelDropped).toContain("↻2≤5");
+    expect(modelDropped).toContain("3 tool uses");
+    // 50 cols: model and turns go, tool uses stay.
+    const turnsDropped = h.render(50).find(l => l.includes("◯"));
+    expect(turnsDropped).not.toContain("↻2≤5");
+    expect(turnsDropped).toContain("3 tool uses");
+  });
+
   it("Enter on a queued row notifies that the agent has not started", () => {
     const h = harness([
       makeRecord({ id: "live", description: "live one", startedAt: 1000 }),
