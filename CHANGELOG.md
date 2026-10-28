@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Cap every subagent lifecycle at maxBackgroundWait of wall time (closes #110) ([#111](https://github.com/cad0p/pi-subagents-tintinweb/pull/111))
 - *(subagents)* Nested children join the pool, drop the blocking wait, one get_subagent_result (closes #113) ([#114](https://github.com/cad0p/pi-subagents-tintinweb/pull/114))
 - *(subagents)* Nested results reach the parent as the main session's notification, batched (closes #83) ([#119](https://github.com/cad0p/pi-subagents-tintinweb/pull/119))
+- *(subagents)* Subagents interrupted by a crash come back resumable; evictAfterMinutes (closes #120) ([#125](https://github.com/cad0p/pi-subagents-tintinweb/pull/125))
 
 ### 🐛 Bug Fixes
 
