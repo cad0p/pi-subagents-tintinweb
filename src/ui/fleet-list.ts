@@ -162,7 +162,12 @@ export class FleetList {
 
   /** Whether arrow keys currently navigate the list (vs. flow to the editor). */
   private active = false;
-  /** 0 = `main`, 1..N = subagents. */
+  /**
+   * The selected record, with `undefined` = `main`. Rows appear and disappear above the cursor
+   * (a child spawns, a finished row lingers out, a parent collapses), so the record — not the row
+   * index — is the source of truth. `selectedIndex` caches the row it resolves to: 0 = `main`, 1..N = subagents.
+   */
+  private selectedId: string | undefined;
   private selectedIndex = 0;
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
@@ -235,11 +240,12 @@ export class FleetList {
       }
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
+      this.selectedId = undefined;
       this.selectedIndex = 0;
       return;
     }
 
-    this.clampSelection();
+    this.syncSelection();
     this.ensureTimer(); // keep stats ticking whenever the list is shown (e.g. after a re-enable)
 
     if (!this.widgetRegistered) {
@@ -292,10 +298,26 @@ export class FleetList {
     return [{ kind: "main" }, ...this.agentRows()];
   }
 
-  private clampSelection(): void {
-    const max = this.roster().length - 1;
-    if (this.selectedIndex > max) this.selectedIndex = Math.max(0, max);
-    if (this.selectedIndex < 0) this.selectedIndex = 0;
+  /** Row of the selected record in `roster`, or the nearest row at the previous position once that record is gone. */
+  private resolveIndex(roster: FleetEntry[]): number {
+    if (this.selectedId === undefined) return 0; // `main`
+    const idx = roster.findIndex(e => e.kind === "agent" && e.record.id === this.selectedId);
+    // The record left the roster (it lingered out, or its parent collapsed): stay at the
+    // previous position instead of jumping back to `main`.
+    return idx >= 0 ? idx : Math.min(Math.max(0, this.selectedIndex), Math.max(0, roster.length - 1));
+  }
+
+  /** Point the cursor at `index` in `roster` (clamped) and record which record that is. */
+  private moveSelection(roster: FleetEntry[], index: number): void {
+    this.selectedIndex = Math.min(Math.max(0, index), Math.max(0, roster.length - 1));
+    const entry = roster[this.selectedIndex];
+    this.selectedId = entry?.kind === "agent" ? entry.record.id : undefined;
+  }
+
+  /** Re-resolve the row index from the selected record after the roster changed under the cursor. */
+  private syncSelection(): void {
+    const roster = this.roster();
+    this.moveSelection(roster, this.resolveIndex(roster));
   }
 
   // ---- Key handling ----
@@ -323,7 +345,7 @@ export class FleetList {
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
       if (isActivator && this.agentRows().length > 0 && this.ui.getEditorText() === "") {
         this.active = true;
-        this.selectedIndex = 0;
+        this.moveSelection(this.roster(), 0); // `main`
         this.update();
         return { consume: true };
       }
@@ -332,34 +354,38 @@ export class FleetList {
 
     // Active — arrows navigate, → / ← expand and collapse nested rows, Enter opens, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
-      const max = this.roster().length - 1;
-      this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      const roster = this.roster();
+      this.moveSelection(roster, this.resolveIndex(roster) + 1);
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
-      if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
-      this.selectedIndex -= 1;
+      const roster = this.roster();
+      const idx = this.resolveIndex(roster);
+      if (idx === 0) { this.deactivate(); return { consume: true }; }
+      this.moveSelection(roster, idx - 1);
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "right")) {
-      const entry = this.roster()[this.selectedIndex];
+      const roster = this.roster();
+      const entry = roster[this.resolveIndex(roster)];
       if (entry?.kind === "agent" && entry.nested.length > 0) {
         this.expanded.add(entry.record.id);
-        this.selectedIndex += 1; // its first child is the next row
+        const opened = this.roster(); // its first child is the next row
+        this.moveSelection(opened, this.resolveIndex(opened) + 1);
         this.update();
       }
       return { consume: true };
     }
     if (matchesKey(data, "left")) {
       const roster = this.roster();
-      const entry = roster[this.selectedIndex];
+      const entry = roster[this.resolveIndex(roster)];
       const parentId = entry?.kind === "agent" ? entry.record.parentAgentId : undefined;
-      const parentIdx = roster.findIndex(e => e.kind === "agent" && e.record.id === parentId);
-      if (parentId && parentIdx > 0) {
+      if (parentId) {
         this.expanded.delete(parentId);
-        this.selectedIndex = parentIdx;
+        const collapsed = this.roster();
+        this.moveSelection(collapsed, collapsed.findIndex(e => e.kind === "agent" && e.record.id === parentId));
         this.update();
       }
       return { consume: true };
@@ -387,12 +413,14 @@ export class FleetList {
 
   private deactivate(): void {
     this.active = false;
+    this.selectedId = undefined; // back to `main`
     this.selectedIndex = 0;
     this.update();
   }
 
   private openSelected(): void {
-    const entry = this.roster()[this.selectedIndex];
+    const roster = this.roster();
+    const entry = roster[this.resolveIndex(roster)];
     if (!entry || entry.kind === "main") {
       // `main` = return to the prompt; the native transcript is already shown.
       this.deactivate();
@@ -440,14 +468,10 @@ export class FleetList {
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
   private clearViewer(): void {
-    // Keep the cursor on the agent we were viewing — re-resolve by id so it
-    // still feels natural if the list reordered (an earlier agent finished)
-    // while the overlay was open. If that agent is gone, leave the index for
-    // update()'s clamp to settle.
-    if (this.viewingAgentId) {
-      const idx = this.roster().findIndex(e => e.kind === "agent" && e.record.id === this.viewingAgentId);
-      if (idx >= 0) this.selectedIndex = idx;
-    }
+    // Keep the cursor on the agent we were viewing. The record, not the row, is
+    // the selection, so a reorder while the overlay was open (an earlier agent
+    // finished) or its disappearance is settled by update()'s re-resolve.
+    if (this.viewingAgentId) this.selectedId = this.viewingAgentId;
     this.viewerClose = undefined;
     this.viewingAgentId = undefined;
     this.update();
@@ -458,9 +482,9 @@ export class FleetList {
   private renderBar(width: number, theme: Theme): string[] {
     const agents = this.agentRows();
     if (agents.length === 0) return [];
-    // Clamp locally so a render between a roster shrink and the next update()
+    // Resolve locally so a render between a roster change and the next update()
     // (e.g. on terminal resize) never loses the selection marker.
-    const sel = Math.min(this.selectedIndex, agents.length);
+    const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
     const hint = this.active
       ? "↑↓ select · enter view · esc back"

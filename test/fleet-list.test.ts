@@ -924,3 +924,59 @@ describe("FleetList nested rows (#146)", () => {
     expect(h.overlayComponent()).toBeDefined();
   });
 });
+
+describe("FleetList selection follows the record (#146)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+
+  it("keeps the selection on the same agent when a child spawns above it", () => {
+    const agents = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c1", description: "child one", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(DOWN); // open p, cursor on the sibling
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    agents.push(mk({ id: "c2", description: "child two", startedAt: 2500, parentAgentId: "p" }));
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("child two"))).toContain("◯");
+  });
+
+  it("keeps the selection when a settled parent starts running above it", () => {
+    const settled = mk({ id: "sp", description: "settled parent", startedAt: 1000, status: "completed", completedAt: Date.now() - 600_000 });
+    const agents = [settled, mk({ id: "s", description: "sibling job", startedAt: 3000 })];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); // the sibling is the only row
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+    agents.push(mk({ id: "c", description: "late child", startedAt: 2000, parentAgentId: "sp" }));
+    const lines = h.render();
+    expect(lines.find(l => l.includes("sibling job"))).toContain("⏺");
+    expect(lines.find(l => l.includes("settled parent"))).toContain("◯");
+  });
+
+  it("moves the selection to the parent when the selected child lingers out", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+    agents[1] = mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", status: "completed", completedAt: Date.now() - 60_000 });
+    const lines = h.render();
+    expect(lines.find(l => l.includes("parent job"))).toContain("⏺");
+    expect(lines.some(l => l.includes("child job"))).toBe(false);
+  });
+
+  it("stays at the previous position, not on main, when the selected child lingers out with rows below", () => {
+    const agents: AgentRecord[] = [
+      mk({ id: "p", description: "parent job", startedAt: 1000 }),
+      mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
+      mk({ id: "s", description: "sibling job", startedAt: 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(RIGHT); // child selected
+    agents[1] = mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p", status: "completed", completedAt: Date.now() - 60_000 });
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
+  });
+});
