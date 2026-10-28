@@ -98,12 +98,6 @@ export interface AgentConfig {
   sourcePath?: string;
 }
 
-/**
- * Display mode for the persistent above-editor agent widget.
- * - `all`: show every agent.
- * - `off`: hide the widget entirely.
- */
-export type WidgetMode = 'all' | 'off';
 
 /**
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
@@ -229,7 +223,7 @@ export interface AgentRecord {
    *  carries no turn), so it describes the current run; the record's `toolUses`
    *  stays cumulative across resumes. A second source exists in the `Agent`
    *  tool's execute closure (the closure-local `AgentActivity.turnCount` used
-   *  for the live widget), which is unreachable from `get_subagent_result`'s
+   *  for the live FleetView row), which is unreachable from `get_subagent_result`'s
    *  separate execute — hence the record needs its own field.
    *  `get_subagent_result` surfaces it in its running header;
    *  the `checkpoint` tool reads it as the turn label. */
@@ -264,7 +258,7 @@ export interface AgentRecord {
   depth?: number;
   /** Set on records spawned by a nested delegation tool: the owning agent's id.
    *  Nested records are reachable only through their parent's scoped tools, so
-   *  every top-level surface (notification, widget, `/agents`, RPC, the Agent
+   *  every top-level surface (notification, FleetView, `/agents`, RPC, the Agent
    *  tool) filters them out. */
   parentAgentId?: string;
   /** Effective nesting cap inherited by this branch, so a child hands its own
@@ -278,7 +272,7 @@ export interface AgentRecord {
    *  then the agent-config value, then the settings default
    *  (`getDefaultMaxTurns()`), then normalized. Captured at spawn so
    *  `renderRunning` and the `checkpoint` tool read the same value the
-   *  widget displays (the activity tracker is closure-local and
+   *  FleetView row displays (the activity tracker is closure-local and
    *  unreachable from `get_subagent_result`). Resolved in `manager.spawn`
    *  so every spawn path (Agent tool, scheduler, RPC) agrees on the value. */
   effectiveMaxTurns?: number;

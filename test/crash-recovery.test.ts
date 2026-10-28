@@ -177,8 +177,11 @@ describe("crash recovery — startup report", () => {
     await made.lifecycle.get("session_start")({ reason: "startup" }, ctx);
 
     const keys = ui.setWidget.mock.calls.filter(([, content]) => content !== undefined).map(([key]) => key);
-    expect(keys).toContain("agents");
+    expect(keys).not.toContain("agents");
     expect(keys).toContain("fleet");
+    const factory = ui.setWidget.mock.calls.filter(([key, content]) => key === "fleet" && typeof content === "function").at(-1)?.[1];
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    expect(factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render(120).join("\n")).toContain("task r1");
   });
 
   it("reports nothing on a reopen after the report settled the runs", async () => {

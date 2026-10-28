@@ -52,7 +52,7 @@ export function stripControlChars(s: string): string {
 /**
  * Collapse newlines/CRs/tabs to spaces and strip control/invisible characters,
  * for untrusted text composed into a single terminal line (report headers and
- * metadata, tool-call lines, widget rows). Use `stripControlChars` for body
+ * metadata, tool-call lines, fleet rows). Use `stripControlChars` for body
  * and display paths that preserve layout. A display sanitizer, not a type
  * guard: non-string input renders as the empty string.
  */

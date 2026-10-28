@@ -28,7 +28,8 @@ import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension, { formatTaskNotification } from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentWidget, formatCost } from "../src/ui/agent-widget.js";
+import { formatCost } from "../src/ui/agent-display.js";
+import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);
@@ -121,7 +122,7 @@ describe("the completion report the parent model reads", () => {
   });
 });
 
-describe("the widget's running row", () => {
+describe("FleetView's running row", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
   /** Render a running agent's row, with no activity entry (a scheduled or
@@ -129,23 +130,28 @@ describe("the widget's running row", () => {
   function renderRunningRow(showCost: boolean): string {
     const record = {
       ...createRecord({ status: "running", completedAt: undefined }),
+      session: fakeSession(),
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: COST },
     };
-    const widget = new AgentWidget(
-      { isDraining: () => false, listAgents: () => [record] } as unknown as Parameters<typeof AgentWidget>[0],
+    const fleet = new FleetList(
+      { isDraining: () => false, listAgents: () => [record] } as unknown as ConstructorParameters<typeof FleetList>[0],
       new Map(),
-      () => "all",
       () => showCost,
     );
-    let factory: ((tui: unknown, theme: typeof theme) => { render(): string[] }) | undefined;
-    widget.setUICtx({
-      setStatus: () => {},
+    let factory: ((tui: unknown, theme: typeof theme) => { render(width: number): string[] }) | undefined;
+    fleet.setUICtx({
       setWidget: (_key, content) => {
         if (typeof content === "function") factory = content;
       },
-    });
-    widget.update();
-    return factory?.({ terminal: { columns: 160 }, requestRender: () => {} }, theme).render().join("\n") ?? "";
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: () => Promise.resolve(undefined),
+    } as FleetUICtx);
+    fleet.update();
+    const text = factory?.({ terminal: { columns: 160 }, requestRender: () => {} }, theme).render(160).join("\n") ?? "";
+    fleet.dispose();
+    return text;
   }
 
   it("shows the cost beside the token count when enabled", () => {

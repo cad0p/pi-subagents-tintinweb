@@ -43,7 +43,8 @@ import { runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { AgentWidget, buildInvocationTags, type Theme } from "../src/ui/agent-widget.js";
+import { buildInvocationTags, type Theme } from "../src/ui/agent-display.js";
+import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
@@ -277,7 +278,7 @@ describe("the read-back reaching the surfaces", () => {
   });
 });
 
-describe("the widget's model row", () => {
+describe("FleetView's model row", () => {
   const theme: Theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
   function renderRow(showModel: boolean): string {
@@ -290,24 +291,29 @@ describe("the widget's model row", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 100, output: 50, cacheWrite: 0 },
       compactionCount: 0,
+      session: reportingSession(undefined, undefined),
       invocation: { modelName: "haiku 4.5", modelId: "anthropic/claude-haiku-4-5", thinking: "low" },
     };
-    const widget = new AgentWidget(
-      { isDraining: () => false, listAgents: () => [record] } as unknown as ConstructorParameters<typeof AgentWidget>[0],
+    const fleet = new FleetList(
+      { isDraining: () => false, listAgents: () => [record] } as unknown as ConstructorParameters<typeof FleetList>[0],
       new Map(),
-      () => "all",
       () => false,
       () => showModel,
     );
-    let factory: ((tui: unknown, t: Theme) => { render(): string[] }) | undefined;
-    widget.setUICtx({
-      setStatus: () => {},
+    let factory: ((tui: unknown, t: Theme) => { render(width: number): string[] }) | undefined;
+    fleet.setUICtx({
       setWidget: (_key, content) => {
         if (typeof content === "function") factory = content;
       },
-    });
-    widget.update();
-    return factory?.({ terminal: { columns: 160 }, requestRender: () => {} }, theme).render().join("\n") ?? "";
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: () => Promise.resolve(undefined),
+    } as FleetUICtx);
+    fleet.update();
+    const text = factory?.({ terminal: { columns: 160 }, requestRender: () => {} }, theme).render(160).join("\n") ?? "";
+    fleet.dispose();
+    return text;
   }
 
   it("names the model and level when enabled", () => {

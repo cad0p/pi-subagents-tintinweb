@@ -535,14 +535,14 @@ describe("subagents across a real /reload (faux provider)", () => {
     const id = liveRegistry().listAgents()[0]?.id ?? "";
 
     await reloadRoot(root);
-    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("(draining)"), { timeout: 10_000 });
+    await vi.waitFor(() => expect(renderedWidget("fleet")).toContain("(draining)"), { timeout: 10_000 });
 
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
     });
-    await vi.waitFor(() => expect(renderedWidget("agents")).not.toContain("(draining)"), { timeout: 10_000 });
-    expect(renderedWidget("agents")).toContain("reload agent");
+    await vi.waitFor(() => expect(renderedWidget("fleet")).not.toContain("(draining)"), { timeout: 10_000 });
+    expect(renderedWidget("fleet")).toContain("reload agent");
   }, 20_000);
 
   it("counts a tool call a reloaded child makes in its widget row", async () => {
@@ -557,7 +557,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     await reloadRoot(root);
 
     runTool();
-    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("1 tool use"), { timeout: 10_000 });
+    await vi.waitFor(() => expect(renderedWidget("fleet")).toContain("1 tool use"), { timeout: 10_000 });
 
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.status === "completed")).toBeDefined(), {
@@ -573,17 +573,23 @@ describe("subagents across a real /reload (faux provider)", () => {
     childToolStep = Promise.resolve();
     childHeldCommand = `for i in $(seq 200); do [ -f ${gateFile} ] && break; sleep 0.05; done`;
     await root.prompt("spawn-now");
-    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("running command"), { timeout: 10_000 });
-    expect(renderedWidget("agents")).toContain("1 tool use");
+    // The first call (bash `true`) also reads as "running command" while it runs, so wait for its end ("1 tool use") too.
+    await vi.waitFor(
+      () => {
+        expect(renderedWidget("fleet")).toContain("running command");
+        expect(renderedWidget("fleet")).toContain("1 tool use");
+      },
+      { timeout: 10_000 },
+    );
 
     await reloadRoot(root);
-    expect(renderedWidget("agents")).toContain("(draining)");
-    expect(renderedWidget("agents")).toContain("running command");
-    expect(renderedWidget("agents")).not.toContain("thinking");
-    expect(renderedWidget("agents")).toContain("1 tool use");
+    expect(renderedWidget("fleet")).toContain("(draining)");
+    expect(renderedWidget("fleet")).toContain("running command");
+    expect(renderedWidget("fleet")).not.toContain("thinking");
+    expect(renderedWidget("fleet")).toContain("1 tool use");
 
     writeFileSync(gateFile, "");
-    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("2 tool uses"), { timeout: 10_000 });
+    await vi.waitFor(() => expect(renderedWidget("fleet")).toContain("2 tool uses"), { timeout: 10_000 });
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.status === "completed")).toBeDefined(), {
       timeout: 10_000,
@@ -607,10 +613,10 @@ describe("subagents across a real /reload (faux provider)", () => {
 
     await reloadRoot(root);
     // Shown as soon as reload() returns: retireDrained renders the adopted row, no widget timer tick is needed.
-    expect(renderedWidget("agents")).toContain("reload agent");
+    expect(renderedWidget("fleet")).toContain("reload agent");
 
     await root.prompt("bash-now");
-    await vi.waitFor(() => expect(renderedWidget("agents")).not.toContain("reload agent"), { timeout: 10_000 });
+    await vi.waitFor(() => expect(renderedWidget("fleet")).not.toContain("reload agent"), { timeout: 10_000 });
   }, 20_000);
 
   it("counts a tool call a resumed child makes after /reload", async () => {
@@ -638,7 +644,7 @@ describe("subagents across a real /reload (faux provider)", () => {
 
     await reloadRoot(root);
     runTool();
-    await vi.waitFor(() => expect(renderedWidget("agents")).toContain("1 tool use"), { timeout: 10_000 });
+    await vi.waitFor(() => expect(renderedWidget("fleet")).toContain("1 tool use"), { timeout: 10_000 });
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {
       timeout: 10_000,
@@ -662,12 +668,12 @@ describe("subagents across a real /reload (faux provider)", () => {
     resumeTarget = id;
     await root.prompt("resume-now");
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.toolUses).toBe(2), { timeout: 10_000 });
-    expect(renderedWidget("agents")).not.toContain("2 tool uses");
+    expect(renderedWidget("fleet")).not.toContain("2 tool uses");
 
     await reloadRoot(root);
-    expect(renderedWidget("agents")).toContain("(draining)");
-    expect(renderedWidget("agents")).toContain("1 tool use");
-    expect(renderedWidget("agents")).not.toContain("2 tool uses");
+    expect(renderedWidget("fleet")).toContain("(draining)");
+    expect(renderedWidget("fleet")).toContain("1 tool use");
+    expect(renderedWidget("fleet")).not.toContain("2 tool uses");
 
     release();
     await vi.waitFor(() => expect(liveRegistry().listAgents().find((r) => r.id === id)?.status).toBe("completed"), {

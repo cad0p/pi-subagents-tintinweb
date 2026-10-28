@@ -52,7 +52,7 @@ import {
   toSpawnData,
 } from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
-import type { AgentActivity } from "./ui/agent-widget.js";
+import type { AgentActivity } from "./ui/agent-display.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -131,7 +131,7 @@ export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
 /**
  * Fired by `steer()` once a message is delivered or queued. Every steer path
- * that goes through the manager reports through it — the widget, the fleet
+ * that goes through the manager reports through it — the fleet
  * list, the conversation viewer, and the cross-extension RPC. The SendMessage
  * tools (index.ts and its nested twin) call `deliver` directly and emit nothing.
  */

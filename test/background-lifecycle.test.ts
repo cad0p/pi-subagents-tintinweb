@@ -1057,7 +1057,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     // only from the activity tracker, so a leftover entry would add a `↻`.
     await lifecycle.get("tool_execution_start")({}, { ui });
     const widgetFactory = ui.setWidget.mock.calls.find(
-      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+      ([key, content]: [string, unknown]) => key === "fleet" && typeof content === "function",
     )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
     expect(widgetFactory).toBeTypeOf("function");
     const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)
@@ -1114,7 +1114,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     const ui = { setStatus: vi.fn(), setWidget: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
     await lifecycle.get("tool_execution_start")({}, { ui });
     const widgetFactory = ui.setWidget.mock.calls.find(
-      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+      ([key, content]: [string, unknown]) => key === "fleet" && typeof content === "function",
     )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
     expect(widgetFactory).toBeTypeOf("function");
     const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)
@@ -1244,7 +1244,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     expect(record.result).toBe("second");
   });
 
-  it("shows the resumed run's finished row after the prior run's latch aged out", async () => {
+  it("shows the resumed run's finished row after the prior run's linger has aged out", async () => {
     resolvedRun("first");
     const { tools, lifecycle } = registerExtension();
     const ui = { setWidget: vi.fn(), setStatus: vi.fn(), onTerminalInput: vi.fn(() => vi.fn()) };
@@ -1259,21 +1259,22 @@ describe("background lifecycle — model-visible surfaces", () => {
     const record = handle.getRecord(id);
     await record.promise;
 
-    // The finished row is latched on completion and then aged out by the next
-    // main turn, so it disappears from the widget.
+    // The finished row lingers 4 s after completion. Backdate it past that
+    // window so the next main turn renders it gone.
+    record.completedAt = Date.now() - 60_000;
     await lifecycle.get("tool_execution_start")({}, { ui });
+    // FleetView clears its widget once no row remains: the latest call decides what shows.
     const renderAgents = (): string => {
-      const factory = ui.setWidget.mock.calls.find(
-        ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
-      )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
-      expect(factory).toBeTypeOf("function");
-      return factory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme).render().join("\n");
+      const fleetCalls = ui.setWidget.mock.calls.filter(([key]: [string, unknown]) => key === "fleet");
+      const factory = fleetCalls[fleetCalls.length - 1]?.[1] as ((tui: unknown, theme: unknown) => { render(): string[] }) | undefined;
+      if (!factory) return "";
+      return factory({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme).render().join("\n");
     };
     const rowOf = (rendered: string) => rendered.split("\n").find((line) => line.includes("aged out"));
     expect(rowOf(renderAgents())).toBeUndefined();
 
-    // Starting the resume clears the stale latch, so the resumed run's own
-    // completion row is visible instead of inheriting the aged-out one.
+    // Starting the resume makes the record running again, so the row that
+    // shows after it finishes is the resumed run's own.
     vi.mocked(resumeAgent).mockResolvedValue({ text: "second" });
     await tools.get("SendMessage").execute(
       "tc-resume",
@@ -1537,7 +1538,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
 
     const widgetFactory = ui.setWidget.mock.calls.find(
-      ([key, content]: [string, unknown]) => key === "agents" && typeof content === "function",
+      ([key, content]: [string, unknown]) => key === "fleet" && typeof content === "function",
     )?.[1] as ((tui: any, theme: any) => { render(): string[] }) | undefined;
     expect(widgetFactory).toBeTypeOf("function");
     const rendered = widgetFactory!({ terminal: { columns: 500 }, requestRender: () => {} }, mockTheme)

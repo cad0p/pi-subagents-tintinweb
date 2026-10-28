@@ -15,7 +15,7 @@ import { DEFAULT_SHOW_COST } from "./settings.js";
 import { getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { toSingleLine } from "./text-safety.js";
 import type { AgentRecord } from "./types.js";
-import { formatCost, formatDuration, formatTokens, getDisplayName } from "./ui/agent-widget.js";
+import { formatCost, formatDuration, formatTokens, getDisplayName } from "./ui/agent-display.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 /**
