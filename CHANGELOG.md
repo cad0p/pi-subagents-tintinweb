@@ -31,6 +31,10 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Name a broken background-work provider in a warning (closes #135) ([#136](https://github.com/cad0p/pi-subagents-tintinweb/pull/136))
 - *(subagents)* The time-limit label says whether the agent wrapped up or was stopped (closes #134) ([#138](https://github.com/cad0p/pi-subagents-tintinweb/pull/138))
 
+### 🚜 Refactor
+
+- *(subagents)* FleetView is the only subagent surface (closes #143) ([#145](https://github.com/cad0p/pi-subagents-tintinweb/pull/145))
+
 ### 📚 Documentation
 
 - One subagents extension per process (closes #131) ([#132](https://github.com/cad0p/pi-subagents-tintinweb/pull/132))
