@@ -288,7 +288,12 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const descriptionText = sanitizeHeaderText(String(record.description ?? ""));
   const description = headerPreview(descriptionText) || "(no description)";
-  let header = `**${getStatusGlyph(String(record.status))} Subagent ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
+  // getAgentConfig, not getConfig: getConfig falls back to general-purpose for an unregistered or disabled type, which would name the wrong agent.
+  // A disabled type whose config is still present keeps its own name; only a type absent from the registry shows its record.type string.
+  const config = getAgentConfig(String(record.type));
+  const typeName = sanitizeHeaderText(config ? config.displayName ?? config.name : "") || sanitizeHeaderText(String(record.type));
+  const agentName = headerPreview(typeName) || "Agent";
+  let header = `**${getStatusGlyph(String(record.status))} ${agentName} ${getStatusWord(record.status, record.limitReason, record.timeLimit)}: ${description}**`;
   const errorText = record.error && (record.status === "error" || record.status === "stopped" || record.status === "interrupted")
     ? sanitizeHeaderText(String(record.error))
     : "";

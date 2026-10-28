@@ -180,7 +180,7 @@ describe("turn-gated completion notifications", () => {
     expect(payload.display).toBe(true);
     expect(payload.details).toBeUndefined();
     expect(payload.content).not.toContain("<task-notification>");
-    expect(payload.content).toContain("**✓ Subagent completed: research thing**");
+    expect(payload.content).toContain("**✓ Agent completed: research thing**");
     // A completed run still reports its turn count.
     expect(payload.content).toContain("↻1");
     expect(payload.content).toContain("Result:\n\n");
@@ -373,7 +373,7 @@ describe("turn-gated completion notifications", () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("NaN"));
       expect(pi.sendMessage).toHaveBeenCalledTimes(1);
       const [payload] = pi.sendMessage.mock.calls[0];
-      expect(payload.content).toContain("**✗ Subagent error: failing task** — boom");
+      expect(payload.content).toContain("**✗ Agent error: failing task** — boom");
       expect(payload.content).toContain("Result:\n\nboom");
     } finally {
       capOverride = undefined;
@@ -398,8 +398,8 @@ describe("turn-gated completion notifications", () => {
     expect(payload.customType).toBe("subagent-notification");
     expect(payload.content).not.toContain("Background agent group completed");
     expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
-    expect(payload.content).toContain("**✓ Subagent completed: first task**");
-    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+    expect(payload.content).toContain("**✓ Agent completed: first task**");
+    expect(payload.content).toContain("**✓ Agent completed: second task**");
   });
 
   it("two completions in one window send one notification with both (#83)", async () => {
@@ -413,8 +413,8 @@ describe("turn-gated completion notifications", () => {
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     const [payload] = pi.sendMessage.mock.calls[0];
-    expect(payload.content).toContain("**✓ Subagent completed: first task**");
-    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+    expect(payload.content).toContain("**✓ Agent completed: first task**");
+    expect(payload.content).toContain("**✓ Agent completed: second task**");
   });
 
   it("a pull during the window drops that child from the batch; the rest still sends (#83)", async () => {
@@ -432,7 +432,7 @@ describe("turn-gated completion notifications", () => {
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     const [payload] = pi.sendMessage.mock.calls[0];
     expect(payload.content).not.toContain("first task");
-    expect(payload.content).toContain("**✓ Subagent completed: second task**");
+    expect(payload.content).toContain("**✓ Agent completed: second task**");
   });
 
   it("a pull during the window of a lone completion sends nothing (#83)", async () => {

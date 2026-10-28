@@ -68,7 +68,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       expect(conversationText(run!.parentSession)).toContain("CHILD_GREETING_OK");
     });
     const transcript = conversationText(run.parentSession);
-    expect(transcript).toContain("**✓ Subagent completed: greet**");
+    expect(transcript).toContain("**✓ Agent completed: greet**");
     expect(run.responseText).toContain("Parent relays.");
     // Parent t1 (Agent call) + child t1 (reply) + parent t2 (final) = 3 calls.
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
@@ -217,7 +217,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     const transcript = conversationText(parentSession);
     expect(transcript).not.toContain(CHILD_MARKER);
     expect(transcript).not.toContain("CHILD_TOKEN_SHOULD_NOT_APPEAR");
-    expect(transcript).not.toMatch(/Subagent (completed|error|stopped)/);
+    expect(transcript).not.toMatch(/\*\*[✓✗○] [^*\n]+ (completed|error|stopped): /);
   });
 
   it("delivers one markdown notification per background agent, in completion order", async () => {
@@ -259,13 +259,13 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 
     const transcript = conversationText(run.parentSession);
     expect(transcript).not.toContain("Background agent group completed");
-    expect(transcript).toContain("**✓ Subagent completed: first bg**");
-    expect(transcript).toContain("**✓ Subagent completed: second bg**");
-    expect(transcript.match(/\*\*[✓✗] Subagent completed: /g)?.length).toBe(2);
+    expect(transcript).toContain("**✓ Agent completed: first bg**");
+    expect(transcript).toContain("**✓ Agent completed: second bg**");
+    expect(transcript.match(/\*\*[✓✗] Agent completed: /g)?.length).toBe(2);
     expect(transcript).toContain("Result:");
     // Completion order: first bg's report precedes second bg's.
-    expect(transcript.indexOf("Subagent completed: first bg")).toBeLessThan(
-      transcript.indexOf("Subagent completed: second bg"),
+    expect(transcript.indexOf("Agent completed: first bg")).toBeLessThan(
+      transcript.indexOf("Agent completed: second bg"),
     );
   });
 

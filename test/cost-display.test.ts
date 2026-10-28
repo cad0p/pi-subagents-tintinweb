@@ -98,7 +98,7 @@ describe("the completion report the parent model reads", () => {
   it("names the cost in the stats it already reports", () => {
     // Catches a formatter that is never called from the markdown report.
     expect(formatTaskNotification(createRecord(), settings, true).split("\n")[0]).toBe(
-      "**✓ Subagent completed: Test Agent** · 2 tool uses · 1.2k token · ~$0.0123 · 5.0s",
+      "**✓ Agent completed: Test Agent** · 2 tool uses · 1.2k token · ~$0.0123 · 5.0s",
     );
   });
 
