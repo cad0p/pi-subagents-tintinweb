@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  guardInit,
   guardInitAsync,
   guardInitVoid,
   takeInitFailures,
@@ -13,10 +12,9 @@ describe("init-guard", () => {
 
   it("records message and stack for an Error", () => {
     const err = new Error("boom");
-    const out = guardInit("label", () => {
+    expect(guardInitVoid("label", () => {
       throw err;
-    });
-    expect(out).toBeUndefined();
+    })).toBe(false);
     const failures = takeInitFailures();
     expect(failures).toHaveLength(1);
     expect(failures[0].label).toBe("label");
@@ -25,10 +23,9 @@ describe("init-guard", () => {
   });
 
   it("records a non-Error value", () => {
-    const out = guardInit("label", () => {
+    expect(guardInitVoid("label", () => {
       throw "nope";
-    });
-    expect(out).toBeUndefined();
+    })).toBe(false);
     const failures = takeInitFailures();
     expect(failures).toHaveLength(1);
     expect(failures[0].message).toBe("nope");
@@ -44,13 +41,9 @@ describe("init-guard", () => {
     expect(() => guardInitVoid("label", () => {
       throw hostile;
     })).not.toThrow();
-    expect(() => guardInit("label", () => {
-      throw hostile;
-    })).not.toThrow();
     const failures = takeInitFailures();
-    expect(failures).toHaveLength(2);
+    expect(failures).toHaveLength(1);
     expect(failures[0].message).toBe("<unprintable thrown value>");
-    expect(failures[1].message).toBe("<unprintable thrown value>");
   });
 
   it("survives a thrown proxy whose getPrototypeOf throws", () => {
@@ -71,16 +64,10 @@ describe("init-guard", () => {
   });
 
   it("drains recorded failures", () => {
-    guardInit("a", () => {
+    guardInitVoid("a", () => {
       throw new Error("x");
     });
     expect(takeInitFailures()).toHaveLength(1);
-    expect(takeInitFailures()).toHaveLength(0);
-  });
-
-  it("guardInit returns the value on success", () => {
-    const out = guardInit("label", () => 42);
-    expect(out).toBe(42);
     expect(takeInitFailures()).toHaveLength(0);
   });
 
@@ -105,7 +92,6 @@ describe("init-guard", () => {
   });
 
   it("records nothing when nothing throws", () => {
-    guardInit("a", () => 1);
     guardInitVoid("b", () => {});
     void guardInitAsync("c", async () => 2);
     expect(takeInitFailures()).toHaveLength(0);
