@@ -25,6 +25,7 @@ import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { isStrictAgentFilesEnabled, loadCustomAgents, setStrictAgentFiles } from "./custom-agents.js";
+import { capDebugEnabled } from "./debug.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
@@ -767,6 +768,10 @@ export default function (pi: ExtensionAPI) {
   // A resumed child is rebuilt outside any spawn's context: read the live root theme instead of
   // letting its extensions see the fallback one.
   manager.uiTheme = () => currentCtx?.ui?.theme;
+  // The cap's diagnostic lines, on only with PI_SUBAGENTS_DEBUG set (#112 item 4); with the gate off nothing is emitted.
+  manager.onCapEvent = (event) => {
+    if (capDebugEnabled()) pi.events.emit("subagents:debug", event);
+  };
 
   // ---- Native transcript view (root only) ----
   // The capture probe runs at factory time; the view is inert until the probe fires.

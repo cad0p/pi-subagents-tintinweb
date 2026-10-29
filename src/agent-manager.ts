@@ -338,6 +338,12 @@ export interface SpawnOptions {
   agentConfig?: AgentConfig;
 }
 
+/** One line of the cap diagnostic channel: when the heads-up was observed, when the hard stop fired, when the lifecycle settled. */
+export type CapEvent =
+  | { kind: "headsUp"; id: string; at: number; startedAt: number; capMinutes?: number; left: string }
+  | { kind: "hardStop"; id: string; at: number; startedAt: number; capMinutes?: number; streaming: boolean }
+  | { kind: "settle"; id: string; at: number; startedAt: number; capMinutes?: number; status: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" };
+
 /** The five activity callbacks a resumed run forwards to its caller. */
 export type ResumeCallbacks = Pick<
   SpawnOptions,
@@ -373,6 +379,8 @@ export class AgentManager {
    * Without it a resumed child's `ctx.ui.theme` falls back to the identity stand-in.
    */
   uiTheme?: () => Theme | undefined;
+  /** Diagnostic sink (#112 item 4): the cap's heads-up, hard stop and settle. Unset with the gate off. */
+  onCapEvent?: (event: CapEvent) => void;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -965,6 +973,7 @@ export class AgentManager {
     this.wake(record, session, content, {
       delivered: () => {
         record.capForced = true;
+        this.onCapEvent?.({ kind: "headsUp", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, left });
       },
     });
   }
@@ -1000,6 +1009,7 @@ export class AgentManager {
       this.endGate(gate, "aborted");
     }
     const session = record.session;
+    this.onCapEvent?.({ kind: "hardStop", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, streaming: !!(session?.isStreaming || session?.agent.state.isStreaming) });
     if (session && (session.isStreaming || session.agent.state.isStreaming)) {
       void session.abort();
       return;
@@ -1284,6 +1294,7 @@ export class AgentManager {
     this.nestedSendFailures.delete(record.id);
     const notes = [this.dropUndelivered(record, unsent), this.nameUnobservedNested(record.id)].filter(Boolean);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
+    this.onCapEvent?.({ kind: "settle", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, status: record.status, limitReason: record.limitReason, timeLimit: record.timeLimit });
     const text = notes.length > 0 ? [finished, ...notes].join("\n\n") : finished;
     if (notes.length > 0) record.result = text;
     void this.afterRun(record).then(() => life.resolve(text));
