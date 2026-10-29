@@ -118,7 +118,10 @@ describe("nested ownership metadata", () => {
     const call = (name: string, params: Record<string, unknown>) =>
       root.tools.get(name).execute("tc", params, undefined, undefined, ctx());
     expect(textOf(await call("get_subagent_result", { agent_id: nestedId }))).toContain("not found");
-    expect(textOf(await call("SendMessage", { to: nestedId, message: "x" }))).toContain("not found");
+    // SendMessage says why it cannot reach it: a nested child is addressed through its parent, and nothing was delivered.
+    const answer = textOf(await call("SendMessage", { to: nestedId, message: "x" }));
+    expect(answer).toContain("is a nested child");
+    expect(answer).toContain("Nothing was delivered");
   });
 
   it("the RPC surface cannot spawn with forged metadata or stop a nested child", async () => {
