@@ -16,6 +16,12 @@ export interface InitFailure {
 	stack?: string;
 }
 
+/**
+ * Process-wide, not per activation: every activation in this process records here, and only the
+ * root activation's `session_start` drains it (see `reportInitFailures` in src/index.ts, gated
+ * on `isRoot`). A child-side reporter calling `takeInitFailures` would splice the root's failures
+ * away and report them under its own session, leaving the root's warning lost entirely.
+ */
 const failures: InitFailure[] = [];
 
 /** Reported when the thrown value cannot even be stringified — an exotic value, but still no reason to lose every tool. */
@@ -47,15 +53,6 @@ export function recordInitFailure(label: string, error: unknown): void {
 	failures.push(failure);
 }
 
-export function guardInit<T>(label: string, fn: () => T): T | undefined {
-	try {
-		return fn();
-	} catch (error) {
-		recordInitFailure(label, error);
-		return undefined;
-	}
-}
-
 export function guardInitVoid(label: string, fn: () => void): boolean {
 	try {
 		fn();
@@ -75,7 +72,10 @@ export async function guardInitAsync<T>(label: string, fn: () => Promise<T>): Pr
 	}
 }
 
-/** Drain the recorded failures, once per activation. */
+/**
+ * Drain the recorded failures, once per activation, from the root only — the array is process-wide.
+ * See the `failures` comment above for why a child-side caller must never drain it.
+ */
 export function takeInitFailures(): InitFailure[] {
 	return failures.splice(0, failures.length);
 }
