@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -46,6 +46,7 @@ import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js"
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType } from "./types.js";
 import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme } from "./ui/agent-display.js";
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
+import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
@@ -313,6 +314,10 @@ export default function (pi: ExtensionAPI) {
   // Read once, while the factory runs: only a child session's construction sets the context, and it ends before
   // this activation's later callbacks run.
   const isRoot = !inChildSessionContext();
+  // Root only, and at factory time so it runs before pi's first `renderInitialMessages`: the probe
+  // captures the live InteractiveMode and restores the original method on that first call. If it
+  // never fires, the view stays unavailable and FleetView keeps opening the overlay.
+  if (isRoot) captureInteractiveMode(InteractiveMode);
   let leakedChildContext = isRoot ? takeLeakedChildContextRead() : undefined;
   // Read directly rather than waiting for applyAndEmitLoaded below: this decides
   // the initial load, which happens hundreds of lines before settings are applied.
@@ -574,6 +579,9 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
+    // PR 1 re-reads a shown transcript when its run completes. Every record reaches this callback,
+    // nested ones included; the bus events above are top-level only.
+    nativeView?.onRecordEvent(record.id);
     // A settled record keeps a snapshot, not the live session: drop the activity
     // handle too, so the child session is unreachable once its teardown ran.
     const activity = agentActivity.get(record.id);
@@ -683,6 +691,24 @@ export default function (pi: ExtensionAPI) {
   });
 
   manager.resolveSettings = recoveredSettings;
+
+  // ---- Native transcript view (root only) ----
+  // The capture probe runs at factory time; the view is inert until the probe fires.
+  const nativeView = isRoot
+    ? new NativeTranscriptView({
+        manager,
+        getContext: () => currentCtx as unknown as NativeViewContext | undefined,
+        getMode: capturedInteractiveMode,
+      })
+    : undefined;
+  if (nativeView) {
+    // The events that name a record. They fire per run, never per token (PR 1 is a snapshot).
+    for (const event of ["subagents:started", "subagents:steered", "subagents:compacted", "subagents:completed", "subagents:failed"]) {
+      pi.events.on(event, (raw: unknown) => {
+        if (typeof raw === "object" && raw !== null && "id" in raw && typeof raw.id === "string") nativeView.onRecordEvent(raw.id);
+      });
+    }
+  }
 
   // ---- Program Status Protocol (OSC 7501) ----
   // One child record per subagent in the terminal's own status UI. Root only: a child session loads
@@ -943,6 +969,9 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async (event, ctx) => {
+    // First statement: deactivate, unsubscribe and restore the wrappers before an abort below can
+    // fire a completion. `quit` never paints; `reload` only re-attaches the host container.
+    nativeView?.close(event.reason === "reload" ? "reload" : event.reason === "quit" ? "quit" : "session");
     shutDown = true;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
@@ -1235,6 +1264,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled);
+  fleet.setNativeView(nativeView);
 
   // Project/global default for writing the subagent .output transcript lives in
   // output-file.ts (both spawn paths read it). A custom agent's

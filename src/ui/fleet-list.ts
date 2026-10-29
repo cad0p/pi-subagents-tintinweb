@@ -36,6 +36,7 @@ import {
   type Theme,
 } from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { noTranscriptMessage } from "./native-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -61,6 +62,12 @@ export type FleetUICtx = {
     options?: { overlay?: boolean; overlayOptions?: unknown; onHandle?: (handle: unknown) => void },
   ): Promise<T>;
 };
+
+/** The native transcript view FleetView opens into; `unavailable` falls back to the overlay. */
+export interface FleetNativeView {
+  isOpen(): boolean;
+  open(id: string): "opened" | "refused" | "unavailable";
+}
 
 type MainEntry = { kind: "main" };
 /** One visible agent row: its depth in the tree, every descendant under it, and whether it is open. */
@@ -180,6 +187,8 @@ export class FleetList {
   private viewingAgentId: string | undefined;
   /** Parents whose nested rows are shown, by parent id; dropped once the parent is evicted. */
   private expanded = new Set<string>();
+  /** The in-place native view, when the capture probe found pi's instance. */
+  private nativeView: FleetNativeView | undefined;
 
   constructor(
     private manager: AgentManager,
@@ -195,6 +204,11 @@ export class FleetList {
   ) {}
 
   // ---- Lifecycle ----
+
+  /** Wire the native transcript view; left unset, Enter keeps opening the overlay. */
+  setNativeView(view: FleetNativeView | undefined): void {
+    this.nativeView = view;
+  }
 
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
@@ -333,6 +347,9 @@ export class FleetList {
   /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
     if (!this.ui) return undefined;
+    // The native view owns the keyboard (its editor is focused): the process-global listener must
+    // not steal ↓ from a child prompt whose draft happens to be empty.
+    if (this.nativeView?.isOpen()) return undefined;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
@@ -440,12 +457,21 @@ export class FleetList {
     }
     const record = entry.record;
     if (!this.ui) return;
+    if (this.nativeView) {
+      try {
+        const result = this.nativeView.open(record.id);
+        if (result === "opened") {
+          this.deactivate();
+          return;
+        }
+        if (result === "refused") return;
+      } catch {
+        // The capture guard failed: fall back to the overlay, exactly as today.
+      }
+    }
     const session = record.session ?? this.manager.settledTranscript(record.id);
     if (!session) {
-      const message = isQueued(record) ? "queued, not started yet"
-        : record.status === "stopped" && record.completedAt != null ? "stopped before it started"
-        : `Agent is ${toSingleLine(record.status)} — no session available.`;
-      this.ui.notify(message, "info");
+      this.ui.notify(noTranscriptMessage(record), "info");
       return;
     }
     const activity = this.agentActivity.get(record.id);
