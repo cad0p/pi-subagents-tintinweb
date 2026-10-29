@@ -252,12 +252,12 @@ the merge reports "Already up to date" and the revision check compares two stale
 values. `rev-parse --abbrev-ref HEAD` catches the checkout that fast-forwarded
 while sitting on some other branch.
 
-A refusal means one of three things, with different remedies:
+A refusal means one of four things, with different remedies:
 
 - `error: Your local changes to the following files would be overwritten by merge`
   — edits the fast-forward would clobber. Stash or discard them; they belong in
-  the worktree. Committing them is not a remedy, it turns this into the next
-  case.
+  the worktree. Committing them is not a remedy, it turns this into the third
+  case below.
 - `error: The following untracked working tree files would be overwritten by merge`
   — move or delete those files first.
 - `fatal: Not possible to fast-forward, aborting.` — the local branch has commits
