@@ -126,7 +126,7 @@ function readEntry<T extends { id: string; v?: number }>(data: unknown): T | und
   if (typeof data !== "object" || data === null) return undefined;
   const entry = data as T;
   if (typeof entry.id !== "string") return undefined;
-  if (entry.v !== undefined && entry.v > LEDGER_VERSION) return undefined;
+  if (isNewerLedgerEntry(data)) return undefined;
   return entry;
 }
 
