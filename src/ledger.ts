@@ -130,7 +130,7 @@ function readEntry<T extends { id: string; v?: number }>(data: unknown): T | und
   if (typeof data !== "object" || data === null) return undefined;
   const entry = data as T;
   if (typeof entry.id !== "string") return undefined;
-  if (entry.v !== undefined && entry.v > LEDGER_VERSION) return undefined;
+  if (isNewerLedgerEntry(data)) return undefined;
   return entry;
 }
 
@@ -158,11 +158,21 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
   };
 }
 
+/**
+ * Whether a ledger entry was written by a later release. One predicate for every reader: the same marker must be
+ * ignored by the state replay and by the renderer, or a downgrade reports the same stop twice.
+ */
+export function isNewerLedgerEntry(data: unknown): boolean {
+  if (typeof data !== "object" || data === null) return false;
+  const { v } = data as { v?: number };
+  return v !== undefined && v > LEDGER_VERSION;
+}
+
 /** The ids a shutdown-notice marker named; a malformed marker, or one from a later version, names none. */
 function readNoticeIds(data: unknown): string[] {
   if (typeof data !== "object" || data === null) return [];
   const notice = data as { v?: number; ids?: unknown };
-  if (notice.v !== undefined && notice.v > LEDGER_VERSION) return [];
+  if (isNewerLedgerEntry(data)) return [];
   if (!Array.isArray(notice.ids)) return [];
   return notice.ids.filter((id): id is string => typeof id === "string");
 }

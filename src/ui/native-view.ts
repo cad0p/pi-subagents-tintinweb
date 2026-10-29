@@ -251,11 +251,17 @@ interface ViewState {
 }
 
 export interface NativeViewOptions {
-  manager: Pick<AgentManager, "getRecord" | "settledSessionManager" | "steer">;
+  manager: Pick<AgentManager, "getRecord" | "settledSessionManager" | "steer" | "abort">;
   /** The root session's latest context; `ctx.ui` is the footer/editor/theme surface. */
   getContext: () => NativeViewContext | undefined;
   /** The captured `InteractiveMode`, or undefined when the probe never fired. */
   getMode: () => InteractiveModeView | undefined;
+  /**
+   * Called once this view is no longer open, whatever ended it — except a `switch`, which is only
+   * `open()` closing the record it was replacing. FleetView owns the cursor, so this is how it
+   * learns that the row it points at is no longer the transcript on screen (Esc, or pi's reload).
+   */
+  onClosed?: () => void;
 }
 
 /** The parts of `ExtensionContext` the view reads. */
@@ -276,6 +282,20 @@ class NoticeBandComponent implements NoticeBand {
   invalidate(): void {}
 }
 
+/**
+ * pi's footer data with the host's extension statuses blanked: `childLine` below states this
+ * child's own, and the host's line is a host fact that would read as a second, unrelated state.
+ * Everything else (branch, provider count) stays the host's, as pi's footer always reads it.
+ */
+function childFooterData(footerData: ReadonlyFooterDataProvider): ReadonlyFooterDataProvider {
+  return {
+    getGitBranch: () => footerData.getGitBranch(),
+    getExtensionStatuses: () => new Map<string, string>(),
+    getAvailableProviderCount: () => footerData.getAvailableProviderCount(),
+    onBranchChange: (callback) => footerData.onBranchChange(callback),
+  };
+}
+
 /** One child's own footer lines, followed by the line that says which child this is. */
 export class ChildFooter extends FooterComponent {
   constructor(
@@ -285,7 +305,7 @@ export class ChildFooter extends FooterComponent {
     private hostCwd: () => string,
     private theme: Theme,
   ) {
-    super(childSession, footerData);
+    super(childSession, childFooterData(footerData));
   }
 
   render(width: number): string[] {
@@ -296,10 +316,11 @@ export class ChildFooter extends FooterComponent {
     const record = this.record();
     if (!record) return [];
     const state = childUIState(record.id);
+    // One statement of state: the record's status. A running record is streaming by definition, so
+    // a second "streaming" fragment only repeats it in other words.
     const parts = [record.id, toSingleLine(record.type), record.dialog ? `blocked · ${toSingleLine(record.dialog.title)}` : record.status];
     if (record.status === "running") parts.push(`${Math.max(0, Math.round((Date.now() - record.startedAt) / 1000))}s`);
     for (const text of state.statuses.values()) parts.push(toSingleLine(text));
-    if (this.sessionIsStreaming()) parts.push("streaming");
     // The inherited first line's (branch) is the host's; say so when the child runs elsewhere.
     if (this.childSession.sessionManager.getCwd() !== this.hostCwd()) parts.push("branch: host");
     return [truncateToWidth(this.theme.fg("dim", `  ${parts.join(" · ")}`), width)];
@@ -318,11 +339,6 @@ export class ChildFooter extends FooterComponent {
     const notice = state.notices.at(-1);
     if (notice) lines.push(truncateToWidth(this.theme.fg("dim", `  ${notice.level}: ${toSingleLine(notice.text)}`), width));
     return lines;
-  }
-
-  private sessionIsStreaming(): boolean {
-    // Read through the session the footer was built for; PR 1 has no tap to keep this current.
-    return this.childSession.isStreaming === true || this.childSession.agent?.state?.isStreaming === true;
   }
 }
 
@@ -361,6 +377,11 @@ export class NativeTranscriptView {
     return this.state?.active === true;
   }
 
+  /** The record the open view shows, so landing on the row it already shows is not a rebuild. */
+  shownId(): string | undefined {
+    return this.isOpen() ? this.state?.id : undefined;
+  }
+
   /** The bus event handler: repaint only when the event names the shown record. */
   onRecordEvent(id: string | undefined): void {
     if (!id || this.state?.id !== id) return;
@@ -377,17 +398,21 @@ export class NativeTranscriptView {
     const ctx = this.options.getContext();
     const record = this.options.manager.getRecord(id);
     if (!ctx || !record) return "unavailable";
-    if (this.state) this.close("switch");
-
-    const hostContainer = im.chatContainer;
-    const hostIndex = im.documentContainer.children.indexOf(hostContainer);
-    if (hostIndex < 0) return "unavailable";
+    // Refuse before anything is closed: a row with no transcript must not drop the transcript
+    // already on screen, nor repeat its notice on every keypress that lands on it.
     const childSession = record.session;
     const sessionManager = childSession?.sessionManager ?? this.options.manager.settledSessionManager(id);
     if (!sessionManager) {
       ctx.ui.notify(noTranscriptMessage(record), "info");
       return "refused";
     }
+    if (this.state) this.close("switch");
+
+    // Read after the close: while a view is open the host container is detached, so its index is
+    // only meaningful once the close put it back.
+    const hostContainer = im.chatContainer;
+    const hostIndex = im.documentContainer.children.indexOf(hostContainer);
+    if (hostIndex < 0) return "unavailable";
 
     const state: ViewState = {
       active: true,
@@ -500,6 +525,10 @@ export class NativeTranscriptView {
     state.unsubDialogFlag();
     dropChildDialogs(state.id);
     this.restoreWrappers(im, state);
+    // Before the restore, which can throw: the view is already closed, so its owner must be told
+    // now or a failed restore leaves it pointing at an agent nobody is showing. A `switch` is this
+    // view's own doing on the way to the next record, so there is nothing to report.
+    if (reason !== "switch") this.options.onClosed?.();
     if (reason === "quit") {
       this.state = undefined;
       return;
@@ -536,20 +565,24 @@ export class NativeTranscriptView {
         im.ui.requestRender();
       }
     };
+    // Every method saved here is called on the instance it was saved from, never detached: pi's
+    // showStatus reads `this.chatContainer` (and its siblings `this.editor`), so a bare
+    // `state.saved.showStatus(...)` throws before the notice is drawn — which on the Esc path is
+    // before close("escape"), leaving the host transcript behind and the parent unnotified.
     state.wrappers.showError = (message: string) => {
-      state.saved.showError(message);
+      state.saved.showError.call(im, message);
       band(`Error: ${message}`);
     };
     state.wrappers.showWarning = (message: string) => {
-      state.saved.showWarning(message);
+      state.saved.showWarning.call(im, message);
       band(`Warning: ${message}`);
     };
     state.wrappers.showStatus = (message: string) => {
-      state.saved.showStatus(message);
+      state.saved.showStatus.call(im, message);
       band(message);
     };
     state.wrappers.showExtensionError = (extensionPath: string, error: unknown, stack?: string) => {
-      state.saved.showExtensionError(extensionPath, error, stack);
+      state.saved.showExtensionError.call(im, extensionPath, error, stack);
       band(`Extension "${extensionPath}" error: ${String(error)}`);
     };
     im.showError = state.wrappers.showError;
@@ -680,7 +713,9 @@ export class NativeTranscriptView {
   }
 
   private installEditor(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
-    ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => new CustomEditor(tui, editorTheme, keybindings));
+    // `embedWorkingStatus` keeps pi's working indicator in the editor's own top border. Without it
+    // pi draws it in `statusContainer`, a separate row that does not line up with the editor.
+    ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => new CustomEditor(tui, editorTheme, keybindings, { embedWorkingStatus: true }));
     const editor = im.editor;
     if (editor === im.defaultEditor) throw new Error("native view: pi did not install the custom editor");
     const ed = editor as CustomEditor;
@@ -690,7 +725,8 @@ export class NativeTranscriptView {
     // pi's copied onChange writes im.isBashMode from the text; a child ! must not flip host state.
     ed.onChange = () => {};
     ed.onSubmit = (text: string) => this.submit(im, state, text);
-    ed.onEscape = () => this.close("escape");
+    // Esc interrupts the run this view shows, then goes back to `main`.
+    ed.onEscape = () => this.interrupt(state);
     ed.onCtrlD = () => im.handleCtrlD();
     ed.onExtensionShortcut = (data: string) => {
       if (!im.keybindings.matches(data, "app.session.rename")) return false;
@@ -724,10 +760,10 @@ export class NativeTranscriptView {
     // wrapper a child draft becomes the host draft on every reload.
     state.wrappers.resetExtensionUI = () => {
       if (im.editor === state.editor) state.editor?.setText(state.hostDraft);
-      state.saved.resetExtensionUI();
+      state.saved.resetExtensionUI.call(im);
     };
     state.wrappers.setupAutocompleteProvider = () => {
-      state.saved.setupAutocompleteProvider();
+      state.saved.setupAutocompleteProvider.call(im);
       if (im.editor === state.editor && state.childProvider) state.editor.setAutocompleteProvider(state.childProvider);
     };
     im.resetExtensionUI = state.wrappers.resetExtensionUI;
@@ -745,6 +781,22 @@ export class NativeTranscriptView {
     if (im.editor !== im.defaultEditor) {
       console.warn("[pi-subagents] native view: pi did not restore the default editor");
     }
+  }
+
+  /**
+   * Esc in a child view: interrupt the run it shows and return to `main`.
+   *
+   * Delivery needs nothing extra. `abort()` stops the run, and its settle reaches the manager's
+   * completion callback (index.ts), which runs `sendIndividualNudge` for any other end — the parent
+   * gets the same steer turn, with the status note naming the stop. Esc on a record that already
+   * settled (`abort()` is false) is not a no-op either: it still leaves the view.
+   */
+  private interrupt(state: ViewState): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (record && this.options.manager.abort(state.id)) {
+      this.options.getContext()?.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
+    }
+    this.close("escape");
   }
 
   private submit(im: InteractiveModeView, state: ViewState, text: string): void {

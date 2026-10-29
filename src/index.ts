@@ -29,7 +29,7 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
+import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -152,6 +152,16 @@ function getStatusGlyph(status: string): string {
  */
 function sanitizeHeaderText(s: string): string {
   return toSingleLine(s);
+}
+
+/** Dims one transcript line through the live theme; never throws, because pi turns a throwing renderer into a bare failure line. */
+function dim(theme: Pick<Theme, "fg">, line: string): string {
+  try {
+    // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
+    return typeof theme?.fg === "function" ? theme.fg("dim", line) : line;
+  } catch {
+    return line;
+  }
 }
 
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
@@ -521,15 +531,41 @@ export default function (pi: ExtensionAPI) {
     ].join("\n");
   }
 
+  /** The stops a shutdown-notice entry names: `stops` when this release wrote it, else the bare `ids` of an older one. */
+  function noticeStops(data: unknown): ShutdownStop[] {
+    if (typeof data !== "object" || data === null) return [];
+    const { ids, stops } = data as { v?: unknown; ids?: unknown; stops?: unknown };
+    // The gate ledger's own reader applies, shared rather than copied: a marker from a later version names no
+    // stop, so it must paint none either.
+    if (isNewerLedgerEntry(data)) return [];
+    const named = Array.isArray(stops)
+      ? stops.flatMap((stop) => {
+          if (stop === null || typeof stop !== "object") return [];
+          const { id, description } = stop as { id?: unknown; description?: unknown };
+          return typeof id === "string" ? [{ id, ...(typeof description === "string" ? { description } : {}) }] : [];
+        })
+      : [];
+    // An entry that names no stop in `stops` is an older one, or a damaged one: its `ids` still say who stopped.
+    if (named.length > 0) return named;
+    return (Array.isArray(ids) ? ids : []).filter((id): id is string => typeof id === "string").map((id) => ({ id }));
+  }
+
   /** Posts the shutdown-stop notice once per session file: the marker keeps a later reopen quiet. */
   function reportShutdownStops(entries: readonly SessionEntry[]): void {
     const stops = shutdownStops(entries);
     if (stops.length === 0) return;
     // Marked before the send, like a delivered nudge: a throw must not make every later reopen repeat it.
-    pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: stops.map((stop) => stop.id) });
+    // `ids` stays the shape ledger reads; `stops` carries what the entry renderer draws.
+    pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, {
+      v: LEDGER_VERSION,
+      ids: stops.map((stop) => stop.id),
+      stops: stops.map((stop) => ({ id: stop.id, description: stop.description })),
+    });
     try {
+      // The entry renderer draws the notice now, before any turn: `nextTurn` queues a message until one
+      // starts. `display: false` still puts it in the model's context at that turn, without a second copy.
       pi.sendMessage(
-        { customType: "subagent-notification", content: formatShutdownNotice(stops), display: true },
+        { customType: "subagent-notification", content: formatShutdownNotice(stops), display: false },
         { deliverAs: "nextTurn", triggerTurn: false },
       );
     } catch (err) {
@@ -739,6 +775,9 @@ export default function (pi: ExtensionAPI) {
         manager,
         getContext: () => currentCtx as unknown as NativeViewContext | undefined,
         getMode: capturedInteractiveMode,
+        // The list points its cursor at the transcript on screen: Esc in a child (and pi's own
+        // teardown on reload) closes the view behind its back, so put the cursor back on `main`.
+        onClosed: () => fleet.returnToMain(),
       })
     : undefined;
   if (nativeView) {
@@ -1479,14 +1518,6 @@ export default function (pi: ExtensionAPI) {
     // did not produce: pi turns a throwing renderer into a bare "[subagents:init-error]
     // renderer failed: …" line, which hides the failure the entry exists to report.
     const renderer: EntryRenderer = (entry, _options, theme) => {
-      // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
-      const paint = (s: string): string => {
-        try {
-          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
-        } catch {
-          return s;
-        }
-      };
       const lines: string[] = [];
       try {
         const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
@@ -1495,14 +1526,34 @@ export default function (pi: ExtensionAPI) {
           if (f === null || typeof f !== "object") continue;
           const { label, message } = f as { label?: unknown; message?: unknown };
           if (typeof label !== "string") continue;
-          lines.push(paint(label + ": " + (typeof message === "string" ? message : "")));
+          lines.push(dim(theme, label + ": " + (typeof message === "string" ? message : "")));
         }
       } catch {
         // Malformed entry (a proxy with a throwing trap, say): fall through to the plain line.
       }
-      return { render: (_width: number) => (lines.length ? lines : [paint("pi-subagents: init failed")]), invalidate: () => {} };
+      return { render: (_width: number) => (lines.length ? lines : [dim(theme, "pi-subagents: init failed")]), invalidate: () => {} };
     };
     pi.registerEntryRenderer("subagents:init-error", renderer);
+  });
+
+  guardInitVoid("shutdown-notice-renderer", () => {
+    // Registered at factory time so a reopened session draws the notice with its first paint, before
+    // any turn: a `nextTurn` message would wait for a user message that may never come. Defensive in
+    // the same way as the init-error renderer: a stored entry outlives the code that wrote it.
+    const renderer: EntryRenderer = (entry, _options, theme) => {
+      try {
+        const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
+        const stops = noticeStops(data);
+        // pi keeps any defined component and inserts a spacer for it, so an empty one draws a blank line.
+        if (stops.length === 0) return undefined;
+        const lines = formatShutdownNotice(stops).split("\n").map((line) => dim(theme, line));
+        return { render: (_width: number) => lines, invalidate: () => {} };
+      } catch {
+        // Malformed entry (a proxy with a throwing trap, say): draw nothing rather than a failure line.
+        return undefined;
+      }
+    };
+    pi.registerEntryRenderer(SHUTDOWN_NOTICE_ENTRY, renderer);
   });
 
   // ---- Agent tool ----
