@@ -10,9 +10,7 @@ that, not the author.
 
 Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
-dependencies there, and run every gate and live check from it. Remove the
-merged branch's worktree after merge (`git worktree remove <path>`); `git
-worktree prune` only matters for a directory deleted by hand.
+dependencies there, and run every gate and live check from it.
 
 ## Automated gates
 
@@ -245,13 +243,23 @@ prove otherwise.
 ```bash
 git -C <repo> fetch origin
 git -C <repo> merge --ff-only origin/main
+git -C <repo> rev-parse --abbrev-ref HEAD  # main
 git -C <repo> rev-parse HEAD origin/main   # both lines print the same commit
 ```
 
 The fetch is not optional: without it `origin/main` is the last-fetched ref, so
 the merge reports "Already up to date" and the revision check compares two stale
-values. If the merge refuses, the checkout has local edits — commit or discard
-them first rather than working on top of them.
+values. `rev-parse --abbrev-ref HEAD` catches the checkout that fast-forwarded
+while sitting on some other branch.
+
+A refusal means one of two things, with different remedies: local edits the
+fast-forward would overwrite (commit or discard them), or commits on the local
+branch that `origin/main` does not have (`fatal: Not possible to fast-forward`).
+The second is a checkout that drifted, and it needs a human decision, not a
+reset.
+
+Remove the merged branch's worktree here too (`git worktree remove <path>`);
+`git worktree prune` only matters for a directory deleted by hand.
 
 ## Fork release rules
 
