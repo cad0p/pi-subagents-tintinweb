@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isValidType } from "./agent-types.js";
+import { removedKeyEntries, removedKeyMessage } from "./custom-agents.js";
 import { SubagentScheduler } from "./schedule.js";
 import type { IsolationMode, ScheduledSubagent, ScheduleStoreData, SubagentType, ThinkingLevel } from "./types.js";
 
@@ -53,6 +54,11 @@ function sanitizeJob(raw: unknown): ScheduledSubagent | undefined {
   // type silently falls back to a write-capable config at spawn time.
   if (scheduleType === "cron" && !SubagentScheduler.validateCronExpression(schedule).valid) return undefined;
   if (!isValidType(subagent_type)) return undefined;
+  // A job file from a release that had the removed `isolated` flag still
+  // loads: this build is field-by-field, so the stale key is ignored, not
+  // fatal. load() reports it with the same migration an agent file gets — the
+  // key is what made the job hermetic, and dropping it silently would leave an
+  // old cron running fully tooled with no sign of why.
   return {
     id,
     name,
@@ -65,7 +71,6 @@ function sanitizeJob(raw: unknown): ScheduledSubagent | undefined {
     model: typeof raw.model === "string" ? raw.model : undefined,
     thinking: typeof raw.thinking === "string" ? (raw.thinking as ThinkingLevel) : undefined,
     max_turns: typeof raw.max_turns === "number" && Number.isFinite(raw.max_turns) ? raw.max_turns : undefined,
-    isolated: typeof raw.isolated === "boolean" ? raw.isolated : undefined,
     isolation: typeof raw.isolation === "string" && ISOLATION_MODES.includes(raw.isolation) ? (raw.isolation as IsolationMode) : undefined,
     // A non-boolean flag cannot be trusted to mean "arm me": load disabled and
     // keep the record visible so the user can fix or cancel it.
@@ -177,6 +182,8 @@ export class ScheduleStore {
   private fileShapeInvalid = false;
   /** Signature of the last skip set we warned about, so repeated locked loads stay quiet. */
   private warnedSkips: string | undefined;
+  /** Signature of the last set of removed keys reported, same once-per-state rule. */
+  private warnedRemovedKeys: string | undefined;
   /** Ids the last locked load promoted into the live set; drained once the lock is gone. */
   private pendingPromoted: string[] = [];
   /**
@@ -247,7 +254,12 @@ export class ScheduleStore {
     const skipped: unknown[] = [];
     const shadowed: unknown[] = [];
     let dropped = 0;
+    const removedKeys: Array<{ id: string; key: string; migration: string }> = [];
     for (const raw of entries) {
+      if (isRecord(raw)) {
+        const id = typeof raw.id === "string" && raw.id.length > 0 ? raw.id : "unnamed";
+        for (const [key, migration] of removedKeyEntries(raw)) removedKeys.push({ id, key, migration });
+      }
       const job = sanitizeJob(raw);
       if (!job) {
         if (!preserveRecord(raw, skipped)) dropped++;
@@ -273,6 +285,7 @@ export class ScheduleStore {
     this.jobsContainerInvalid = rawJobs !== undefined && !Array.isArray(rawJobs);
     this.fileShapeInvalid = !isRecord(parsed);
     this.warnAboutSkips();
+    this.warnAboutRemovedKeys(removedKeys);
     // A record that left the live set must not keep a timer armed: the timer
     // would keep firing a record the store no longer considers live, and a
     // later load (e.g. after the agent type returns) would re-promote it.
@@ -283,6 +296,16 @@ export class ScheduleStore {
     // run while withLock holds the non-re-entrant lock.
     const previousLive = new Set(previousLiveIds);
     this.pendingPromoted = [...jobs.keys()].filter(id => !previousLive.has(id));
+  }
+
+  /** The removed-key warning an agent file gets, for a job file that still sets one. */
+  private warnAboutRemovedKeys(removed: Array<{ id: string; key: string; migration: string }>): void {
+    const signature = removed.map(({ id, key }) => `${id}:${key}`).join(",");
+    if (signature === this.warnedRemovedKeys) return;
+    this.warnedRemovedKeys = signature;
+    for (const { id, key, migration } of removed) {
+      console.warn(`[pi-subagents] ${this.filePath}: ${removedKeyMessage(`scheduled job "${id}"`, key, migration)}`);
+    }
   }
 
   /** Warn once per distinct invalid-entry summary — load() runs before every mutation. */

@@ -79,8 +79,6 @@ export interface AgentConfig {
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
   inheritContext?: boolean;
-  /** Default for spawn: no extension tools. undefined = caller decides. */
-  isolated?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
   memory?: MemoryScope;
   /**
@@ -307,7 +305,6 @@ export interface AgentInvocation {
    */
   requestedThinking?: EffectiveThinkingLevel;
   maxTurns?: number;
-  isolated?: boolean;
   inheritContext?: boolean;
   isolation?: IsolationMode;
 }
@@ -341,7 +338,6 @@ export interface ScheduledSubagent {
   model?: string;
   thinking?: ThinkingLevel;
   max_turns?: number;
-  isolated?: boolean;
   isolation?: IsolationMode;
 
   // state

@@ -10,6 +10,7 @@
  */
 
 import { deliveryText } from "./delivery-text.js";
+import { isolatedParamError } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import type { AgentRecord, DeliverOutcome } from "./types.js";
 
@@ -104,6 +105,11 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     events, "subagents:rpc:spawn", ({ type, prompt, options }) => {
       const ctx = getCtx();
       if (!ctx) throw new Error("No active session");
+
+      // Options arrive unvalidated, so the removed flag would otherwise reach
+      // the manager and be ignored — a failed result is the honest answer.
+      const isolatedError = isolatedParamError(options);
+      if (isolatedError) throw new Error(isolatedError);
 
       // Cross-extension RPC callers (e.g. pi-tasks TaskExecute) naturally
       // forward serializable values, so options.model can be a string like

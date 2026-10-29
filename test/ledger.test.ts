@@ -72,6 +72,20 @@ describe("ledger replay", () => {
     expect(replay([spawn(), settle("completed")])).toEqual([]);
   });
 
+  // Persisted sessions from releases with the removed `isolated` flag carry it in
+  // their spawn entries. A stale field must not make the replay drop the run.
+  it("recovers a run whose spawn entry still carries the removed isolated flag", () => {
+    const legacy = { ...spawnedEntry(record, "/s/child.jsonl", { pid: 42 }), isolated: true };
+
+    const recovered = replay([custom("subagent-spawned", legacy)]);
+
+    expect(recovered).toEqual([
+      expect.objectContaining({ id: "child-1", status: "interrupted", sessionFile: "/s/child.jsonl" }),
+    ]);
+    // The flag is gone: the recovered record does not resurrect it.
+    expect(recovered[0].invocation).toEqual({ modelId: "faux/model", requestedThinking: "high" });
+  });
+
   it("a run whose owner died is recovered as an interrupted record", () => {
     expect(replay([spawn()])).toEqual([
       expect.objectContaining({ id: "child-1", status: "interrupted", sessionFile: "/s/child.jsonl", parentAgentId: "parent-1", settled: true, interruptedAt: 5000, crashCount: 1 }),

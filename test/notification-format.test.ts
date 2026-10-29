@@ -759,7 +759,6 @@ describe("completion header names the agent type", () => {
       systemPrompt: "You review code.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
       ...overrides,
     };
     registerAgents(new Map([[config.name, config]]));

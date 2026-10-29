@@ -374,6 +374,41 @@ describe("ScheduleStore", () => {
     expect(store.remove("bad-model")).toBe(true);
   });
 
+  // Job files from releases with the removed `isolated` flag are still on disk.
+  // The build is field-by-field, so the stale key is ignored, not fatal — but a
+  // silent drop would leave an old hermetic cron running fully tooled, so load()
+  // reports the same migration an agent file gets.
+  it("ignores the removed isolated key on an older job, and reports the migration once", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "legacy-isolated" }), isolated: true }]);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = new ScheduleStore(file);
+      expect(store.list()).toHaveLength(1);
+      const job = store.get("legacy-isolated") as unknown as Record<string, unknown> | undefined;
+      expect(job?.prompt).toBe("hello");
+      expect(job?.isolated).toBeUndefined();
+
+      const messages = warn.mock.calls.map(args => String(args[0]));
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("[pi-subagents]");
+      expect(messages[0]).toContain('removed frontmatter key "isolated"');
+      expect(messages[0]).toContain("legacy-isolated");
+      // The recipe, not a generic "invalid entry" note.
+      expect(messages[0]).toContain("extensions: false");
+      expect(messages[0]).not.toContain("unknown frontmatter key");
+
+      // A save rewrites the record without the stale key; the warning stays once.
+      store.update("legacy-isolated", { prompt: "second" });
+      const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+      expect(onDisk.jobs[0]).not.toHaveProperty("isolated");
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("loads a non-boolean enabled as disabled", () => {
     const file = join(tmp, "s.json");
     writeStoreFile(file, [{ ...makeJob({ id: "bad-enabled" }), enabled: "yes" }]);

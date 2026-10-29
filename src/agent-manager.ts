@@ -277,7 +277,6 @@ export interface SpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
-  isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /**
@@ -673,7 +672,6 @@ export class AgentManager {
       parentAgentId: record.parentAgentId,
       model: options.model,
       maxTurns: options.maxTurns,
-      isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
       // Resolved by the caller's own registry (a nested spawn reads its branch's

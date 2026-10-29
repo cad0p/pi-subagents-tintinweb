@@ -15,9 +15,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getUserAgentNames, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { getAgentConfig, getUserAgentNames, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { runInChildSessionContext } from "../src/child-context.js";
+import { isStrictAgentFilesEnabled, setStrictAgentFiles } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 import { takeInitFailures } from "../src/init-guard.js";
+import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
+import { loadSettings } from "../src/settings.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -39,6 +43,7 @@ function makePi() {
 }
 
 const BROKEN = "---\nname: broken\ndescription: Use this: that\n---\n\nBroken.\n";
+const REMOVED_KEY_AGENT = "---\ndescription: Was hermetic\nisolated: true\n---\n\nHermetic.\n";
 
 let cwd: string;
 let originalCwd: string;
@@ -56,6 +61,15 @@ function writeBrokenAgent(): string {
   mkdirSync(dir, { recursive: true });
   const path = join(dir, "broken.md");
   writeFileSync(path, BROKEN);
+  return path;
+}
+
+/** A file that still sets the removed `isolated` key: strict must refuse it, not warn. */
+function writeRemovedKeyAgent(): string {
+  const dir = join(cwd, ".pi", "agents");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "hermetic.md");
+  writeFileSync(path, REMOVED_KEY_AGENT);
   return path;
 }
 
@@ -94,6 +108,7 @@ describe("strictAgentFiles gates extension activation", () => {
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
     registerAgents(new Map());
+    setStrictAgentFiles(false);
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -117,6 +132,139 @@ describe("strictAgentFiles gates extension activation", () => {
     expect(failures).toHaveLength(1);
     expect(failures[0].label).toBe("agent-files");
     expect(failures[0].message).toContain(path);
+  });
+
+  // The refusal has to outlive the pass that reported it: the strict load
+  // throws, the init guard retries non-strict, and that retry must still keep
+  // the file out — otherwise the agent returns with every extension and skill
+  // the removed key was meant to switch off.
+  it("refuses a removed-key file and keeps it out of the registry after the retry", () => {
+    const path = writeRemovedKeyAgent();
+    writeValidAgent();
+    writeSettings({ strictAgentFiles: true });
+
+    const { pi } = makePi();
+    expect(() => subagentsExtension(pi)).not.toThrow();
+
+    expect(getUserAgentNames()).toContain("ok");
+    expect(getUserAgentNames()).not.toContain("hermetic");
+    expect(getAgentConfig("hermetic")).toBeUndefined();
+
+    const failures = takeInitFailures();
+    expect(failures).toHaveLength(1);
+    expect(failures[0].label).toBe("agent-files");
+    expect(failures[0].message).toContain(path);
+    expect(failures[0].message).toContain('frontmatter key "isolated" was removed');
+  });
+
+  it("loads a removed-key file with the migration warning when strict is off", () => {
+    writeRemovedKeyAgent();
+
+    expect(() => subagentsExtension(makePi().pi)).not.toThrow();
+
+    expect(getAgentConfig("hermetic")).toBeDefined();
+    const messages = warn.mock.calls.map(args => String(args[0]));
+    expect(messages.some(m => m.includes('removed frontmatter key "isolated"'))).toBe(true);
+  });
+
+  // The chain the whole setting hangs on: the activation records the project's
+  // value, and the nested registry — built for a branch whose config root cannot
+  // see this project's settings file — reads that record. Setting the accessor in
+  // the test instead would pass with the activation's record deleted, so this
+  // drives the real factory and then asks the real nested tools.
+  it("hands the activation's record to the nested registry", async () => {
+    writeSettings({ strictAgentFiles: true });
+    writeRemovedKeyAgent();
+    expect(() => subagentsExtension(makePi().pi)).not.toThrow();
+    expect(isStrictAgentFilesEnabled()).toBe(true);
+
+    // A worktree copy holds committed content only: no `.pi/subagents.json` for a
+    // load under it to read the setting from.
+    const copy = mkdtempSync(join(tmpdir(), "strict-agent-copy-"));
+    try {
+      mkdirSync(join(copy, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(copy, ".pi", "agents", "hermetic.md"), REMOVED_KEY_AGENT);
+      expect(loadSettings(copy)).toEqual({});
+
+      const spawned: string[] = [];
+      const manager: NestedAgentManager = {
+        spawn: (_pi, _ctx, type) => {
+          spawned.push(type);
+          return "child-1";
+        },
+        deliver: async () => "delivered",
+        getRecord: () => undefined,
+        resultReachedParent: () => false,
+        isDraining: () => false,
+        listAgents: () => [],
+      };
+      // Built per child session in production, so each activation's value is
+      // sampled by a fresh tool set — the advertised type list is fixed at build.
+      const buildNested = () => createNestedSubagentTools({
+        manager,
+        pi: {} as never,
+        parentAgentId: "parent-1",
+        depth: 1,
+        maxSubagentDepth: 2,
+        allowedSubagents: "all",
+        configCwd: copy,
+      });
+      let nested = buildNested();
+      const uiCtx = {
+        cwd: copy,
+        model: undefined,
+        modelRegistry: { find: vi.fn(), getAvailable: () => [] },
+        sessionManager: { getSessionId: () => "root-session" },
+      } as never;
+      const spawnHermetic = async () => {
+        const result = await nested[0].execute(
+          "call-1",
+          { subagent_type: "hermetic", description: "d", prompt: "p" },
+          undefined,
+          undefined,
+          uiCtx,
+        );
+        return (result.content[0] as { text: string }).text;
+      };
+      const advertised = () =>
+        (nested[0].parameters as { properties: { subagent_type: { description: string } } })
+          .properties.subagent_type.description;
+
+      // Not advertised as a nested type ...
+      expect(advertised()).not.toContain("hermetic");
+      // ... and not spawnable, which is what the refusal is for.
+      expect(await spawnHermetic()).toContain("Unknown or disabled nested agent type");
+      expect(spawned).toEqual([]);
+
+      // Not a blanket refusal: the same branch root loads its file once an
+      // activation records the setting off, which the copy itself cannot tell.
+      writeSettings({ strictAgentFiles: false });
+      expect(() => subagentsExtension(makePi().pi)).not.toThrow();
+      expect(isStrictAgentFilesEnabled()).toBe(false);
+      nested = buildNested();
+      expect(advertised()).toContain("hermetic");
+      expect(await spawnHermetic()).toContain("Agent ID: child-1");
+      expect(spawned).toEqual(["hermetic"]);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  });
+
+  // A child session re-runs this factory in the same process (src/child-context.ts),
+  // so a factory-time settings read there overwrites the value the root recorded —
+  // and that value is what the nested registry applies. A `/agents` toggle whose
+  // save failed lives in memory only, so the disk read is the one writer that could
+  // silently undo it for the rest of the session.
+  it("does not let a child activation overwrite the recorded setting", () => {
+    writeSettings({ strictAgentFiles: false });
+    expect(() => subagentsExtension(makePi().pi)).not.toThrow();
+    expect(isStrictAgentFilesEnabled()).toBe(false);
+
+    // What the toggle does when the save fails: session-only.
+    setStrictAgentFiles(true);
+
+    expect(() => runInChildSessionContext(() => subagentsExtension(makePi().pi))).not.toThrow();
+    expect(isStrictAgentFilesEnabled()).toBe(true);
   });
 
   it("skips the file and activates when disabled (the default)", () => {

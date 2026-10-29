@@ -83,7 +83,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Extra custom instructions here.",
       promptMode: "append",
       inheritContext: false,
-      isolated: false,
     };
     const parentPrompt = "You are a parent coding agent with special powers.";
     const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
@@ -105,7 +104,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Extra custom instructions here.",
       promptMode: "append",
       inheritContext: false,
-      isolated: false,
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("/workspace");
@@ -123,7 +121,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "",
       promptMode: "append",
       inheritContext: false,
-      isolated: false,
     };
     const parentPrompt = "You are a parent coding agent.";
     const prompt = buildAgentPrompt(config, "/workspace", env, parentPrompt);
@@ -143,7 +140,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "You are a specialized agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("You are a specialized agent.");
@@ -161,7 +157,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "You are a standalone agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const prompt = buildAgentPrompt(config, "/workspace", env, "SECRET parent prompt content");
     expect(prompt).toContain("You are a standalone agent.");
@@ -187,7 +182,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Extra stuff.",
       promptMode: "append",
       inheritContext: false,
-      isolated: false,
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).toContain("<sub_agent_context>");
@@ -207,7 +201,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "You are a memory agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const extras = { memoryBlock: "# Agent Memory\nYou have persistent memory at /tmp/mem/" };
     const prompt = buildAgentPrompt(config, "/workspace", env, undefined, extras);
@@ -226,7 +219,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Custom instructions.",
       promptMode: "append",
       inheritContext: false,
-      isolated: false,
     };
     const extras = { memoryBlock: "# Agent Memory\nPersistent memory here." };
     const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.", extras);
@@ -245,7 +237,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "You are a skill agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const extras = {
       skillBlocks: [
@@ -270,7 +261,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Full agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const extras = {
       memoryBlock: "# Memory\nRemember this.",
@@ -303,7 +293,6 @@ describe("buildAgentPrompt", () => {
         systemPrompt: "You are a worktree agent.",
         promptMode: "replace",
         inheritContext: false,
-        isolated: false,
       };
       const prompt = buildAgentPrompt(config, worktree.path, env, undefined, { worktree });
       expect(prompt).toContain("<worktree_isolation>");
@@ -327,7 +316,6 @@ describe("buildAgentPrompt", () => {
       systemPrompt: "Plain agent.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
     };
     const prompt = buildAgentPrompt(config, "/workspace", env);
     expect(prompt).not.toContain("Agent Memory");
@@ -345,7 +333,6 @@ describe("buildAgentPrompt", () => {
         systemPrompt: "You are a test agent.",
         promptMode: "replace",
         inheritContext: false,
-        isolated: false,
       };
       const prompt = buildAgentPrompt(config, "/workspace", env);
       expect(prompt).toMatch(/^<active_agent name="my-agent"\/>/);
@@ -361,7 +348,6 @@ describe("buildAgentPrompt", () => {
         systemPrompt: "Custom instructions.",
         promptMode: "append",
         inheritContext: false,
-        isolated: false,
       };
       const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
       // Parent prompt must form the verbatim, cacheable byte prefix.
@@ -383,7 +369,6 @@ describe("buildAgentPrompt", () => {
         systemPrompt: "Test.",
         promptMode: "replace",
         inheritContext: false,
-        isolated: false,
       };
       const prompt = buildAgentPrompt(config, "/workspace", env);
       expect(prompt).toContain('<active_agent name="Some Agent With Spaces"/>');
@@ -400,7 +385,6 @@ describe("buildAgentPrompt", () => {
           systemPrompt: "Test.",
           promptMode,
           inheritContext: false,
-          isolated: false,
         };
         const prompt = buildAgentPrompt(config, "/workspace", env, "Parent.");
         const tagIndex = prompt.indexOf('<active_agent name="test-agent"/>');

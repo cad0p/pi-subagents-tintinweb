@@ -230,12 +230,22 @@ All fields are optional — sensible defaults for everything.
 | `session_dir` | parent session's dir | Directory for this agent's pi session file (written during the run; retained after it only with `persist_session: true`). Omitted, the file goes in the parent session's directory (honours `--session-dir`, `PI_CODING_AGENT_SESSION_DIR` and the `sessionDir` setting, like the main session; a nested agent's spawner is its parent). Relative paths resolve from the agent's cwd before its own worktree isolation, never from that worktree, so the file survives its cleanup. A nested agent spawned by a worktree-isolated agent still resolves from its spawner's worktree ([#87](https://github.com/cad0p/pi-subagents-tintinweb/issues/87)) |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
-| `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `allowed_subagents` | — | Opt this agent into nested delegation: `all`, or a comma-separated list of agent types it may spawn. Omitted = no nested tools at all |
 | `max_subagent_depth` | inherit | Per-agent nesting cap. Can only tighten the project's `maxSubagentDepth`, never raise it |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
+**Hermetic agents — the old `isolated: true` is gone.** That flag was removed (issue #177); write the fields above instead:
+
+```yaml
+extensions: false      # no extension/MCP tools
+skills: false          # no skills loaded or preloaded
+scoped_models: false   # no model scope
+# and do not declare allowed_subagents — that leaves no nested delegation tools
+```
+
+That combination is exactly what `isolated: true` used to force: the agent keeps only the built-in tools listed in `tools:` (or all of them when it is omitted). Also drop any `ext:` entries from `tools:` and any `exclude_extensions:` — a hermetic agent loads no extension, so a leftover selector only warns `extension-error:…` on every spawn. A file that still sets `isolated:` loads without it and warns with this recipe; `strictAgentFiles` refuses the file instead (see **Strict agent files** below), and passing `isolated` to the `Agent` tool (or over RPC) is refused with the same recipe.
+
+Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
 
 A key this extension doesn't read (a typo, or a field from another tool such as `run_in_background`, `join_mode`, or `name:`) is a silent no-op in the field-by-field parser, so it is reported once per file per key at load — same warning channel as a malformed file — instead of being dropped quietly. A file whose frontmatter cannot be parsed is skipped with a warning naming the path (and, when it was overriding another agent, the file that now wins); `strictAgentFiles` turns that skip into a startup failure.
 
@@ -265,7 +275,10 @@ exclude_extensions: builtin:mcp   # everything except pi's built-in MCP
 extensions: [mcp]
 tools: "*, ext:mcp/search"
 
-isolated: true                    # hermetic: built-ins only, no extensions/skills/context
+# Hermetic (replaces the removed `isolated: true`): built-ins only
+extensions: false
+skills: false
+scoped_models: false
 ```
 
 A few rules the examples don't make obvious:
@@ -300,7 +313,6 @@ Launch a sub-agent.
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
-| `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"worktree"` or `"off"` | no | `worktree` runs in an isolated git worktree; `off` declines one (the default) |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
@@ -458,7 +470,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 
 **Worktree isolation** (`worktreeIsolation`, default `true`): whether `isolation: worktree` may create a worktree at all. Set `false` on a repo where a copy costs too much time or disk: a requested worktree is then dropped and the agent runs in the main checkout, on every path — agent files, scheduled jobs, and cross-extension RPC. The refusal is immediate; the `isolation` parameter and its usage note are also dropped from the Agent tool spec (next pi session) so the model is never told a capability exists. Custom tool descriptions opt in to the matching prose with `{{isolationGuideline}}`.
 
-**Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` is refused instead of being loaded, and the refusal is reported as an init failure naming the file (see below) while every other agent in the directory still loads. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. For a checked-in `.pi/agents/`, refusing the file is the point: the alternative is running a *different* agent than the file names.
+**Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable `agents/*.md` — or one that sets a removed frontmatter key such as `isolated` — is refused instead of being loaded, and the refusal is reported as an init failure naming the file (see below) while every other agent in the directory still loads. Startup only, by design — mid-session reloads (one per `Agent` call) keep warning instead of throwing, so a bad edit at 3pm cannot kill the session on the next unrelated spawn. The refusal itself holds for the session: a removed-key file stays out of the registry on every reload (with the migration warning), and the nested agent registry applies the same policy, so a refused agent is not advertised or spawnable as a nested child either. For a checked-in `.pi/agents/`, refusing the file is the point: the alternative is running a *different* agent than the file names.
 
 **Init failures (reload mitigation, refs #151):** if one of our own init steps throws while pi is loading the extension, the failure is recorded as a `subagents:init-error` entry, rendered in the transcript and surfaced as a warning, and the rest of the extension — including the `Agent`, `SendMessage` and `get_subagent_result` tools — keeps working. Pi discards every registration of a package whose factory throws, silently and with no retry, so an unlucky throw used to cost every tool this package owns. The guard covers the seven init steps wrapped in `src/index.ts` — agent files, settings, the entry renderer, program status, background work, handover adoption, stranded-run cleanup — not the whole factory: a throw in an unguarded factory statement still escapes and costs every registration.
 
