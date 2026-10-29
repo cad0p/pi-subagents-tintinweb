@@ -8,6 +8,7 @@ const hoisted = vi.hoisted(() => ({
   registerRpcHandlersThrows: { value: false },
   registerProviderThrows: { value: false },
   takeStrandedThrows: { value: false },
+  applyLoadedThrows: { value: false },
 }));
 
 vi.mock("../src/background-work.js", async () => {
@@ -17,6 +18,17 @@ vi.mock("../src/background-work.js", async () => {
     registerSubagentProvider: (...args: any[]) => {
       if (hoisted.registerProviderThrows.value) throw new Error("provider boom");
       return (actual as any).registerSubagentProvider(...args);
+    },
+  };
+});
+
+vi.mock("../src/settings.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/settings.js")>("../src/settings.js");
+  return {
+    ...actual,
+    applyAndEmitLoaded: (...args: any[]) => {
+      if (hoisted.applyLoadedThrows.value) throw new Error("settings boom");
+      return (actual as any).applyAndEmitLoaded(...args);
     },
   };
 });
@@ -106,6 +118,7 @@ beforeEach(() => {
   hoisted.registerRpcHandlersThrows.value = false;
   hoisted.registerProviderThrows.value = false;
   hoisted.takeStrandedThrows.value = false;
+  hoisted.applyLoadedThrows.value = false;
   takeInitFailures();
   delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
 });
@@ -282,6 +295,62 @@ describe("init-guard wiring", () => {
 
     const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
     expect(entryCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("settings-apply: a throwing applyAndEmitLoaded keeps every tool and is reported", async () => {
+    hoisted.applyLoadedThrows.value = true;
+    const { pi, tools, lifecycle } = makePi();
+    expect(() => subagentsExtension(pi)).not.toThrow();
+    expect(tools.has("Agent")).toBe(true);
+    expect(tools.has("SendMessage")).toBe(true);
+    expect(tools.has("get_subagent_result")).toBe(true);
+
+    const ui = makeUi();
+    await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(ui, cwd));
+    const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
+    expect(entryCalls).toHaveLength(1);
+    expect(entryCalls[0][1].failures.map((f: any) => f.label)).toEqual(["settings-apply"]);
+  });
+
+  it("a failed transcript append does not poison the next drain", async () => {
+    writeFault();
+    const { pi, lifecycle } = makePi();
+    expect(() => subagentsExtension(pi)).not.toThrow();
+    pi.appendEntry.mockImplementation((type: string) => {
+      if (type === "subagents:init-error") throw new Error("append boom");
+    });
+    const ui = makeUi();
+    const ctx = makeCtx(ui, cwd);
+    const handler = lifecycle.get("session_start");
+    await handler({ reason: "startup" }, ctx);
+    // A second activation must find nothing to report: an "init-error-entry" failure left
+    // behind by the failed append would drain here, under the wrong label.
+    await handler({ reason: "reload" }, ctx);
+
+    const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
+    expect(entryCalls).toHaveLength(1);
+    expect(ui.notify).toHaveBeenCalledTimes(1);
+    expect(ui.notify.mock.calls[0][0]).toContain("could not be written");
+    expect(ui.notify.mock.calls[0][0]).not.toContain("Details in the transcript");
+  });
+
+  it("renderer survives malformed entries and a throwing theme", () => {
+    const { pi } = makePi();
+    expect(() => subagentsExtension(pi)).not.toThrow();
+    const renderer = pi.registerEntryRenderer.mock.calls.find((c: any[]) => c[0] === "subagents:init-error")[1];
+    const theme = { prefix: "<dim>", fg(this: { prefix: string }, _c: string, s: string) { return this.prefix + s; } };
+    const text = (entry: any, t: any = theme) => renderer(entry, {}, t).render(80).join("\n");
+
+    // null element, non-string label, non-array failures, null entry
+    expect(text({ failures: [null] })).toContain("pi-subagents: init failed");
+    expect(text({ failures: [{ label: 42, message: "x" }, { label: "ok", message: "m" }] })).toBe("<dim>ok: m");
+    expect(text({ failures: "nope" })).toContain("pi-subagents: init failed");
+    expect(text(null)).toContain("pi-subagents: init failed");
+    // missing theme, and a theme whose fg throws: the plain string, never a render throw
+    expect(text({ failures: [{ label: "a" }] }, null)).toBe("a: ");
+    const throwing = { fg() { throw new Error("theme boom"); } };
+    expect(text({ failures: [{ label: "a", message: "b" }] }, throwing)).toBe("a: b");
+    expect(text({ failures: [null] }, throwing)).toBe("pi-subagents: init failed");
   });
 
   it("renderer registered and renders both labels", () => {

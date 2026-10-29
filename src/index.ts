@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -27,7 +27,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
-import { guardInit, guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
+import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -1210,12 +1210,24 @@ export default function (pi: ExtensionAPI) {
   function reportInitFailures(event: SessionStartEvent, ctx: ExtensionContext): void {
     const failures = takeInitFailures();
     if (failures.length === 0) return;
-    guardInit("init-error-entry", () => {
-      pi.appendEntry("subagents:init-error", { reason: event.reason, failures });
-    });
     const labels = failures.map((f) => f.label).join(", ");
+    // The append is not guarded through recordInitFailure: a throw there would leave an
+    // "init-error-entry" failure in the array, which the next activation would drain and
+    // report under the wrong label. The failure is already drained; only the entry is lost.
+    let written = true;
+    try {
+      pi.appendEntry("subagents:init-error", { reason: event.reason, failures });
+    } catch {
+      written = false;
+    }
     guardInitVoid("init-error-notify", () => {
-      ctx.ui.notify("pi-subagents: init failed for " + labels + "; the rest of the extension kept working. Details in the transcript.", "warning");
+      ctx.ui.notify(
+        "pi-subagents: init failed for " +
+          labels +
+          "; the rest of the extension kept working. " +
+          (written ? "Details in the transcript." : "The transcript entry could not be written."),
+        "warning",
+      );
     });
   }
 
@@ -1344,14 +1356,34 @@ export default function (pi: ExtensionAPI) {
   });
 
   guardInitVoid("entry-renderer", () => {
-    pi.registerEntryRenderer("subagents:init-error", (entry: any, _options: any, theme: any) => {
-      const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
-      const failures = Array.isArray(data?.failures) ? data.failures : [];
+    // A stored entry outlives the code that wrote it, so the renderer has to survive data it
+    // did not produce: pi turns a throwing renderer into a bare "[subagents:init-error]
+    // renderer failed: …" line, which hides the failure the entry exists to report.
+    const renderer: EntryRenderer = (entry, _options, theme) => {
       // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
-      const fg = typeof theme?.fg === "function" ? (c: string, s: string) => theme.fg(c, s) : (_c: string, s: string) => s;
-      const lines = failures.map((f: { label?: string; message?: string }) => fg("dim", (f.label ?? "?") + ": " + (f.message ?? "")));
-      return { render: (_width: number) => (lines.length ? lines : [fg("dim", "pi-subagents: init failed")]), invalidate: () => {} };
-    });
+      const paint = (s: string): string => {
+        try {
+          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
+        } catch {
+          return s;
+        }
+      };
+      const lines: string[] = [];
+      try {
+        const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
+        const raw = (data as { failures?: unknown } | null | undefined)?.failures;
+        for (const f of Array.isArray(raw) ? raw : []) {
+          if (f === null || typeof f !== "object") continue;
+          const { label, message } = f as { label?: unknown; message?: unknown };
+          if (typeof label !== "string") continue;
+          lines.push(paint(label + ": " + (typeof message === "string" ? message : "")));
+        }
+      } catch {
+        // Malformed entry (a proxy with a throwing trap, say): fall through to the plain line.
+      }
+      return { render: (_width: number) => (lines.length ? lines : [paint("pi-subagents: init failed")]), invalidate: () => {} };
+    };
+    pi.registerEntryRenderer("subagents:init-error", renderer);
   });
 
   // ---- Agent tool ----

@@ -18,11 +18,32 @@ export interface InitFailure {
 
 const failures: InitFailure[] = [];
 
-export function recordInitFailure(label: string, error: unknown): void {
-	const failure: InitFailure = { label, message: String(error) };
-	if (error instanceof Error) {
-		failure.stack = error.stack;
+/** Reported when the thrown value cannot even be stringified — an exotic value, but still no reason to lose every tool. */
+const UNPRINTABLE = "<unprintable thrown value>";
+
+/** `String(error)` runs user code: a `toString` that throws (or a proxy trap) would escape the catch below. */
+function messageOf(error: unknown): string {
+	try {
+		return String(error);
+	} catch {
+		return UNPRINTABLE;
 	}
+}
+
+/** `instanceof` walks the prototype chain, so a proxy with a throwing `getPrototypeOf` throws here too. */
+function stackOf(error: unknown): string | undefined {
+	try {
+		return error instanceof Error ? error.stack : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Never throws: every read of the thrown value is guarded, because this runs inside a catch. */
+export function recordInitFailure(label: string, error: unknown): void {
+	const failure: InitFailure = { label, message: messageOf(error) };
+	const stack = stackOf(error);
+	if (stack !== undefined) failure.stack = stack;
 	failures.push(failure);
 }
 

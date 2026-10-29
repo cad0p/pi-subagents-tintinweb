@@ -35,6 +35,41 @@ describe("init-guard", () => {
     expect(failures[0].stack).toBeUndefined();
   });
 
+  it("survives a thrown value whose toString throws", () => {
+    const hostile = {
+      toString() {
+        throw new Error("toString boom");
+      },
+    };
+    expect(() => guardInitVoid("label", () => {
+      throw hostile;
+    })).not.toThrow();
+    expect(() => guardInit("label", () => {
+      throw hostile;
+    })).not.toThrow();
+    const failures = takeInitFailures();
+    expect(failures).toHaveLength(2);
+    expect(failures[0].message).toBe("<unprintable thrown value>");
+    expect(failures[1].message).toBe("<unprintable thrown value>");
+  });
+
+  it("survives a thrown proxy whose getPrototypeOf throws", () => {
+    // String(value) works on the proxy (the default toString does not walk the chain), so this
+    // one fails on the instanceof read and not on the message read.
+    const hostile = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error("getPrototypeOf boom");
+      },
+    });
+    expect(() => guardInitVoid("label", () => {
+      throw hostile;
+    })).not.toThrow();
+    const failures = takeInitFailures();
+    expect(failures).toHaveLength(1);
+    expect(failures[0].message).toBe("[object Object]");
+    expect(failures[0].stack).toBeUndefined();
+  });
+
   it("drains recorded failures", () => {
     guardInit("a", () => {
       throw new Error("x");
