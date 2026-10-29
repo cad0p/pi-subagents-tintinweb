@@ -187,6 +187,13 @@ export interface AgentRecord {
   gated?: boolean;
   /** Set while the record is idle with pending background work. Its status stays `running`. */
   waiting?: { since: number; items: string[] };
+  /**
+   * Set while a child extension's dialog (select/confirm/input/editor/custom) is parked waiting for
+   * the human. A display flag, never a status: `record.status` stays `running`, so `abort()` and
+   * `deliver` keep working for a parked child. Cleared when the dialog is answered, cancelled or
+   * the agent is stopped.
+   */
+  dialog?: { since: number; title: string };
   /** The lifecycle's max_turns counter. Counts every run; a resume starts a fresh one. */
   turnBudget?: TurnBudget;
   /** The working directory the run started in. The run cap reads its background-work policy here, at spawn and at resume. */

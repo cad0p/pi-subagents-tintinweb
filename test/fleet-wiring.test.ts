@@ -22,6 +22,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
+import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
 import { paintedScreen } from "./helpers/painted-screen.js";
 import { textOf } from "./helpers/subagents-harness.js";
@@ -138,6 +139,25 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("a child activation never takes the host's terminal input or fleet widget", async () => {
+    const { pi, lifecycle } = makePi();
+    runInChildSessionContext(() => subagentsExtension(pi));
+    const ui = uiCtx();
+    await lifecycle.get("tool_execution_start")?.({}, ctxWith(ui));
+    expect(ui.onTerminalInput).not.toHaveBeenCalled();
+    expect(ui.setWidget).not.toHaveBeenCalled();
+  });
+
+  it("registers /agents only on the root activation", () => {
+    const root = makePi();
+    subagentsExtension(root.pi);
+    expect(root.pi.registerCommand).toHaveBeenCalledWith("agents", expect.anything());
+
+    const child = makePi();
+    runInChildSessionContext(() => subagentsExtension(child.pi));
+    expect(child.pi.registerCommand).not.toHaveBeenCalled();
   });
 
   it("captures terminal input on tool_execution_start (fleet hooked into the UI)", async () => {

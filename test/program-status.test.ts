@@ -149,6 +149,13 @@ describe("program status mapping", () => {
 		});
 	});
 
+	it("reports a parked child dialog as blocked with its title, and nothing else is", () => {
+		expect(state({ status: "running", dialog: { since: 1, title: "Need a choice" } })).toMatchObject({
+			state: "blocked",
+			message: "Need a choice",
+		});
+	});
+
 	it("reports waiting with its items, and never blocked", () => {
 		expect(state({ status: "running", waiting: { since: 1, items: ["timer-1", "heartbeat"] } })).toMatchObject({
 			state: "working",
