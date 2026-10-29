@@ -216,6 +216,23 @@ describe("run cap", () => {
     expect(completions).toHaveLength(1);
   });
 
+  it("a parked child is not killed at the cap; the check resumes after its dialog clears", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    record.dialog = { since: Date.now(), title: "Pick one" };
+    vi.advanceTimersByTime(CAP_MS + 60_000);
+    expect(child.abort).not.toHaveBeenCalled();
+    expect(record.status).toBe("running");
+    expect(completions).toHaveLength(0);
+    record.dialog = undefined;
+    vi.advanceTimersByTime(30_000);
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(completions).toHaveLength(1);
+  });
+
   it("idle hard stop: the waiting run settles at the cap with the time limit", async () => {
     pending = [bgItem];
     const child = fakeChild();

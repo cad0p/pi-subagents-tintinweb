@@ -676,7 +676,7 @@ export class AgentManager {
       onChildDialog: (dialog) => {
         record.dialog = dialog;
       },
-      uiTheme: ctx.ui.theme,
+      uiTheme: ctx.ui?.theme,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -938,7 +938,12 @@ export class AgentManager {
    */
   private headsUp(record: AgentRecord, life: Life, left: string): void {
     const session = record.session;
-    if (this.lives.get(record.id) !== life || life.hardStopped || record.capForced || !session) return;
+    if (this.lives.get(record.id) !== life) return;
+    if (record.dialog) {
+      this.retryParkedCap(record, life, "headsUp", left);
+      return;
+    }
+    if (life.hardStopped || record.capForced || !session) return;
     if (record.status !== "running" || this.waking.has(record.id)) return;
     const content = `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
     this.wake(record, session, content, {
@@ -954,6 +959,12 @@ export class AgentManager {
    */
   private hardStop(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
+    // A child waiting for a human is not idle work: skip the cap, re-check later. The cap resumes
+    // when the dialog clears, so a parked child is never killed for waiting to be asked a question.
+    if (record.dialog) {
+      this.retryParkedCap(record, life, "hardStop");
+      return;
+    }
     // An abort owns the label: abort() marks the record stopped while its run unwinds (from the user, a
     // parent signal, or an owner's stop), and a cap that fires in that window must not claim the time limit.
     // Every other terminal status is written by finalize/afterRun, which clear these timers first, so
@@ -980,6 +991,30 @@ export class AgentManager {
     // Idle or not yet started: the run's signal goes too, so a prompt that has not begun meets it aborted.
     record.abortController?.abort();
     this.decide(record, life);
+  }
+
+  /** How often a parked record's cap re-checks whether the dialog cleared. */
+  private static readonly PARKED_CAP_RECHECK_MS = 30_000;
+
+  /**
+   * Re-arm the cap event a parked record skipped. The other timer keeps its original schedule; this
+   * only replaces the one that fired. A record still parked at the next check repeats.
+   */
+  private retryParkedCap(record: AgentRecord, life: Life, kind: "headsUp" | "hardStop", left?: string): void {
+    const timers = this.capTimers.get(record.id);
+    if (!timers) return;
+    const run = (): void => {
+      if (this.lives.get(record.id) !== life) return;
+      if (record.dialog) {
+        this.retryParkedCap(record, life, kind, left);
+        return;
+      }
+      if (kind === "headsUp") this.headsUp(record, life, left ?? "1 minute");
+      else this.hardStop(record, life);
+    };
+    const timer = setTimeout(run, AgentManager.PARKED_CAP_RECHECK_MS);
+    timer.unref();
+    this.capTimers.set(record.id, kind === "headsUp" ? { ...timers, headsUp: timer } : { ...timers, hardStop: timer });
   }
 
   private clearCap(id: string): void {
