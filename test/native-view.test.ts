@@ -763,6 +763,24 @@ describe("native transcript view", () => {
     expect(h.im.ui.requestRender).not.toHaveBeenCalled();
   });
 
+  // Eviction removes the record outright (retireSession only clears its session). `syncSession`
+  // returned on the missing record before it reached watchSession, so the view kept a listener on a
+  // session it no longer showed.
+  it("A4 a record that disappears drops its session watch, and the next repaint takes it back", () => {
+    const h = harness();
+    h.openChild();
+    const child = h.record.session as any;
+    expect(child.listenerCount()).toBe(1);
+
+    h.manager.getRecord.mockImplementation(() => undefined);
+    h.view.repaint();
+    expect(child.listenerCount()).toBe(0);
+
+    h.manager.getRecord.mockImplementation((id: string) => id === h.record.id ? h.record : undefined);
+    h.view.repaint();
+    expect(child.listenerCount()).toBe(1);
+  });
+
   // pi's host `showStatus` fires on every ctrl+o toggle, and the wrapper used to answer it with a
   // full child render: the components were recreated (an expansion reset) and pi's alt-screen
   // render reset the text selection, so a selection lasted a moment.
@@ -881,6 +899,33 @@ describe("native transcript view", () => {
     // The child transcript is in pi's slot exactly once; the host container is still detached.
     expect(h.documentContainer.children).not.toContain(h.hostContainer);
     expect(h.documentContainer.children).toHaveLength(2);
+  });
+
+  it("a child UI change raised during a render waits for the paint, it never re-enters it", () => {
+    const h = harness();
+    const child = h.record.session as any;
+    const pushedDuringRender: boolean[] = [];
+    child.extensionRunner.getEntryRenderer = (type: string) => type === "child-only" ? () => {
+      // A child extension parks a dialog from inside its own entry render: the child-UI bus fires
+      // synchronously, and the refresh it asks for must not push a component into pi's dialog stack
+      // while pi is still drawing the transcript.
+      const before = h.im.dialogs.length;
+      void createChildUIProxy("child-1", { answerable: true }).select("Pick one", ["a", "b"]);
+      pushedDuringRender.push(h.im.dialogs.length !== before);
+      return new Text("CUSTOM CHILD");
+    } : undefined;
+    h.openChild();
+    child.sessionManager.buildContextEntries = () => [
+      message("user", "CHILD TEXT"),
+      { type: "custom", customType: "child-only", data: {}, timestamp: Date.now() },
+    ];
+    // A repaint, not the open render: the child-UI subscriptions are only live afterwards.
+    h.view.repaint();
+
+    expect(pushedDuringRender.length).toBeGreaterThan(0);
+    expect(pushedDuringRender.every((pushed) => pushed === false)).toBe(true);
+    // Deferred, not dropped: the paint pushes the parked dialog once its render returns.
+    expect(h.im.dialogs.length).toBe(1);
   });
 
   it("repaints replace the transcript instead of appending it", () => {

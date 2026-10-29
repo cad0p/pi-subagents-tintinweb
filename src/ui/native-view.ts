@@ -522,6 +522,12 @@ export class NativeTranscriptView {
     const im = this.options.getMode();
     const state = this.state;
     if (!im || !state || !this.canPaint(im, state)) return;
+    if (state.rendering) {
+      // A child entry renderer that calls `ctx.ui` reaches this from inside pi's render: rebinding
+      // the footer or pushing a dialog now would re-enter it. The outer paint runs one pass more.
+      state.repaintPending = true;
+      return;
+    }
     const ctx = this.options.getContext();
     if (ctx) {
       this.syncSession(im, ctx, state);
@@ -933,7 +939,12 @@ export class NativeTranscriptView {
    */
   private syncSession(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
     const record = this.options.manager.getRecord(state.id);
-    if (!record) return;
+    if (!record) {
+      // A removed record emits nothing of its own, so nothing else drops the watch: without this
+      // the view keeps a listener on the session it no longer shows.
+      this.watchSession(state, undefined);
+      return;
+    }
     const session = record.session;
     if (!session) {
       if (state.footerKind !== "record") this.installRecordFooter(ctx, state);
