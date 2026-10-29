@@ -36,8 +36,10 @@ import type { LifetimeUsage } from "./usage.js";
  * that delta silently, and this release does not take the route that would keep it: it stops an older hand-over as it
  * always has and accepts the loss as a documented limitation, not a guard to write. A reader that must have the delta
  * does not call `stop` on such a hand-over: it `attach`es a listener for its `usage` events, disposes its idle items
- * itself through `teardownChildSession`, and then ends the pool the way `stop` would have — `detach`,
- * `draining.abortAll`, `draining.dispose`; stopping at the disposal leaves the pool, its runs and their slots alive.
+ * itself through `teardownChildSession`, ends the pool the way `stop` would have — `draining.abortAll`,
+ * `draining.dispose` — and only then `detach`es. The order matters: `abortAll` emits a final `usage` for each run it
+ * stops, and a detached hand-over buffers those into `pending`, which nothing reads once `stop` is skipped. Stopping
+ * there leaves the pool, its runs and their slots alive.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 

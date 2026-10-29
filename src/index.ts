@@ -960,11 +960,11 @@ export default function (pi: ExtensionAPI) {
         held = [];
       }
     } else {
-      // Every hand-over in `held` was read when this activation adopted it (`takeUnreported`), so its unreported
-      // delta already sits in this activation's `pendingUsage`. That pool's only consumer is a tool result of this
-      // activation (`withUsageReporting`), and `session_shutdown` has run: this activation returns none again. The
-      // value is unobservable here and is not read a second time; `stopStranded` is where it is reported, in an
-      // activation that still returns tool results.
+      // Every hand-over in `held` was read when this activation adopted it (`takeUnreported`, or `take` for one
+      // from an older release), so its unreported delta already sits in this activation's `pendingUsage`. That
+      // pool's only consumer is a tool result of this activation (`withUsageReporting`), and `session_shutdown`
+      // has run: this activation returns none again. The value is unobservable here and is not read a second time;
+      // `stopStranded` is where it is reported, in an activation that still returns tool results.
       //
       // A `usage` event that arrives after `stop` is a different delta: spend that reached neither `subagents:usage`
       // nor a tool result. The sink gives it the consumer a live event has, which emits the ledger event and, with
