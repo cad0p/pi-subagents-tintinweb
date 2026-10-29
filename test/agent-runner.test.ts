@@ -164,10 +164,11 @@ import {
   runAgent,
   type SessionLifecycle,
   SUBAGENT_TOOL_NAMES,
+  teardownChildSession,
 } from "../src/agent-runner.js";
 import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
-import { answerChildDialog, childUIState, clearChildUI, pendingChildDialogs } from "../src/ui/child-ui.js";
+import { answerChildDialog, childUIState, clearChildUI, createChildUIProxy, pendingChildDialogs } from "../src/ui/child-ui.js";
 import type { LifetimeUsage } from "../src/usage.js";
 
 function createSession(finalText: string) {
@@ -193,6 +194,8 @@ function createSession(finalText: string) {
     setActiveToolsByName: vi.fn(),
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
+    dispose: vi.fn(),
+    extensionRunner: { emit: vi.fn(async () => {}) },
   };
   return { session, listeners };
 }
@@ -2650,5 +2653,23 @@ describe("agent-runner child ui context", () => {
     answerChildDialog("answerable-dialogs", true);
     await expect(pending).resolves.toBe(true);
     expect(flags.at(-1)).toBeUndefined();
+  });
+
+  it("stops writing the record's dialog flag once the session is torn down", async () => {
+    const { session } = createSession("TORN DOWN");
+    createAgentSession.mockResolvedValue({ session });
+    const flags: Array<{ title: string } | undefined> = [];
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "answerable-dialogs",
+      dialogsAnswerable: true,
+      onChildDialog: (dialog) => flags.push(dialog),
+    });
+
+    await teardownChildSession(session as unknown as Parameters<typeof teardownChildSession>[0]);
+    const seen = flags.length;
+    // A dialog queued after the teardown must not reach the retired record's hook.
+    void createChildUIProxy("answerable-dialogs", { answerable: true }).confirm("Late?", "the record is gone");
+    expect(flags).toHaveLength(seen);
   });
 });

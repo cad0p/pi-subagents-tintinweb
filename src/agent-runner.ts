@@ -810,7 +810,14 @@ export async function teardownChildSession(session: AgentSession, abortTimeoutMs
   await teardownStep("session_shutdown", () => session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }));
   if (session.isStreaming) await teardownStep("abort again", () => abortWithTimeout(session, abortTimeoutMs));
   await teardownStep("dispose", () => session.dispose());
+  // The record this session's dialog flag was written to may already be gone: stop the hook with it.
+  const unsubscribe = dialogFlagHooks.get(session);
+  dialogFlagHooks.delete(session);
+  unsubscribe?.();
 }
+
+/** The dialog-flag subscription of each live child session, released by its teardown. */
+const dialogFlagHooks = new WeakMap<AgentSession, () => void>();
 
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
@@ -1224,7 +1231,7 @@ export async function createChildSession(
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
   const childId = options.agentId ?? "child";
-  if (options.onChildDialog) onChildDialogFlag(childId, options.onChildDialog);
+  if (options.onChildDialog) dialogFlagHooks.set(session, onChildDialogFlag(childId, options.onChildDialog));
   await session.bindExtensions({
     uiContext: createChildUIProxy(childId, {
       theme: options.uiTheme,

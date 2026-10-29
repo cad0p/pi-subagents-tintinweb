@@ -691,6 +691,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   manager.resolveSettings = recoveredSettings;
+  // A resumed child is rebuilt outside any spawn's context: read the live root theme instead of
+  // letting its extensions see the fallback one.
+  manager.uiTheme = () => currentCtx?.ui?.theme;
 
   // ---- Native transcript view (root only) ----
   // The capture probe runs at factory time; the view is inert until the probe fires.

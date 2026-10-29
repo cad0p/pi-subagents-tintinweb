@@ -21,6 +21,7 @@ import {
   type ExtensionContext,
   type FileEntry,
   SessionManager,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   attachSessionLifecycle,
@@ -368,6 +369,11 @@ export class AgentManager {
    * headless host (print, JSON, RPC), where a parked dialog would hang the child and the process.
    */
   private dialogsAnswerable = false;
+  /**
+   * Supplied by the extension: the live root theme, read when a settled record's session is reopened.
+   * Without it a resumed child's `ctx.ui.theme` falls back to the identity stand-in.
+   */
+  uiTheme?: () => Theme | undefined;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -1722,6 +1728,7 @@ export class AgentManager {
           return createChildSession(childSettings, sessionManager, {
             agentId: id,
             parentAgentId: record.parentAgentId,
+            uiTheme: this.uiTheme?.(),
             dialogsAnswerable: this.dialogsAnswerable,
             onChildDialog: (dialog) => {
               record.dialog = dialog;

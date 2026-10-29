@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
-import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
@@ -2639,7 +2639,14 @@ describe("AgentManager — dialog answerability", () => {
     await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBeUndefined());
 
     manager.setDialogsAnswerable(true);
+    const rootTheme = { name: "root" } as unknown as Theme;
+    manager.uiTheme = () => rootTheme;
     await reopen(manager, id);
-    expect(vi.mocked(createChildSession).mock.lastCall?.[2]).toMatchObject({ dialogsAnswerable: true });
+    // A resumed child is rebuilt outside any spawn's context: both the answerability and the live
+    // root theme have to reach it, or its extensions see the fallback theme and park forever.
+    expect(vi.mocked(createChildSession).mock.lastCall?.[2]).toMatchObject({
+      dialogsAnswerable: true,
+      uiTheme: rootTheme,
+    });
   });
 });
