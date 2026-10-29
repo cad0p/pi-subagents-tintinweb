@@ -765,6 +765,9 @@ export default function (pi: ExtensionAPI) {
         manager,
         getContext: () => currentCtx as unknown as NativeViewContext | undefined,
         getMode: capturedInteractiveMode,
+        // The list points its cursor at the transcript on screen: Esc in a child (and pi's own
+        // teardown on reload) closes the view behind its back, so put the cursor back on `main`.
+        onClosed: () => fleet.returnToMain(),
       })
     : undefined;
   if (nativeView) {
