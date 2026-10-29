@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Report subagents through the terminal's program status (closes #152) ([#153](https://github.com/cad0p/pi-subagents-tintinweb/pull/153))
 - *(probe)* A daily, gated upstream compatibility probe (closes #156) ([#157](https://github.com/cad0p/pi-subagents-tintinweb/pull/157))
 - *(fleetview)* Show a subagent session in place, on pi own transcript ([#168](https://github.com/cad0p/pi-subagents-tintinweb/pull/168)) (closes #167)
+- *(fleetview)* The arrows enter a session, Esc interrupts it (closes #178) ([#182](https://github.com/cad0p/pi-subagents-tintinweb/pull/182))
 
 ### 🐛 Bug Fixes
 
