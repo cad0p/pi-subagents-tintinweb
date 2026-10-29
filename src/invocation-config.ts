@@ -52,6 +52,23 @@ export function isolationParam(enabled: boolean): Partial<typeof isolationParamS
   return enabled ? isolationParamShape : {};
 }
 
+/**
+ * The removed `isolated` parameter (issue #177).
+ *
+ * TypeBox sets no `additionalProperties: false`, and cross-extension RPC
+ * forwards its options verbatim, so a stale caller — a cached prompt, a
+ * third-party extension still passing the old options — would otherwise be
+ * accepted silently and get a fully-tooled agent that it asked to be hermetic.
+ * Every entry point refuses the field with this one message instead.
+ */
+export const ISOLATED_REMOVED =
+  'The "isolated" parameter was removed. For a hermetic agent, set `extensions: false`, `skills: false` and `scoped_models: false` in its agent file and omit `allowed_subagents`.';
+
+/** The refusal message when unvalidated params still carry the removed flag. */
+export function isolatedParamError(params: unknown): string | undefined {
+  return params !== null && typeof params === "object" && "isolated" in params ? ISOLATED_REMOVED : undefined;
+}
+
 interface AgentInvocationParams {
   max_turns?: number;
   inherit_context?: boolean;

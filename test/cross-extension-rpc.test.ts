@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
+import { ISOLATED_REMOVED } from "../src/invocation-config.js";
 
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {
@@ -126,6 +127,22 @@ describe("cross-extension RPC", () => {
         deps.pi, ctx, "general-purpose", "do stuff",
         { isBackground: false },
       );
+    });
+
+    // Options arrive unvalidated over the bus, so the schema cannot refuse a
+    // flag the caller still forwards (issue #177): the spawn must fail.
+    it("refuses the removed isolated option instead of spawning", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s2c", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s2c", type: "general-purpose", prompt: "do stuff",
+        options: { isolated: true },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: ISOLATED_REMOVED });
+      expect(manager.spawn).not.toHaveBeenCalled();
     });
 
     it("returns error when no active session", async () => {

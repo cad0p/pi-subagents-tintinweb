@@ -27,7 +27,7 @@ import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeI
 import { saveCheckpoint } from "./checkpoint.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
-import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -157,6 +157,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const isolatedError = isolatedParamError(params);
+      if (isolatedError) return textResult(isolatedError, true);
+
       if (context.depth >= context.maxSubagentDepth) {
         return textResult(
           `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,

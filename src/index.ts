@@ -28,7 +28,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
-import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
@@ -1730,6 +1730,12 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      // The schema no longer declares `isolated`, but TypeBox accepts unknown
+      // properties and RPC forwards them verbatim — refuse the removed flag here
+      // rather than silently spawning an agent that is not hermetic.
+      const isolatedError = isolatedParamError(params);
+      if (isolatedError) return textResult(isolatedError, true);
+
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 

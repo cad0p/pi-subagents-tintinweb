@@ -3,13 +3,14 @@ description: "Hermetic recipe (extensions/skills/scoped_models: false) leaves bu
 extensions: false
 skills: false
 scoped_models: false
-tools: "*, ext:ext-alpha.mjs"
+tools: "*"
 expect_tools_present: "read, bash, edit, write, grep, find, ls"
-expect_tools_absent: "alpha_read, alpha_write, beta_tool"
+expect_tools_absent: "hermetic_probe, alpha_read, alpha_write, beta_tool"
 ---
 e2e template: the README's hermetic recipe — extensions: false, skills: false,
 scoped_models: false, and no allowed_subagents — replaces the removed isolated:
-true flag. Even with an ext: selector declared, no extension tool surfaces: only
-built-ins. This harness observes the active tool set and the built prompt, so the
-ext: selector and extensions: false are the parts it pins; skills/scoped_models
-are covered by the runner unit tests.
+true flag. `hermetic_probe` is a discovered project extension
+(fixtures/.pi/extensions/hermetic-probe.js), so `extensions: false` is what
+keeps it out; with the default `extensions: true` it would surface, which is
+what makes this template falsifiable. skills/scoped_models are covered by the
+runner unit tests.

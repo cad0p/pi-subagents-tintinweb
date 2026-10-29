@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { ISOLATED_REMOVED } from "../src/invocation-config.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager, type NestedSpawnOptions } from "../src/nested-tools.js";
 import type { AgentRecord } from "../src/types.js";
@@ -223,6 +224,17 @@ describe("nested Agent tool", () => {
     } finally {
       setWorktreeIsolationEnabled(true);
     }
+  });
+
+  // The nested schema no longer declares `isolated`, but TypeBox accepts unknown
+  // properties, so the child would otherwise silently get a fully-tooled agent
+  // (issue #177). Refuse it by value, before any spawn or depth check.
+  it("refuses the removed isolated parameter instead of spawning", async () => {
+    const result = await run(0, { subagent_type: "scout", description: "d", prompt: "p", isolated: true });
+
+    expect((result as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(result)).toBe(ISOLATED_REMOVED);
+    expect(spawns).toHaveLength(0);
   });
 
   it("applies the shared scopeModels policy to a frontmatter-pinned model", async () => {

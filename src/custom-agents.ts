@@ -56,6 +56,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       continue;
     }
     const { frontmatter: fm, body } = parsed;
+    warnRemovedKeys(path, fm, strict);
     warnUnknownKeys(path, fm);
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
@@ -133,6 +134,10 @@ function warnSkippedOverride(name: string, agents: Map<string, AgentConfig>): vo
  * (`run_in_background`, `join_mode`, `name:`) that reads as configuration and
  * does nothing. Reported once per file per key at load — the same channel as a
  * malformed file — rather than per spawn, where it would be noise.
+ *
+ * Removed keys are `REMOVED_FRONTMATTER_KEYS`, not this set: they get their own
+ * warning with the migration, because "unknown key" says nothing about what the
+ * author meant to configure.
  */
 const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "description",
@@ -161,9 +166,31 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "enabled",
 ]);
 
+/**
+ * Keys this loader used to read, with the recipe that replaces each one. A file
+ * that still sets one loads, but no longer gets the behavior the key names — so
+ * the warning has to carry the migration, not just the key. `strictAgentFiles`
+ * refuses the file instead: a checked-in `.pi/agents/` that asks for a hermetic
+ * agent and silently gets a fully-tooled one is exactly what strict is for.
+ */
+const REMOVED_FRONTMATTER_KEYS: ReadonlyMap<string, string> = new Map([
+  [
+    "isolated",
+    "for a hermetic agent set `extensions: false`, `skills: false` and `scoped_models: false`, omit `allowed_subagents`, and drop any `ext:` selectors and `exclude_extensions`",
+  ],
+]);
+
+function warnRemovedKeys(path: string, frontmatter: Record<string, unknown>, strict: boolean): void {
+  for (const [key, migration] of REMOVED_FRONTMATTER_KEYS) {
+    if (!(key in frontmatter)) continue;
+    if (strict) throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
+    warnIfNew(`Ignoring removed frontmatter key "${key}" in ${path} — ${migration}`);
+  }
+}
+
 function warnUnknownKeys(path: string, frontmatter: Record<string, unknown>): void {
   for (const key of Object.keys(frontmatter)) {
-    if (KNOWN_FRONTMATTER_KEYS.has(key)) continue;
+    if (KNOWN_FRONTMATTER_KEYS.has(key) || REMOVED_FRONTMATTER_KEYS.has(key)) continue;
     warnIfNew(`Ignoring unknown frontmatter key "${key}" in ${path}`);
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
+import { ISOLATED_REMOVED, isolatedParamError, resolveAgentInvocationConfig } from "../src/invocation-config.js";
 import type { AgentConfig } from "../src/types.js";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -15,6 +15,28 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     ...overrides,
   };
 }
+
+// TypeBox accepts unknown properties and the RPC forwards options verbatim, so
+// the removed `isolated` flag has to be refused by value, not by schema.
+describe("isolatedParamError", () => {
+  it("refuses the removed flag with the migration recipe", () => {
+    for (const isolated of [true, false]) {
+      expect(isolatedParamError({ isolated })).toBe(ISOLATED_REMOVED);
+    }
+    expect(ISOLATED_REMOVED).toContain("extensions: false");
+    expect(ISOLATED_REMOVED).toContain("skills: false");
+    expect(ISOLATED_REMOVED).toContain("scoped_models: false");
+    expect(ISOLATED_REMOVED).toContain("allowed_subagents");
+  });
+
+  it("leaves every other call alone", () => {
+    expect(isolatedParamError({ subagent_type: "general-purpose" })).toBeUndefined();
+    expect(isolatedParamError({})).toBeUndefined();
+    expect(isolatedParamError(undefined)).toBeUndefined();
+    expect(isolatedParamError(null)).toBeUndefined();
+    expect(isolatedParamError("isolated")).toBeUndefined();
+  });
+});
 
 describe("resolveAgentInvocationConfig", () => {
   it("prefers agent config over tool-call params for locked fields", () => {

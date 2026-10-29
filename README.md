@@ -230,7 +230,7 @@ All fields are optional — sensible defaults for everything.
 | `max_subagent_depth` | inherit | Per-agent nesting cap. Can only tighten the project's `maxSubagentDepth`, never raise it |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-**Hermetic agents — the old `isolated: true` is gone.** That flag was removed; write the fields above instead:
+**Hermetic agents — the old `isolated: true` is gone.** That flag was removed (issue #177); write the fields above instead:
 
 ```yaml
 extensions: false      # no extension/MCP tools
@@ -239,7 +239,7 @@ scoped_models: false   # no model scope
 # and do not declare allowed_subagents — that leaves no nested delegation tools
 ```
 
-That combination is exactly what `isolated: true` used to force: the agent keeps only the built-in tools listed in `tools:` (or all of them when it is omitted). A file that still sets `isolated:` warns as an unknown key and is otherwise ignored.
+That combination is exactly what `isolated: true` used to force: the agent keeps only the built-in tools listed in `tools:` (or all of them when it is omitted). Also drop any `ext:` entries from `tools:` and any `exclude_extensions:` — a hermetic agent loads no extension, so a leftover selector only warns `extension-error:…` on every spawn. A file that still sets `isolated:` loads without it and warns with this recipe; `strictAgentFiles` refuses it at startup instead, and passing `isolated` to the `Agent` tool (or over RPC) is refused with the same recipe.
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
 
