@@ -32,6 +32,8 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Reload hand-over.** A `/reload` does not stop subagents. The old activation hands running and finished agents to the new one (`src/reload-handover.ts`), hands a nested result still held in its batch to its parent once, and the manager registry is owned by the root activation by role, not by whichever activation loaded first. A port that aborts or disposes agents on `reload` is a regression.
 
+**Init failures are reported, not fatal.** Every step of this package's own initialization that can throw is guarded (`src/init-guard.ts`), and a guarded failure becomes a `subagents:init-error` chat entry plus a warning instead of escaping the factory. Pi discards every registration of a package whose factory throws — silently, with no retry — so a single unlucky throw used to cost all three tools ([#151](https://github.com/cad0p/pi-subagents-tintinweb/issues/151)); upstream has no guard and still has the silent drop. The one behavioural consequence for a ported feature: `strictAgentFiles` refuses the malformed file exactly as before, but reports it and loads the rest of the directory rather than aborting the whole load.
+
 ## Deliberately not ported
 
 Each of these exists upstream and is not coming here without a new decision.

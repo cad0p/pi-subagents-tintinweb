@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -27,6 +27,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
+import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -325,7 +326,10 @@ export default function (pi: ExtensionAPI) {
 
   // Initial load — the only strict one. A bad edit mid-session must not kill the
   // session on the next unrelated spawn, so every later reload keeps warning.
-  reloadCustomAgents(strictAgentFiles);
+  // Guarded: a throw here would otherwise cost every tool the package registered.
+  if (!guardInitVoid("agent-files", () => reloadCustomAgents(strictAgentFiles))) {
+    guardInitVoid("agent-files", () => reloadCustomAgents(false));
+  }
 
   // ---- Agent activity tracking ----
   const agentActivity = new Map<string, AgentActivity>();
@@ -834,7 +838,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (event, ctx) => {
+  async function runSessionStart(event: SessionStartEvent, ctx: ExtensionContext): Promise<void> {
     currentCtx = ctx;
     if (leakedChildContext) {
       const frames = leakedChildContext.split("\n").slice(1, 8).join("\n");
@@ -891,25 +895,40 @@ export default function (pi: ExtensionAPI) {
       // would add a line). Captured once per activation and kept until shutdown — the reporter must
       // outlive the FleetView, whose own widget unmounts whenever the list empties.
       if (ctx.hasUI) {
-        ctx.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, (tui) => {
-          // pi-tui keeps `programStatusSupported` private in its type; the field is a normal property
-          // at runtime, and it is the only way to read the support flag. Absent reads as unsupported.
-          programStatus?.attach(tui.terminal);
-          return { render: () => [], invalidate: () => {} };
-        }, { placement: "belowEditor" });
-        programStatusUi = ctx;
+        guardInitVoid("program-status", () => {
+          ctx.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, (tui) => {
+            // pi-tui keeps `programStatusSupported` private in its type; the field is a normal property
+            // at runtime, and it is the only way to read the support flag. Absent reads as unsupported.
+            programStatus?.attach(tui.terminal);
+            return { render: () => [], invalidate: () => {} };
+          }, { placement: "belowEditor" });
+          programStatusUi = ctx;
+        });
       }
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
       const getSource = () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY];
-      registerSubagentProvider(event.reason, getSource);
-      registerSubagentDisplayProvider(event.reason, getSource);
+      guardInitVoid("background-work", () => {
+        registerSubagentProvider(event.reason, getSource);
+        registerSubagentDisplayProvider(event.reason, getSource);
+      });
       try {
-        await adoptHandovers(ctx);
+        await guardInitAsync("handover-adoption", () => adoptHandovers(ctx));
       } finally {
         openSlots();
       }
-      stopStranded(ctx.sessionManager.getSessionId());
+      guardInitVoid("stranded", () => { stopStranded(ctx.sessionManager.getSessionId()); });
       if (event.reason === "startup" || event.reason === "resume") recoverCrashed(ctx);
+    }
+  }
+
+  pi.on("session_start", async (event, ctx) => {
+    try {
+      await runSessionStart(event as SessionStartEvent, ctx);
+    } catch (error) {
+      recordInitFailure("session_start", error);
+      throw error;
+    } finally {
+      reportInitFailures(event as SessionStartEvent, ctx);
     }
   });
 
@@ -1188,6 +1207,30 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
+  function reportInitFailures(event: SessionStartEvent, ctx: ExtensionContext): void {
+    const failures = takeInitFailures();
+    if (failures.length === 0) return;
+    const labels = failures.map((f) => f.label).join(", ");
+    // The append is not guarded through recordInitFailure: a throw there would leave an
+    // "init-error-entry" failure in the array, which the next activation would drain and
+    // report under the wrong label. The failure is already drained; only the entry is lost.
+    let written = true;
+    try {
+      pi.appendEntry("subagents:init-error", { reason: event.reason, failures });
+    } catch {
+      written = false;
+    }
+    guardInitVoid("init-error-notify", () => {
+      ctx.ui.notify(
+        "pi-subagents: init failed for " +
+          labels +
+          "; the rest of the extension kept working. " +
+          (written ? "Details in the transcript." : "The transcript entry could not be written."),
+        "warning",
+      );
+    });
+  }
+
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled);
 
   // Project/global default for writing the subagent .output transcript lives in
@@ -1287,7 +1330,7 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
+  guardInitVoid("settings-apply", () => { applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setEvictAfterMinutes: (n) => manager.setEvictAfterMinutes(n),
@@ -1310,6 +1353,38 @@ export default function (pi: ExtensionAPI) {
     },
     (event, payload) => pi.events.emit(event, payload),
   );
+  });
+
+  guardInitVoid("entry-renderer", () => {
+    // A stored entry outlives the code that wrote it, so the renderer has to survive data it
+    // did not produce: pi turns a throwing renderer into a bare "[subagents:init-error]
+    // renderer failed: …" line, which hides the failure the entry exists to report.
+    const renderer: EntryRenderer = (entry, _options, theme) => {
+      // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
+      const paint = (s: string): string => {
+        try {
+          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
+        } catch {
+          return s;
+        }
+      };
+      const lines: string[] = [];
+      try {
+        const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
+        const raw = (data as { failures?: unknown } | null | undefined)?.failures;
+        for (const f of Array.isArray(raw) ? raw : []) {
+          if (f === null || typeof f !== "object") continue;
+          const { label, message } = f as { label?: unknown; message?: unknown };
+          if (typeof label !== "string") continue;
+          lines.push(paint(label + ": " + (typeof message === "string" ? message : "")));
+        }
+      } catch {
+        // Malformed entry (a proxy with a throwing trap, say): fall through to the plain line.
+      }
+      return { render: (_width: number) => (lines.length ? lines : [paint("pi-subagents: init failed")]), invalidate: () => {} };
+    };
+    pi.registerEntryRenderer("subagents:init-error", renderer);
+  });
 
   // ---- Agent tool ----
 

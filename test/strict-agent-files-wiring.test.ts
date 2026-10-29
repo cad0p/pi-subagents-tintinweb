@@ -2,18 +2,22 @@
  * strict-agent-files-wiring.test.ts — proves `strictAgentFiles` gates the real
  * extension activation, and that it is a STARTUP decision only.
  *
- * The load-bearing pair: activating with the setting on must throw (that is the
- * whole point — pi refuses to start rather than run a substituted agent), while
- * a later reload of the same broken file must not. Agents reload once per
- * `Agent` call, so a strict reload would kill the session on an unrelated spawn
- * long after the bad edit, where the failure looks disconnected from its cause.
+ * The load-bearing pair: activating with the setting on still refuses to run the
+ * broken file — it is never loaded — but it no longer takes every tool with it.
+ * The strict load failure is recorded and reported (see src/init-guard.ts and
+ * src/index.ts's reportInitFailures) and the load is retried non-strict, so the
+ * valid agents in the same directory still load. A later reload of the same
+ * broken file stays non-strict. Agents reload once per `Agent` call, so a
+ * strict reload would kill the session on an unrelated spawn long after the bad
+ * edit, where the failure looks disconnected from its cause.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { getUserAgentNames, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
+import { takeInitFailures } from "../src/init-guard.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -21,6 +25,7 @@ function makePi() {
   return {
     pi: {
       registerMessageRenderer: vi.fn(),
+      registerEntryRenderer: vi.fn(),
       registerTool: vi.fn((t: any) => tools.set(t.name, t)),
       registerCommand: vi.fn(),
       on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
@@ -54,6 +59,13 @@ function writeBrokenAgent(): string {
   return path;
 }
 
+/** A valid agent next to the broken one: it only loads if the strict failure is retried non-strict. */
+function writeValidAgent(): void {
+  const dir = join(cwd, ".pi", "agents");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "ok.md"), "---\nname: ok\ndescription: ok agent\n---\n\nOk.\n");
+}
+
 describe("strictAgentFiles gates extension activation", () => {
   let warn: ReturnType<typeof vi.spyOn>;
 
@@ -67,10 +79,12 @@ describe("strictAgentFiles gates extension activation", () => {
     originalHome = process.env.HOME;
     process.env.PI_CODING_AGENT_DIR = join(cwd, "agent-dir");
     process.env.HOME = cwd;
+    takeInitFailures();
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
+    takeInitFailures();
     warn.mockRestore();
     setFallbackSubagent(undefined);
     delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
@@ -83,11 +97,26 @@ describe("strictAgentFiles gates extension activation", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("aborts activation naming the file when enabled", () => {
+  it("activates, skips the broken file and records the failure when enabled", () => {
     const path = writeBrokenAgent();
+    writeValidAgent();
     writeSettings({ strictAgentFiles: true });
 
-    expect(() => subagentsExtension(makePi().pi)).toThrow(path);
+    const { pi, tools } = makePi();
+    expect(() => subagentsExtension(pi)).not.toThrow();
+    // Every tool survives: the throw no longer escapes the factory.
+    expect(tools.has("Agent")).toBe(true);
+
+    // Strictness still refuses the broken file, and the retry is non-strict
+    // rather than a give-up: the valid agent beside it is registered.
+    expect(getUserAgentNames()).toContain("ok");
+    expect(getUserAgentNames()).not.toContain("broken");
+
+    // ... and the refusal is on the record, naming the file.
+    const failures = takeInitFailures();
+    expect(failures).toHaveLength(1);
+    expect(failures[0].label).toBe("agent-files");
+    expect(failures[0].message).toContain(path);
   });
 
   it("skips the file and activates when disabled (the default)", () => {
