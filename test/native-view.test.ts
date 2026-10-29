@@ -501,6 +501,47 @@ describe("native transcript view", () => {
     expect(resolved).toBeUndefined();
   });
 
+  it("repaints replace the transcript instead of appending it", () => {
+    const h = harness();
+    h.openChild();
+    const once = h.documentContainer.render(120).join("\n");
+    h.view.repaint();
+    h.view.repaint();
+    const thrice = h.documentContainer.render(120).join("\n");
+    // Two more paints, one transcript: the child container is cleared before every render.
+    expect(thrice.match(/CHILD TEXT/g)).toHaveLength(1);
+    expect(thrice).toBe(once);
+  });
+
+  it("answering a queued dialog resolves the child's call, clears the flag and pushes the next one", async () => {
+    const h = harness();
+    onChildDialogFlag("child-1", (flag) => { h.record.dialog = flag; });
+    h.openChild();
+    const proxy = createChildUIProxy("child-1", { answerable: true });
+    const answers: Array<string | undefined> = [];
+    const first = proxy.select("Pick one", ["a", "b"]).then((value) => { answers.push(value); });
+    const second = proxy.confirm("Then?", "sure").then((value) => { answers.push(String(value)); });
+    await Promise.resolve();
+    expect(h.im.dialogs).toHaveLength(1);
+    expect(h.record.dialog?.title).toBe("Pick one");
+
+    // The human presses Enter on "b" in the component pi holds.
+    (h.im.dialogs[0] as any).onSelectCallback("b");
+    await first;
+    await Promise.resolve();
+    expect(answers).toEqual(["b"]);
+    expect(h.im.removeExtensionDialog).toHaveBeenCalledWith(h.im.dialogs[0]);
+    // The next parked dialog is pulled forward, and the record's flag names it.
+    expect(h.record.dialog?.title).toBe("Then?");
+    expect(h.im.dialogs).toHaveLength(2);
+
+    (h.im.dialogs[1] as any).onCancelCallback();
+    await second;
+    await Promise.resolve();
+    expect(answers).toEqual(["b", "false"]);
+    expect(h.record.dialog).toBeUndefined();
+  });
+
   it("honours the child's timeout: the dialog expires as cancelled", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     try {
