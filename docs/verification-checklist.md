@@ -44,19 +44,28 @@ versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
 `xhigh`; for checks that do not exercise a Visual proof step, fall back to
-`opencode-go/deepseek-v4.1-flash` at `max` when Anthropic is unavailable.
-`--no-extensions` drops discovered extensions, so pass the global
-ones explicitly with `-e` (the global `system-prompt.ts` is required for native
-Anthropic). Add the branch build with `-e <repo>/src/index.ts`, so the two don't
-collide. Subagents spawned from the session follow the same `-e` flags (#92).
+`opencode-go-2/deepseek-v4.1-flash` at `max` when Anthropic is unavailable. That
+account and its `opencode-go-3`, `opencode-go-4`, ... siblings are registered by
+`@cad0p/pi-fallback-provider`. On a terminal error it rotates through
+`enabledModels` in list order, skipping the failed model, so `opencode-go-2`
+in the command below is only the starting account. The `opencode-go-*`
+siblings are tried only because they are listed there; with none listed, it
+warns "No fallback models available." `--no-extensions`
+drops discovered extensions, so pass each one the run needs with its own `-e`: the
+global `system-prompt.ts` (required for native Anthropic) and, on the fallback, the
+installed `~/.pi/agent/npm/node_modules/@cad0p/pi-fallback-provider/index.ts`. Add
+the branch build with `-e <repo>/src/index.ts`, so the two don't collide; subagents
+spawned from the session follow the same `-e` flags (#92).
 
 ```bash
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
   -e <repo>/src/index.ts --provider anthropic --model claude-haiku-5-5 --thinking xhigh
 
-# fallback
+# fallback: -e <fallback-provider>/index.ts is what makes opencode-go-2 resolve;
+# a terminal error rotates through enabledModels, skipping the failed model
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
-  -e <repo>/src/index.ts --provider opencode-go --model deepseek-v4.1-flash --thinking max
+  -e <fallback-provider>/index.ts -e <repo>/src/index.ts \
+  --provider opencode-go-2 --model deepseek-v4.1-flash --thinking max
 ```
 
 - Exercise the changed surface end to end in a real session — spawn, steer,
