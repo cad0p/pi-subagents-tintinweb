@@ -209,6 +209,33 @@ interface GateEntry {
 type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 
 /**
+ * Write what a live session reports as its model and thinking level back to its record.
+ *
+ * The two are only knowable once pi has resolved its defaults and clamped the level to what the
+ * model supports, so the record is made authoritative here and every surface reads one place
+ * instead of each re-deriving "session, else the request" for itself. `bindSession` calls it at
+ * spawn and the native view on an in-place model switch inside a run.
+ */
+export function adoptSessionModel(record: AgentRecord, session: AgentSession): void {
+  if (!session.model) return;
+  record.invocation ??= {};
+  // Read the kept request first: a caller's level survives being clamped
+  // AND, one line later, being replaced by the effective one.
+  const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+  Object.assign(record.invocation, describeModel(session.model));
+  // Guarded: a session that reports no level keeps the request rather
+  // than losing it. Overwriting unconditionally would turn a stubbed or
+  // older session into a blank `thinking:` tag, which is worse than the
+  // stale-but-true value it replaced.
+  if (session.thinkingLevel) {
+    record.invocation.thinking = session.thinkingLevel;
+    if (requested && requested !== session.thinkingLevel) {
+      record.invocation.requestedThinking = requested;
+    }
+  }
+}
+
+/**
  * Bind a live session to its record: identity, the persistent lifecycle and the model and
  * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
  * same way as a fresh one.
@@ -218,29 +245,7 @@ function bindSession(record: AgentRecord, session: AgentSession, lifecycle: Sess
   record.lifecycle = lifecycle;
   record.sessionId = session.sessionId;
   record.sessionFile = session.sessionManager.getSessionFile();
-  // The model and thinking level are only knowable once pi has resolved
-  // its defaults and clamped the level to what the model supports. Writing
-  // them back here makes the record authoritative, so every surface reads
-  // one place instead of each re-deriving "session, else the request" for
-  // itself. An agent started outside the Agent tool (RPC, scheduler) has
-  // no invocation yet and gains one here.
-  if (session.model) {
-    record.invocation ??= {};
-    // Read the kept request first: a caller's level survives being clamped
-    // AND, one line later, being replaced by the effective one.
-    const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
-    Object.assign(record.invocation, describeModel(session.model));
-    // Guarded: a session that reports no level keeps the request rather
-    // than losing it. Overwriting unconditionally would turn a stubbed or
-    // older session into a blank `thinking:` tag, which is worse than the
-    // stale-but-true value it replaced.
-    if (session.thinkingLevel) {
-      record.invocation.thinking = session.thinkingLevel;
-      if (requested && requested !== session.thinkingLevel) {
-        record.invocation.requestedThinking = requested;
-      }
-    }
-  }
+  adoptSessionModel(record, session);
   // Flush any steers that arrived before the session was ready
   if (record.pendingSteers?.length) {
     for (const msg of record.pendingSteers) {
