@@ -135,8 +135,11 @@ describe("shutdown stops", () => {
     expect(shutdownStops([spawn(), settle("stopped", true), notice, resume(), settle("stopped", true)])).toHaveLength(1);
   });
 
-  it("ignores entries from a later ledger version", () => {
-    expect(shutdownStops([spawn(), custom("subagents:record", { v: LEDGER_VERSION + 1, id: "child-1", status: "stopped", shutdown: true })])).toEqual([]);
+  it("does not honor a shutdown-notice marker from a later ledger version", () => {
+    // The marker would silence the stop if it were read; the version guard in readNoticeIds is what keeps it named.
+    expect(shutdownStops([spawn(), settle("stopped", true), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"] })])).toEqual([
+      { id: "child-1", type: "general-purpose", description: "review auth.ts" },
+    ]);
   });
 });
 
