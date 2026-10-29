@@ -38,6 +38,7 @@ export function makePi() {
   const pi = {
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn((name: string, opts: any) => commands.set(name, opts)),
+    registerEntryRenderer: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: {
       emit: vi.fn(),

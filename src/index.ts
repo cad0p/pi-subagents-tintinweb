@@ -27,7 +27,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
-import { guardInit, guardInitVoid, takeInitFailures } from "./init-guard.js";
+import { guardInit, guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -895,13 +895,15 @@ export default function (pi: ExtensionAPI) {
       // would add a line). Captured once per activation and kept until shutdown — the reporter must
       // outlive the FleetView, whose own widget unmounts whenever the list empties.
       if (ctx.hasUI) {
-        ctx.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, (tui) => {
-          // pi-tui keeps `programStatusSupported` private in its type; the field is a normal property
-          // at runtime, and it is the only way to read the support flag. Absent reads as unsupported.
-          programStatus?.attach(tui.terminal);
-          return { render: () => [], invalidate: () => {} };
-        }, { placement: "belowEditor" });
-        programStatusUi = ctx;
+        guardInitVoid("program-status", () => {
+          ctx.ui.setWidget(PROGRAM_STATUS_WIDGET_KEY, (tui) => {
+            // pi-tui keeps `programStatusSupported` private in its type; the field is a normal property
+            // at runtime, and it is the only way to read the support flag. Absent reads as unsupported.
+            programStatus?.attach(tui.terminal);
+            return { render: () => [], invalidate: () => {} };
+          }, { placement: "belowEditor" });
+          programStatusUi = ctx;
+        });
       }
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
       const getSource = () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY];
@@ -910,7 +912,7 @@ export default function (pi: ExtensionAPI) {
         registerSubagentDisplayProvider(event.reason, getSource);
       });
       try {
-        guardInitVoid("handover-adoption", () => { void adoptHandovers(ctx); });
+        await guardInitAsync("handover-adoption", () => adoptHandovers(ctx));
       } finally {
         openSlots();
       }
@@ -922,6 +924,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     try {
       await runSessionStart(event as SessionStartEvent, ctx);
+    } catch (error) {
+      recordInitFailure("session_start", error);
+      throw error;
     } finally {
       reportInitFailures(event as SessionStartEvent, ctx);
     }
@@ -1336,6 +1341,17 @@ export default function (pi: ExtensionAPI) {
     },
     (event, payload) => pi.events.emit(event, payload),
   );
+  });
+
+  guardInitVoid("entry-renderer", () => {
+    pi.registerEntryRenderer("subagents:init-error", (entry: any, _options: any, theme: any) => {
+      const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
+      const failures = Array.isArray(data?.failures) ? data.failures : [];
+      // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
+      const fg = typeof theme?.fg === "function" ? (c: string, s: string) => theme.fg(c, s) : (_c: string, s: string) => s;
+      const lines = failures.map((f: { label?: string; message?: string }) => fg("dim", (f.label ?? "?") + ": " + (f.message ?? "")));
+      return { render: (_width: number) => (lines.length ? lines : [fg("dim", "pi-subagents: init failed")]), invalidate: () => {} };
+    });
   });
 
   // ---- Agent tool ----

@@ -32,6 +32,7 @@ function makePi() {
   const pi = {
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
     registerCommand: vi.fn(),
+    registerEntryRenderer: vi.fn(),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
     appendEntry: vi.fn(),
