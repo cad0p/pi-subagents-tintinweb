@@ -9,8 +9,8 @@ import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, 
 import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
 import { renderAgentReport } from "../src/result-report.js";
-import { answerChildDialog, createChildUIProxy, onChildDialogFlag } from "../src/ui/child-ui.js";
 import type { AgentRecord } from "../src/types.js";
+import { answerChildDialog, createChildUIProxy, onChildDialogFlag } from "../src/ui/child-ui.js";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
 
