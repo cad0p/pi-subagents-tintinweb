@@ -11,7 +11,14 @@ that, not the author.
 Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
 dependencies there, and run every gate and live check from it. Remove the
-worktree after merge.
+merged branch's worktree and prune (`git worktree remove <path>`, `git worktree
+prune`).
+
+After a PR is merged, fast-forward the main checkout before you start the next
+task: `git -C <repo> pull --ff-only` (or `git -C <repo> merge --ff-only
+origin/main`). Confirm it with `git -C <repo> log --oneline -1` matching the
+merge commit on `origin/main` and `git -C <repo> status --porcelain` printing
+nothing; anything else means you are reading stale code.
 
 ## Automated gates
 
