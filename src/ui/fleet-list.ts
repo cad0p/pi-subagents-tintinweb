@@ -501,15 +501,16 @@ export class FleetList {
     const view = this.nativeView;
     if (!view) return "unavailable";
     if (view.isOpen() && view.shownId() === id) {
-      // The row is already on screen: re-point the pin instead of rebuilding the view for nothing.
-      this.viewingAgentId = id;
+      // The row is already on screen, and the pin below already points at what is painted: rebuilding
+      // the view would throw away a live transcript for nothing.
       return "opened";
     }
     try {
       const result = view.open(id);
-      // The pin follows what is actually painted. A refusal leaves the record already on screen
-      // untouched, so the pin stays on that one: following the cursor would drop the row out from
-      // under the transcript it still belongs to, and a finished row does not come back.
+      // The pin follows what is actually painted: a refusal leaves the record already on screen
+      // untouched, so the pin stays on that one, and a closed view shows nothing, so it pins nothing.
+      // Following the cursor instead would drop the row out from under the transcript it still belongs
+      // to, and a finished row does not come back.
       this.viewingAgentId = result === "opened" ? id : view.shownId();
       return result;
     } catch {

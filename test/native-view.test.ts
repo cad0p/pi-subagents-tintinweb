@@ -969,6 +969,9 @@ describe("native transcript view", () => {
     h.setFooter.mockImplementationOnce(() => { throw new Error("footer boom"); });
     expect(() => h.view.close("escape")).toThrow("footer boom");
     expect(h.view.isOpen()).toBe(false);
+    // The state survives the throw, so shownId() must not read it: FleetView pins what a refusal
+    // leaves painted, and pinning a closed view's id would keep a row nothing paints alive.
+    expect(h.view.shownId()).toBeUndefined();
   });
   it("records fire-and-forget calls and never forwards them to the host", async () => {
     clearChildUI("proxy-child");

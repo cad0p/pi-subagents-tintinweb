@@ -1107,8 +1107,12 @@ function fakeNativeView(notify: (message: string) => void = () => {}) {
     shown: undefined as string | undefined,
     /** What open() answers; a refused record has nothing to show, an unavailable one falls back. */
     result: "opened" as "opened" | "refused" | "unavailable",
-    isOpen: () => view.shown !== undefined && view.result !== "unavailable",
-    shownId: () => view.shown,
+    /** The real view's `active` flag: its close() clears this before the restore can throw. */
+    active: false,
+    /** A restore that throws mid-close: the view is gone, the id it painted is not. */
+    closeThrows: false,
+    isOpen: () => view.active,
+    shownId: () => (view.isOpen() ? view.shown : undefined),
     open: (id: string) => {
       view.opened.push(id);
       // The real view refuses before it closes anything: a row it cannot show leaves the transcript
@@ -1118,16 +1122,20 @@ function fakeNativeView(notify: (message: string) => void = () => {}) {
         notify("queued, not started yet");
         return view.result;
       }
-      // open() closes whatever it was showing first: an unavailable record leaves nothing up.
-      view.shown = view.result === "opened" ? id : undefined;
+      // An unavailable record is refused before the view touches what it already shows.
+      if (view.result === "unavailable") return view.result;
+      view.shown = id;
+      view.active = true;
       return view.result;
     },
     close: (reason: "switch") => {
       view.closes.push(reason);
+      view.active = false;
+      if (view.closeThrows) throw new Error("restore boom");
       view.shown = undefined;
     },
     /** The view closing itself, the way Esc in a child does. */
-    closeSelf: () => { view.shown = undefined; },
+    closeSelf: () => { view.active = false; view.shown = undefined; },
   };
   return view;
 }
@@ -1297,14 +1305,43 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     h.press(UP); // and back onto the row whose transcript is still on screen
     expect(view.opened).toEqual(["shown", "refused"]); // no rebuild: the view already shows it
 
-    // The row must get its exemption back. Without the pin it ages out at FINISHED_LINGER_MS, and
-    // the roster re-resolve then moves the cursor and replaces the transcript still on screen.
+    // The pin never left (the refusal pinned what it leaves painted), so stepping back onto the row
+    // rebuilds nothing and the row keeps its exemption: without it, it ages out at FINISHED_LINGER_MS
+    // and the roster re-resolve moves the cursor, replacing the transcript still on screen.
     shown.status = "completed";
     shown.completedAt = now - 60_000;
     h.fleet.update();
     expect(h.render().find(l => l.includes("shown one"))).toContain("⏺");
     expect(view.opened).toEqual(["shown", "refused"]);
     expect(view.shown).toBe("shown");
+  });
+
+  it("pins nothing for a view a throwing close left closed, since nothing is painted", () => {
+    const now = Date.now();
+    const shown = mk({ id: "shown", description: "shown one", startedAt: now - 5000 });
+    const queued = mk({ id: "q", description: "queued one", startedAt: now - 4000, status: "queued", session: undefined });
+    const h = harness([shown, queued]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // onto the shown record
+    expect(view.shownId()).toBe("shown");
+
+    // Back onto `main` closes the view, but its restore throws. `close()` deactivated first, so the
+    // view is gone while its id still sits in the state it never got to clear.
+    view.closeThrows = true;
+    expect(() => h.press(UP)).toThrow("restore boom");
+    expect(view.isOpen()).toBe(false);
+    expect(view.shownId()).toBeUndefined();
+
+    // A refusal pins what is painted, and a closed view paints nothing: the stale id must not keep
+    // alive a row the roster no longer qualifies, or the pin points at a row nobody shows.
+    view.result = "refused";
+    h.press(DOWN); h.press(DOWN);
+    shown.status = "completed";
+    shown.completedAt = now - 60_000; // past the linger window
+    h.fleet.update();
+    expect(h.render().some(l => l.includes("shown one"))).toBe(false);
+    expect(h.render().find(l => l.includes("queued one"))).toContain("⏺");
   });
 
   it("says why once per row it cannot show, not once per repaint", () => {
