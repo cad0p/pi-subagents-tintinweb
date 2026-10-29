@@ -10,6 +10,7 @@ import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
 import { renderAgentReport } from "../src/result-report.js";
 import type { AgentRecord } from "../src/types.js";
+import { answerChildDialog, createChildUIProxy, onChildDialogFlag } from "../src/ui/child-ui.js";
 
 vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
 
@@ -214,6 +215,76 @@ describe("run cap", () => {
     expect(abortById).not.toHaveBeenCalled();
     expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     expect(completions).toHaveLength(1);
+  });
+
+  it("a parked child is not killed at the cap; the check resumes after its dialog clears", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    // A real parked dialog: the proxy queues it and the runner's own flag hook writes the record.
+    const unsubscribe = onChildDialogFlag(record.id, vi.mocked(runAgent).mock.lastCall![3].onChildDialog!);
+    let answered: boolean | undefined;
+    void createChildUIProxy(record.id, { answerable: true }).confirm("Pick one", "the cap must wait").then((value) => {
+      answered = value;
+    });
+    await settle();
+    expect(record.dialog).toMatchObject({ title: "Pick one" });
+    vi.advanceTimersByTime(CAP_MS + 60_000);
+    expect(child.abort).not.toHaveBeenCalled();
+    expect(record.status).toBe("running");
+    expect(completions).toHaveLength(0);
+    // The human answers: the flag clears, and the cap resumes.
+    answerChildDialog(record.id, true);
+    await settle();
+    expect(answered).toBe(true);
+    expect(record.dialog).toBeUndefined();
+    vi.advanceTimersByTime(30_000);
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(completions).toHaveLength(1);
+    unsubscribe();
+  });
+
+  it("aborting a record resolves its parked dialog as cancelled", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    const unsubscribe = onChildDialogFlag(record.id, vi.mocked(runAgent).mock.lastCall![3].onChildDialog!);
+    let answered: boolean | undefined;
+    void createChildUIProxy(record.id, { answerable: true }).confirm("Pick one", "nobody will answer").then((value) => {
+      answered = value;
+    });
+    await settle();
+    expect(record.dialog).toMatchObject({ title: "Pick one" });
+
+    expect(manager.abort(record.id)).toBe(true);
+    await settle();
+    expect(answered).toBe(false);
+    expect(record.dialog).toBeUndefined();
+    unsubscribe();
+  });
+
+  it("retiring a record resolves its parked dialog as cancelled", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    const unsubscribe = onChildDialogFlag(record.id, vi.mocked(runAgent).mock.lastCall![3].onChildDialog!);
+    let answered: boolean | undefined;
+    void createChildUIProxy(record.id, { answerable: true }).confirm("Pick one", "the record is going").then((value) => {
+      answered = value;
+    });
+    await settle();
+    expect(record.dialog).toMatchObject({ title: "Pick one" });
+
+    // Every exit that retires the session runs through retireSession: dispose here, eviction and
+    // clearCompleted through removeRecord. None of them may leave the child's await hanging.
+    await manager.dispose(false);
+    expect(answered).toBe(false);
+    expect(record.dialog).toBeUndefined();
+    unsubscribe();
   });
 
   it("idle hard stop: the waiting run settles at the cap with the time limit", async () => {

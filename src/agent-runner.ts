@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, LoadExtensionsResult, ScopedModel, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, LoadExtensionsResult, ScopedModel, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -36,6 +36,7 @@ import { parentExtensionFlags } from "./parent-cli.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
+import { createChildUIProxy, onChildDialogFlag } from "./ui/child-ui.js";
 import type { LifetimeUsage } from "./usage.js";
 
 /**
@@ -445,6 +446,19 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
+  /**
+   * Called when a child extension's dialog is parked or its queue changes. The manager writes
+   * `record.dialog` from it; the record's status deliberately stays `running`.
+   */
+  onChildDialog?: (dialog: { since: number; title: string } | undefined) => void;
+  /** The parent's theme, so a child's `ctx.ui.theme` reads real colors. */
+  uiTheme?: Theme;
+  /**
+   * Whether a human can reach this child's parked dialogs. Only the TUI's FleetView can answer one;
+   * every other host (print, JSON, RPC) must resolve them to pi's no-op values instead of parking
+   * the child's await forever.
+   */
+  dialogsAnswerable?: boolean;
   onSessionCreated?: (session: AgentSession, lifecycle: SessionLifecycle) => void;
   /** Called with the resolved child settings before its session is built, so a failed reload can rebuild it. */
   onChildSettings?: (settings: ChildSessionSettings) => void;
@@ -796,7 +810,14 @@ export async function teardownChildSession(session: AgentSession, abortTimeoutMs
   await teardownStep("session_shutdown", () => session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }));
   if (session.isStreaming) await teardownStep("abort again", () => abortWithTimeout(session, abortTimeoutMs));
   await teardownStep("dispose", () => session.dispose());
+  // The record this session's dialog flag was written to may already be gone: stop the hook with it.
+  const unsubscribe = dialogFlagHooks.get(session);
+  dialogFlagHooks.delete(session);
+  unsubscribe?.();
 }
+
+/** The dialog-flag subscription of each live child session, released by its teardown. */
+const dialogFlagHooks = new WeakMap<AgentSession, () => void>();
 
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
@@ -838,7 +859,10 @@ export interface ChildSessionSettings {
 export async function createChildSession(
   settings: ChildSessionSettings,
   sessionManager: SessionManager,
-  options: Pick<RunOptions, "agentId" | "onToolActivity" | "parentAgentId">,
+  options: Pick<
+    RunOptions,
+    "agentId" | "onToolActivity" | "parentAgentId" | "onChildDialog" | "uiTheme" | "dialogsAnswerable"
+  >,
 ): Promise<AgentSession> {
   const {
     type,
@@ -1206,7 +1230,13 @@ export async function createChildSession(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
+  const childId = options.agentId ?? "child";
+  if (options.onChildDialog) dialogFlagHooks.set(session, onChildDialogFlag(childId, options.onChildDialog));
   await session.bindExtensions({
+    uiContext: createChildUIProxy(childId, {
+      theme: options.uiTheme,
+      answerable: options.dialogsAnswerable === true,
+    }),
     onError: (err) => routedExtensionError(err.extensionPath, options.agentId, options.onToolActivity),
   });
 
