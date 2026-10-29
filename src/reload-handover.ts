@@ -25,7 +25,30 @@ import type { LifetimeUsage } from "./usage.js";
  * A reader of any release takes a hand-over that carries them, whatever its version, and ignores members it does not
  * know; a hand-over that lacks them stays published for a reader that knows it. A field added after the first release
  * may be absent from an older hand-over: read it through an accessor that tolerates absence (`slotHoldersOf`,
- * `takeNudgeEntries`), never directly. Absence of an added field is never a reason to reject a hand-over.
+ * `takeNudgeEntries`, `takeUnreportedOf`), never directly. Absence of an added field is never a reason to reject a
+ * hand-over. A direct call on one is not a late failure but an immediate one: it throws inside the adoption, and the
+ * hand-over it threw on has already left the store, so nothing adopts it and nothing stops it — which is what an
+ * unguarded `takeUnreported()` did, and why that accessor exists.
+ *
+ * The members are permanent, their signatures are not: `stop`'s `replay` sink is this release's addition, and a
+ * hand-over published by an older release carries that release's `stop`, which takes no argument (`stop.length` is 0
+ * there) and drops the `usage` events it never delivered. A reader of this release that stops such a hand-over loses
+ * that delta silently, and this release does not take the route that would keep it: it stops an older hand-over as it
+ * always has and accepts the loss as a documented limitation, not a guard to write. A reader that must have the delta
+ * does not call `stop` on such a hand-over: it `attach`es a listener for its `usage` events, disposes its idle items
+ * itself through `teardownChildSession`, aborts the runs (`draining.abortAll`), and disposes the pool only once every
+ * record it still owns reads `settled` — `draining.ownAgents().every((r) => r.settled !== false)`. `abortAll` emits
+ * nothing itself: it aborts each run's signal, and that run's messages reach `onUsage` afterwards, once
+ * `session.abort()` has awaited the session's idle state — a promise that resolves at the tail of the session's
+ * settle emission, after the last `message_end` was handed to subscribers. Disposing before that point drops exactly
+ * the delta this paragraph is about, which is the loss #164 was filed for: `dispose()` removes the records, and
+ * removing one detaches its lifecycle, which is the subscription those events ride. Three plausible predicates are
+ * wrong: a record's `status`, because `abortAll` writes `stopped` in its own frame; `runningCount()`, because a pool
+ * that handed its runs over reports 0; and `ownAgents()` alone, because `dispose()` empties it synchronously.
+ * A detached hand-over buffers into `pending`, which nothing reads when `stop` is skipped, so detach last, once the
+ * pool is gone and nothing can arrive. `stop` may detach first because its sink takes every later `usage` too, not
+ * only what `pending` holds. Ending at the idle items, before `draining.abortAll`, leaves the pool, its runs and
+ * their slots alive.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
@@ -97,6 +120,8 @@ export class ReloadHandover {
   private nudged: NudgeEntry[];
   private unreported?: LifetimeUsage;
   private stopped = false;
+  /** Set by `stop`: the one consumer left for a `usage` event no activation will adopt. */
+  private replay?: (dto: AgentDto, usage: LifetimeUsage) => void;
 
   constructor(
     items: HandoverItem[],
@@ -115,10 +140,25 @@ export class ReloadHandover {
     this.unreported = unreported;
   }
 
-  /** Hands out the queued specs and unreported usage; each is returned once. Idle items and nudges wait for their own accessors. */
+  /**
+   * Hands out the queued specs and whatever unreported usage `takeUnreported` left; each is returned once. Idle items
+   * and nudges wait for their own accessors.
+   */
   take(): { queued: QueuedSpec[]; unreported?: LifetimeUsage } {
     const taken = { queued: this.queued, unreported: this.unreported };
     this.queued = [];
+    this.unreported = undefined;
+    return taken;
+  }
+
+  /**
+   * Hands out the unreported spend; returned once. Kept apart from `take` so a reader can read it before anything can
+   * stop the hand-over — a stop drops it — without consuming the queued specs, which belong to the activation that
+   * adopts this hand-over: an activation that shuts down mid-list republishes the hand-overs it never reached, and a
+   * queue taken by it would not survive that republish.
+   */
+  takeUnreported(): LifetimeUsage | undefined {
+    const taken = this.unreported;
     this.unreported = undefined;
     return taken;
   }
@@ -146,10 +186,14 @@ export class ReloadHandover {
     else this.items = [...this.items, ...items];
   }
 
-  /** Delivers an event now, or buffers it while no activation is attached. A stopped hand-over disposes what it is given. */
+  /**
+   * Delivers an event now, or buffers it while no activation is attached. A stopped hand-over disposes what it is
+   * given; its `usage` events go to the sink `stop` was given, the only consumer they have left.
+   */
   emit(event: HandoverEvent): void {
     if (this.stopped) {
       if (event.kind === "settled") disposeItems(event.items);
+      else if (event.kind === "usage") this.replay?.(event.dto, event.usage);
     } else if (this.listener) this.listener(event);
     else this.pending.push(event);
   }
@@ -165,12 +209,25 @@ export class ReloadHandover {
     this.listener = undefined;
   }
 
-  /** Ends the hand-over for good: no activation will adopt what it holds. Disposes the sessions it holds and any it is given later. */
-  stop(): void {
+  /**
+   * Ends the hand-over for good: no activation will adopt what it holds. Disposes the sessions it holds and any it is
+   * given later.
+   *
+   * `replay` receives every `usage` event this hand-over never delivered: the ones buffered here, in order, and every
+   * one `emit` is given afterwards. A stopped hand-over is never adopted, so that sink is the only reader the spend
+   * has left — pass the consumer a live `usage` event goes through. The parameter is optional because it is not part
+   * of the contract: a hand-over published by an older release carries that release's `stop`, which ignores it and
+   * drops the events (see HANDOVER_KEY). Nothing on this side recovers that delta for it.
+   */
+  stop(replay?: (dto: AgentDto, usage: LifetimeUsage) => void): void {
     this.detach();
     this.stopped = true;
+    this.replay = replay;
     const held = [...this.items];
-    for (const event of this.pending.splice(0)) if (event.kind === "settled") held.push(...event.items);
+    for (const event of this.pending.splice(0)) {
+      if (event.kind === "settled") held.push(...event.items);
+      else if (event.kind === "usage") replay?.(event.dto, event.usage);
+    }
     this.items = [];
     disposeItems(held);
   }
@@ -268,6 +325,17 @@ function isReadableHandover(value: unknown): value is ReloadHandover {
  */
 export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
   return (handover as { slotHolders?: Set<string> }).slotHolders ?? [];
+}
+
+/**
+ * Takes the spend a hand-over never reported. Read through this accessor, never as `handover.takeUnreported()`:
+ * `takeUnreported` is this release's addition, and an older hand-over has no such member, so a direct call throws and
+ * costs the whole adoption. That hand-over's delta is still in `take` where it always was, and the adoption loop folds
+ * it in there.
+ */
+export function takeUnreportedOf(handover: ReloadHandover): LifetimeUsage | undefined {
+  const take = (handover as { takeUnreported?: () => LifetimeUsage | undefined }).takeUnreported;
+  return typeof take === "function" ? take.call(handover) : undefined;
 }
 
 /** The pending nudges as entries: releases before nested delivery handed plain ids over. */
