@@ -87,7 +87,7 @@ function loadFromDir(
         const [key, migration] = removed[0]!;
         throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
       }
-      for (const [key, migration] of removed) warnIfNew(removedKeyMessage(path, key, migration));
+      for (const [key, migration] of removed) warnIfNew(refusedKeyMessage(path, key, migration));
       warnSkippedOverride(name, agents);
       continue;
     }
@@ -202,6 +202,30 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * This project's effective `strictAgentFiles`, for a load that cannot see the
+ * settings file the activation read.
+ *
+ * The nested registry is that caller: its config root is the branch's own, and
+ * under worktree isolation that is the copy, where `.pi/subagents.json` is
+ * absent — this repo gitignores it and `/agents` writes it, and `git worktree
+ * add` writes committed content only — while the checked-in agent file the
+ * setting refuses is right there in the copy. Reading the setting from the copy
+ * would load that file and hand the branch back the fully-tooled agent the
+ * parent refused. The parent's decision is the only honest source, so the
+ * activation records it here; one process serves one project, so the value is
+ * process-wide (the same shape as `worktreeIsolation` in worktree.ts).
+ */
+let strictAgentFilesEnabled = false;
+
+export function setStrictAgentFiles(enabled: boolean): void {
+  strictAgentFilesEnabled = enabled;
+}
+
+export function isStrictAgentFilesEnabled(): boolean {
+  return strictAgentFilesEnabled;
+}
+
+/**
  * Keys this loader used to read, with the recipe that replaces each one. A file
  * that still sets one no longer gets the behavior the key names, so the warning
  * has to carry the migration, not just the key.
@@ -225,6 +249,16 @@ export function removedKeyEntries(fields: Record<string, unknown>): Array<[strin
 /** The one removed-key message, shared with the schedule store's job files. */
 export function removedKeyMessage(where: string, key: string, migration: string): string {
   return `Ignoring removed frontmatter key "${key}" in ${where} — ${migration}`;
+}
+
+/**
+ * What an agent file gets instead when the key is not ignored but fatal: the
+ * whole file is dropped, so reusing the "Ignoring" wording would read as a key
+ * skipped inside a file that still loaded. Names the setting that did it —
+ * "why is my agent gone" is the question this line exists to answer.
+ */
+function refusedKeyMessage(path: string, key: string, migration: string): string {
+  return `Skipping agent file ${path}: it sets the removed frontmatter key "${key}" and strictAgentFiles is on — ${migration}`;
 }
 
 function warnUnknownKeys(path: string, frontmatter: Record<string, unknown>): void {

@@ -25,13 +25,12 @@ import { type ResumeCallbacks } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, alreadyDeliveredResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
-import { loadCustomAgents } from "./custom-agents.js";
+import { isStrictAgentFilesEnabled, loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { loadSettings } from "./settings.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -107,13 +106,14 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   // Same removed-key policy the top-level load applies: a file `strictAgentFiles`
   // refuses there must not come back here, where it would be advertised and
   // spawnable as a fully-tooled nested child — exactly the silent capability
-  // upgrade the refusal exists to stop. Read per call, like the agent files
-  // themselves, so the persisted setting is what decides.
+  // upgrade the refusal exists to stop. The policy is the parent's effective
+  // setting, never a settings file read under this branch's config root: under
+  // worktree isolation that root is the copy, and `.pi/subagents.json` is
+  // untracked, so the copy reports the default while the checked-in agent file
+  // it refuses sits right beside it.
   const loadRegistry = () =>
     buildAgentRegistry(
-      loadCustomAgents(context.configCwd, false, {
-        refuseRemovedKeys: loadSettings(context.configCwd).strictAgentFiles === true,
-      }),
+      loadCustomAgents(context.configCwd, false, { refuseRemovedKeys: isStrictAgentFilesEnabled() }),
     );
   const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
     context.allowedSubagents === "all"

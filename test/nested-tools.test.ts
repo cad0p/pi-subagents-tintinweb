@@ -12,10 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
-import { loadCustomAgents } from "../src/custom-agents.js";
+import { loadCustomAgents, setStrictAgentFiles } from "../src/custom-agents.js";
 import { ISOLATED_REMOVED } from "../src/invocation-config.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager, type NestedSpawnOptions } from "../src/nested-tools.js";
+import { loadSettings } from "../src/settings.js";
 import type { AgentRecord } from "../src/types.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -112,6 +113,7 @@ beforeEach(() => {
 afterEach(() => {
   registerAgents(new Map());
   setScopeModelsEnabled(false);
+  setStrictAgentFiles(false);
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -243,7 +245,7 @@ describe("nested Agent tool", () => {
   // fully-tooled child, which is the silent upgrade the refusal exists to stop.
   it("applies strictAgentFiles' removed-key refusal to the nested registry", async () => {
     writeAgent("hermetic", "isolated: true\n");
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ strictAgentFiles: true }));
+    setStrictAgentFiles(true);
 
     const refused = await run(0, { subagent_type: "hermetic", description: "d", prompt: "p" });
     expect(textOf(refused)).toContain("Unknown or disabled");
@@ -252,9 +254,70 @@ describe("nested Agent tool", () => {
     expect(available.subagent_type.description).not.toContain("hermetic");
 
     // With the setting off the file loads as before, carrying the warning.
-    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ strictAgentFiles: false }));
+    setStrictAgentFiles(false);
     const loaded = await run(0, { subagent_type: "hermetic", description: "d", prompt: "p" });
     expect(textOf(loaded)).toContain("Agent ID: child-1");
+  });
+
+  // The branch's config root is not the project's under worktree isolation: the
+  // copy holds committed content only, and `.pi/subagents.json` is untracked
+  // (this repo gitignores it; `/agents` writes it). A load that reads the
+  // setting from the copy therefore sees the default while the checked-in agent
+  // file it refuses sits right beside it — the parent's decision is the source,
+  // which is what keeps README's "not advertised or spawnable as a nested child"
+  // true for worktree branches too.
+  it("applies the parent's strictAgentFiles to a worktree-isolated branch", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "nested-parent-"));
+    const copy = mkdtempSync(join(tmpdir(), "nested-worktree-"));
+    const agentDir = mkdtempSync(join(tmpdir(), "nested-agent-dir-"));
+    const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    // An empty global settings dir: otherwise a developer's own
+    // ~/.pi/subagents.json could supply the value and pass this with the fix out.
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      const agentFile = "---\ndescription: Was hermetic\nisolated: true\n---\n\nHermetic.\n";
+      for (const root of [projectRoot, copy]) {
+        mkdirSync(join(root, ".pi", "agents"), { recursive: true });
+        writeFileSync(join(root, ".pi", "agents", "hermetic.md"), agentFile);
+      }
+      writeFileSync(join(projectRoot, ".pi", "subagents.json"), JSON.stringify({ strictAgentFiles: true }));
+
+      // The shape of the bug: the parent project is strict, and the copy,
+      // which cannot see that file, is not.
+      expect(loadSettings(projectRoot)).toEqual({ strictAgentFiles: true });
+      expect(loadSettings(copy)).toEqual({});
+      // What the activation does with the parent's settings — the value the
+      // nested registry has to inherit instead of re-reading the copy.
+      setStrictAgentFiles(loadSettings(projectRoot).strictAgentFiles === true);
+
+      const branch = () => tools({ configCwd: copy });
+      const refused = await branch()[0].execute(
+        "call-1",
+        { subagent_type: "hermetic", description: "d", prompt: "p" },
+        undefined,
+        undefined,
+        ctx() as never,
+      );
+      expect(textOf(refused)).toContain("Unknown or disabled");
+      expect(spawns).toHaveLength(0);
+      const schema = branch()[0].parameters as { properties: Record<string, { description?: string }> };
+      expect(schema.properties.subagent_type.description).not.toContain("hermetic");
+
+      // Not a blanket refusal: the copy's own file loads once the parent is not strict.
+      setStrictAgentFiles(false);
+      const loaded = await branch()[0].execute(
+        "call-1",
+        { subagent_type: "hermetic", description: "d", prompt: "p" },
+        undefined,
+        undefined,
+        ctx() as never,
+      );
+      expect(textOf(loaded)).toContain("Agent ID: child-1");
+    } finally {
+      if (previousAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+      for (const dir of [projectRoot, copy, agentDir]) rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("applies the shared scopeModels policy to a frontmatter-pinned model", async () => {

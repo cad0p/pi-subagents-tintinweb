@@ -24,7 +24,7 @@ import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSub
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
-import { loadCustomAgents } from "./custom-agents.js";
+import { isStrictAgentFilesEnabled, loadCustomAgents, setStrictAgentFiles } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
@@ -321,21 +321,25 @@ export default function (pi: ExtensionAPI) {
   let leakedChildContext = isRoot ? takeLeakedChildContextRead() : undefined;
   // Read directly rather than waiting for applyAndEmitLoaded below: this decides
   // the initial load, which happens hundreds of lines before settings are applied.
-  let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
+  // Recorded rather than kept in this activation: the nested registry rebuilds
+  // agent files for a branch whose config root cannot see this project's
+  // settings file (under worktree isolation, the copy), so the effective value
+  // has to be readable from outside this closure. See `custom-agents.ts`.
+  setStrictAgentFiles(loadSettings(process.cwd()).strictAgentFiles === true);
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
     // `refuseRemovedKeys` tracks the setting, not this pass: strict is thrown
     // away after the startup retry, so a removed-key file refused there must be
     // refused by every later reload too, not just by the pass that reported it.
-    const userAgents = loadCustomAgents(process.cwd(), strict, { refuseRemovedKeys: strictAgentFiles });
+    const userAgents = loadCustomAgents(process.cwd(), strict, { refuseRemovedKeys: isStrictAgentFilesEnabled() });
     registerAgents(userAgents);
   };
 
   // Initial load — the only strict one. A bad edit mid-session must not kill the
   // session on the next unrelated spawn, so every later reload keeps warning.
   // Guarded: a throw here would otherwise cost every tool the package registered.
-  if (!guardInitVoid("agent-files", () => reloadCustomAgents(strictAgentFiles))) {
+  if (!guardInitVoid("agent-files", () => reloadCustomAgents(isStrictAgentFilesEnabled()))) {
     guardInitVoid("agent-files", () => reloadCustomAgents(false));
   }
 
@@ -1447,7 +1451,7 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
-      setStrictAgentFiles: (b) => { strictAgentFiles = b; },
+      setStrictAgentFiles,
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -2770,7 +2774,7 @@ ${systemPrompt}
       maxSubagentDepth: getMaxSubagentDepth(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
-      strictAgentFiles,
+      strictAgentFiles: isStrictAgentFilesEnabled(),
       failurePreviewMaxChars,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -2867,7 +2871,7 @@ ${systemPrompt}
           id: "strictAgentFiles",
           label: "Strict agent files",
           description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
-          currentValue: strictAgentFiles ? "on" : "off",
+          currentValue: isStrictAgentFilesEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -3009,7 +3013,7 @@ ${systemPrompt}
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
-        strictAgentFiles = enabled;
+        setStrictAgentFiles(enabled);
         notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
       } else if (id === "worktreeIsolation") {
         const enabled = value === "on";

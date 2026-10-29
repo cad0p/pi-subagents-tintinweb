@@ -940,7 +940,8 @@ Stale.`);
   });
 
   // The refusal must not be silent. A reload (every `Agent` call) is non-strict,
-  // so the file is skipped there — with the same migration warning — and when a
+  // so the file is skipped there — with a message that says the file is skipped,
+  // not that a key inside it was ignored, and carries the migration — and when a
   // same-named file below it in precedence already loaded, that substitution is
   // named too, instead of the name quietly changing hands.
   it("warns when a removed-key file is refused and a lower-priority file takes the name", () => {
@@ -967,8 +968,15 @@ Hermetic.`);
       expect(result.get("hermetic")?.description).toBe("Global fallback");
 
       const messages = warn.mock.calls.map(args => String(args[0]));
-      const removedWarning = messages.find(m => m.includes(`removed frontmatter key "isolated" in ${projectPath}`));
+      const removedWarning = messages.find(m => m.includes(projectPath) && m.includes('removed frontmatter key "isolated"'));
       expect(removedWarning).toBeDefined();
+      // The whole file is dropped, so the skip has to say so; "Ignoring …" would
+      // read as a key skipped inside an agent that still loaded and still has
+      // every tool the removed key meant to switch off.
+      expect(removedWarning).toContain("Skipping agent file");
+      expect(removedWarning).toContain("strictAgentFiles is on");
+      expect(removedWarning).not.toContain("Ignoring");
+      // The migration is still the actionable half.
       expect(removedWarning).toContain("extensions: false");
       expect(messages.some(m => m.includes('Agent "hermetic" now loads from') && m.includes(join(globalAgents, "hermetic.md")))).toBe(true);
 
