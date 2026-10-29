@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
-import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
@@ -2618,5 +2618,35 @@ describe("AgentManager — PR119 r1 findings", () => {
       unregister();
       warn.mockRestore();
     }
+  });
+});
+
+describe("AgentManager — dialog answerability", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("forwards the root's dialog answerability to a spawn and to a reopen", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    // A headless root never sets it: the default must be "nobody can answer".
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ dialogsAnswerable: false });
+
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBeUndefined());
+
+    manager.setDialogsAnswerable(true);
+    const rootTheme = { name: "root" } as unknown as Theme;
+    manager.uiTheme = () => rootTheme;
+    await reopen(manager, id);
+    // A resumed child is rebuilt outside any spawn's context: both the answerability and the live
+    // root theme have to reach it, or its extensions see the fallback theme and park forever.
+    expect(vi.mocked(createChildSession).mock.lastCall?.[2]).toMatchObject({
+      dialogsAnswerable: true,
+      uiTheme: rootTheme,
+    });
   });
 });

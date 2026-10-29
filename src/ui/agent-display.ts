@@ -72,6 +72,11 @@ export interface AgentDetails {
 
 // ---- Formatting helpers ----
 
+/** What a parked child shows instead of its status word: `blocked · <title>`, or undefined when none is parked. */
+export function blockedLabel(record: Pick<AgentRecord, "dialog">): string | undefined {
+  return record.dialog ? `blocked · ${toSingleLine(record.dialog.title)}` : undefined;
+}
+
 /** Queued for a slot: a spawn not yet admitted, or a run held at the provider gate. */
 export function isQueued(record: AgentRecord): boolean {
   return record.status === "queued" || (record.status === "running" && record.gated === true);

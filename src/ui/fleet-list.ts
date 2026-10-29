@@ -22,6 +22,7 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import {
   type AgentActivity,
+  blockedLabel,
   buildInvocationTags,
   describeActivity,
   fgPreservingNestedStyles,
@@ -35,6 +36,7 @@ import {
   type Theme,
 } from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { noTranscriptMessage } from "./native-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -61,6 +63,12 @@ export type FleetUICtx = {
   ): Promise<T>;
 };
 
+/** The native transcript view FleetView opens into; `unavailable` falls back to the overlay. */
+export interface FleetNativeView {
+  isOpen(): boolean;
+  open(id: string): "opened" | "refused" | "unavailable";
+}
+
 type MainEntry = { kind: "main" };
 /** One visible agent row: its depth in the tree, every descendant under it, and whether it is open. */
 export type TreeRow = { record: AgentRecord; depth: number; nested: AgentRecord[]; expanded: boolean };
@@ -85,20 +93,20 @@ function rightAlign(left: string, right: string, width: number): string {
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
 }
 
-type RowKind = "queued" | "waiting" | "running" | "finished";
+type RowKind = "queued" | "blocked" | "waiting" | "running" | "finished";
 /** Display order for overflow counts. */
-const ROW_KINDS: RowKind[] = ["running", "waiting", "queued", "finished"];
+const ROW_KINDS: RowKind[] = ["blocked", "running", "waiting", "queued", "finished"];
 
-/** Disjoint row categories, checked in order: queued, waiting, running, finished. */
+/** Disjoint row categories, checked in order: queued, blocked, waiting, running, finished. */
 function rowKind(record: AgentRecord): RowKind {
   if (isQueued(record)) return "queued";
-  if (record.status === "running") return record.waiting ? "waiting" : "running";
+  if (record.status === "running") return record.dialog ? "blocked" : record.waiting ? "waiting" : "running";
   return "finished";
 }
 
 /** `2 running, 1 finished`; zero counts are omitted. */
 function countsText(records: AgentRecord[]): string {
-  const counts: Record<RowKind, number> = { queued: 0, waiting: 0, running: 0, finished: 0 };
+  const counts: Record<RowKind, number> = { queued: 0, blocked: 0, waiting: 0, running: 0, finished: 0 };
   for (const record of records) counts[rowKind(record)] += 1;
   return ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`).join(", ");
 }
@@ -179,6 +187,8 @@ export class FleetList {
   private viewingAgentId: string | undefined;
   /** Parents whose nested rows are shown, by parent id; dropped once the parent is evicted. */
   private expanded = new Set<string>();
+  /** The in-place native view, when the capture probe found pi's instance. */
+  private nativeView: FleetNativeView | undefined;
 
   constructor(
     private manager: AgentManager,
@@ -194,6 +204,11 @@ export class FleetList {
   ) {}
 
   // ---- Lifecycle ----
+
+  /** Wire the native transcript view; left unset, Enter keeps opening the overlay. */
+  setNativeView(view: FleetNativeView | undefined): void {
+    this.nativeView = view;
+  }
 
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
@@ -332,6 +347,9 @@ export class FleetList {
   /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
     if (!this.ui) return undefined;
+    // The native view owns the keyboard (its editor is focused): the process-global listener must
+    // not steal ↓ from a child prompt whose draft happens to be empty.
+    if (this.nativeView?.isOpen()) return undefined;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
@@ -439,12 +457,21 @@ export class FleetList {
     }
     const record = entry.record;
     if (!this.ui) return;
+    if (this.nativeView) {
+      try {
+        const result = this.nativeView.open(record.id);
+        if (result === "opened") {
+          this.deactivate();
+          return;
+        }
+        if (result === "refused") return;
+      } catch {
+        // The capture guard failed: fall back to the overlay, exactly as today.
+      }
+    }
     const session = record.session ?? this.manager.settledTranscript(record.id);
     if (!session) {
-      const message = isQueued(record) ? "queued, not started yet"
-        : record.status === "stopped" && record.completedAt != null ? "stopped before it started"
-        : `Agent is ${toSingleLine(record.status)} — no session available.`;
-      this.ui.notify(message, "info");
+      this.ui.notify(noTranscriptMessage(record), "info");
       return;
     }
     const activity = this.agentActivity.get(record.id);
@@ -552,6 +579,7 @@ export class FleetList {
     const elapsed = formatFleetElapsed((record.completedAt ?? Date.now()) - record.startedAt); // freezes once finished
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
+    if (kind === "blocked") return theme.fg("warning", blockedLabel(record) ?? `blocked · ${elapsed}`);
     if (kind === "finished") {
       // The activity tracker is dropped at finish, so turns fall back to the record, as the notification
       // does; a run stopped before it started has no turn to show.

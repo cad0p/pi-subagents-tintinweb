@@ -21,6 +21,7 @@ import {
   type ExtensionContext,
   type FileEntry,
   SessionManager,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   attachSessionLifecycle,
@@ -53,6 +54,7 @@ import {
 } from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
+import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -361,6 +363,17 @@ export class AgentManager {
   private ledgerWriters = new Map<string, LedgerWriter>();
   /** Supplied by the extension: re-derives the child settings of a recovered record, which has none until its run starts. */
   resolveSettings?: (record: AgentRecord) => Promise<ChildSessionSettings>;
+  /**
+   * Whether a human can reach a child's parked dialog: only the root TUI's FleetView can answer one.
+   * The extension sets it once per activation from the root's context; it stays false in every
+   * headless host (print, JSON, RPC), where a parked dialog would hang the child and the process.
+   */
+  private dialogsAnswerable = false;
+  /**
+   * Supplied by the extension: the live root theme, read when a settled record's session is reopened.
+   * Without it a resumed child's `ctx.ui.theme` falls back to the identity stand-in.
+   */
+  uiTheme?: () => Theme | undefined;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -445,6 +458,11 @@ export class AgentManager {
 
   getEvictAfterMinutes(): number {
     return this.evictAfterMinutes;
+  }
+
+  /** Whether a human can answer a child's parked dialogs. See `dialogsAnswerable`. */
+  setDialogsAnswerable(answerable: boolean): void {
+    this.dialogsAnswerable = answerable;
   }
 
   /**
@@ -672,6 +690,11 @@ export class AgentManager {
       signal: record.abortController!.signal,
       turnBudget: record.turnBudget,
       observer: this.observerFor(record, life),
+      onChildDialog: (dialog) => {
+        record.dialog = dialog;
+      },
+      uiTheme: ctx.ui?.theme,
+      dialogsAnswerable: this.dialogsAnswerable,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -933,7 +956,12 @@ export class AgentManager {
    */
   private headsUp(record: AgentRecord, life: Life, left: string): void {
     const session = record.session;
-    if (this.lives.get(record.id) !== life || life.hardStopped || record.capForced || !session) return;
+    if (this.lives.get(record.id) !== life) return;
+    if (record.dialog) {
+      this.retryParkedCap(record, life, "headsUp", left);
+      return;
+    }
+    if (life.hardStopped || record.capForced || !session) return;
     if (record.status !== "running" || this.waking.has(record.id)) return;
     const content = `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
     this.wake(record, session, content, {
@@ -949,6 +977,12 @@ export class AgentManager {
    */
   private hardStop(record: AgentRecord, life: Life): void {
     if (this.lives.get(record.id) !== life) return;
+    // A child waiting for a human is not idle work: skip the cap, re-check later. The cap resumes
+    // when the dialog clears, so a parked child is never killed for waiting to be asked a question.
+    if (record.dialog) {
+      this.retryParkedCap(record, life, "hardStop");
+      return;
+    }
     // An abort owns the label: abort() marks the record stopped while its run unwinds (from the user, a
     // parent signal, or an owner's stop), and a cap that fires in that window must not claim the time limit.
     // Every other terminal status is written by finalize/afterRun, which clear these timers first, so
@@ -975,6 +1009,30 @@ export class AgentManager {
     // Idle or not yet started: the run's signal goes too, so a prompt that has not begun meets it aborted.
     record.abortController?.abort();
     this.decide(record, life);
+  }
+
+  /** How often a parked record's cap re-checks whether the dialog cleared. */
+  private static readonly PARKED_CAP_RECHECK_MS = 30_000;
+
+  /**
+   * Re-arm the cap event a parked record skipped. The other timer keeps its original schedule; this
+   * only replaces the one that fired. A record still parked at the next check repeats.
+   */
+  private retryParkedCap(record: AgentRecord, life: Life, kind: "headsUp" | "hardStop", left?: string): void {
+    const timers = this.capTimers.get(record.id);
+    if (!timers) return;
+    const run = (): void => {
+      if (this.lives.get(record.id) !== life) return;
+      if (record.dialog) {
+        this.retryParkedCap(record, life, kind, left);
+        return;
+      }
+      if (kind === "headsUp") this.headsUp(record, life, left ?? "1 minute");
+      else this.hardStop(record, life);
+    };
+    const timer = setTimeout(run, AgentManager.PARKED_CAP_RECHECK_MS);
+    timer.unref();
+    this.capTimers.set(record.id, kind === "headsUp" ? { ...timers, headsUp: timer } : { ...timers, hardStop: timer });
   }
 
   private clearCap(id: string): void {
@@ -1364,6 +1422,8 @@ export class AgentManager {
    * until the teardown resolves, so resume, reopen and hand-over refuse the record meanwhile.
    */
   private async retireSession(record: AgentRecord): Promise<void> {
+    dropChildDialogs(record.id);
+    record.dialog = undefined;
     record.transition = "teardown";
     record.lifecycle?.detach();
     record.lifecycle = undefined;
@@ -1666,7 +1726,15 @@ export class AgentManager {
             : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
           if (!sessionManager) throw new Error(`Cannot resume ${id}: its session file ${sessionFile} is missing or unreadable.`);
           // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
-          return createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
+          return createChildSession(childSettings, sessionManager, {
+            agentId: id,
+            parentAgentId: record.parentAgentId,
+            uiTheme: this.uiTheme?.(),
+            dialogsAnswerable: this.dialogsAnswerable,
+            onChildDialog: (dialog) => {
+              record.dialog = dialog;
+            },
+          })
             .then(async (session) => {
               if (this.agents.get(id) !== record) {
                 await teardownChildSession(session);
@@ -1690,15 +1758,25 @@ export class AgentManager {
   }
 
   /**
-   * Read-only transcript of a settled record, rebuilt from its session file (or the in-memory
-   * entries of a `--no-session` child). Lets the viewer open a record after its session is torn down.
+   * A read-only `SessionManager` for a settled record, rebuilt from its session file (or the
+   * in-memory entries of a `--no-session` child). Undefined for a record with neither — a queued
+   * record, or a resume-failure retire — which is what lets the native view refuse it instead of
+   * throwing. `settledTranscript` and the native view share this one construction.
    */
-  settledTranscript(id: string): Pick<AgentSession, "messages" | "subscribe"> | undefined {
-    const record = this.agents.get(id);
+  settledSessionManager(id: string): SessionManager | undefined {
+    const record = this.getRecord(id);
     if (!record || record.session || (!record.sessionFile && !record.memoryEntries)) return undefined;
-    const sessionManager = record.sessionFile
+    return record.sessionFile
       ? SessionManager.open(record.sessionFile)
       : SessionManager.inMemory(undefined, undefined, record.memoryEntries);
+  }
+
+  /**
+   * Read-only transcript of a settled record. Lets the viewer open a record after its session is torn down.
+   */
+  settledTranscript(id: string): Pick<AgentSession, "messages" | "subscribe"> | undefined {
+    const sessionManager = this.settledSessionManager(id);
+    if (!sessionManager) return undefined;
     return { messages: sessionManager.buildSessionContext().messages, subscribe: () => () => {} };
   }
 
@@ -1854,6 +1932,10 @@ export class AgentManager {
   abort(id: string): boolean {
     const record = this.getRecord(id);
     if (!record) return false;
+    // A parked dialog dies with the stop: its promise resolves as cancelled, so the child's tool
+    // call unwinds, and the flag the row shows is cleared. Status stays `running` until the settle.
+    dropChildDialogs(id);
+    record.dialog = undefined;
 
     // Remove from queue if queued
     if (record.status === "queued") {
@@ -1897,6 +1979,7 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    clearChildUI(id);
     this.ledgerWriters.delete(id);
     this.stopLedgered.delete(id);
     this.clearCap(id);
@@ -1973,6 +2056,8 @@ export class AgentManager {
     // Abort running agents
     for (const record of this.agents.values()) {
       if (record.status === "running") {
+        dropChildDialogs(record.id);
+        record.dialog = undefined;
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
