@@ -1281,8 +1281,11 @@ export default function (pi: ExtensionAPI) {
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
 
-  // Grab UI context from first tool execution
+  // Grab UI context from first tool execution. Root only: this fires in every child activation
+  // too, and a child's `setUICtx` would register its terminal input handler on the process-global
+  // list and overwrite the host's `fleet` widget key (research/2026-10-29-child-ui-proxy-audit.md).
   pi.on("tool_execution_start", async (_event, ctx) => {
+    if (!isRoot) return;
     fleet.setUICtx(ctx.ui as FleetUICtx);
     fleet.update();
   });
@@ -3063,8 +3066,12 @@ ${systemPrompt}
     ctx.ui.notify(message, level);
   }
 
-  pi.registerCommand("agents", {
-    description: "Manage agents",
-    handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
-  });
+  // Root only: a child that gains a real `ctx.ui` (the per-child proxy) could otherwise have its
+  // own `/agents` open the host's menu and mutate process-global settings.
+  if (isRoot) {
+    pi.registerCommand("agents", {
+      description: "Manage agents",
+      handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+    });
+  }
 }

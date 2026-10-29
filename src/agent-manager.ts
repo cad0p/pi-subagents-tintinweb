@@ -53,6 +53,7 @@ import {
 } from "./reload-handover.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
+import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
 import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -672,6 +673,10 @@ export class AgentManager {
       signal: record.abortController!.signal,
       turnBudget: record.turnBudget,
       observer: this.observerFor(record, life),
+      onChildDialog: (dialog) => {
+        record.dialog = dialog;
+      },
+      uiTheme: ctx.ui.theme,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1363,6 +1368,8 @@ export class AgentManager {
    * until the teardown resolves, so resume, reopen and hand-over refuse the record meanwhile.
    */
   private async retireSession(record: AgentRecord): Promise<void> {
+    dropChildDialogs(record.id);
+    record.dialog = undefined;
     record.transition = "teardown";
     record.lifecycle?.detach();
     record.lifecycle = undefined;
@@ -1665,7 +1672,13 @@ export class AgentManager {
             : SessionManager.inMemory(childSettings.effectiveCwd, undefined, memoryEntries);
           if (!sessionManager) throw new Error(`Cannot resume ${id}: its session file ${sessionFile} is missing or unreadable.`);
           // Checked inside the shared promise so a session reopened for an evicted record is torn down once.
-          return createChildSession(childSettings, sessionManager, { agentId: id, parentAgentId: record.parentAgentId })
+          return createChildSession(childSettings, sessionManager, {
+            agentId: id,
+            parentAgentId: record.parentAgentId,
+            onChildDialog: (dialog) => {
+              record.dialog = dialog;
+            },
+          })
             .then(async (session) => {
               if (this.agents.get(id) !== record) {
                 await teardownChildSession(session);
@@ -1689,15 +1702,25 @@ export class AgentManager {
   }
 
   /**
-   * Read-only transcript of a settled record, rebuilt from its session file (or the in-memory
-   * entries of a `--no-session` child). Lets the viewer open a record after its session is torn down.
+   * A read-only `SessionManager` for a settled record, rebuilt from its session file (or the
+   * in-memory entries of a `--no-session` child). Undefined for a record with neither — a queued
+   * record, or a resume-failure retire — which is what lets the native view refuse it instead of
+   * throwing. `settledTranscript` and the native view share this one construction.
    */
-  settledTranscript(id: string): Pick<AgentSession, "messages" | "subscribe"> | undefined {
-    const record = this.agents.get(id);
+  settledSessionManager(id: string): SessionManager | undefined {
+    const record = this.getRecord(id);
     if (!record || record.session || (!record.sessionFile && !record.memoryEntries)) return undefined;
-    const sessionManager = record.sessionFile
+    return record.sessionFile
       ? SessionManager.open(record.sessionFile)
       : SessionManager.inMemory(undefined, undefined, record.memoryEntries);
+  }
+
+  /**
+   * Read-only transcript of a settled record. Lets the viewer open a record after its session is torn down.
+   */
+  settledTranscript(id: string): Pick<AgentSession, "messages" | "subscribe"> | undefined {
+    const sessionManager = this.settledSessionManager(id);
+    if (!sessionManager) return undefined;
     return { messages: sessionManager.buildSessionContext().messages, subscribe: () => () => {} };
   }
 
@@ -1853,6 +1876,10 @@ export class AgentManager {
   abort(id: string): boolean {
     const record = this.getRecord(id);
     if (!record) return false;
+    // A parked dialog dies with the stop: its promise resolves as cancelled, so the child's tool
+    // call unwinds, and the flag the row shows is cleared. Status stays `running` until the settle.
+    dropChildDialogs(id);
+    record.dialog = undefined;
 
     // Remove from queue if queued
     if (record.status === "queued") {
@@ -1896,6 +1923,7 @@ export class AgentManager {
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
     const retired = this.retireSession(record);
     this.agents.delete(id);
+    clearChildUI(id);
     this.ledgerWriters.delete(id);
     this.stopLedgered.delete(id);
     this.clearCap(id);
@@ -1972,6 +2000,8 @@ export class AgentManager {
     // Abort running agents
     for (const record of this.agents.values()) {
       if (record.status === "running") {
+        dropChildDialogs(record.id);
+        record.dialog = undefined;
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();

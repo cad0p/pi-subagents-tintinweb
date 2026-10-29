@@ -10,8 +10,9 @@
  * - **Never the root record.** Every report carries an id; a record whose id sanitizes to nothing
  *   is skipped rather than sent without one. The root is pi's to write, and a second writer would
  *   fight it every second.
- * - **Never `blocked`.** A subagent waiting for a slot, for a gate, or for background work is
- *   still working. `blocked` means waiting on the user, and nothing here emits it.
+ * - **`blocked` only for a human answer.** A subagent waiting for a slot, for a gate, or for
+ *   background work is still working. The one case this file emits `blocked` for is a parked
+ *   child dialog (`record.dialog`): the run is waiting on the user, not on a slot.
  * - **Never model-authored text.** The message vocabulary is this extension's own ("queued",
  *   "running", "waiting · timer-1") plus provider item ids and the first line of an error. The
  *   FleetView activity line falls back to the model's response text, so it is not used here.
@@ -190,6 +191,8 @@ function resultGone(record: AgentRecord): boolean {
 function stateOf(record: AgentRecord): { state: ProgramStatusState; message?: string } {
 	if (record.status === "queued") return { state: "working", message: "queued" };
 	if (record.status === "running") {
+		// The only blocked case; the message is the dialog title only, matching pi's own rule.
+		if (record.dialog) return { state: "blocked", message: record.dialog.title };
 		if (record.gated) return { state: "working", message: "waiting · gate" };
 		if (record.waiting) {
 			const items = record.waiting.items.filter((item) => item !== "");

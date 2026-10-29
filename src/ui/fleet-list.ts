@@ -22,6 +22,7 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import {
   type AgentActivity,
+  blockedLabel,
   buildInvocationTags,
   describeActivity,
   fgPreservingNestedStyles,
@@ -85,20 +86,20 @@ function rightAlign(left: string, right: string, width: number): string {
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
 }
 
-type RowKind = "queued" | "waiting" | "running" | "finished";
+type RowKind = "queued" | "blocked" | "waiting" | "running" | "finished";
 /** Display order for overflow counts. */
-const ROW_KINDS: RowKind[] = ["running", "waiting", "queued", "finished"];
+const ROW_KINDS: RowKind[] = ["blocked", "running", "waiting", "queued", "finished"];
 
-/** Disjoint row categories, checked in order: queued, waiting, running, finished. */
+/** Disjoint row categories, checked in order: queued, blocked, waiting, running, finished. */
 function rowKind(record: AgentRecord): RowKind {
   if (isQueued(record)) return "queued";
-  if (record.status === "running") return record.waiting ? "waiting" : "running";
+  if (record.status === "running") return record.dialog ? "blocked" : record.waiting ? "waiting" : "running";
   return "finished";
 }
 
 /** `2 running, 1 finished`; zero counts are omitted. */
 function countsText(records: AgentRecord[]): string {
-  const counts: Record<RowKind, number> = { queued: 0, waiting: 0, running: 0, finished: 0 };
+  const counts: Record<RowKind, number> = { queued: 0, blocked: 0, waiting: 0, running: 0, finished: 0 };
   for (const record of records) counts[rowKind(record)] += 1;
   return ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`).join(", ");
 }
@@ -552,6 +553,7 @@ export class FleetList {
     const elapsed = formatFleetElapsed((record.completedAt ?? Date.now()) - record.startedAt); // freezes once finished
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
+    if (kind === "blocked") return theme.fg("warning", blockedLabel(record) ?? `blocked · ${elapsed}`);
     if (kind === "finished") {
       // The activity tracker is dropped at finish, so turns fall back to the record, as the notification
       // does; a run stopped before it started has no turn to show.
