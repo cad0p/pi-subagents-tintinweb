@@ -325,7 +325,10 @@ export default function (pi: ExtensionAPI) {
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
-    const userAgents = loadCustomAgents(process.cwd(), strict);
+    // `refuseRemovedKeys` tracks the setting, not this pass: strict is thrown
+    // away after the startup retry, so a removed-key file refused there must be
+    // refused by every later reload too, not just by the pass that reported it.
+    const userAgents = loadCustomAgents(process.cwd(), strict, { refuseRemovedKeys: strictAgentFiles });
     registerAgents(userAgents);
   };
 

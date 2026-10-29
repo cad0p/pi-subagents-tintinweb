@@ -20,15 +20,26 @@ import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./t
  * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
-export function loadCustomAgents(cwd: string, strict = false): Map<string, AgentConfig> {
+export function loadCustomAgents(
+  cwd: string,
+  strict = false,
+  opts: { refuseRemovedKeys?: boolean } = {},
+): Map<string, AgentConfig> {
+  // Two axes on purpose: `strict` decides whether a refusal throws, so the
+  // startup init-failure channel can name the file; `refuseRemovedKeys` decides
+  // whether a file that sets a removed key is loaded at all. The caller passes
+  // the project setting for the second, because the non-strict retry that
+  // follows a strict failure — and every later reload — must keep refusing the
+  // file, or "strict refuses it" would only hold for the pass that reported it.
+  const refuseRemovedKeys = opts.refuseRemovedKeys ?? strict;
   const globalDir = join(getAgentDir(), "agents");
   const workspaceProjectDir = join(cwd, ".agents", "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
-  loadFromDir(globalDir, agents, "global", strict);            // lowest priority
-  loadFromDir(workspaceProjectDir, agents, "project", strict); // shared workspace
-  loadFromDir(projectDir, agents, "project", strict);          // highest priority (overwrites)
+  loadFromDir(globalDir, agents, "global", strict, refuseRemovedKeys);            // lowest priority
+  loadFromDir(workspaceProjectDir, agents, "project", strict, refuseRemovedKeys); // shared workspace
+  loadFromDir(projectDir, agents, "project", strict, refuseRemovedKeys);          // highest priority (overwrites)
 
   warnedLastLoad = warnedThisLoad;
   warnedThisLoad = new Set();
@@ -36,7 +47,13 @@ export function loadCustomAgents(cwd: string, strict = false): Map<string, Agent
 }
 
 /** Load agent configs from a directory into the map. */
-function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global", strict: boolean): void {
+function loadFromDir(
+  dir: string,
+  agents: Map<string, AgentConfig>,
+  source: "project" | "global",
+  strict: boolean,
+  refuseRemovedKeys: boolean,
+): void {
   if (!existsSync(dir)) return;
 
   let files: string[];
@@ -56,7 +73,18 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       continue;
     }
     const { frontmatter: fm, body } = parsed;
-    warnRemovedKeys(path, fm, strict);
+    // Parsed keys only: a comment or a nested block mentioning a removed key is
+    // not a setting, so it must not trip this.
+    const removed = removedKeyEntries(fm);
+    if (removed.length > 0 && refuseRemovedKeys) {
+      // The behaviour the key asked for is gone, so loading the file anyway
+      // leaves a fully-tooled agent behind it. `strict` reports the refusal by
+      // throwing; the retry and every later reload take the skip branch.
+      if (!strict) continue;
+      const [key, migration] = removed[0]!;
+      throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
+    }
+    for (const [key, migration] of removed) warnIfNew(removedKeyMessage(path, key, migration));
     warnUnknownKeys(path, fm);
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
@@ -168,10 +196,12 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
 
 /**
  * Keys this loader used to read, with the recipe that replaces each one. A file
- * that still sets one loads, but no longer gets the behavior the key names — so
- * the warning has to carry the migration, not just the key. `strictAgentFiles`
- * refuses the file instead: a checked-in `.pi/agents/` that asks for a hermetic
- * agent and silently gets a fully-tooled one is exactly what strict is for.
+ * that still sets one no longer gets the behavior the key names, so the warning
+ * has to carry the migration, not just the key.
+ *
+ * It loads with that warning by default. Under `strictAgentFiles` it is refused
+ * instead: a checked-in `.pi/agents/` that asks for a hermetic agent and
+ * silently gets a fully-tooled one is exactly what strict is for.
  */
 const REMOVED_FRONTMATTER_KEYS: ReadonlyMap<string, string> = new Map([
   [
@@ -180,12 +210,14 @@ const REMOVED_FRONTMATTER_KEYS: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
-function warnRemovedKeys(path: string, frontmatter: Record<string, unknown>, strict: boolean): void {
-  for (const [key, migration] of REMOVED_FRONTMATTER_KEYS) {
-    if (!(key in frontmatter)) continue;
-    if (strict) throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
-    warnIfNew(`Ignoring removed frontmatter key "${key}" in ${path} — ${migration}`);
-  }
+/** Removed keys present in `fields`, each with the recipe that replaces it. */
+export function removedKeyEntries(fields: Record<string, unknown>): Array<[string, string]> {
+  return [...REMOVED_FRONTMATTER_KEYS].filter(([key]) => key in fields);
+}
+
+/** The one removed-key message, shared with the schedule store's job files. */
+export function removedKeyMessage(where: string, key: string, migration: string): string {
+  return `Ignoring removed frontmatter key "${key}" in ${where} — ${migration}`;
 }
 
 function warnUnknownKeys(path: string, frontmatter: Record<string, unknown>): void {

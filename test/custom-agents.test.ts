@@ -988,6 +988,19 @@ scoped_models: false
 Hermetic.`);
       expect(loadCustomAgents(tmpDir).get("hermetic")).toBeDefined();
       expect(warn).toHaveBeenCalledTimes(1);
+
+      // A comment or a nested block that merely mentions the key is not a
+      // setting: only parsed top-level keys count.
+      writeAgent("mention", `---
+description: Mentions only
+# isolated: true
+memory:
+  isolated: true
+---
+
+Mentions.`);
+      expect(loadCustomAgents(tmpDir).get("mention")).toBeDefined();
+      expect(warn.mock.calls.map(args => String(args[0])).some(m => m.includes("mention.md"))).toBe(false);
     } finally {
       warn.mockRestore();
     }
