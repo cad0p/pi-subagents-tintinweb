@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentSession, CustomEditor, initTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type EditorTheme, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, type EditorTheme, isKeyRelease, Text, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -179,7 +179,7 @@ async function harness(): Promise<Harness> {
   };
 
   const notifications: string[] = [];
-  let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
+  const inputListeners = new Set<(data: string) => { consume?: boolean; data?: string } | undefined>();
   let widget: { render(width: number): string[] } | undefined;
   let widgetLines: string[] = [];
   const paintWidget = () => { widgetLines = widget ? widget.render(120) : []; };
@@ -243,9 +243,9 @@ async function harness(): Promise<Harness> {
       widget = content ? content(tui, theme) : undefined;
       paintWidget();
     },
-    onTerminalInput: (handler?: (data: string) => { consume?: boolean } | undefined) => {
-      inputHandler = handler;
-      return () => { inputHandler = undefined; };
+    onTerminalInput: (handler?: (data: string) => { consume?: boolean; data?: string } | undefined) => {
+      if (handler) inputListeners.add(handler);
+      return () => { if (handler) inputListeners.delete(handler); };
     },
     // pi reads the FOCUSED editor, which is the child's while its view is open.
     getEditorText: () => im.editor.getText() as string,
@@ -268,6 +268,25 @@ async function harness(): Promise<Harness> {
     isProjectTrusted: () => true,
   } as any;
 
+  /**
+   * pi's own input path (pi-tui tui.js handleTerminalInput): every registered listener runs in
+   * order, one may rewrite the key through `data`, a consumed key never reaches the focused
+   * component, and a key release is dropped unless that component asks for releases. `toEditor`
+   * false stops after the listeners, which is what the list itself answers.
+   */
+  const dispatch = (data: string, toEditor: boolean): { consume?: boolean } | undefined => {
+    let current = data;
+    for (const listener of inputListeners) {
+      const result = listener(current);
+      if (result?.consume) return { consume: true };
+      if (result?.data !== undefined) current = result.data;
+    }
+    if (current.length === 0 || !toEditor) return undefined;
+    if (isKeyRelease(current) && (im.editor as { wantsKeyRelease?: boolean }).wantsKeyRelease !== true) return undefined;
+    im.editor.handleInput(current);
+    return undefined;
+  };
+
   const { pi, tools, lifecycle } = makePi();
   subagentsExtension(pi);
   // The probe the extension installs at factory time wraps pi's real prototype; give it this one
@@ -283,14 +302,8 @@ async function harness(): Promise<Harness> {
     pi,
     ui,
     im,
-    press: (data) => inputHandler?.(data),
-    type: (data) => {
-      const result = inputHandler?.(data);
-      // pi hands an unconsumed key to the focused component, which is the child's editor while its
-      // view is open. Driving this path is what pins the routing: the fleet must not take Esc.
-      if (result === undefined) im.editor.handleInput(data);
-      return result;
-    },
+    press: (data) => dispatch(data, false),
+    type: (data) => dispatch(data, true),
     transcript: () => documentContainer.render(120).join("\n"),
     painted: () => widgetLines,
     notifications,

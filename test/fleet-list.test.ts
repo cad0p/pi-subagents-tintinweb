@@ -1277,6 +1277,31 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     expect(h.render().some(l => l.includes("shown one"))).toBe(false);
   });
 
+  it("keeps the pin when the cursor returns to the row already on screen", () => {
+    const now = Date.now();
+    const shown = mk({ id: "shown", description: "shown one", startedAt: now - 5000 });
+    const refused = mk({ id: "refused", description: "refused one", startedAt: now - 4000, status: "queued", session: undefined });
+    const h = harness([shown, refused]);
+    const view = fakeNativeView((message) => h.notifications.push(message));
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // the shown record
+    expect(view.shown).toBe("shown");
+
+    view.result = "refused";
+    h.press(DOWN); // the next row has nothing to show: the refusal drops the pin
+    h.press(UP); // and back onto the row whose transcript is still on screen
+    expect(view.opened).toEqual(["shown", "refused"]); // no rebuild: the view already shows it
+
+    // The row must get its exemption back. Without the pin it ages out at FINISHED_LINGER_MS, and
+    // the roster re-resolve then moves the cursor and replaces the transcript still on screen.
+    shown.status = "completed";
+    shown.completedAt = now - 60_000;
+    h.fleet.update();
+    expect(h.render().find(l => l.includes("shown one"))).toContain("⏺");
+    expect(view.opened).toEqual(["shown", "refused"]);
+    expect(view.shown).toBe("shown");
+  });
+
   it("says why once per row it cannot show, not once per repaint", () => {
     const h = harness([makeRecord({ id: "q", description: "queued one", status: "queued", session: undefined })]);
     const view = fakeNativeView((message) => h.notifications.push(message));
@@ -1289,7 +1314,7 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     expect(h.notifications).toEqual(["queued, not started yet"]);
   });
 
-  it("drops the marker to `main` when a deactivation cannot follow it", () => {
+  it("closes the view when ↑ moves the cursor back onto `main`", () => {
     const h = harness([mk({ id: "a1", description: "one" })]);
     const view = fakeNativeView();
     h.fleet.setNativeView(view);

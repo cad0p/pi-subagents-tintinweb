@@ -452,7 +452,6 @@ export class FleetList {
     if (matchesKey(data, "escape")) {
       // The child view's Esc is the child editor's: it interrupts the shown run and returns to
       // `main`, so the list must not swallow it.
-
       if (viewing) return undefined;
       this.deactivate();
       return { consume: true };
@@ -501,7 +500,13 @@ export class FleetList {
   private openNative(id: string): "opened" | "refused" | "unavailable" {
     const view = this.nativeView;
     if (!view) return "unavailable";
-    if (view.isOpen() && view.shownId() === id) return "opened";
+    if (view.isOpen() && view.shownId() === id) {
+      // The row is already on screen, so it is shown again even if an earlier refusal cleared the
+      // pin: without it the row loses its "being viewed" exemption and drops out from under the
+      // transcript that is still displayed.
+      this.viewingAgentId = id;
+      return "opened";
+    }
     try {
       const result = view.open(id);
       // Only a shown record may pin its row: a refused or unavailable one must not keep the list
