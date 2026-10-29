@@ -217,10 +217,14 @@ async function harness(): Promise<Harness> {
     ui: tui,
     keybindings,
     isShuttingDown: false,
-    showError: vi.fn(),
-    showWarning: vi.fn(),
-    showStatus: vi.fn(),
-    showExtensionError: vi.fn(),
+    // pi's four notice methods read `this` (showStatus draws into this.chatContainer), so the saved
+    // copies must be called on the instance: a detached call throws, which on the Esc path would
+    // abort before the view closes. `hostStatuses` is the human-facing log the tests assert on.
+    hostStatuses: notifications,
+    showError(this: any, message: string) { this.hostStatuses.push(message); },
+    showWarning(this: any, message: string) { this.hostStatuses.push(message); },
+    showStatus(this: any, message: string) { this.hostStatuses.push(message); },
+    showExtensionError(this: any, extensionPath: string, error: unknown) { this.hostStatuses.push(`${extensionPath}: ${String(error)}`); },
     handleCtrlD: vi.fn(),
     handleOpenExternalEditor: vi.fn(async () => {}),
     handleCopyCommand: vi.fn(async () => {}),
@@ -245,7 +249,8 @@ async function harness(): Promise<Harness> {
     },
     // pi reads the FOCUSED editor, which is the child's while its view is open.
     getEditorText: () => im.editor.getText() as string,
-    notify: (message: string) => { notifications.push(message); },
+    // Exactly what pi's ctx.ui.notify does: through showStatus, on the instance.
+    notify: (message: string) => im.showStatus(message),
     custom: vi.fn(() => new Promise<undefined>(() => {})),
     setFooter: vi.fn(),
     setEditorComponent,

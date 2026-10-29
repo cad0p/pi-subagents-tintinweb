@@ -692,6 +692,26 @@ describe("native transcript view", () => {
     expect(h.view.isOpen()).toBe(false);
   });
 
+  it("calls the host methods it saved on the instance, never detached", () => {
+    const h = harness();
+    // pi's methods read `this` — showStatus its chat container, resetExtensionUI its editor — so a
+    // saved reference called detached throws instead of doing its job. Esc depends on this: the
+    // stop's notice goes through showStatus before the view closes.
+    const seen: string[] = [];
+    for (const name of ["showError", "showWarning", "showStatus", "showExtensionError"] as const) {
+      (h.im as any)[name] = function (this: any, ...args: unknown[]) { this.seen.push(`${name}:${String(args[0])}`); };
+    }
+    (h.im as any).seen = seen;
+    h.openChild();
+    expect(() => h.im.showError("boom")).not.toThrow();
+    expect(() => h.im.showWarning("careful")).not.toThrow();
+    expect(() => h.im.showStatus("working on it")).not.toThrow();
+    expect(() => h.im.showExtensionError("ext", "bad")).not.toThrow();
+    expect(() => h.im.resetExtensionUI()).not.toThrow();
+    expect(() => h.im.setupAutocompleteProvider()).not.toThrow();
+    expect(seen).toEqual(["showError:boom", "showWarning:careful", "showStatus:working on it", "showExtensionError:ext"]);
+  });
+
   it("refuses a record with no transcript without dropping the view already on screen", () => {
     const h = harness();
     h.openChild();

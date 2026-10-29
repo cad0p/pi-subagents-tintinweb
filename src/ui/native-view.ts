@@ -565,20 +565,24 @@ export class NativeTranscriptView {
         im.ui.requestRender();
       }
     };
+    // Every method saved here is called on the instance it was saved from, never detached: pi's
+    // showStatus reads `this.chatContainer` (and its siblings `this.editor`), so a bare
+    // `state.saved.showStatus(...)` throws before the notice is drawn — which on the Esc path is
+    // before close("escape"), leaving the host transcript behind and the parent unnotified.
     state.wrappers.showError = (message: string) => {
-      state.saved.showError(message);
+      state.saved.showError.call(im, message);
       band(`Error: ${message}`);
     };
     state.wrappers.showWarning = (message: string) => {
-      state.saved.showWarning(message);
+      state.saved.showWarning.call(im, message);
       band(`Warning: ${message}`);
     };
     state.wrappers.showStatus = (message: string) => {
-      state.saved.showStatus(message);
+      state.saved.showStatus.call(im, message);
       band(message);
     };
     state.wrappers.showExtensionError = (extensionPath: string, error: unknown, stack?: string) => {
-      state.saved.showExtensionError(extensionPath, error, stack);
+      state.saved.showExtensionError.call(im, extensionPath, error, stack);
       band(`Extension "${extensionPath}" error: ${String(error)}`);
     };
     im.showError = state.wrappers.showError;
@@ -756,10 +760,10 @@ export class NativeTranscriptView {
     // wrapper a child draft becomes the host draft on every reload.
     state.wrappers.resetExtensionUI = () => {
       if (im.editor === state.editor) state.editor?.setText(state.hostDraft);
-      state.saved.resetExtensionUI();
+      state.saved.resetExtensionUI.call(im);
     };
     state.wrappers.setupAutocompleteProvider = () => {
-      state.saved.setupAutocompleteProvider();
+      state.saved.setupAutocompleteProvider.call(im);
       if (im.editor === state.editor && state.childProvider) state.editor.setAutocompleteProvider(state.childProvider);
     };
     im.resetExtensionUI = state.wrappers.resetExtensionUI;
