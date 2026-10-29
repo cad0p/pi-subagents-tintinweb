@@ -36,10 +36,12 @@ const theme = {
   },
 };
 
-/** What the chat paints: every stored notice entry through its renderer, then each message `display` let through. */
-function visibleText(pi: any, session: SessionEntry[]): string {
-  const renderer = pi.registerEntryRenderer.mock.calls.find((c: any[]) => c[0] === SHUTDOWN_NOTICE_ENTRY)?.[1];
-  const entries = noticeEntries(session).map((e) => (renderer ? renderer(e, {}, theme).render(80).join("\n") : ""));
+/** What the chat paints: every stored notice entry through the captured renderer, then each message `display` let through. */
+function visibleText(pi: any, session: SessionEntry[], renderer: any): string {
+  const entries = noticeEntries(session).map((e) => {
+    const component = renderer?.(e, { expanded: false }, theme);
+    return component ? component.render(80).join("\n") : "";
+  });
   const messages = pi.sendMessage.mock.calls.map((c: any[]) => c[0]).filter((m: any) => m.display !== false);
   return [...entries, ...messages.map((m: any) => m.content)].join("\n");
 }
@@ -53,7 +55,10 @@ function boot(session: SessionEntry[]) {
     session.push(custom(customType, data));
   });
   subagentsExtension(pi);
-  return { pi, lifecycle };
+  // Read off the factory's registration, the way pi reads it into its renderer table: a renderer
+  // registered inside `session_start` is missing here, and misses the paint of the stored entries.
+  const renderer = pi.registerEntryRenderer.mock.calls.find((c: any[]) => c[0] === SHUTDOWN_NOTICE_ENTRY)?.[1];
+  return { pi, lifecycle, renderer };
 }
 
 let cwd: string;
@@ -105,27 +110,31 @@ function makeCtx(session: SessionEntry[]) {
 describe("shutdown-stop notice rendering", () => {
   it("draws the notice at session start, with no user message", async () => {
     const session = stoppedRun();
-    const { pi, lifecycle } = boot(session);
+    const { pi, lifecycle, renderer } = boot(session);
+    // Registered by the factory, not by `session_start`: pi paints the stored entries before a turn.
+    expect(renderer).toBeTypeOf("function");
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
 
-    const text = visibleText(pi, session);
+    const text = visibleText(pi, session, renderer);
     expect(text).toContain("1 subagent was stopped when pi shut down: child-1 (review auth.ts)");
     expect(countNotices(text)).toBe(1);
   });
 
   it("draws nothing when the session file holds no shutdown stop", async () => {
     const session: SessionEntry[] = [];
-    const { pi, lifecycle } = boot(session);
+    const { pi, lifecycle, renderer } = boot(session);
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
 
     expect(noticeEntries(session)).toHaveLength(0);
     expect(pi.sendMessage).not.toHaveBeenCalled();
-    expect(visibleText(pi, session)).toBe("");
+    // No component at all: pi inserts a spacer for any defined one, which would draw a blank line.
+    expect(renderer(null, { expanded: false }, theme)).toBeUndefined();
+    expect(visibleText(pi, session, renderer)).toBe("");
   });
 
   it("shows the notice once across the first turn and the reopen after it", async () => {
     const session = stoppedRun();
-    const { pi, lifecycle } = boot(session);
+    const { pi, lifecycle, renderer } = boot(session);
     const ctx = makeCtx(session);
     await lifecycle.get("session_start")({ reason: "startup" }, ctx);
 
@@ -138,25 +147,41 @@ describe("shutdown-stop notice rendering", () => {
 
     await lifecycle.get("turn_start")({}, ctx);
     await lifecycle.get("turn_end")({}, ctx);
-    expect(countNotices(visibleText(pi, session))).toBe(1);
+    expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
 
     // A reopen of the same file finds the marker it appended: nothing new is drawn or sent.
     await lifecycle.get("session_start")({ reason: "startup" }, ctx);
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(noticeEntries(session)).toHaveLength(1);
-    expect(countNotices(visibleText(pi, session))).toBe(1);
+    expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
 
   it("renders the older ids-only entry, and counts it as reported", async () => {
     const session = [...stoppedRun(), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] })];
-    const { pi, lifecycle } = boot(session);
+    const { pi, lifecycle, renderer } = boot(session);
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
 
     expect(pi.sendMessage).not.toHaveBeenCalled();
     expect(noticeEntries(session)).toHaveLength(1);
-    const text = visibleText(pi, session);
+    const text = visibleText(pi, session, renderer);
     expect(text).toContain("1 subagent was stopped when pi shut down: child-1");
     // The old entry carries no description: the renderer must not invent one.
     expect(text).not.toContain("(review auth.ts)");
+    // A damaged `stops` array parses to nothing: the ids still say who stopped.
+    const damaged = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"], stops: [{}] });
+    expect(renderer(damaged, { expanded: false }, theme).render(80).join("\n")).toContain("stopped when pi shut down: child-1");
+  });
+
+  it("paints nothing for a marker a newer release wrote", async () => {
+    const session = [
+      ...stoppedRun(),
+      custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"], stops: [{ id: "child-1", description: "review auth.ts" }] }),
+    ];
+    const { pi, lifecycle, renderer } = boot(session);
+
+    // Ledger ignores a later-version marker, so the stop is named again; the stale marker must stay silent.
+    expect(renderer(noticeEntries(session)[0], { expanded: false }, theme)).toBeUndefined();
+    await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
 });

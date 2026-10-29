@@ -154,6 +154,16 @@ function sanitizeHeaderText(s: string): string {
   return toSingleLine(s);
 }
 
+/** Dims one transcript line through the live theme; never throws, because pi turns a throwing renderer into a bare failure line. */
+function dim(theme: Pick<Theme, "fg">, line: string): string {
+  try {
+    // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
+    return typeof theme?.fg === "function" ? theme.fg("dim", line) : line;
+  } catch {
+    return line;
+  }
+}
+
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
 const HEADER_PREVIEW_MAX_CHARS = 300; // ~one wrapped line; description/error are untrusted input.
 
@@ -514,14 +524,18 @@ export default function (pi: ExtensionAPI) {
   /** The stops a shutdown-notice entry names: `stops` when this release wrote it, else the bare `ids` of an older one. */
   function noticeStops(data: unknown): ShutdownStop[] {
     if (typeof data !== "object" || data === null) return [];
-    const { ids, stops } = data as { ids?: unknown; stops?: unknown };
-    if (Array.isArray(stops)) {
-      return stops.flatMap((stop) => {
-        if (stop === null || typeof stop !== "object") return [];
-        const { id, description } = stop as { id?: unknown; description?: unknown };
-        return typeof id === "string" ? [{ id, ...(typeof description === "string" ? { description } : {}) }] : [];
-      });
-    }
+    const { v, ids, stops } = data as { v?: unknown; ids?: unknown; stops?: unknown };
+    // The gate ledger's reader applies: a marker from a later version names no stop, so it must paint none either.
+    if (typeof v === "number" && v > LEDGER_VERSION) return [];
+    const named = Array.isArray(stops)
+      ? stops.flatMap((stop) => {
+          if (stop === null || typeof stop !== "object") return [];
+          const { id, description } = stop as { id?: unknown; description?: unknown };
+          return typeof id === "string" ? [{ id, ...(typeof description === "string" ? { description } : {}) }] : [];
+        })
+      : [];
+    // An entry that names no stop in `stops` is an older one, or a damaged one: its `ids` still say who stopped.
+    if (named.length > 0) return named;
     return (Array.isArray(ids) ? ids : []).filter((id): id is string => typeof id === "string").map((id) => ({ id }));
   }
 
@@ -1488,14 +1502,6 @@ export default function (pi: ExtensionAPI) {
     // did not produce: pi turns a throwing renderer into a bare "[subagents:init-error]
     // renderer failed: …" line, which hides the failure the entry exists to report.
     const renderer: EntryRenderer = (entry, _options, theme) => {
-      // Called through the theme object, never detached: pi's Theme.fg reads this.tokenAnsi.
-      const paint = (s: string): string => {
-        try {
-          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
-        } catch {
-          return s;
-        }
-      };
       const lines: string[] = [];
       try {
         const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
@@ -1504,12 +1510,12 @@ export default function (pi: ExtensionAPI) {
           if (f === null || typeof f !== "object") continue;
           const { label, message } = f as { label?: unknown; message?: unknown };
           if (typeof label !== "string") continue;
-          lines.push(paint(label + ": " + (typeof message === "string" ? message : "")));
+          lines.push(dim(theme, label + ": " + (typeof message === "string" ? message : "")));
         }
       } catch {
         // Malformed entry (a proxy with a throwing trap, say): fall through to the plain line.
       }
-      return { render: (_width: number) => (lines.length ? lines : [paint("pi-subagents: init failed")]), invalidate: () => {} };
+      return { render: (_width: number) => (lines.length ? lines : [dim(theme, "pi-subagents: init failed")]), invalidate: () => {} };
     };
     pi.registerEntryRenderer("subagents:init-error", renderer);
   });
@@ -1519,22 +1525,17 @@ export default function (pi: ExtensionAPI) {
     // any turn: a `nextTurn` message would wait for a user message that may never come. Defensive in
     // the same way as the init-error renderer: a stored entry outlives the code that wrote it.
     const renderer: EntryRenderer = (entry, _options, theme) => {
-      const paint = (s: string): string => {
-        try {
-          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
-        } catch {
-          return s;
-        }
-      };
-      let lines: string[] = [];
       try {
         const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
         const stops = noticeStops(data);
-        lines = stops.length > 0 ? formatShutdownNotice(stops).split("\n").map(paint) : [];
+        // pi keeps any defined component and inserts a spacer for it, so an empty one draws a blank line.
+        if (stops.length === 0) return undefined;
+        const lines = formatShutdownNotice(stops).split("\n").map((line) => dim(theme, line));
+        return { render: (_width: number) => lines, invalidate: () => {} };
       } catch {
-        // Malformed entry: draw nothing rather than a renderer-failure line in place of the notice.
+        // Malformed entry (a proxy with a throwing trap, say): draw nothing rather than a failure line.
+        return undefined;
       }
-      return { render: (_width: number) => lines, invalidate: () => {} };
     };
     pi.registerEntryRenderer(SHUTDOWN_NOTICE_ENTRY, renderer);
   });
