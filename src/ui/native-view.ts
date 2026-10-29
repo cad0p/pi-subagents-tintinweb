@@ -14,7 +14,9 @@
 
 import {
   type AgentSession,
+  type AppKeybinding,
   CustomEditor,
+  copyToClipboard,
   ExtensionEditorComponent,
   ExtensionInputComponent,
   ExtensionSelectorComponent,
@@ -35,6 +37,7 @@ import {
   type ChildDialogRequest,
   childDialogFlag,
   childUIState,
+  dropChildDialogs,
   onChildDialogFlag,
   onChildUIChange,
   pendingChildDialogs,
@@ -42,6 +45,27 @@ import {
 
 /** The one probe key: never wrap a wrapper. */
 const PROBE_KEY = Symbol.for("pi-subagents:native-view-probe");
+
+/**
+ * pi's 13 app-action handlers that are not kept. Each one acts on the host session or replaces it;
+ * a notice is the only honest thing to print. `app.interrupt` and `app.exit` are not in this map
+ * (they are the onEscape/onCtrlD fallbacks in CustomEditor.handleInput), so they cannot print one.
+ */
+const BLOCKED_ACTIONS: readonly AppKeybinding[] = [
+  "app.clear",
+  "app.suspend",
+  "app.thinking.cycle",
+  "app.thinking.toggle",
+  "app.model.cycleForward",
+  "app.model.cycleBackward",
+  "app.model.select",
+  "app.message.followUp",
+  "app.message.dequeue",
+  "app.session.new",
+  "app.session.tree",
+  "app.session.fork",
+  "app.session.resume",
+];
 
 export interface EditorLike {
   getText(): string;
@@ -56,8 +80,8 @@ export interface EditorLike {
   onExtensionShortcut?: (data: string) => boolean;
   onPasteImage?: () => void;
   embedWorkingStatus?: boolean;
-  actionHandlers?: Map<string, () => void>;
-  onAction?: (action: string, handler: () => void) => void;
+  actionHandlers?: Map<AppKeybinding, () => void>;
+  onAction?: (action: AppKeybinding, handler: () => void) => void;
 }
 
 /** The live renderer pi uses; only the members the view touches. */
@@ -192,7 +216,7 @@ interface ViewState {
 }
 
 export interface NativeViewOptions {
-  manager: Pick<AgentManager, "getRecord" | "settledSessionManager">;
+  manager: Pick<AgentManager, "getRecord" | "settledSessionManager" | "steer">;
   /** The root session's latest context; `ctx.ui` is the footer/editor/theme surface. */
   getContext: () => NativeViewContext | undefined;
   /** The captured `InteractiveMode`, or undefined when the probe never fired. */
@@ -379,6 +403,7 @@ export class NativeTranscriptView {
     state.active = false;
     state.unsubChange();
     state.unsubDialogFlag();
+    dropChildDialogs(state.id);
     this.restoreWrappers(im, state);
     if (reason === "quit") {
       this.state = undefined;
@@ -515,9 +540,120 @@ export class NativeTranscriptView {
     }
   }
 
-  /** Section 3 fills this in. */
-  private installEditor(_im: InteractiveModeView, _ctx: NativeViewContext, _state: ViewState): void {}
-  private restoreEditor(_im: InteractiveModeView, _state: ViewState): void {}
+  private installEditor(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
+    ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => new CustomEditor(tui, editorTheme, keybindings));
+    const editor = im.editor;
+    if (editor === im.defaultEditor) throw new Error("native view: pi did not install the custom editor");
+    const ed = editor as CustomEditor;
+    state.editor = ed;
+    // pi copied the host draft into the new editor (IM:2219); the draft is kept in hostDraft.
+    ed.setText("");
+    // pi's copied onChange writes im.isBashMode from the text; a child ! must not flip host state.
+    ed.onChange = () => {};
+    ed.onSubmit = (text: string) => this.submit(im, state, text);
+    ed.onEscape = () => this.close("escape");
+    ed.onCtrlD = () => im.handleCtrlD();
+    ed.onExtensionShortcut = (data: string) => {
+      if (!im.keybindings.matches(data, "app.session.rename")) return false;
+      this.repaint();
+      return true;
+    };
+    const record = this.options.manager.getRecord(state.id);
+    const childSession = record?.session;
+    const sessionManager = childSession?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    if (sessionManager) {
+      const provider = new CombinedAutocompleteProvider(undefined, sessionManager.getCwd());
+      state.childProvider = provider;
+      ed.setAutocompleteProvider(provider);
+    }
+    // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
+    // replace or clear the host session. Only three act on something the view can honour.
+    ed.actionHandlers.clear();
+    ed.onAction("app.tools.expand", () => {
+      state.childToolOutputExpanded = !state.childToolOutputExpanded;
+      for (const child of state.childContainer.children) {
+        if (child instanceof ToolExecutionComponent) child.setExpanded(state.childToolOutputExpanded);
+      }
+      im.ui.requestRender();
+    });
+    ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
+    ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
+    for (const action of BLOCKED_ACTIONS) {
+      ed.onAction(action, () => this.notice(im, state, action + " acts on the host session; Esc to leave " + state.id));
+    }
+    // The reset runs before our shutdown handler on reload and after it on new/resume; without this
+    // wrapper a child draft becomes the host draft on every reload.
+    state.wrappers.resetExtensionUI = () => {
+      if (im.editor === state.editor) state.editor?.setText(state.hostDraft);
+      state.saved.resetExtensionUI();
+    };
+    state.wrappers.setupAutocompleteProvider = () => {
+      state.saved.setupAutocompleteProvider();
+      if (im.editor === state.editor && state.childProvider) state.editor.setAutocompleteProvider(state.childProvider);
+    };
+    im.resetExtensionUI = state.wrappers.resetExtensionUI;
+    im.setupAutocompleteProvider = state.wrappers.setupAutocompleteProvider;
+  }
+
+  private restoreEditor(im: InteractiveModeView, state: ViewState): void {
+    const ed = state.editor;
+    if (!ed) return;
+    if (im.editor === ed) {
+      ed.setText(state.hostDraft);
+      // IM restores defaultEditor from our text (IM:2259), so the host draft comes back, never the child's.
+      this.options.getContext()?.ui.setEditorComponent(undefined);
+    }
+    if (im.editor !== im.defaultEditor) {
+      console.warn("[pi-subagents] native view: pi did not restore the default editor");
+    }
+  }
+
+  private submit(im: InteractiveModeView, state: ViewState, text: string): void {
+    if (!this.canPaint(im, state)) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
+      const what = trimmed.startsWith("!") ? "Bash mode" : "Slash commands";
+      this.notice(im, state, what + " act on the host session; Esc to leave " + state.id);
+      return;
+    }
+    state.editor?.addToHistory?.(trimmed);
+    im.ui.requestRender();
+    void this.options.manager.steer(state.id, trimmed).then(
+      (outcome) => {
+        if (!this.canPaint(im, state)) return;
+        if (outcome === false) this.notice(im, state, "could not deliver to " + state.id);
+        else this.repaint();
+      },
+      (error: unknown) => {
+        if (this.canPaint(im, state)) this.notice(im, state, "delivery failed: " + (error instanceof Error ? error.message : String(error)));
+      },
+    );
+  }
+
+  private async copyChild(im: InteractiveModeView, state: ViewState): Promise<void> {
+    if (im.ui.hasActiveSelection?.() === true) {
+      await im.handleCopyCommand({ preferSelection: true, flashConfirmation: true });
+      return;
+    }
+    const text = this.options.manager.getRecord(state.id)?.session?.getLastAssistantText() ?? "";
+    if (!text) {
+      this.notice(im, state, "no child reply to copy yet");
+      return;
+    }
+    try {
+      await copyToClipboard(text);
+      this.notice(im, state, "copied the child's last reply");
+    } catch (error) {
+      this.notice(im, state, "copy failed: " + (error instanceof Error ? error.message : String(error)));
+    }
+  }
+
+  private notice(im: InteractiveModeView, state: ViewState, text: string): void {
+    state.noticeText = text;
+    if (this.canPaint(im, state)) this.renderChild(im, state, { populateHistory: false });
+    im.ui.requestRender();
+  }
 
   /** Section 4 fills this in. */
   private syncSession(_im: InteractiveModeView, _ctx: NativeViewContext, _state: ViewState): void {}
