@@ -37,9 +37,13 @@ import type { LifetimeUsage } from "./usage.js";
  * always has and accepts the loss as a documented limitation, not a guard to write. A reader that must have the delta
  * does not call `stop` on such a hand-over: it `attach`es a listener for its `usage` events, disposes its idle items
  * itself through `teardownChildSession`, ends the pool the way `stop` would have — `draining.abortAll`,
- * `draining.dispose` — and only then `detach`es. The order matters: `abortAll` emits a final `usage` for each run it
- * stops, and a detached hand-over buffers those into `pending`, which nothing reads once `stop` is skipped. Stopping
- * there leaves the pool, its runs and their slots alive.
+ * `draining.dispose` — and leaves the listener attached. `abortAll` emits nothing itself: it aborts each run's
+ * signal, and that run's last `message_end` reaches `onUsage` afterwards, once `session.abort()` has awaited the
+ * session's idle state. A listener removed in the same frame as `abortAll` therefore misses exactly the delta this
+ * paragraph is about — the loss #164 was filed for. Detach once the aborted runs have reported; a detached hand-over
+ * buffers into `pending`, which nothing reads when `stop` is skipped. `stop` itself may detach first only because it
+ * replays what `pending` holds through the sink it is given. Ending at the idle items, before `draining.abortAll`,
+ * leaves the pool, its runs and their slots alive.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
