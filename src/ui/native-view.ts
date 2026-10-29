@@ -213,6 +213,7 @@ interface ViewState {
   childToolOutputExpanded: boolean;
   dialogRequest?: ChildDialogRequest;
   dialogComponent?: Component;
+  footer?: ChildFooter;
 }
 
 export interface NativeViewOptions {
@@ -247,6 +248,7 @@ export class ChildFooter extends FooterComponent {
     session: AgentSession,
     footerData: ReadonlyFooterDataProvider,
     private record: () => AgentRecord | undefined,
+    private hostCwd: () => string,
     private theme: Theme,
   ) {
     super(session, footerData);
@@ -264,6 +266,9 @@ export class ChildFooter extends FooterComponent {
     if (record.status === "running") parts.push(`${Math.max(0, Math.round((Date.now() - record.startedAt) / 1000))}s`);
     for (const text of state.statuses.values()) parts.push(toSingleLine(text));
     if (this.sessionIsStreaming()) parts.push("streaming");
+    // The inherited first line's (branch) is the host's; say so when the child runs elsewhere.
+    const session = (this as unknown as { session?: AgentSession }).session;
+    if (session && session.sessionManager.getCwd() !== this.hostCwd()) parts.push("branch: host");
     return [truncateToWidth(this.theme.fg("dim", `  ${parts.join(" · ")}`), width)];
   }
 
@@ -655,9 +660,39 @@ export class NativeTranscriptView {
     im.ui.requestRender();
   }
 
-  /** Section 4 fills this in. */
-  private syncSession(_im: InteractiveModeView, _ctx: NativeViewContext, _state: ViewState): void {}
-  private restoreFooter(): void {}
+  private syncSession(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const session = record.session;
+    if (session && session.sessionId === state.shownSessionId) {
+      state.footer?.setAutoCompactEnabled(session.autoCompactionEnabled);
+      return;
+    }
+    state.shownSessionId = session?.sessionId;
+    if (session) {
+      const live = session;
+      const getRecord = () => this.options.manager.getRecord(state.id);
+      const hostCwd = () => im.sessionManager.getCwd();
+      ctx.ui.setFooter((_tui, theme, footerData) => {
+        const footer = new ChildFooter(live, footerData, getRecord, hostCwd, theme);
+        // A constructed FooterComponent defaults to auto-compaction on; pi only calls this on
+        // its own footer, so the factory must set it or every child prints (auto).
+        footer.setAutoCompactEnabled(live.autoCompactionEnabled);
+        state.footer = footer;
+        return footer;
+      });
+      if (state.editor) state.editor.borderColor = ctx.ui.theme.getThinkingBorderColor(live.thinkingLevel);
+    } else {
+      const getRecord = () => this.options.manager.getRecord(state.id);
+      ctx.ui.setFooter((_tui, theme) => new RecordFooter(getRecord, theme));
+      state.footer = undefined;
+    }
+  }
+
+  private restoreFooter(): void {
+    // pi disposes whichever custom footer is installed and re-adds its built-in one.
+    this.options.getContext()?.ui.setFooter(undefined);
+  }
 
   /** Surface the oldest parked dialog through pi's own dialog stack. */
   private pushDialog(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
