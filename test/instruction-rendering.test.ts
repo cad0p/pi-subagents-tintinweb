@@ -582,6 +582,8 @@ describe("instruction rendering", () => {
       const missing = await steer.execute("tc", { to: "nope", message: "x" }, undefined, undefined, spawnCtx(cwd));
       expect(missing.details.sendOutcome).toBe("not-found");
       expect(missing.content[0].text).toContain("Agent not found");
+      // A refusal must fail the tool call: from codemode a non-error result resolves and the script ends clean.
+      expect((missing as { isError?: boolean }).isError).toBe(true);
     });
 
     it("attaches queued when the session is not ready yet", async () => {
@@ -592,6 +594,7 @@ describe("instruction rendering", () => {
 
       const queued = await steer.execute("tc", { to: id, message: "queue me" }, undefined, undefined, spawnCtx(cwd));
       expect(queued.details.sendOutcome).toBe("queued");
+      expect((queued as { isError?: boolean }).isError).toBe(false);
       expect(record.pendingSteers).toEqual(["queue me"]);
     });
 
@@ -604,6 +607,7 @@ describe("instruction rendering", () => {
       record.session = { prompt, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       const sent = await steer.execute("tc", { to: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
       expect(sent.details.sendOutcome).toBe("delivered");
+      expect((sent as { isError?: boolean }).isError).toBe(false);
       expect(prompt).toHaveBeenCalledWith("go left", expect.objectContaining({ streamingBehavior: "steer" }));
     });
 
@@ -615,6 +619,7 @@ describe("instruction rendering", () => {
 
       const failed = await steer.execute("tc", { to: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
       expect(failed.details.sendOutcome).toBe("failed");
+      expect((failed as { isError?: boolean }).isError).toBe(true);
       const theme = makeTheme();
       const text = renderResultText(steer, failed, theme, { args: { message: "x" } });
       expect(text).toContain("did not take the message");

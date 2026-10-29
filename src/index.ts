@@ -1910,7 +1910,13 @@ Terse command-style prompts produce shallow, generic work.
   // ---- SendMessage tool ----
 
   type SendOutcome = Exclude<DeliverOutcome, false> | "not-found" | "failed";
-  const sendResult = (msg: string, sendOutcome: SendOutcome) => textResult(msg, { sendOutcome });
+  // A refusal is a failed tool result: inside codemode a non-error result resolves instead of rejecting, so a
+  // not-found or refused SendMessage would end the script as a success and the model would never learn. `sendOutcome`
+  // stays for the renderer's colour. The nested twin and get_subagent_result already answer their refusals this way.
+  const sendResult = (msg: string, sendOutcome: SendOutcome) => ({
+    ...textResult(msg, { sendOutcome }),
+    isError: sendOutcome === "not-found" || sendOutcome === "failed",
+  });
 
   registerParentTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.SEND_MESSAGE,
