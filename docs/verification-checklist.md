@@ -11,14 +11,8 @@ that, not the author.
 Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
 dependencies there, and run every gate and live check from it. Remove the
-merged branch's worktree and prune (`git worktree remove <path>`, `git worktree
-prune`).
-
-After a PR is merged, fast-forward the main checkout before you start the next
-task: `git -C <repo> pull --ff-only` (or `git -C <repo> merge --ff-only
-origin/main`). Confirm it with `git -C <repo> log --oneline -1` matching the
-merge commit on `origin/main` and `git -C <repo> status --porcelain` printing
-nothing; anything else means you are reading stale code.
+merged branch's worktree after merge (`git worktree remove <path>`); `git
+worktree prune` only matters for a directory deleted by hand.
 
 ## Automated gates
 
@@ -241,6 +235,23 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   check whenever the reviewer found Visual proof applies, and, when it
   applies, at least one after run of every step on that head, every after run
   of every step on that head passing.
+
+## After merge
+
+This part is the maintainer's, and it comes before the next task: a main
+checkout that is behind reads pre-merge code, and a clean `git status` does not
+prove otherwise.
+
+```bash
+git -C <repo> fetch origin
+git -C <repo> merge --ff-only origin/main
+git -C <repo> rev-parse HEAD origin/main   # both lines print the same commit
+```
+
+The fetch is not optional: without it `origin/main` is the last-fetched ref, so
+the merge reports "Already up to date" and the revision check compares two stale
+values. If the merge refuses, the checkout has local edits — commit or discard
+them first rather than working on top of them.
 
 ## Fork release rules
 
