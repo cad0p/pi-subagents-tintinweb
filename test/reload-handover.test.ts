@@ -20,10 +20,12 @@ import {
   slotHoldersOf,
   takeHandovers,
   takeNudgeEntries,
+  takeUnreportedOf,
   toDto,
   toSpawnData,
 } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
+import type { LifetimeUsage } from "../src/usage.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -127,6 +129,35 @@ describe("ReloadHandover buffering", () => {
     expect(takeNudgeEntries(older)).toEqual([{ id: "n1" }, { id: "n2" }]);
   });
 
+  it("reads a hand-over published before takeUnreported: its delta is still in take", () => {
+    const delta: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const older = new ReloadHandover([], [], [], delta, stubPool);
+    Object.defineProperty(older, "takeUnreported", { value: undefined, configurable: true });
+    expect(takeUnreportedOf(older)).toBeUndefined();
+    expect(older.take().unreported).toEqual(delta);
+  });
+
+  it("takes the unreported spend through the accessor, leaving it in take for a hand-over that has no accessor", () => {
+    const delta: LifetimeUsage = { input: 1, output: 0, cacheWrite: 0 };
+    const current = new ReloadHandover([], [], [], delta, stubPool);
+    expect(takeUnreportedOf(current)).toEqual(delta);
+    expect(takeUnreportedOf(current)).toBeUndefined();
+    expect(current.take().unreported).toBeUndefined();
+  });
+
+  it("hands out the unreported spend alone, leaving the queued specs for the activation that adopts it", () => {
+    const spec = { id: "q", type: "general-purpose" as const, prompt: "p", options: { description: "d" } };
+    const delta: LifetimeUsage = { input: 1, output: 0, cacheWrite: 0 };
+    const handover = new ReloadHandover([], [spec], [], delta, stubPool);
+
+    // Read once, before anything can stop the hand-over, and only that: a queue taken here would not survive a
+    // republish to the next activation.
+    expect(handover.takeUnreported()).toEqual(delta);
+    expect(handover.takeUnreported()).toBeUndefined();
+    expect(handover.take().queued).toEqual([spec]);
+    expect(handover.takeUnreported()).toBeUndefined();
+  });
+
   it("reads the current hand-over's slot holders and nudge targets unchanged", () => {
     const current = new ReloadHandover([], [], [{ id: "n1", target: "p1" }], undefined, stubPool, new Map(), new Set(["s1"]));
     expect([...slotHoldersOf(current)]).toEqual(["s1"]);
@@ -139,6 +170,47 @@ describe("ReloadHandover buffering", () => {
     handover.detach();
     expect(handover.idleItems()).toHaveLength(1);
     expect(idle.dispose).not.toHaveBeenCalled();
+  });
+
+  it("replays the usage it buffered, in order, to the consumer that stops it — once", () => {
+    const first: LifetimeUsage = { input: 1, output: 2, cacheWrite: 3 };
+    const second: LifetimeUsage = { input: 4, output: 5, cacheWrite: 6 };
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    handover.emit({ kind: "usage", dto: dtoOf("u1"), usage: first });
+    handover.emit(slotFreed);
+    handover.emit({ kind: "usage", dto: dtoOf("u2"), usage: second });
+
+    const replayed: Array<[string, LifetimeUsage]> = [];
+    const replay = (dto: AgentDto, usage: LifetimeUsage) => replayed.push([dto.id, usage]);
+    handover.stop(replay);
+    handover.stop(replay);
+
+    expect(replayed).toEqual([
+      ["u1", first],
+      ["u2", second],
+    ]);
+  });
+
+  it("replays a usage event it is given after it stopped", () => {
+    const usage: LifetimeUsage = { input: 7, output: 0, cacheWrite: 0 };
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    const replayed: Array<[string, LifetimeUsage]> = [];
+    handover.stop((dto, delta) => replayed.push([dto.id, delta]));
+
+    handover.emit({ kind: "usage", dto: dtoOf("late"), usage });
+
+    expect(replayed).toEqual([["late", usage]]);
+  });
+
+  it("drops usage as it always did when a reader that knows no sink stops it", () => {
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    const seen: HandoverEvent[] = [];
+    handover.attach((event) => seen.push(event));
+
+    handover.stop();
+    handover.emit({ kind: "usage", dto: dtoOf("u"), usage: { input: 1, output: 0, cacheWrite: 0 } });
+
+    expect(seen).toEqual([]);
   });
 
   it("disposes the idle and buffered sessions it holds when stopped", async () => {

@@ -36,7 +36,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -963,8 +963,17 @@ export default function (pi: ExtensionAPI) {
         held = [];
       }
     } else {
+      // Every hand-over in `held` was read when this activation adopted it (`takeUnreported`, or `take` for one
+      // from an older release), so its unreported delta already sits in this activation's `pendingUsage`. That
+      // pool's only consumer is a tool result of this activation (`withUsageReporting`), and `session_shutdown`
+      // has run: this activation returns none again. The value is unobservable here and is not read a second time;
+      // `stopStranded` is where it is reported, in an activation that still returns tool results.
+      //
+      // A `usage` event that arrives after `stop` is a different delta: spend that reached neither `subagents:usage`
+      // nor a tool result. The sink gives it the consumer a live event has, which emits the ledger event and, with
+      // `reportUsage` on, adds it to that same pool.
       for (const h of held) {
-        h.stop();
+        h.stop(replayStoppedUsage);
         h.draining.abortAll();
         h.draining.dispose();
       }
@@ -1006,6 +1015,17 @@ export default function (pi: ExtensionAPI) {
   // replay would otherwise drop items that were not taken yet.
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
+    // Read the unreported spend of every hand-over before anything touches the list: a stop drops it with the
+    // hand-over, and this is the delta the old activation already emitted live. Only that accessor is hoisted. The
+    // queued specs stay in their hand-over until this loop reaches it: an adoption that returns early (a shutdown
+    // mid-way through `held`) republishes every hand-over behind it, and a queue taken by this activation would not
+    // survive that republish (see `takeUnreported`). Read through `takeUnreportedOf`, never directly: an older
+    // hand-over has no such member, and a call on it throws here, before anything is adopted — and `takeHandovers`
+    // has already emptied the store, so that hand-over would be adopted by nobody and stopped by nobody.
+    for (const h of held) {
+      const unreported = takeUnreportedOf(h);
+      if (unreported) pendingUsage.add(unreported);
+    }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
     manager.setDrainingPools(held.map((h) => h.draining));
@@ -1028,7 +1048,12 @@ export default function (pi: ExtensionAPI) {
       fleet.ensureTimer();
     }
     for (const h of held) {
+      // The queued specs are taken here, in the loop, and not with the unreported spend above: this is the activation
+      // that spawns them, and a hand-over this loop has not reached must be republished with its queue intact.
       const taken = h.take();
+      // A hand-over from an older release has no `takeUnreported`: its delta is still in `take`, where it always was,
+      // and dropping it here would lose spend the old activation already emitted live. This release's own hand-over
+      // reported its delta in the hoist above, so its `take` carries none and nothing is counted twice.
       if (taken.unreported) pendingUsage.add(taken.unreported);
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
@@ -1191,10 +1216,19 @@ export default function (pi: ExtensionAPI) {
     for (const h of takeStrandedHandovers(sessionId)) {
       const unreported = h.take().unreported;
       if (unreported) pendingUsage.add(unreported);
-      h.stop();
+      h.stop(replayStoppedUsage);
       h.draining.abortAll();
       h.draining.dispose();
     }
+  }
+
+  /**
+   * The one consumer a `usage` event has once no activation will adopt its hand-over: the hook a live event goes
+   * through (`onHandoverEvent`), so `reportUsage` gates the parent's totals and the `subagents:usage` ledger event
+   * exactly as it does for a message that arrives while draining.
+   */
+  function replayStoppedUsage(dto: AgentDto, usage: LifetimeUsage): void {
+    manager.replayUsage(fromDto(dto), usage);
   }
 
   /** Drops a draining pool once its last record has left it: a settled parent waits for its unwinding child to hand over. */
