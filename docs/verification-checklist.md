@@ -10,8 +10,7 @@ that, not the author.
 
 Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
-dependencies there, and run every gate and live check from it. Remove the
-worktree after merge.
+dependencies there, and run every gate and live check from it.
 
 ## Automated gates
 
@@ -234,6 +233,45 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   check whenever the reviewer found Visual proof applies, and, when it
   applies, at least one after run of every step on that head, every after run
   of every step on that head passing.
+
+## After merge
+
+This part is the maintainer's, and it comes before the next task: a main
+checkout that is behind reads pre-merge code, and a clean `git status` does not
+prove otherwise.
+
+```bash
+git -C <repo> fetch origin
+git -C <repo> merge --ff-only origin/main
+git -C <repo> rev-parse --abbrev-ref HEAD  # main
+git -C <repo> rev-parse HEAD origin/main   # both lines print the same commit
+```
+
+The fetch is not optional: without it `origin/main` is the last-fetched ref, so
+the merge reports "Already up to date" and the revision check compares two stale
+values. `rev-parse --abbrev-ref HEAD` catches the checkout that fast-forwarded
+while sitting on some other branch.
+
+A refusal means one of four things, with different remedies:
+
+- `error: Your local changes to the following files would be overwritten by merge`
+  — edits the fast-forward would clobber. Stash or discard them; they belong in
+  the worktree. Committing them is not a remedy, it turns this into the third
+  case below.
+- `error: The following untracked working tree files would be overwritten by merge`
+  — move or delete those files first.
+- `fatal: Not possible to fast-forward, aborting.` — the local branch has commits
+  `origin/main` does not. That is a checkout that drifted, and it needs a human
+  decision, not a reset.
+- `error: Merging is not possible because you have unmerged files.` — the checkout
+  is mid-merge. Finish or abort that merge first.
+
+Remove the merged branch's worktree here too (`git worktree remove <path>`). It
+refuses while the worktree holds modified or untracked, non-ignored files —
+capture files kept as evidence, for instance. Deleting untracked ones is enough;
+for a modified tracked file, discard or commit it, or pass `--force` once you
+have checked that nothing there is worth keeping. `git worktree prune` only
+matters for a directory deleted by hand.
 
 ## Fork release rules
 
