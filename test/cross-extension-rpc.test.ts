@@ -265,7 +265,7 @@ describe("cross-extension RPC", () => {
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(reply).toHaveBeenCalledWith({
         success: false,
-        error: expect.stringContaining("did not take the message"),
+        error: expect.stringContaining("Nothing was delivered to agent"),
       });
     });
   });

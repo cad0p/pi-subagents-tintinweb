@@ -312,7 +312,7 @@ describe("turn-gated completion notifications", () => {
       { to: id, message: "more" },
       undefined, undefined, ctx(),
     );
-    expect(textOf(resume)).toContain(`Agent ${id} did not take the message`);
+    expect(textOf(resume)).toContain(`Nothing was delivered to agent ${id}`);
     expect(resumeAgent).not.toHaveBeenCalled();
 
     // The refusal must not cancel the prior run's still-armed nudge.

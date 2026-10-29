@@ -1994,7 +1994,14 @@ Terse command-style prompts produce shallow, generic work.
       const record = manager.getRecord(params.to);
       // An id in its adoption window has no record yet, but its input is parked, not lost.
       if (record?.parentAgentId || (!record && !manager.isAdopting(params.to))) {
-        return sendResult(`Agent not found: "${params.to}". It may have been cleaned up.`, "not-found");
+        // State the fact, not a hedge: the hop was not attempted, so nothing reached the run. A nested child exists
+        // but only its parent can steer it, which is a different fact from an id this process has no record of.
+        return sendResult(
+          record?.parentAgentId
+            ? `Agent "${params.to}" is a nested child: only its parent's SendMessage reaches it. Nothing was delivered.`
+            : `No agent "${params.to}" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.`,
+          "not-found",
+        );
       }
       const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => params.to, record?.effectiveMaxTurns);
       const outcome = await manager.steer(params.to, params.message, sendCallbacks);

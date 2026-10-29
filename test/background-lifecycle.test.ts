@@ -1213,7 +1213,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
 
     // A record stopped before its session existed has nothing to reopen.
-    expect(textOf(resume)).toContain("did not take the message");
+    expect(textOf(resume)).toContain("Nothing was delivered to agent");
     expect(textOf(resume)).toContain("no session to reopen");
   });
 
@@ -1462,7 +1462,7 @@ describe("background lifecycle — model-visible surfaces", () => {
       { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
-    expect(textOf(resume)).toContain("did not take the message");
+    expect(textOf(resume)).toContain("Nothing was delivered to agent");
 
     // Settle the aborted run so the lifecycle completes.
     resolveRun({ responseText: "", session: mockSession(), aborted: true, steered: false });

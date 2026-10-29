@@ -14,6 +14,7 @@ export function deliveryText(id: string, outcome: DeliverOutcome): string {
     case "held":
       return `Message held for agent ${id}; it is delivered when the agent's current hand-over or teardown ends.`;
     case false:
-      return `Agent ${id} did not take the message: it has no session to reopen, was stopped with its parent, or is still settling or handing over after a reload. Send again in a moment if it is still running.`;
+      // Not a transient state to re-try blindly: the message was never delivered. Lead with that.
+      return `Nothing was delivered to agent ${id}: it has no session to reopen, so it was stopped with its parent or is still settling after a reload.`;
   }
 }
