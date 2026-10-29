@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `SendMessage`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4)
-- **FleetView** — always-on, Claude Code-style navigable list of `main` + every running, waiting, queued, and recently finished subagent, rendered below the editor (earliest-launched first, nested subagents under their parent). Each running row shows live tool activity, turns, tool uses, tokens, cost, and elapsed time; there is no separate widget, and the extension itself sets no footer status (with `@cad0p/pi-background-work` [installed as its own pi package](#install), its footer counts the session's pending background work). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `→` to open a parent's nested agents and `←` back out, `Enter` to show the selected agent's session in place, on pi's own transcript (pi's editor below, pi's footer at the bottom), and `Esc` to return. Finished agents linger briefly before dropping out, and the view stays open through completion so you can read the final output. The transcript is a snapshot: it refreshes on `Ctrl+R` (the `app.session.rename` binding), when a run completes, and when the child queues a dialog; live token-by-token output is not in this release. If pi's live interactive instance cannot be captured, the conversation overlay opens instead.
+- **FleetView** — always-on, Claude Code-style navigable list of `main` + every running, waiting, queued, and recently finished subagent, rendered below the editor (earliest-launched first, nested subagents under their parent). Each running row shows live tool activity, turns, tool uses, tokens, cost, and elapsed time; there is no separate widget, and the extension itself sets no footer status (with `@cad0p/pi-background-work` [installed next to this one](#install), its footer counts the session's pending background work). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `→` to open a parent's nested agents and `←` back out, `Enter` to show the selected agent's session in place, on pi's own transcript (pi's editor below, pi's footer at the bottom), and `Esc` to return. Finished agents linger briefly before dropping out, and the view stays open through completion so you can read the final output. The transcript is a snapshot: it refreshes on `Ctrl+R` (the `app.session.rename` binding), when a run completes, and when the child queues a dialog; live token-by-token output is not in this release. If pi's live interactive instance cannot be captured, the conversation overlay opens instead.
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for any running agent
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
@@ -36,16 +36,18 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 ## Install
 
 ```bash
-pi install npm:@cad0p/pi-subagents-tintinweb
+pi install npm:@cad0p/pi-subagents-tintinweb@next
 ```
 
-The footer line that counts pending background work comes from a second package, [`@cad0p/pi-background-work`](https://www.npmjs.com/package/@cad0p/pi-background-work); current source and `next` builds depend on it at runtime. pi loads only the packages you install yourself — a dependency is not one — so the dependency copy's extension never loads on its own, and the footer needs its own install. That install names the `next` tag, because `latest` is still the placeholder library release and ships no extension:
+Releases land on the `next` tag; `latest` is the older 0.22.0.
+
+The footer line that counts pending background work needs a second package, [`@cad0p/pi-background-work`](https://www.npmjs.com/package/@cad0p/pi-background-work), which this build depends on at runtime. pi loads only the packages you install yourself — a dependency is not one — so the dependency copy's extension never loads on its own. Install it from `next` too, where the extension lives:
 
 ```bash
 pi install npm:@cad0p/pi-background-work@next
 ```
 
-Without that install there is no `⏳` footer segment and no pending count — silently, with no error. Everything else works.
+The footer needs both installs: drop the second and nothing renders the segment, install a build that does not depend on the package and there is no provider to render. Either way there is no `⏳` footer segment and no pending count — silently, with no error — and everything else works.
 
 Or load directly for development:
 
@@ -114,7 +116,7 @@ The token field is annotated with two optional signals inside parens:
 
 ### FleetView
 
-While subagents are running, a Claude Code-style navigable list renders **below** the editor. It is always on: there is no setting to hide it. The extension sets no footer status of its own; the footer segment comes from `@cad0p/pi-background-work`, which needs its own `pi install npm:@cad0p/pi-background-work@next` (see [Install](#install)). Without that install FleetView still lists every agent — only pi's own footer line is absent:
+While subagents are running, a Claude Code-style navigable list renders **below** the editor. It is always on: there is no setting to hide it. The extension sets no footer status of its own; the footer segment comes from `@cad0p/pi-background-work`, installed next to this one (see [Install](#install)). Without both installs, FleetView still lists every agent — only pi's own footer line is absent:
 
 ```
   esc to interrupt · ← for agents · ↓ to manage
