@@ -220,6 +220,16 @@ interface NoticeBand extends Component {
 
 interface ViewState {
   active: boolean;
+  /**
+   * True while a paint is running. A child entry renderer executes synchronously inside
+   * `renderSessionEntries`, so it can call back into repaint(): the guard turns that into one
+   * extra pass instead of a nested render of the same container.
+   */
+  rendering: boolean;
+  /** Set by a paint that arrived during a paint: the outer paint runs one more pass for it. */
+  repaintPending: boolean;
+  /** Whether this view installed the custom footer, so close clears only what it set. */
+  footerInstalled: boolean;
   id: string;
   hostContainer: Container;
   hostIndex: number;
@@ -381,6 +391,9 @@ export class NativeTranscriptView {
 
     const state: ViewState = {
       active: true,
+      rendering: false,
+      repaintPending: false,
+      footerInstalled: false,
       id,
       hostContainer,
       hostIndex,
@@ -423,9 +436,11 @@ export class NativeTranscriptView {
     } catch (error) {
       try {
         this.close("escape");
-      } catch {
+      } catch (restoreError) {
         // A restore that throws must not replace the error that caused it. isOpen() already reads
-        // the deactivated state, and the next open finishes the same close.
+        // the deactivated state, and the next open finishes the same close — but say so, because a
+        // silent half-restore is what makes the next symptom unrecognisable.
+        console.warn("[pi-subagents] native view: restoring after a failed open threw", restoreError);
       }
       throw error;
     }
@@ -440,9 +455,36 @@ export class NativeTranscriptView {
     const im = this.options.getMode();
     const state = this.state;
     if (!im || !state || !this.canPaint(im, state)) return;
-    this.renderChild(im, state, { populateHistory: false });
-    this.syncSession(im, this.options.getContext()!, state);
-    this.pushDialog(im, this.options.getContext()!, state);
+    // Children have `hasUI`, so a child entry renderer that calls `ctx.ui.setStatus` reaches this
+    // method from inside its own render. Re-entering would clear the container the outer render is
+    // filling and restore the session shadow it is still reading, so a paint that arrives during a
+    // paint only asks for one more pass.
+    this.paintView(im, state);
+    if (!state.repaintPending) return;
+    // Exactly one pass for whatever asked during the first, never a loop: the retry holds the same
+    // guard, so a request made during it waits for the next repaint.
+    this.paintView(im, state);
+  }
+
+  /** One full paint under the re-entrancy guard: transcript, then footer and parked dialog. */
+  private paintView(im: InteractiveModeView, state: ViewState): void {
+    if (state.rendering) {
+      // A paint asked for by a renderer that is itself painting: one pass afterwards, never a nest.
+      state.repaintPending = true;
+      return;
+    }
+    const ctx = this.options.getContext();
+    state.repaintPending = false;
+    state.rendering = true;
+    try {
+      this.paintChild(im, state, { populateHistory: false });
+      if (ctx) {
+        this.syncSession(im, ctx, state);
+        this.pushDialog(im, ctx, state);
+      }
+    } finally {
+      state.rendering = false;
+    }
   }
 
   close(reason: CloseReason): void {
@@ -469,7 +511,9 @@ export class NativeTranscriptView {
       this.state = undefined;
       return;
     }
-    this.restoreFooter();
+    // Editor and footer first, the transcript slot last: nothing paints the child's chrome over the
+    // host's transcript in between.
+    this.restoreFooter(state);
     this.restoreEditor(im, state);
     this.reattach(im, state);
     im.footer.invalidate();
@@ -545,7 +589,22 @@ export class NativeTranscriptView {
     children.splice(state.hostIndex, 0, state.hostContainer);
   }
 
+  /** Paint the transcript. A render that asks for another paint defers it; see repaint(). */
   private renderChild(im: InteractiveModeView, state: ViewState, options: { populateHistory: boolean }): void {
+    if (state.rendering) {
+      state.repaintPending = true;
+      return;
+    }
+    state.rendering = true;
+    try {
+      this.paintChild(im, state, options);
+    } finally {
+      state.rendering = false;
+    }
+  }
+
+  /** Render the child transcript into the child container. Callers hold the re-entrancy guard. */
+  private paintChild(im: InteractiveModeView, state: ViewState, options: { populateHistory: boolean }): void {
     const record = this.options.manager.getRecord(state.id);
     if (!record) return;
     const childSession = record.session;
@@ -754,6 +813,7 @@ export class NativeTranscriptView {
         // its own footer, so the factory must set it or every child prints (auto).
         footer.setAutoCompactEnabled(live.autoCompactionEnabled);
         state.footer = footer;
+        state.footerInstalled = true;
         return footer;
       });
       if (state.editor) state.editor.borderColor = ctx.ui.theme.getThinkingBorderColor(live.thinkingLevel);
@@ -761,12 +821,16 @@ export class NativeTranscriptView {
       const getRecord = () => this.options.manager.getRecord(state.id);
       ctx.ui.setFooter((_tui, theme) => new RecordFooter(getRecord, theme));
       state.footer = undefined;
+      state.footerInstalled = true;
     }
   }
 
-  private restoreFooter(): void {
+  /** Clear only the footer this view installed: another extension's wins, as the wrappers do. */
+  private restoreFooter(state: ViewState): void {
+    if (!state.footerInstalled) return;
     // pi disposes whichever custom footer is installed and re-adds its built-in one.
     this.options.getContext()?.ui.setFooter(undefined);
+    state.footerInstalled = false;
   }
 
   /** Surface the oldest parked dialog through pi's own dialog stack. */

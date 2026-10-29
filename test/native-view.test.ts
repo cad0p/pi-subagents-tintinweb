@@ -601,6 +601,44 @@ describe("native transcript view", () => {
     expect(resolved).toBeUndefined();
   });
 
+  it("a child UI call made during a render cannot re-enter it", () => {
+    const h = harness();
+    const child = h.record.session as any;
+    const seen: Array<{ session: any; chatContainer: any }> = [];
+    child.extensionRunner.getEntryRenderer = (type: string) => type === "child-only" ? () => {
+      // The exact path a child extension takes: an entry renderer with hasUI calls ctx.ui, which
+      // fires onChildUIChange and asks this view for a repaint from inside pi's own render loop.
+      createChildUIProxy("child-1", { answerable: true }).setStatus("phase", "working");
+      seen.push({ session: h.im.session, chatContainer: h.im.chatContainer });
+      return new Text("CUSTOM CHILD");
+    } : undefined;
+    child.sessionManager.buildContextEntries = () => [
+      message("user", "CHILD TEXT"),
+      { type: "custom", customType: "child-only", data: {}, timestamp: Date.now() },
+    ];
+    h.openChild();
+    h.view.repaint();
+
+    const rendered = h.documentContainer.render(120).join("\n");
+    // One transcript, not a tail rendered twice by a nested paint clearing the container mid-loop.
+    expect(rendered.match(/CHILD TEXT/g)).toHaveLength(1);
+    expect(rendered.match(/CUSTOM CHILD/g)).toHaveLength(1);
+    // The nested call must never drop the shadow the outer render is still reading: every line the
+    // renderer saw, including the last one after its own setStatus, resolved to the child.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((line) => line.session === child)).toBe(true);
+    expect(seen.every((line) => line.chatContainer !== h.hostContainer)).toBe(true);
+    // And a consistent view afterwards: host accessors back, child transcript in the slot.
+    expect(h.im.session).toBe(h.hostSession);
+    expect(h.im.chatContainer).toBe(h.hostContainer);
+    for (const name of ["session", "sessionManager"]) {
+      expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
+    }
+    // The child transcript is in pi's slot exactly once; the host container is still detached.
+    expect(h.documentContainer.children).not.toContain(h.hostContainer);
+    expect(h.documentContainer.children).toHaveLength(2);
+  });
+
   it("repaints replace the transcript instead of appending it", () => {
     const h = harness();
     h.openChild();
@@ -718,6 +756,16 @@ describe("native transcript view", () => {
     expect(lines.join("\n")).toContain("todo: second");
     expect(lines.join("\n")).toContain("warning: watch out");
     expect(lines.filter((line: string) => line.trim() === "custom:")).toHaveLength(0);
+  });
+
+  it("a close clears only a footer this view installed", () => {
+    const h = harness();
+    // The editor install fails before syncSession, so this view never set a footer; the close that
+    // open() runs on the way out must not clear the host's.
+    h.ctx.ui.setEditorComponent = () => { throw new Error("editor boom"); };
+    (h.ctx.ui.setFooter as any).mockClear();
+    expect(() => h.view.open("child-1")).toThrow("editor boom");
+    expect(h.ctx.ui.setFooter).not.toHaveBeenCalled();
   });
 
   it("a close that throws still frees FleetView's keys", () => {
