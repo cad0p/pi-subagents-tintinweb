@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Fixed
-
-- **The `@cad0p/pi-background-work` range admits the `0.0.2` stable, so the footer package stops nesting a second copy of itself** (fixes [#186](https://github.com/cad0p/pi-subagents-tintinweb/issues/186)). The range was `>=0.0.1-20261028.1 <0.0.1`, written when the only build that shipped the footer extension was the `next` prerelease and `0.0.1` on `latest` was the placeholder library release with no `pi` manifest — but `<0.0.1` also excluded `0.0.2`, the first *stable* that ships `pi.extensions: ["./src/extension.ts"]` and the footer extension. A user who installed `@cad0p/pi-background-work@0.0.2` beside this extension got `0.0.1-20261028.2` nested inside it: two copies, two registries, and the provider this extension registers was invisible to the footer's copy, so the `⏳` segment and the pending count silently never appeared — the exact failure the README's version-pair warning describes. The range is now `>=0.0.2 <1.0.0`: it admits every stable that carries the footer and still refuses `0.0.1` and the prereleases below it, so a satisfied install dedupes to one copy. `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude` pin moves to `0.0.2` with it.
-
 ## [0.22.0] - 2026-10-21
 
 > **⚠️ Breaking — `persist_session` changed meaning.** It used to mean "persist this subagent at all"; without it the run used an in-memory session and left nothing behind. It now means "retain this subagent's session file after it settles": every run writes a session file while it runs, so a crashed or killed run stays recoverable, and the file is deleted when the agent record is removed unless `persist_session: true`. Migration: an agent that relied on the old default to keep a run off disk must set `output_transcript: false`, avoid `persist_session`, `isolation: worktree` and `memory:`, or run pi with `--no-session`, which keeps subagent sessions in memory as before.
