@@ -511,15 +511,36 @@ export default function (pi: ExtensionAPI) {
     ].join("\n");
   }
 
+  /** The stops a shutdown-notice entry names: `stops` when this release wrote it, else the bare `ids` of an older one. */
+  function noticeStops(data: unknown): ShutdownStop[] {
+    if (typeof data !== "object" || data === null) return [];
+    const { ids, stops } = data as { ids?: unknown; stops?: unknown };
+    if (Array.isArray(stops)) {
+      return stops.flatMap((stop) => {
+        if (stop === null || typeof stop !== "object") return [];
+        const { id, description } = stop as { id?: unknown; description?: unknown };
+        return typeof id === "string" ? [{ id, ...(typeof description === "string" ? { description } : {}) }] : [];
+      });
+    }
+    return (Array.isArray(ids) ? ids : []).filter((id): id is string => typeof id === "string").map((id) => ({ id }));
+  }
+
   /** Posts the shutdown-stop notice once per session file: the marker keeps a later reopen quiet. */
   function reportShutdownStops(entries: readonly SessionEntry[]): void {
     const stops = shutdownStops(entries);
     if (stops.length === 0) return;
     // Marked before the send, like a delivered nudge: a throw must not make every later reopen repeat it.
-    pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: stops.map((stop) => stop.id) });
+    // `ids` stays the shape ledger reads; `stops` carries what the entry renderer draws.
+    pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, {
+      v: LEDGER_VERSION,
+      ids: stops.map((stop) => stop.id),
+      stops: stops.map((stop) => ({ id: stop.id, description: stop.description })),
+    });
     try {
+      // The entry renderer draws the notice now, before any turn: `nextTurn` queues a message until one
+      // starts. `display: false` still puts it in the model's context at that turn, without a second copy.
       pi.sendMessage(
-        { customType: "subagent-notification", content: formatShutdownNotice(stops), display: true },
+        { customType: "subagent-notification", content: formatShutdownNotice(stops), display: false },
         { deliverAs: "nextTurn", triggerTurn: false },
       );
     } catch (err) {
@@ -1491,6 +1512,31 @@ export default function (pi: ExtensionAPI) {
       return { render: (_width: number) => (lines.length ? lines : [paint("pi-subagents: init failed")]), invalidate: () => {} };
     };
     pi.registerEntryRenderer("subagents:init-error", renderer);
+  });
+
+  guardInitVoid("shutdown-notice-renderer", () => {
+    // Registered at factory time so a reopened session draws the notice with its first paint, before
+    // any turn: a `nextTurn` message would wait for a user message that may never come. Defensive in
+    // the same way as the init-error renderer: a stored entry outlives the code that wrote it.
+    const renderer: EntryRenderer = (entry, _options, theme) => {
+      const paint = (s: string): string => {
+        try {
+          return typeof theme?.fg === "function" ? theme.fg("dim", s) : s;
+        } catch {
+          return s;
+        }
+      };
+      let lines: string[] = [];
+      try {
+        const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
+        const stops = noticeStops(data);
+        lines = stops.length > 0 ? formatShutdownNotice(stops).split("\n").map(paint) : [];
+      } catch {
+        // Malformed entry: draw nothing rather than a renderer-failure line in place of the notice.
+      }
+      return { render: (_width: number) => lines, invalidate: () => {} };
+    };
+    pi.registerEntryRenderer(SHUTDOWN_NOTICE_ENTRY, renderer);
   });
 
   // ---- Agent tool ----
