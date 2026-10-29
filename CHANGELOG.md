@@ -38,6 +38,7 @@ All notable changes to this project will be documented in this file.
 - *(reload)* A throwing init step no longer costs every tool (closes #151) ([#158](https://github.com/cad0p/pi-subagents-tintinweb/pull/158))
 - *(reload)* Name every member a hand-over reader needs (closes #162) ([#161](https://github.com/cad0p/pi-subagents-tintinweb/pull/161))
 - *(init-guard)* Report init failures only on the root activation, and drop the dead helper (closes #159) ([#160](https://github.com/cad0p/pi-subagents-tintinweb/pull/160))
+- *(reload)* A stopped hand-over last usage reaches the parent like a live one ([#166](https://github.com/cad0p/pi-subagents-tintinweb/pull/166)) (closes #164)
 
 ### 🚜 Refactor
 
