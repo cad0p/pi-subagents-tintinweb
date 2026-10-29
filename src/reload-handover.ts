@@ -97,6 +97,8 @@ export class ReloadHandover {
   private nudged: NudgeEntry[];
   private unreported?: LifetimeUsage;
   private stopped = false;
+  /** Set by `stop`: the one consumer left for a `usage` event no activation will adopt. */
+  private replay?: (dto: AgentDto, usage: LifetimeUsage) => void;
 
   constructor(
     items: HandoverItem[],
@@ -146,10 +148,14 @@ export class ReloadHandover {
     else this.items = [...this.items, ...items];
   }
 
-  /** Delivers an event now, or buffers it while no activation is attached. A stopped hand-over disposes what it is given. */
+  /**
+   * Delivers an event now, or buffers it while no activation is attached. A stopped hand-over disposes what it is
+   * given; its `usage` events go to the sink `stop` was given, the only consumer they have left.
+   */
   emit(event: HandoverEvent): void {
     if (this.stopped) {
       if (event.kind === "settled") disposeItems(event.items);
+      else if (event.kind === "usage") this.replay?.(event.dto, event.usage);
     } else if (this.listener) this.listener(event);
     else this.pending.push(event);
   }
@@ -165,12 +171,24 @@ export class ReloadHandover {
     this.listener = undefined;
   }
 
-  /** Ends the hand-over for good: no activation will adopt what it holds. Disposes the sessions it holds and any it is given later. */
-  stop(): void {
+  /**
+   * Ends the hand-over for good: no activation will adopt what it holds. Disposes the sessions it holds and any it is
+   * given later.
+   *
+   * `replay` receives every `usage` event this hand-over never delivered: the ones buffered here, in order, and every
+   * one `emit` is given afterwards. A stopped hand-over is never adopted, so that sink is the only reader the spend
+   * has left — pass the consumer a live `usage` event goes through. The parameter is optional only for a reader that
+   * stops a hand-over this release published: it has no sink and drops the events, as it always did.
+   */
+  stop(replay?: (dto: AgentDto, usage: LifetimeUsage) => void): void {
     this.detach();
     this.stopped = true;
+    this.replay = replay;
     const held = [...this.items];
-    for (const event of this.pending.splice(0)) if (event.kind === "settled") held.push(...event.items);
+    for (const event of this.pending.splice(0)) {
+      if (event.kind === "settled") held.push(...event.items);
+      else if (event.kind === "usage") replay?.(event.dto, event.usage);
+    }
     this.items = [];
     disposeItems(held);
   }
@@ -273,6 +291,23 @@ export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
 /** The pending nudges as entries: releases before nested delivery handed plain ids over. */
 export function takeNudgeEntries(handover: ReloadHandover): NudgeEntry[] {
   return (handover.takeNudged() as (NudgeEntry | string)[]).map((nudge) => (typeof nudge === "string" ? { id: nudge } : nudge));
+}
+
+/** What one hand-over handed out when it was taken: its queued specs and the spend no tool result carried away. */
+export interface TakenHandover {
+  queued: QueuedSpec[];
+  unreported?: LifetimeUsage;
+}
+
+/**
+ * Takes every hand-over in `held` exactly once, before anything else reads or ends it, and returns what each carried,
+ * keyed by hand-over so the caller's adoption loop never calls `take()` a second time.
+ *
+ * The take has to come first: an adoption that returns early (a shutdown mid-way through `held`) would otherwise
+ * leave every hand-over behind it untaken, and a stopped hand-over would lose the queued specs it still holds.
+ */
+export function takeHeldHandovers(held: ReloadHandover[]): Map<ReloadHandover, TakenHandover> {
+  return new Map(held.map((handover) => [handover, handover.take()]));
 }
 
 /** Takes the handovers this release reads; each is returned once. Any other hand-over stays published for a reader that knows it. */

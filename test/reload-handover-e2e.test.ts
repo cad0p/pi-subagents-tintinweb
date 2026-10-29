@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listSubagentWork } from "../src/background-work.js";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
-import { HANDOVER_KEY, type HandoverEvent, publishHandovers, type ReloadHandover, takeHandovers } from "../src/reload-handover.js";
+import { type AgentDto, type DrainingPool, HANDOVER_KEY, type HandoverEvent, publishHandovers, ReloadHandover, takeHandovers } from "../src/reload-handover.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
@@ -100,6 +100,46 @@ function publishedRoot(): RootRoute {
   const published = (globalThis as unknown as Record<symbol, ImplV1 | undefined>)[IMPL_KEY];
   if (!published) throw new Error("no root route published on globalThis");
   return published.root();
+}
+
+/** Adds hand-overs to whatever an activation publishes next; returns the undo. */
+function publishExtra(extra: ReloadHandover[]): () => void {
+  const globals = globalThis as unknown as Record<symbol, Map<string, ReloadHandover[]> | undefined>;
+  const previous = globals[HANDOVER_KEY];
+  class ExtraStore extends Map<string, ReloadHandover[]> {
+    override set(key: string, list: ReloadHandover[]): this {
+      return super.set(key, [...list, ...extra]);
+    }
+  }
+  globals[HANDOVER_KEY] = new ExtraStore(previous ?? []);
+  return () => {
+    globals[HANDOVER_KEY] = previous;
+  };
+}
+
+/** One settled run as plain data: the shape a hand-over carries for an idle item. */
+function handoverItem(id: string): AgentDto {
+  return {
+    id,
+    type: "general-purpose",
+    description: id,
+    status: "completed",
+    toolUses: 0,
+    startedAt: 0,
+    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    compactionCount: 0,
+  };
+}
+
+/** A draining pool that holds nothing: what a hand-over is stopped with in these tests. */
+function emptyPool(): DrainingPool {
+  return { runningCount: () => 0, abortAll: vi.fn(() => 0), dispose: vi.fn(), ownAgents: () => [] };
+}
+
+/** The `usage` pi recorded on the last tool result of `toolName` in a session's transcript. */
+function toolResultUsage(target: AgentSession, toolName: string) {
+  const results = target.messages.filter((message) => message.role === "toolResult" && message.toolName === toolName);
+  return results[results.length - 1]?.usage;
 }
 
 /** Whether a user turn carrying `text` reached the child's transcript. */
@@ -1737,6 +1777,89 @@ describe("subagents across a real /reload (faux provider)", () => {
     const total = (lifetime?.input ?? 0) + (lifetime?.output ?? 0) + (lifetime?.cacheRead ?? 0) + (lifetime?.cacheWrite ?? 0);
     expect(total).toBeGreaterThan(0);
     expect(reported.filter((event) => event.id === id).map((event) => event.usage.totalTokens)).toEqual([total]);
+  }, 20_000);
+
+  it("reports a stopped hand-over's late usage through the root that stopped it, as a live message", async () => {
+    const dto = handoverItem("late-run");
+    const pool = emptyPool();
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, pool);
+    // Published by a session that has been replaced: the next session adopts nothing and stops it.
+    publishHandovers("replaced-session", [handover]);
+
+    const started = await startSession();
+    other = started;
+    expect(pool.dispose).toHaveBeenCalledTimes(1);
+
+    // A message the aborted run reported after its hand-over stopped reached neither channel.
+    const reported: Array<{ id: string; usage: { totalTokens: number } }> = [];
+    const off = publishedRoot().pi.events.on("subagents:usage", (event) => {
+      reported.push(event as { id: string; usage: { totalTokens: number } });
+    });
+    handover.emit({ kind: "usage", dto, usage: { input: 7, output: 3, cacheWrite: 0 } });
+    off();
+
+    // Once, under the id the event carries — not the hand-over's draining pool.
+    expect(reported.map((event) => [event.id, event.usage.totalTokens])).toEqual([["late-run", 10]]);
+    // With reportUsage on, the next tool result of this activation carries it, as a live message's spend does.
+    await started.prompt("spawn-now");
+    expect(toolResultUsage(started, "Agent")?.totalTokens).toBe(10);
+  }, 20_000);
+
+  it("still emits a stopped hand-over's late usage with reportUsage off, and keeps it out of the parent's totals", async () => {
+    const dto = handoverItem("late-run");
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool());
+    publishHandovers("replaced-session", [handover]);
+    // The next activation loads its settings from the global file, which this run points at the temp agent dir.
+    writeFileSync(join(tmp, "subagents.json"), JSON.stringify({ reportUsage: false }));
+
+    const started = await startSession();
+    other = started;
+
+    const reported: Array<{ id: string; usage: { totalTokens: number } }> = [];
+    const off = publishedRoot().pi.events.on("subagents:usage", (event) => {
+      reported.push(event as { id: string; usage: { totalTokens: number } });
+    });
+    handover.emit({ kind: "usage", dto, usage: { input: 7, output: 3, cacheWrite: 0 } });
+    off();
+
+    // reportUsage decides whether the parent session's own totals include the spend, not whether it happened.
+    expect(reported.map((event) => [event.id, event.usage.totalTokens])).toEqual([["late-run", 10]]);
+    await started.prompt("spawn-now");
+    expect(toolResultUsage(started, "Agent")?.usage).toBeUndefined();
+  }, 20_000);
+
+  it("takes every hand-over a reload publishes before any of its items is adopted", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const first = new ReloadHandover([{ dto: handoverItem("item-a") }], [], [], undefined, emptyPool());
+    const second = new ReloadHandover([{ dto: handoverItem("item-b") }], [], [], undefined, emptyPool());
+    const order: string[] = [];
+    const wrap = (handover: ReloadHandover, id: string) => {
+      const take = handover.take.bind(handover);
+      const removeItem = handover.removeItem.bind(handover);
+      // `take` is the hand-over's, `removeItem` runs once the adoption of its item succeeded.
+      Object.assign(handover, {
+        take: () => {
+          order.push(`take ${id}`);
+          return take();
+        },
+        removeItem: (item: Parameters<ReloadHandover["removeItem"]>[0]) => {
+          order.push(`adopt ${id}`);
+          removeItem(item);
+        },
+      });
+    };
+    wrap(first, "item-a");
+    wrap(second, "item-b");
+    const undo = publishExtra([first, second]);
+    try {
+      await reloadRoot(root);
+      // Both takes run before the first adoption: a take left in the adoption loop interleaves, and an adoption that
+      // returns early would leave the hand-overs behind it untaken.
+      expect(order).toEqual(["take item-a", "take item-b", "adopt item-a", "adopt item-b"]);
+    } finally {
+      undo();
+    }
   }, 20_000);
 
   it("publishes the root route that children reloaded by the new code reach", async () => {
