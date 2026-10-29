@@ -319,13 +319,16 @@ export default function (pi: ExtensionAPI) {
   // never fires, the view stays unavailable and FleetView keeps opening the overlay.
   if (isRoot) captureInteractiveMode(InteractiveMode);
   let leakedChildContext = isRoot ? takeLeakedChildContextRead() : undefined;
-  // Read directly rather than waiting for applyAndEmitLoaded below: this decides
-  // the initial load, which happens hundreds of lines before settings are applied.
-  // Recorded rather than kept in this activation: the nested registry rebuilds
-  // agent files for a branch whose config root cannot see this project's
-  // settings file (under worktree isolation, the copy), so the effective value
-  // has to be readable from outside this closure. See `custom-agents.ts`.
-  setStrictAgentFiles(loadSettings(process.cwd()).strictAgentFiles === true);
+  // Root only. Read directly rather than waiting for applyAndEmitLoaded below: this
+  // decides the initial load, which happens hundreds of lines before settings are
+  // applied. Recorded rather than kept in this activation: the nested registry
+  // rebuilds agent files for a branch whose config root cannot see this project's
+  // settings file (under worktree isolation, the copy), so the effective value has
+  // to be readable from outside this closure. See `custom-agents.ts`. A child
+  // session re-runs this factory in this process, and its disk read would overwrite
+  // a live `/agents` toggle that never reached the file — the parent's decision is
+  // the only honest source, so the root writes it and nothing else does.
+  if (isRoot) setStrictAgentFiles(loadSettings(process.cwd()).strictAgentFiles === true);
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
@@ -1451,7 +1454,10 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
-      setStrictAgentFiles,
+      // Root only, for the same reason as the factory-time record above: a child
+      // activation re-reads this file, and a value that never reached disk (a
+      // `/agents` toggle that failed to save) would be undone for the session.
+      setStrictAgentFiles: (enabled) => { if (isRoot) setStrictAgentFiles(enabled); },
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
