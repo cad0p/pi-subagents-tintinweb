@@ -25,9 +25,9 @@ import { type ResumeCallbacks } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, alreadyDeliveredResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
-import { loadCustomAgents } from "./custom-agents.js";
+import { isStrictAgentFilesEnabled, loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
-import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -52,7 +52,6 @@ export interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
-  isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isolation?: IsolationMode;
@@ -104,7 +103,18 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   // Agents resolve from a registry built for THIS branch's config root (under
   // worktree isolation, the copy). Never via registerAgents — that is
   // process-global state shared with the main session and every other agent.
-  const loadRegistry = () => buildAgentRegistry(loadCustomAgents(context.configCwd));
+  // Same removed-key policy the top-level load applies: a file `strictAgentFiles`
+  // refuses there must not come back here, where it would be advertised and
+  // spawnable as a fully-tooled nested child — exactly the silent capability
+  // upgrade the refusal exists to stop. The policy is the parent's effective
+  // setting, never a settings file read under this branch's config root: under
+  // worktree isolation that root is the copy, and `.pi/subagents.json` is
+  // untracked, so the copy reports the default while the checked-in agent file
+  // it refuses sits right beside it.
+  const loadRegistry = () =>
+    buildAgentRegistry(
+      loadCustomAgents(context.configCwd, false, { refuseRemovedKeys: isStrictAgentFilesEnabled() }),
+    );
   const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
     context.allowedSubagents === "all"
       ? undefined
@@ -149,7 +159,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(
         Type.Number({ description: "Maximum number of agentic turns before stopping. Omit for the agent's own limit.", minimum: 1 }),
       ),
-      isolated: Type.Optional(Type.Boolean({ description: "If true, the nested agent gets no extension tools." })),
       inherit_context: Type.Optional(
         Type.Boolean({ description: "If true, fork this agent's conversation into the nested agent." }),
       ),
@@ -159,6 +168,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      const isolatedError = isolatedParamError(params);
+      if (isolatedError) return textResult(isolatedError, true);
+
       if (context.depth >= context.maxSubagentDepth) {
         return textResult(
           `Nested subagent call blocked (depth=${context.depth}, max=${context.maxSubagentDepth}). Complete the task directly.`,
@@ -226,14 +238,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         description: params.description,
         model,
         maxTurns: invocation.maxTurns,
-        isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,
         isolation: invocation.isolation,
         invocation: {
           thinking: invocation.thinking,
           maxTurns: invocation.maxTurns,
-          isolated: invocation.isolated,
           inheritContext: invocation.inheritContext,
           isolation: invocation.isolation,
         },

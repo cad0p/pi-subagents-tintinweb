@@ -24,11 +24,11 @@ import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSub
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
-import { loadCustomAgents } from "./custom-agents.js";
+import { isStrictAgentFilesEnabled, loadCustomAgents, setStrictAgentFiles } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
-import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
+import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
@@ -329,20 +329,30 @@ export default function (pi: ExtensionAPI) {
   // never fires, the view stays unavailable and FleetView keeps opening the overlay.
   if (isRoot) captureInteractiveMode(InteractiveMode);
   let leakedChildContext = isRoot ? takeLeakedChildContextRead() : undefined;
-  // Read directly rather than waiting for applyAndEmitLoaded below: this decides
-  // the initial load, which happens hundreds of lines before settings are applied.
-  let strictAgentFiles = loadSettings(process.cwd()).strictAgentFiles === true;
+  // Root only. Read directly rather than waiting for applyAndEmitLoaded below: this
+  // decides the initial load, which happens hundreds of lines before settings are
+  // applied. Recorded rather than kept in this activation: the nested registry
+  // rebuilds agent files for a branch whose config root cannot see this project's
+  // settings file (under worktree isolation, the copy), so the effective value has
+  // to be readable from outside this closure. See `custom-agents.ts`. A child
+  // session re-runs this factory in this process, and its disk read would overwrite
+  // a live `/agents` toggle that never reached the file — the parent's decision is
+  // the only honest source, so the root writes it and nothing else does.
+  if (isRoot) setStrictAgentFiles(loadSettings(process.cwd()).strictAgentFiles === true);
 
   /** Reload agents from project/global custom agent dirs and merge with defaults (called on init and each Agent invocation). */
   const reloadCustomAgents = (strict = false) => {
-    const userAgents = loadCustomAgents(process.cwd(), strict);
+    // `refuseRemovedKeys` tracks the setting, not this pass: strict is thrown
+    // away after the startup retry, so a removed-key file refused there must be
+    // refused by every later reload too, not just by the pass that reported it.
+    const userAgents = loadCustomAgents(process.cwd(), strict, { refuseRemovedKeys: isStrictAgentFilesEnabled() });
     registerAgents(userAgents);
   };
 
   // Initial load — the only strict one. A bad edit mid-session must not kill the
   // session on the next unrelated spawn, so every later reload keeps warning.
   // Guarded: a throw here would otherwise cost every tool the package registered.
-  if (!guardInitVoid("agent-files", () => reloadCustomAgents(strictAgentFiles))) {
+  if (!guardInitVoid("agent-files", () => reloadCustomAgents(isStrictAgentFilesEnabled()))) {
     guardInitVoid("agent-files", () => reloadCustomAgents(false));
   }
 
@@ -765,6 +775,9 @@ export default function (pi: ExtensionAPI) {
         manager,
         getContext: () => currentCtx as unknown as NativeViewContext | undefined,
         getMode: capturedInteractiveMode,
+        // The list points its cursor at the transcript on screen: Esc in a child (and pi's own
+        // teardown on reload) closes the view behind its back, so put the cursor back on `main`.
+        onClosed: () => fleet.returnToMain(),
       })
     : undefined;
   if (nativeView) {
@@ -1262,7 +1275,6 @@ export default function (pi: ExtensionAPI) {
       agentId: record.id,
       parentAgentId: record.parentAgentId,
       model,
-      isolated: record.invocation?.isolated,
       thinkingLevel: requested === "off" ? undefined : requested,
       cwd,
       configCwd: record.configCwd && existsSync(record.configCwd) ? record.configCwd : cwd,
@@ -1481,7 +1493,10 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
-      setStrictAgentFiles: (b) => { strictAgentFiles = b; },
+      // Root only, for the same reason as the factory-time record above: a child
+      // activation re-reads this file, and a value that never reached disk (a
+      // `/agents` toggle that failed to save) would be undone for the session.
+      setStrictAgentFiles: (enabled) => { if (isRoot) setStrictAgentFiles(enabled); },
       setFailurePreviewMaxChars,
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -1706,11 +1721,6 @@ Terse command-style prompts produce shallow, generic work.
           minimum: 1,
         }),
       ),
-      isolated: Type.Optional(
-        Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-        }),
-      ),
       inherit_context: Type.Optional(
         Type.Boolean({
           description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
@@ -1784,6 +1794,12 @@ Terse command-style prompts produce shallow, generic work.
     // ---- Execute ----
 
     execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+      // The schema no longer declares `isolated`, but TypeBox accepts unknown
+      // properties and RPC forwards them verbatim — refuse the removed flag here
+      // rather than silently spawning an agent that is not hermetic.
+      const isolatedError = isolatedParamError(params);
+      if (isolatedError) return textResult(isolatedError, true);
+
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 
@@ -1818,7 +1834,6 @@ Terse command-style prompts produce shallow, generic work.
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
-      const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
       // frontmatter (`output_transcript`) wins; otherwise the project/global
@@ -1900,7 +1915,6 @@ Terse command-style prompts produce shallow, generic work.
             prompt: params.prompt as string,
             thinking: thinking,
             max_turns: effectiveMaxTurns,
-            isolated: isolated,
             isolation: isolation,
           });
           warnOnOutOfScopeModel();
@@ -1925,7 +1939,6 @@ Terse command-style prompts produce shallow, generic work.
           // Explicit value only — the default fallback would just add noise.
           // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
           maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
-          isolated,
           inheritContext,
           isolation,
         };
@@ -1965,7 +1978,6 @@ Terse command-style prompts produce shallow, generic work.
             description: params.description,
             model,
             maxTurns: effectiveMaxTurns,
-            isolated,
             inheritContext,
             thinkingLevel: thinking,
             isolation,
@@ -2528,7 +2540,6 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
     if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
-    if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
     if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
     if (cfg.allowedSubagents !== undefined) {
@@ -2658,7 +2669,6 @@ skills: <true (inherit all), false (none), or comma-separated skill names to pre
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
-isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
       // Offering the field on a project that turned worktrees off would bake a
       // request that is refused at spawn time into a file that outlives the
@@ -2680,7 +2690,7 @@ Guidelines for choosing settings:
 - Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
-- Set isolated: true if the agent should NOT have access to MCP servers or other extensions
+- To keep an agent hermetic (no MCP/extension tools, no skills), set extensions: false and skills: false, and omit allowed_subagents
 - Set output_transcript: false to skip writing this agent's transcript; it doesn't keep the run off disk — every run writes a pi session file while it runs (kept after it settles only with persist_session: true), and isolation: worktree commits and memory still write
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
@@ -2821,7 +2831,7 @@ ${systemPrompt}
       maxSubagentDepth: getMaxSubagentDepth(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
-      strictAgentFiles,
+      strictAgentFiles: isStrictAgentFilesEnabled(),
       failurePreviewMaxChars,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -2918,7 +2928,7 @@ ${systemPrompt}
           id: "strictAgentFiles",
           label: "Strict agent files",
           description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
-          currentValue: strictAgentFiles ? "on" : "off",
+          currentValue: isStrictAgentFilesEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -3060,7 +3070,7 @@ ${systemPrompt}
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
-        strictAgentFiles = enabled;
+        setStrictAgentFiles(enabled);
         notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
       } else if (id === "worktreeIsolation") {
         const enabled = value === "on";

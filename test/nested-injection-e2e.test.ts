@@ -96,7 +96,6 @@ describe("nested tool injection into a real child session", () => {
             systemPrompt: "You are e2e.",
             promptMode: "replace",
             inheritContext: false,
-            isolated: false,
             allowedSubagents: opts.allowedSubagents ?? ["scout"],
             ...cfg,
           } as AgentConfig,

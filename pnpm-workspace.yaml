@@ -11,4 +11,4 @@ allowBuilds:
   koffi: false
   protobufjs: true
 minimumReleaseAgeExclude:
-  - "@cad0p/pi-background-work@0.0.1-20261028.1"
+  - "@cad0p/pi-background-work@0.0.2"

@@ -58,7 +58,7 @@ export interface AgentDetails {
   status: "running" | "completed" | "steered" | "aborted" | "stopped" | "interrupted" | "error" | "background";
   /** Short label for the model the run used, e.g. "haiku 4.5". */
   modelName?: string;
-  /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
+  /** Notable config tags (e.g. ["thinking: high", "worktree"]). */
   tags?: string[];
   /** Current turn count. */
   turnCount?: number;
@@ -220,7 +220,6 @@ export function buildInvocationTags(
     ? `${invocation.thinking} (asked ${invocation.requestedThinking})`
     : invocation.thinking;
   if (thinking) tags.push(`thinking: ${thinking}`);
-  if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);

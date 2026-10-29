@@ -112,7 +112,6 @@ session_dir: .seams/pi-sessions/seam-plan-reviewer
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
-isolated: true
 ---
 
 You are a security auditor.`);
@@ -135,7 +134,6 @@ You are a security auditor.`);
     // `run_in_background` is no longer a recognized key — the parser reads
     // frontmatter field-by-field and ignores it (with a load-time warning).
     expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
-    expect(agent.isolated).toBe(true);
     expect(agent.systemPrompt).toBe("You are a security auditor.");
   });
 
@@ -162,7 +160,6 @@ Just a prompt.`);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
-    expect(agent.isolated).toBeUndefined();
     expect(agent.systemPrompt).toBe("Just a prompt.");
   });
 
@@ -931,12 +928,128 @@ Stale.`);
       const messages = warn.mock.calls.map(args => String(args[0]));
       expect(messages).toHaveLength(3);
       for (const key of ["run_in_background", "join_mode", "name"]) {
-        expect(messages.some(m => m.includes(key) && m.includes(path))).toBe(true);
+        expect(messages.some(m => m.includes(`unknown frontmatter key "${key}"`) && m.includes(path))).toBe(true);
       }
 
       // One-time: a reload of the same file stays quiet.
       loadCustomAgents(tmpDir);
       expect(warn).toHaveBeenCalledTimes(3);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The refusal must not be silent. A reload (every `Agent` call) is non-strict,
+  // so the file is skipped there — with a message that says the file is skipped,
+  // not that a key inside it was ignored, and carries the migration — and when a
+  // same-named file below it in precedence already loaded, that substitution is
+  // named too, instead of the name quietly changing hands.
+  it("warns when a removed-key file is refused and a lower-priority file takes the name", () => {
+    const globalAgentDir = join(tmpDir, "global-agent-dir");
+    process.env.PI_CODING_AGENT_DIR = globalAgentDir;
+    const globalAgents = join(globalAgentDir, "agents");
+    mkdirSync(globalAgents, { recursive: true });
+    writeFileSync(join(globalAgents, "hermetic.md"), "---\ndescription: Global fallback\n---\n\nGlobal.\n");
+    writeAgent("hermetic", `---
+description: Was hermetic
+isolated: true
+---
+
+Hermetic.`);
+    const projectPath = join(tmpDir, ".pi", "agents", "hermetic.md");
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Non-strict pass with the refusal policy on: this is every reload after
+      // the strict startup pass, and the shape a strict startup leaves behind.
+      const result = loadCustomAgents(tmpDir, false, { refuseRemovedKeys: true });
+
+      // The project file is out; the global one holds the name.
+      expect(result.get("hermetic")?.description).toBe("Global fallback");
+
+      const messages = warn.mock.calls.map(args => String(args[0]));
+      const removedWarning = messages.find(m => m.includes(projectPath) && m.includes('removed frontmatter key "isolated"'));
+      expect(removedWarning).toBeDefined();
+      // The whole file is dropped, so the skip has to say so; "Ignoring …" would
+      // read as a key skipped inside an agent that still loaded and still has
+      // every tool the removed key meant to switch off.
+      expect(removedWarning).toContain("Skipping agent file");
+      expect(removedWarning).toContain("strictAgentFiles is on");
+      expect(removedWarning).not.toContain("Ignoring");
+      // The migration is still the actionable half.
+      expect(removedWarning).toContain("extensions: false");
+      expect(messages.some(m => m.includes('Agent "hermetic" now loads from') && m.includes(join(globalAgents, "hermetic.md")))).toBe(true);
+
+      // One-time per reload state, like every other load warning.
+      loadCustomAgents(tmpDir, false, { refuseRemovedKeys: true });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // `isolated` is not merely unknown: the file used to make the agent hermetic
+  // and now loads with every extension, skill and nested tool still on. Report
+  // the recipe, not "unknown key", and refuse it under `strictAgentFiles`.
+  it("reports the removed isolated key with its migration, and refuses it when strict", () => {
+    const path = join(tmpDir, ".pi", "agents", "hermetic.md");
+    writeAgent("hermetic", `---
+description: Was hermetic
+isolated: true
+---
+
+Hermetic.`);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = loadCustomAgents(tmpDir);
+      expect(loaded.get("hermetic")?.description).toBe("Was hermetic");
+
+      const messages = warn.mock.calls.map(args => String(args[0]));
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain(path);
+      expect(messages[0]).toContain('removed frontmatter key "isolated"');
+      expect(messages[0]).not.toContain("unknown frontmatter key");
+      // The migration is the point: what to write instead, including the two
+      // leftovers that would otherwise keep warning on every spawn.
+      expect(messages[0]).toContain("extensions: false");
+      expect(messages[0]).toContain("scoped_models: false");
+      expect(messages[0]).toContain("allowed_subagents");
+      expect(messages[0]).toContain("ext:");
+      expect(messages[0]).toContain("exclude_extensions");
+
+      // Strict refuses the file rather than run an agent that is no longer hermetic.
+      expect(() => loadCustomAgents(tmpDir, true)).toThrow(path);
+      expect(() => loadCustomAgents(tmpDir, true)).toThrow('frontmatter key "isolated" was removed');
+
+      // One-time, like every other load warning.
+      loadCustomAgents(tmpDir);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // The documented replacement is quiet.
+      writeAgent("hermetic", `---
+description: Was hermetic
+extensions: false
+skills: false
+scoped_models: false
+---
+
+Hermetic.`);
+      expect(loadCustomAgents(tmpDir).get("hermetic")).toBeDefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // A comment or a nested block that merely mentions the key is not a
+      // setting: only parsed top-level keys count.
+      writeAgent("mention", `---
+description: Mentions only
+# isolated: true
+memory:
+  isolated: true
+---
+
+Mentions.`);
+      expect(loadCustomAgents(tmpDir).get("mention")).toBeDefined();
+      expect(warn.mock.calls.map(args => String(args[0])).some(m => m.includes("mention.md"))).toBe(false);
     } finally {
       warn.mockRestore();
     }
@@ -970,7 +1083,6 @@ allowed_subagents: general-purpose, Explore
 max_subagent_depth: 2
 prompt_mode: append
 inherit_context: true
-isolated: false
 memory: project
 isolation: off
 enabled: true

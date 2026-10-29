@@ -20,15 +20,26 @@ import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./t
  * authority; .agents/agents is an additional read location.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
-export function loadCustomAgents(cwd: string, strict = false): Map<string, AgentConfig> {
+export function loadCustomAgents(
+  cwd: string,
+  strict = false,
+  opts: { refuseRemovedKeys?: boolean } = {},
+): Map<string, AgentConfig> {
+  // Two axes on purpose: `strict` decides whether a refusal throws, so the
+  // startup init-failure channel can name the file; `refuseRemovedKeys` decides
+  // whether a file that sets a removed key is loaded at all. The caller passes
+  // the project setting for the second, because the non-strict retry that
+  // follows a strict failure — and every later reload — must keep refusing the
+  // file, or "strict refuses it" would only hold for the pass that reported it.
+  const refuseRemovedKeys = opts.refuseRemovedKeys ?? strict;
   const globalDir = join(getAgentDir(), "agents");
   const workspaceProjectDir = join(cwd, ".agents", "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
-  loadFromDir(globalDir, agents, "global", strict);            // lowest priority
-  loadFromDir(workspaceProjectDir, agents, "project", strict); // shared workspace
-  loadFromDir(projectDir, agents, "project", strict);          // highest priority (overwrites)
+  loadFromDir(globalDir, agents, "global", strict, refuseRemovedKeys);            // lowest priority
+  loadFromDir(workspaceProjectDir, agents, "project", strict, refuseRemovedKeys); // shared workspace
+  loadFromDir(projectDir, agents, "project", strict, refuseRemovedKeys);          // highest priority (overwrites)
 
   warnedLastLoad = warnedThisLoad;
   warnedThisLoad = new Set();
@@ -36,7 +47,13 @@ export function loadCustomAgents(cwd: string, strict = false): Map<string, Agent
 }
 
 /** Load agent configs from a directory into the map. */
-function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "project" | "global", strict: boolean): void {
+function loadFromDir(
+  dir: string,
+  agents: Map<string, AgentConfig>,
+  source: "project" | "global",
+  strict: boolean,
+  refuseRemovedKeys: boolean,
+): void {
   if (!existsSync(dir)) return;
 
   let files: string[];
@@ -56,6 +73,25 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       continue;
     }
     const { frontmatter: fm, body } = parsed;
+    // Parsed keys only: a comment or a nested block mentioning a removed key is
+    // not a setting, so it must not trip this.
+    const removed = removedKeyEntries(fm);
+    if (removed.length > 0 && refuseRemovedKeys) {
+      // The behaviour the key asked for is gone, so loading the file anyway
+      // leaves a fully-tooled agent behind it. `strict` reports the refusal by
+      // throwing; the retry and every later reload take the skip branch, which
+      // still has to speak: dropping an agent in silence is the same surprise
+      // as loading it tooled, and a same-named file below it would otherwise
+      // take the name without a word.
+      if (strict) {
+        const [key, migration] = removed[0]!;
+        throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
+      }
+      for (const [key, migration] of removed) warnIfNew(refusedKeyMessage(path, key, migration));
+      warnSkippedOverride(name, agents);
+      continue;
+    }
+    for (const [key, migration] of removed) warnIfNew(removedKeyMessage(path, key, migration));
     warnUnknownKeys(path, fm);
 
     const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
@@ -82,7 +118,6 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
-      isolated: fm.isolated != null ? fm.isolated === true : undefined,
       memory: parseMemory(fm.memory),
       isolation: parseIsolation(fm.isolation),
       enabled: fm.enabled !== false,  // default true; explicitly false disables
@@ -134,6 +169,10 @@ function warnSkippedOverride(name: string, agents: Map<string, AgentConfig>): vo
  * (`run_in_background`, `join_mode`, `name:`) that reads as configuration and
  * does nothing. Reported once per file per key at load — the same channel as a
  * malformed file — rather than per spawn, where it would be noise.
+ *
+ * Removed keys are `REMOVED_FRONTMATTER_KEYS`, not this set: they get their own
+ * warning with the migration, because "unknown key" says nothing about what the
+ * author meant to configure.
  */
 const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "description",
@@ -157,15 +196,74 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "max_subagent_depth",
   "prompt_mode",
   "inherit_context",
-  "isolated",
   "memory",
   "isolation",
   "enabled",
 ]);
 
+/**
+ * This project's effective `strictAgentFiles`, for a load that cannot see the
+ * settings file the activation read.
+ *
+ * The nested registry is that caller: its config root is the branch's own, and
+ * under worktree isolation that is the copy, where `.pi/subagents.json` is
+ * absent — this repo gitignores it and `/agents` writes it, and `git worktree
+ * add` writes committed content only — while the checked-in agent file the
+ * setting refuses is right there in the copy. Reading the setting from the copy
+ * would load that file and hand the branch back the fully-tooled agent the
+ * parent refused. The parent's decision is the only honest source, so the
+ * activation records it here; one process serves one project, so the value is
+ * process-wide (the same shape as `worktreeIsolation` in worktree.ts).
+ */
+let strictAgentFilesEnabled = false;
+
+export function setStrictAgentFiles(enabled: boolean): void {
+  strictAgentFilesEnabled = enabled;
+}
+
+export function isStrictAgentFilesEnabled(): boolean {
+  return strictAgentFilesEnabled;
+}
+
+/**
+ * Keys this loader used to read, with the recipe that replaces each one. A file
+ * that still sets one no longer gets the behavior the key names, so the warning
+ * has to carry the migration, not just the key.
+ *
+ * It loads with that warning by default. Under `strictAgentFiles` it is refused
+ * instead: a checked-in `.pi/agents/` that asks for a hermetic agent and
+ * silently gets a fully-tooled one is exactly what strict is for.
+ */
+const REMOVED_FRONTMATTER_KEYS: ReadonlyMap<string, string> = new Map([
+  [
+    "isolated",
+    "for a hermetic agent set `extensions: false`, `skills: false` and `scoped_models: false`, omit `allowed_subagents`, and drop any `ext:` selectors and `exclude_extensions`",
+  ],
+]);
+
+/** Removed keys present in `fields`, each with the recipe that replaces it. */
+export function removedKeyEntries(fields: Record<string, unknown>): Array<[string, string]> {
+  return [...REMOVED_FRONTMATTER_KEYS].filter(([key]) => key in fields);
+}
+
+/** The one removed-key message, shared with the schedule store's job files. */
+export function removedKeyMessage(where: string, key: string, migration: string): string {
+  return `Ignoring removed frontmatter key "${key}" in ${where} — ${migration}`;
+}
+
+/**
+ * What an agent file gets instead when the key is not ignored but fatal: the
+ * whole file is dropped, so reusing the "Ignoring" wording would read as a key
+ * skipped inside a file that still loaded. Names the setting that did it —
+ * "why is my agent gone" is the question this line exists to answer.
+ */
+function refusedKeyMessage(path: string, key: string, migration: string): string {
+  return `Skipping agent file ${path}: it sets the removed frontmatter key "${key}" and strictAgentFiles is on — ${migration}`;
+}
+
 function warnUnknownKeys(path: string, frontmatter: Record<string, unknown>): void {
   for (const key of Object.keys(frontmatter)) {
-    if (KNOWN_FRONTMATTER_KEYS.has(key)) continue;
+    if (KNOWN_FRONTMATTER_KEYS.has(key) || REMOVED_FRONTMATTER_KEYS.has(key)) continue;
     warnIfNew(`Ignoring unknown frontmatter key "${key}" in ${path}`);
   }
 }
