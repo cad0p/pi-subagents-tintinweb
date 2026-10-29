@@ -63,6 +63,16 @@ describe("init-guard", () => {
     expect(failures[0].stack).toBeUndefined();
   });
 
+  it("accumulates failures in record order", () => {
+    guardInitVoid("first", () => { throw new Error("x"); });
+    guardInitVoid("second", () => { throw new Error("y"); });
+    expect(takeInitFailures().map((f) => f.label)).toEqual(["first", "second"]);
+  });
+
+  it("guardInitAsync returns the awaited value on success", async () => {
+    await expect(guardInitAsync("label", async () => 2)).resolves.toBe(2);
+  });
+
   it("drains recorded failures", () => {
     guardInitVoid("a", () => {
       throw new Error("x");

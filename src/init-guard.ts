@@ -17,11 +17,10 @@ export interface InitFailure {
 }
 
 /**
- * Process-wide, not per activation: every activation in this process records here and the root
- * drains it once at `session_start` (see `reportInitFailures` in src/index.ts). Only the root
- * reports today, so one shared array is enough — but a child-side reporter calling
- * `takeInitFailures` would splice the root's failures away and report them under its own
- * session. Per-activation bookkeeping would be needed before a child ever reports.
+ * Process-wide, not per activation: every activation in this process records here, and only the
+ * root activation's `session_start` drains it (see `reportInitFailures` in src/index.ts, gated
+ * on `isRoot`). A child-side reporter calling `takeInitFailures` would splice the root's failures
+ * away and report them under its own session, leaving the root's warning lost entirely.
  */
 const failures: InitFailure[] = [];
 
@@ -73,7 +72,10 @@ export async function guardInitAsync<T>(label: string, fn: () => Promise<T>): Pr
 	}
 }
 
-/** Drain the recorded failures, once per activation, from the root only — the array is process-wide. */
+/**
+ * Drain the recorded failures, once per activation, from the root only — the array is process-wide.
+ * See the `failures` comment above for why a child-side caller must never drain it.
+ */
 export function takeInitFailures(): InitFailure[] {
 	return failures.splice(0, failures.length);
 }

@@ -60,8 +60,9 @@ vi.mock("../src/cross-extension-rpc.js", async () => {
 });
 
 import { getUserAgentNames } from "../src/agent-types.js";
+import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
-import { takeInitFailures } from "../src/init-guard.js";
+import { recordInitFailure, takeInitFailures } from "../src/init-guard.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -178,6 +179,31 @@ describe("init-guard wiring", () => {
     expect(tools.has("get_subagent_result")).toBe(true);
     const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
     expect(entryCalls).toHaveLength(0);
+  });
+
+  it("child activation: session_start neither appends the entry nor drains the root's failures", async () => {
+    const { pi, lifecycle } = makePi();
+    runInChildSessionContext(() => subagentsExtension(pi));
+    recordInitFailure("agent-files", new Error("root boom"));
+    await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(makeUi(), cwd));
+
+    const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
+    expect(entryCalls).toHaveLength(0);
+    expect(takeInitFailures().map((f) => f.label)).toEqual(["agent-files"]);
+  });
+
+  it("root activation: session_start appends the entry and drains the failures", async () => {
+    const { pi, lifecycle } = makePi();
+    subagentsExtension(pi);
+    recordInitFailure("agent-files", new Error("root boom"));
+    const ui = makeUi();
+    await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(ui, cwd));
+
+    const entryCalls = pi.appendEntry.mock.calls.filter((c: any[]) => c[0] === "subagents:init-error");
+    expect(entryCalls).toHaveLength(1);
+    expect(entryCalls[0][1].failures.map((f: any) => f.label)).toEqual(["agent-files"]);
+    expect(takeInitFailures()).toHaveLength(0);
+    expect(ui.notify).toHaveBeenCalledTimes(1);
   });
 
   it("drain: two session_start after one failure append exactly one entry", async () => {

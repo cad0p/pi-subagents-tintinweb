@@ -928,7 +928,10 @@ export default function (pi: ExtensionAPI) {
       recordInitFailure("session_start", error);
       throw error;
     } finally {
-      reportInitFailures(event as SessionStartEvent, ctx);
+      // Root activation only: `failures` is process-wide, so a child activation — which runs this
+      // same wrapper — would drain the root's failures into the child's session and leave the root
+      // with nothing to report. `isRoot` is the factory-time `!inChildSessionContext()` above.
+      if (isRoot) reportInitFailures(event as SessionStartEvent, ctx);
     }
   });
 
