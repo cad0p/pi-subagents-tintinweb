@@ -31,6 +31,7 @@ import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from
 import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { loadSettings } from "./settings.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -103,7 +104,17 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   // Agents resolve from a registry built for THIS branch's config root (under
   // worktree isolation, the copy). Never via registerAgents — that is
   // process-global state shared with the main session and every other agent.
-  const loadRegistry = () => buildAgentRegistry(loadCustomAgents(context.configCwd));
+  // Same removed-key policy the top-level load applies: a file `strictAgentFiles`
+  // refuses there must not come back here, where it would be advertised and
+  // spawnable as a fully-tooled nested child — exactly the silent capability
+  // upgrade the refusal exists to stop. Read per call, like the agent files
+  // themselves, so the persisted setting is what decides.
+  const loadRegistry = () =>
+    buildAgentRegistry(
+      loadCustomAgents(context.configCwd, false, {
+        refuseRemovedKeys: loadSettings(context.configCwd).strictAgentFiles === true,
+      }),
+    );
   const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
     context.allowedSubagents === "all"
       ? undefined

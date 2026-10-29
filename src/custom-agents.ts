@@ -79,10 +79,17 @@ function loadFromDir(
     if (removed.length > 0 && refuseRemovedKeys) {
       // The behaviour the key asked for is gone, so loading the file anyway
       // leaves a fully-tooled agent behind it. `strict` reports the refusal by
-      // throwing; the retry and every later reload take the skip branch.
-      if (!strict) continue;
-      const [key, migration] = removed[0]!;
-      throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
+      // throwing; the retry and every later reload take the skip branch, which
+      // still has to speak: dropping an agent in silence is the same surprise
+      // as loading it tooled, and a same-named file below it would otherwise
+      // take the name without a word.
+      if (strict) {
+        const [key, migration] = removed[0]!;
+        throw new Error(`${path}: frontmatter key "${key}" was removed — ${migration}`);
+      }
+      for (const [key, migration] of removed) warnIfNew(removedKeyMessage(path, key, migration));
+      warnSkippedOverride(name, agents);
+      continue;
     }
     for (const [key, migration] of removed) warnIfNew(removedKeyMessage(path, key, migration));
     warnUnknownKeys(path, fm);

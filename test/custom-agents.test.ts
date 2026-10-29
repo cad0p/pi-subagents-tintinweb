@@ -939,6 +939,47 @@ Stale.`);
     }
   });
 
+  // The refusal must not be silent. A reload (every `Agent` call) is non-strict,
+  // so the file is skipped there — with the same migration warning — and when a
+  // same-named file below it in precedence already loaded, that substitution is
+  // named too, instead of the name quietly changing hands.
+  it("warns when a removed-key file is refused and a lower-priority file takes the name", () => {
+    const globalAgentDir = join(tmpDir, "global-agent-dir");
+    process.env.PI_CODING_AGENT_DIR = globalAgentDir;
+    const globalAgents = join(globalAgentDir, "agents");
+    mkdirSync(globalAgents, { recursive: true });
+    writeFileSync(join(globalAgents, "hermetic.md"), "---\ndescription: Global fallback\n---\n\nGlobal.\n");
+    writeAgent("hermetic", `---
+description: Was hermetic
+isolated: true
+---
+
+Hermetic.`);
+    const projectPath = join(tmpDir, ".pi", "agents", "hermetic.md");
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // Non-strict pass with the refusal policy on: this is every reload after
+      // the strict startup pass, and the shape a strict startup leaves behind.
+      const result = loadCustomAgents(tmpDir, false, { refuseRemovedKeys: true });
+
+      // The project file is out; the global one holds the name.
+      expect(result.get("hermetic")?.description).toBe("Global fallback");
+
+      const messages = warn.mock.calls.map(args => String(args[0]));
+      const removedWarning = messages.find(m => m.includes(`removed frontmatter key "isolated" in ${projectPath}`));
+      expect(removedWarning).toBeDefined();
+      expect(removedWarning).toContain("extensions: false");
+      expect(messages.some(m => m.includes('Agent "hermetic" now loads from') && m.includes(join(globalAgents, "hermetic.md")))).toBe(true);
+
+      // One-time per reload state, like every other load warning.
+      loadCustomAgents(tmpDir, false, { refuseRemovedKeys: true });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   // `isolated` is not merely unknown: the file used to make the agent hermetic
   // and now loads with every extension, skill and nested tool still on. Report
   // the recipe, not "unknown key", and refuse it under `strictAgentFiles`.

@@ -237,6 +237,26 @@ describe("nested Agent tool", () => {
     expect(spawns).toHaveLength(0);
   });
 
+  // `strictAgentFiles` refuses a removed-key agent at the top level. The nested
+  // registry is built from the same config root and must apply the same policy,
+  // or the agent comes back here — advertised, resolvable and spawnable as a
+  // fully-tooled child, which is the silent upgrade the refusal exists to stop.
+  it("applies strictAgentFiles' removed-key refusal to the nested registry", async () => {
+    writeAgent("hermetic", "isolated: true\n");
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ strictAgentFiles: true }));
+
+    const refused = await run(0, { subagent_type: "hermetic", description: "d", prompt: "p" });
+    expect(textOf(refused)).toContain("Unknown or disabled");
+    expect(spawns).toHaveLength(0);
+    const available = (tools()[0].parameters as { properties: Record<string, { description?: string }> }).properties;
+    expect(available.subagent_type.description).not.toContain("hermetic");
+
+    // With the setting off the file loads as before, carrying the warning.
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ strictAgentFiles: false }));
+    const loaded = await run(0, { subagent_type: "hermetic", description: "d", prompt: "p" });
+    expect(textOf(loaded)).toContain("Agent ID: child-1");
+  });
+
   it("applies the shared scopeModels policy to a frontmatter-pinned model", async () => {
     writeAgent("pinned", "model: anthropic/blocked\n");
     writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels: ["anthropic/allowed"] }));
