@@ -17,15 +17,19 @@ import type { AgentActivity } from "./ui/agent-display.js";
 import type { LifetimeUsage } from "./usage.js";
 
 /**
- * Permanent global key. The members a reader calls on a published hand-over (see `isReadableHandover`) are
- * permanent and may only be added to. A reader of any release takes a hand-over that carries them, whatever its
- * version, and ignores fields it does not know. A hand-over without them stays published for a reader that knows it.
- * A field added after the first release is absent from older hand-overs: read it through an accessor that
- * tolerates that (`slotHoldersOf`, `takeNudgeEntries`), never directly.
+ * Permanent global key. A hand-over a reader takes carries three permanent groups; a later publisher may add
+ * members, never drop one of these:
+ * - the methods `take`, `takeNudged`, `idleItems`, `removeItem`, `keepItems`, `attach`, `detach` and `stop`;
+ * - a `draining` object carrying `runningCount`, `abortAll`, `dispose` and `ownAgents` (its `deliver` is optional);
+ * - an `activity` `Map` of the draining runs' live activity.
+ * A reader of any release takes a hand-over that carries them, whatever its version, and ignores members it does not
+ * know; a hand-over that lacks them stays published for a reader that knows it. A field added after the first release
+ * may be absent from an older hand-over: read it through an accessor that tolerates absence (`slotHoldersOf`,
+ * `takeNudgeEntries`), never directly. Absence of an added field is never a reason to reject a hand-over.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
-/** Layout version this release publishes. Readers do not gate on it; see HANDOVER_KEY. */
+/** Layout version this release publishes. Readers feature-detect the members they call; they never gate on this number. See HANDOVER_KEY. */
 export const HANDOVER_VERSION = 1;
 
 /** A record as plain data: everything except the live run handles. */
@@ -59,7 +63,10 @@ export type HandoverEvent =
   | { kind: "usage"; dto: AgentDto; usage: LifetimeUsage }
   | { kind: "slotFreed" };
 
-/** The draining part of the old manager, as far as the hand-over needs it. */
+/**
+ * The draining part of the old manager, as far as the hand-over needs it. Permanent, as the members named in
+ * HANDOVER_KEY: a reader feature-detects these, it never gates on the hand-over's version.
+ */
 export interface DrainingPool {
   runningCount(): number;
   abortAll(): number;
