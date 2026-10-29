@@ -158,11 +158,12 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     getRegisteredToolDefinition: () => undefined,
     getMarkdownThemeWithSettings: () => undefined,
     getMarkdownTransformers: () => [],
-    pushExtensionDialog: vi.fn((component: any) => { im.dialogs.push(component); }),
+    pushExtensionDialog: vi.fn((component: any, blocked?: any) => { im.dialogs.push(component); im.dialogBlocks.push(blocked); }),
     removeExtensionDialog: vi.fn(),
     updateEditorBorderColor: vi.fn(),
     extensionDialogs: [],
     dialogs: [],
+    dialogBlocks: [],
     resetExtensionUI: vi.fn(() => { im.setCustomEditorComponent(undefined); }),
     setupAutocompleteProvider: vi.fn(),
     setCustomEditorComponent(factory: ((tui: any, t: any, k: any) => any) | undefined) {
@@ -255,6 +256,10 @@ describe("native transcript view", () => {
   beforeEach(() => {
     initTheme("dark");
     vi.mocked(copyToClipboard).mockClear();
+    // The dialog/status/widget store lives on globalThis: no test may inherit another's child state.
+    dropChildDialogs("child-1");
+    clearChildUI("child-1");
+    clearChildUI("proxy-child");
   });
 
   it("T1 probes all five symbols and captures once", () => {
@@ -593,6 +598,40 @@ describe("native transcript view", () => {
     const proxy = createChildUIProxy("child-1", { answerable: true });
     await expect(proxy.select("Pick one", ["a"], { signal: controller.signal })).resolves.toBeUndefined();
     expect(h.im.dialogs).toHaveLength(0);
+  });
+  it("pushes a confirm as a permission prompt, like pi", async () => {
+    const h = harness();
+    h.openChild();
+    const proxy = createChildUIProxy("child-1", { answerable: true });
+    void proxy.confirm("Deploy?", "to production");
+    await Promise.resolve();
+    expect(h.im.dialogBlocks.at(-1)).toEqual({ kind: "permission", message: "Deploy?" });
+    dropChildDialogs("child-1");
+  });
+
+  it("renders the child's widgets and newest notice in its footer", async () => {
+    const h = harness();
+    h.openChild();
+    const proxy = createChildUIProxy("child-1", { answerable: true });
+    proxy.setWidget("todo", ["first", "second"]);
+    // A factory widget has nothing a footer can show; it must not print a blank line.
+    proxy.setWidget("custom", () => new Text("x"));
+    proxy.notify("watch out", "warning");
+    const footer = h.footerFactory()!(h.im.ui, theme, footerData);
+    const lines = footer.render(120);
+    expect(lines.join("\n")).toContain("todo: first");
+    expect(lines.join("\n")).toContain("todo: second");
+    expect(lines.join("\n")).toContain("warning: watch out");
+    expect(lines.filter((line: string) => line.trim() === "custom:")).toHaveLength(0);
+  });
+
+  it("a close that throws still frees FleetView's keys", () => {
+    const h = harness();
+    h.openChild();
+    // pi's own dialog stack or footer install failing mid-restore must not leave the view "open".
+    h.setFooter.mockImplementationOnce(() => { throw new Error("footer boom"); });
+    expect(() => h.view.close("escape")).toThrow("footer boom");
+    expect(h.view.isOpen()).toBe(false);
   });
   it("records fire-and-forget calls and never forwards them to the host", async () => {
     clearChildUI("proxy-child");

@@ -245,17 +245,17 @@ class NoticeBandComponent implements NoticeBand {
 /** One child's own footer lines, followed by the line that says which child this is. */
 export class ChildFooter extends FooterComponent {
   constructor(
-    session: AgentSession,
+    private childSession: AgentSession,
     footerData: ReadonlyFooterDataProvider,
     private record: () => AgentRecord | undefined,
     private hostCwd: () => string,
     private theme: Theme,
   ) {
-    super(session, footerData);
+    super(childSession, footerData);
   }
 
   render(width: number): string[] {
-    return [...super.render(width), ...this.childLine(width)];
+    return [...super.render(width), ...this.childLine(width), ...this.childExtras(width)];
   }
 
   private childLine(width: number): string[] {
@@ -267,16 +267,28 @@ export class ChildFooter extends FooterComponent {
     for (const text of state.statuses.values()) parts.push(toSingleLine(text));
     if (this.sessionIsStreaming()) parts.push("streaming");
     // The inherited first line's (branch) is the host's; say so when the child runs elsewhere.
-    const session = (this as unknown as { session?: AgentSession }).session;
-    if (session && session.sessionManager.getCwd() !== this.hostCwd()) parts.push("branch: host");
+    if (this.childSession.sessionManager.getCwd() !== this.hostCwd()) parts.push("branch: host");
     return [truncateToWidth(this.theme.fg("dim", `  ${parts.join(" · ")}`), width)];
+  }
+
+  /**
+   * What the child recorded but never wrote anywhere: its widgets (the lines form; a component
+   * factory has nothing a footer can show) and its newest notice.
+   */
+  private childExtras(width: number): string[] {
+    const record = this.record();
+    if (!record) return [];
+    const state = childUIState(record.id);
+    const lines = [...state.widgets].flatMap(([key, content]) =>
+      (content ?? []).map((line) => truncateToWidth(this.theme.fg("dim", `  ${key}: ${toSingleLine(line)}`), width)));
+    const notice = state.notices.at(-1);
+    if (notice) lines.push(truncateToWidth(this.theme.fg("dim", `  ${notice.level}: ${toSingleLine(notice.text)}`), width));
+    return lines;
   }
 
   private sessionIsStreaming(): boolean {
     // Read through the session the footer was built for; PR 1 has no tap to keep this current.
-    const session = (this as unknown as { session?: AgentSession }).session;
-    if (!session) return false;
-    return session.isStreaming === true || session.agent?.state?.isStreaming === true;
+    return this.childSession.isStreaming === true || this.childSession.agent?.state?.isStreaming === true;
   }
 }
 
@@ -307,9 +319,12 @@ export class NativeTranscriptView {
 
   constructor(private options: NativeViewOptions) {}
 
-  /** Whether a view is open. FleetView suspends its own keys while it is. */
+  /**
+   * Whether a view is open. FleetView suspends its own keys while it is: a close that threw after
+   * deactivating the view must not leave them suspended forever.
+   */
   isOpen(): boolean {
-    return this.state !== undefined;
+    return this.state?.active === true;
   }
 
   /** The bus event handler: repaint only when the event names the shown record. */
@@ -404,7 +419,9 @@ export class NativeTranscriptView {
     const state = this.state;
     if (!im || !state) return;
     // Step 1, for every reason and before anything can paint: deactivate, unsubscribe, restore the
-    // six instance wrappers. Assignment only; it never renders.
+    // six instance wrappers. Assignment only; it never renders. The state stays until the restore
+    // finishes, so a throw below leaves a view that isOpen() still reports as closed and a later
+    // open() can finish the same close before taking the slot.
     state.active = false;
     state.unsubChange();
     state.unsubDialogFlag();
@@ -772,7 +789,8 @@ export class NativeTranscriptView {
         return;
     }
     state.dialogComponent = component;
-    im.pushExtensionDialog(component, { kind: "question", message: request.kind === "confirm" ? request.title : request.title });
+    // pi's own confirm goes through the permission path; every other dialog is a question.
+    im.pushExtensionDialog(component, { kind: request.kind === "confirm" ? "permission" : "question", message: request.title });
   }
 }
 
