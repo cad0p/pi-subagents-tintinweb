@@ -46,8 +46,11 @@ Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
 `xhigh`; for checks that do not exercise a Visual proof step, fall back to
 `opencode-go-2/deepseek-v4.1-flash` at `max` when Anthropic is unavailable. That
 account and its `opencode-go-3`, `opencode-go-4`, ... siblings are registered by
-`@cad0p/pi-fallback-provider`, which rotates them for you on a terminal error, so
-`opencode-go-2` in the command below is only the starting account. `--no-extensions`
+`@cad0p/pi-fallback-provider`. On a terminal error it rotates through
+`enabledModels` in list order, skipping the failed model, so `opencode-go-2`
+in the command below is only the starting account. The `opencode-go-*`
+siblings are tried only because they are listed there; with none listed, it
+warns "No fallback models available." `--no-extensions`
 drops discovered extensions, so pass each one the run needs with its own `-e`: the
 global `system-prompt.ts` (required for native Anthropic) and, on the fallback, the
 installed `~/.pi/agent/npm/node_modules/@cad0p/pi-fallback-provider/index.ts`. Add
@@ -59,7 +62,7 @@ pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s '
   -e <repo>/src/index.ts --provider anthropic --model claude-haiku-5-5 --thinking xhigh
 
 # fallback: -e <fallback-provider>/index.ts is what makes opencode-go-2 resolve;
-# the extension rotates the accounts itself on a terminal error
+# a terminal error rotates through enabledModels, skipping the failed model
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
   -e <fallback-provider>/index.ts -e <repo>/src/index.ts \
   --provider opencode-go-2 --model deepseek-v4.1-flash --thinking max
