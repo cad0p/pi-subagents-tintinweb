@@ -263,11 +263,14 @@ A refusal means one of three things, with different remedies:
 - `fatal: Not possible to fast-forward, aborting.` — the local branch has commits
   `origin/main` does not. That is a checkout that drifted, and it needs a human
   decision, not a reset.
+- `error: Merging is not possible because you have unmerged files.` — the checkout
+  is mid-merge. Finish or abort that merge first.
 
 Remove the merged branch's worktree here too (`git worktree remove <path>`). It
-refuses while the worktree holds untracked, non-ignored files — capture files
-kept as evidence, for instance — so remove them first, or pass `--force` once
-you have checked that nothing there is worth keeping. `git worktree prune` only
+refuses while the worktree holds modified or untracked, non-ignored files —
+capture files kept as evidence, for instance. Deleting untracked ones is enough;
+for a modified tracked file, discard or commit it, or pass `--force` once you
+have checked that nothing there is worth keeping. `git worktree prune` only
 matters for a directory deleted by hand.
 
 ## Fork release rules
