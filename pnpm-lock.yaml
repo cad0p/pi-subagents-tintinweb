@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@cad0p/pi-background-work':
-        specifier: '>=0.0.1-20261028.1 <0.0.1'
-        version: 0.0.1-20261028.1(@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.21.0)(zod@4.4.3))
+        specifier: '>=0.0.2 <1.0.0'
+        version: 0.0.2(@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.21.0)(zod@4.4.3))
       '@sinclair/typebox':
         specifier: '*'
         version: 0.34.49
@@ -195,8 +195,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@cad0p/pi-background-work@0.0.1-20261028.1':
-    resolution: {integrity: sha512-xu5W6lQ9q9ln4/FF6Xe84SSZMnj4nT6lX1PMuW9Wh4AEC2oTuaR99Ehkk9mxnk4kEvwxp1Xis4YyBOw+RO6w2w==}
+  '@cad0p/pi-background-work@0.0.2':
+    resolution: {integrity: sha512-nxDW5qiUl2euPLd60dclimAYos+rpvK3iMRl4FVh+z2NI6VED0Emm0Et8oc/xEtlkOpTP81ew983FoKSgGNZWQ==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
@@ -1440,7 +1440,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.3':
     optional: true
 
-  '@cad0p/pi-background-work@0.0.1-20261028.1(@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.21.0)(zod@4.4.3))':
+  '@cad0p/pi-background-work@0.0.2(@earendil-works/pi-coding-agent@1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 1.4.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.21.0)(zod@4.4.3)
 
