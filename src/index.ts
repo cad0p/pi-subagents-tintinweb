@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -27,6 +27,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
+import { guardInit, guardInitVoid, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
 import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -325,7 +326,10 @@ export default function (pi: ExtensionAPI) {
 
   // Initial load — the only strict one. A bad edit mid-session must not kill the
   // session on the next unrelated spawn, so every later reload keeps warning.
-  reloadCustomAgents(strictAgentFiles);
+  // Guarded: a throw here would otherwise cost every tool the package registered.
+  if (!guardInitVoid("agent-files", () => reloadCustomAgents(strictAgentFiles))) {
+    guardInitVoid("agent-files", () => reloadCustomAgents(false));
+  }
 
   // ---- Agent activity tracking ----
   const agentActivity = new Map<string, AgentActivity>();
@@ -834,7 +838,7 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (event, ctx) => {
+  async function runSessionStart(event: SessionStartEvent, ctx: ExtensionContext): Promise<void> {
     currentCtx = ctx;
     if (leakedChildContext) {
       const frames = leakedChildContext.split("\n").slice(1, 8).join("\n");
@@ -901,15 +905,25 @@ export default function (pi: ExtensionAPI) {
       }
       // The getter reads the live root registry per listing, so a reload's replacement is picked up.
       const getSource = () => (globalThis as Record<symbol, BackgroundWorkSource | undefined>)[MANAGER_KEY];
-      registerSubagentProvider(event.reason, getSource);
-      registerSubagentDisplayProvider(event.reason, getSource);
+      guardInitVoid("background-work", () => {
+        registerSubagentProvider(event.reason, getSource);
+        registerSubagentDisplayProvider(event.reason, getSource);
+      });
       try {
-        await adoptHandovers(ctx);
+        guardInitVoid("handover-adoption", () => { void adoptHandovers(ctx); });
       } finally {
         openSlots();
       }
-      stopStranded(ctx.sessionManager.getSessionId());
+      guardInitVoid("stranded", () => { stopStranded(ctx.sessionManager.getSessionId()); });
       if (event.reason === "startup" || event.reason === "resume") recoverCrashed(ctx);
+    }
+  }
+
+  pi.on("session_start", async (event, ctx) => {
+    try {
+      await runSessionStart(event as SessionStartEvent, ctx);
+    } finally {
+      reportInitFailures(event as SessionStartEvent, ctx);
     }
   });
 
@@ -1188,6 +1202,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
+  function reportInitFailures(event: SessionStartEvent, ctx: ExtensionContext): void {
+    const failures = takeInitFailures();
+    if (failures.length === 0) return;
+    guardInit("init-error-entry", () => {
+      pi.appendEntry("subagents:init-error", { reason: event.reason, failures });
+    });
+    const labels = failures.map((f) => f.label).join(", ");
+    guardInitVoid("init-error-notify", () => {
+      ctx.ui.notify("pi-subagents: init failed for " + labels + "; the rest of the extension kept working. Details in the transcript.", "warning");
+    });
+  }
+
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled);
 
   // Project/global default for writing the subagent .output transcript lives in
@@ -1287,7 +1313,7 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
+  guardInitVoid("settings-apply", () => { applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setEvictAfterMinutes: (n) => manager.setEvictAfterMinutes(n),
@@ -1310,6 +1336,7 @@ export default function (pi: ExtensionAPI) {
     },
     (event, payload) => pi.events.emit(event, payload),
   );
+  });
 
   // ---- Agent tool ----
 
