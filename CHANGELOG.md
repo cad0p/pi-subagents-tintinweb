@@ -48,6 +48,7 @@ All notable changes to this project will be documented in this file.
 ### 🚜 Refactor
 
 - *(subagents)* FleetView is the only subagent surface (closes #143) ([#145](https://github.com/cad0p/pi-subagents-tintinweb/pull/145))
+- Drop isolated from the Agent tool and agent frontmatter (closes #177) ([#179](https://github.com/cad0p/pi-subagents-tintinweb/pull/179))
 
 ### 📚 Documentation
 
