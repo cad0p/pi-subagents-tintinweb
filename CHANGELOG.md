@@ -42,6 +42,7 @@ All notable changes to this project will be documented in this file.
 - *(reload)* A stopped hand-over last usage reaches the parent like a live one ([#166](https://github.com/cad0p/pi-subagents-tintinweb/pull/166)) (closes #164)
 - *(sendmessage)* A refused delivery is a failed tool result, and a shutdown stop is named ([#172](https://github.com/cad0p/pi-subagents-tintinweb/pull/172)) (closes #171)
 - *(notice)* Draw the shutdown-stop notice at session start (closes #173) ([#176](https://github.com/cad0p/pi-subagents-tintinweb/pull/176))
+- *(deps)* Admit the pi-background-work 0.0.2 stable, so the footer package stops nesting a duplicate (closes #186) ([#188](https://github.com/cad0p/pi-subagents-tintinweb/pull/188))
 
 ### 🚜 Refactor
 
@@ -53,6 +54,7 @@ All notable changes to this project will be documented in this file.
 - *(verification)* A live proof must show the planned outcome, not only the mechanism (closes #126) ([#127](https://github.com/cad0p/pi-subagents-tintinweb/pull/127))
 - *(checklist)* Name a numbered opencode-go account and load its provider ([#170](https://github.com/cad0p/pi-subagents-tintinweb/pull/170)) (closes #169)
 - *(checklist)* Fast-forward the main checkout after every merge (closes #174) ([#175](https://github.com/cad0p/pi-subagents-tintinweb/pull/175))
+- *(readme)* The footer needs pi-background-work, in a matching version pair (closes #180) ([#181](https://github.com/cad0p/pi-subagents-tintinweb/pull/181))
 
 
 ## [0.22.0] - 2026-10-21
