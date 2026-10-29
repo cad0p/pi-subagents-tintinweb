@@ -26,7 +26,7 @@ import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
-import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
+import { agentIdOf, MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);
 
@@ -116,7 +116,7 @@ function spawned(id: string, pid: number, extra: Record<string, unknown> = {}) {
 interface Entry {
   type: string;
   customType?: string;
-  data?: { id?: string; status?: string };
+  data?: { id?: string; status?: string; shutdown?: boolean };
 }
 
 function entriesOf(file: string): Entry[] {
@@ -267,6 +267,8 @@ describe("crash recovery — startup report", () => {
     expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
     expect(message.content).toContain(NOTE);
     expect(message.content).not.toContain("SendMessage(");
+    // Even the crash-loop record is resumable on request, just not autonomously.
+    expect(message.content).toContain("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
   });
 
   it("tells the main agent to resume a first interruption itself with SendMessage, naming its id", async () => {
@@ -280,6 +282,7 @@ describe("crash recovery — startup report", () => {
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
     const [message] = made.pi.sendMessage.mock.calls[0];
     expect(message.content).toContain('Resume first now: SendMessage({ to: "first", message: "continue" }) without asking the user');
+    expect(message.content).toContain("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
     expect(message.content).not.toContain(NOTE);
   });
 
@@ -347,8 +350,8 @@ describe("crash recovery — startup report", () => {
     expect(reopened.pi.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("stops a run at shutdown as stopped, and does not recover it", async () => {
-    const file = join(tmpDir, "parent.jsonl");
+  /** A run that starts and never settles: the fixture the shutdown tests stop. */
+  async function unendingRun(file: string) {
     const childFile = join(tmpDir, "stop.jsonl");
     writeSession(file);
     writeSession(childFile);
@@ -360,17 +363,64 @@ describe("crash recovery — startup report", () => {
       return new Promise(() => {});
     });
     const made = boot(file);
-    await made.tools.get("Agent").execute("tc-stop", { prompt: "go", description: "stop me", subagent_type: "general-purpose" }, undefined, undefined, spawnCtx(tmpDir));
-    await vi.waitFor(() => expect(entriesOf(file).some((e) => e.customType === "subagent-spawned")).toBe(true));
+    const spawn = await made.tools.get("Agent").execute("tc-stop", { prompt: "go", description: "stop me", subagent_type: "general-purpose" }, undefined, undefined, spawnCtx(tmpDir));
+    const id = agentIdOf(spawn);
+    await vi.waitFor(() => expect(entriesOf(file).some((e) => e.customType === "subagent-spawned" && e.data?.id === id)).toBe(true));
+    return { made, id };
+  }
+
+  it("stops a run at shutdown as stopped, and names it at reopen instead of recovering it", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    const { made, id } = await unendingRun(file);
 
     await made.lifecycle.get("session_shutdown")({ reason: "quit" }, spawnCtx(tmpDir));
 
     const settle = entriesOf(file).find((e) => e.customType === "subagents:record");
-    expect(settle?.data?.status).toBe("stopped");
+    expect(settle?.data).toMatchObject({ status: "stopped", shutdown: true });
+    // Nothing is resumable: #120 keeps a shutdown stop settled.
+    expect(interruptedSettles(file)).toEqual([]);
+
     const reopened = boot(file);
     await startup(reopened, file);
+    await vi.waitFor(() => expect(reopened.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message, options] = reopened.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    expect(message.content).toContain(`1 subagent was stopped when pi shut down: ${id} (stop me)`);
+    expect(message.content).toContain("It is not running. SendMessage will not reach it: nothing will be delivered. Start a new Agent");
+    expect(resumeAgent).not.toHaveBeenCalled();
+    // The marker keeps a second reopen quiet.
+    expect(entriesOf(file).some((e) => e.customType === "subagent-shutdown-notice")).toBe(true);
+    const again = boot(file);
+    await startup(again, file);
     await quiet();
-    expect(reopened.pi.sendMessage).not.toHaveBeenCalled();
+    expect(again.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("names no run that settled before the shutdown: a completion or a user stop is not a shutdown stop", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [
+      spawned("done", DEAD_PID),
+      custom("subagents:record", { id: "done", status: "completed" }),
+      spawned("stopped", DEAD_PID),
+      custom("subagents:record", { id: "stopped", status: "stopped" }),
+    ]);
+    const made = boot(file);
+
+    await startup(made, file);
+    await quiet();
+
+    expect(made.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing on a clean start with nothing running", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file);
+    const made = boot(file);
+
+    await startup(made, file);
+    await quiet();
+
+    expect(made.pi.sendMessage).not.toHaveBeenCalled();
   });
 });
 

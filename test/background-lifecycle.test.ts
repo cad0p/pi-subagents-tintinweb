@@ -1212,9 +1212,10 @@ describe("background lifecycle — model-visible surfaces", () => {
       undefined, undefined, spawnCtx(tmpDir),
     );
 
-    // A record stopped before its session existed has nothing to reopen.
-    expect(textOf(resume)).toContain("did not take the message");
-    expect(textOf(resume)).toContain("no session to reopen");
+    // A record stopped before its session existed has nothing to reopen: the answer names that cause as one alternative.
+    expect(textOf(resume)).toBe(
+      `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`,
+    );
   });
 
   it("resumes a finished agent through SendMessage and runs the message to completion", async () => {
@@ -1462,7 +1463,11 @@ describe("background lifecycle — model-visible surfaces", () => {
       { to: id, message: "more" },
       undefined, undefined, spawnCtx(tmpDir),
     );
-    expect(textOf(resume)).toContain("did not take the message");
+    // The settling branch is the one transient refusal, but the shared text does not promise a retry for the final ones.
+    expect(textOf(resume)).toBe(
+      `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`,
+    );
+    expect((resume as { isError?: boolean }).isError).toBe(true);
 
     // Settle the aborted run so the lifecycle completes.
     resolveRun({ responseText: "", session: mockSession(), aborted: true, steered: false });

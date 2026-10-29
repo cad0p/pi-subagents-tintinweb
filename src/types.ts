@@ -103,7 +103,7 @@ export interface AgentConfig {
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
  * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "resumedAfterCrash" (an
  * interrupted record restarted from its file with a crash note), "held" (parked until a teardown or a hand-over's
- * adoption ends), or false (unknown, still settling, or aborted by its owner).
+ * adoption ends), or false (nothing was delivered: still settling, stopped with its parent, or no session left to reopen).
  */
 export type DeliverOutcome = "delivered" | "queued" | "resumed" | "resumedAfterCrash" | "held" | false;
 

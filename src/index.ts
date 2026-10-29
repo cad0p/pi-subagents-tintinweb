@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type SessionEntry, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
@@ -29,7 +29,7 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { lastActivityOf, openChildSession, type ReplayOptions, replayLedger } from "./ledger.js";
+import { LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -493,11 +493,38 @@ export default function (pi: ExtensionAPI) {
       const calls = resumable.map((id) => `SendMessage({ to: "${id}", message: "continue" })`).join(", ");
       lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a crash note. Do not start a new Agent for them.`);
     }
+    lines.push("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
     for (const record of records) {
       const note = crash.get(record.id)?.note;
       if (note) lines.push(`${record.id}: ${note}`);
     }
     return lines.join("\n");
+  }
+
+  /** One notice for the runs a shutdown stopped: they are gone, and no SendMessage can reach them. */
+  function formatShutdownNotice(stops: readonly ShutdownStop[]): string {
+    const one = stops.length === 1;
+    const names = stops.map((stop) => `${stop.id}${stop.description ? ` (${sanitizeHeaderText(stop.description)})` : ""}`).join(", ");
+    return [
+      `${stops.length} ${one ? "subagent was" : "subagents were"} stopped when pi shut down: ${names}`,
+      `${one ? "It is" : "They are"} not running. SendMessage will not reach ${one ? "it" : "them"}: nothing will be delivered. Start a new Agent if that work is still needed.`,
+    ].join("\n");
+  }
+
+  /** Posts the shutdown-stop notice once per session file: the marker keeps a later reopen quiet. */
+  function reportShutdownStops(entries: readonly SessionEntry[]): void {
+    const stops = shutdownStops(entries);
+    if (stops.length === 0) return;
+    // Marked before the send, like a delivered nudge: a throw must not make every later reopen repeat it.
+    pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: stops.map((stop) => stop.id) });
+    try {
+      pi.sendMessage(
+        { customType: "subagent-notification", content: formatShutdownNotice(stops), display: true },
+        { deliverAs: "nextTurn", triggerTurn: false },
+      );
+    } catch (err) {
+      console.warn(`[pi-subagents] failed to send the shutdown-stop notice for ${stops.map((stop) => stop.id).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them. */
@@ -1216,8 +1243,11 @@ export default function (pi: ExtensionAPI) {
       now: Date.now(),
     };
     const spawnerSessionId = sessionKey(ctx.sessionManager);
-    const crashed = replayLedger(ctx.sessionManager.getEntries(), options);
+    const entries = ctx.sessionManager.getEntries();
+    const crashed = replayLedger(entries, options);
     for (const record of crashed) record.spawnerSessionId = spawnerSessionId;
+    // A shutdown stop settles the run, so replayLedger recovers nothing: name the ids it left, once.
+    guardInitVoid("shutdown-stops", () => reportShutdownStops(entries));
     const adopted = manager.adoptInterrupted(crashed, pi);
     if (adopted.length === 0) return;
     const policy = readPolicy(ctx.cwd);
@@ -1984,7 +2014,13 @@ Terse command-style prompts produce shallow, generic work.
   // ---- SendMessage tool ----
 
   type SendOutcome = Exclude<DeliverOutcome, false> | "not-found" | "failed";
-  const sendResult = (msg: string, sendOutcome: SendOutcome) => textResult(msg, { sendOutcome });
+  // A refusal is a failed tool result: inside codemode a non-error result resolves instead of rejecting, so a
+  // not-found or refused SendMessage would end the script as a success and the model would never learn. `sendOutcome`
+  // stays for the renderer's colour. The nested twin and get_subagent_result already answer their refusals this way.
+  const sendResult = (msg: string, sendOutcome: SendOutcome) => ({
+    ...textResult(msg, { sendOutcome }),
+    isError: sendOutcome === "not-found" || sendOutcome === "failed",
+  });
 
   registerParentTool(defineTool({
     name: SUBAGENT_TOOL_NAMES.SEND_MESSAGE,
@@ -2062,7 +2098,14 @@ Terse command-style prompts produce shallow, generic work.
       const record = manager.getRecord(params.to);
       // An id in its adoption window has no record yet, but its input is parked, not lost.
       if (record?.parentAgentId || (!record && !manager.isAdopting(params.to))) {
-        return sendResult(`Agent not found: "${params.to}". It may have been cleaned up.`, "not-found");
+        // State the fact, not a hedge: the hop was not attempted, so nothing reached the run. A nested child exists
+        // but only its parent can steer it, which is a different fact from an id this process has no record of.
+        return sendResult(
+          record?.parentAgentId
+            ? `Agent "${params.to}" is a nested child: only its parent's SendMessage reaches it. Nothing was delivered.`
+            : `No agent "${params.to}" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.`,
+          "not-found",
+        );
       }
       const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => params.to, record?.effectiveMaxTurns);
       const outcome = await manager.steer(params.to, params.message, sendCallbacks);

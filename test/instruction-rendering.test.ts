@@ -443,10 +443,10 @@ describe("instruction rendering", () => {
     const outcomes: Array<{ outcome: string; line: string; color: string }> = [
       { outcome: "sent", line: "Message sent to agent abc.", color: "dim" },
       { outcome: "queued", line: "Message queued for agent abc. It is delivered once the session initializes.", color: "dim" },
-      { outcome: "not-found", line: 'Agent not found: "abc". It may have been cleaned up.', color: "error" },
+      { outcome: "not-found", line: 'No agent "abc" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.', color: "error" },
       { outcome: "resumed", line: "Agent abc had finished; resumed it with the message (fresh max_turns budget).", color: "dim" },
       { outcome: "resumedAfterCrash", line: "Agent abc was interrupted by a crash; resumed it from its transcript with a crash note and the message (fresh max_turns budget).", color: "dim" },
-      { outcome: "failed", line: "Agent abc did not take the message: it is handing over after a reload or still settling, or it was stopped with its parent.", color: "error" },
+      { outcome: "failed", line: "Nothing was delivered to agent abc: it is still settling, was stopped with its parent, or has no session left to reopen.", color: "error" },
     ];
 
     it("renders every outcome verbatim with a ⎿ prefix in the outcome color", () => {
@@ -581,7 +581,26 @@ describe("instruction rendering", () => {
 
       const missing = await steer.execute("tc", { to: "nope", message: "x" }, undefined, undefined, spawnCtx(cwd));
       expect(missing.details.sendOutcome).toBe("not-found");
-      expect(missing.content[0].text).toContain("Agent not found");
+      // The answer states what happened: the id is unknown here, nothing was delivered, and the work needs a new Agent.
+      expect(missing.content[0].text).toBe(
+        'No agent "nope" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.',
+      );
+      expect(missing.content[0].text).not.toContain("may have been cleaned up");
+      // A refusal must fail the tool call: from codemode a non-error result resolves and the script ends clean.
+      expect((missing as { isError?: boolean }).isError).toBe(true);
+    });
+
+    it("does not claim a nested child is gone: only its parent reaches it", async () => {
+      const { tools } = registerTools();
+      const { id, record } = await spawnBackground(tools);
+      record.parentAgentId = "parent-1";
+
+      const denied = await tools.get("SendMessage").execute("tc", { to: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
+      expect(denied.details.sendOutcome).toBe("not-found");
+      expect(denied.content[0].text).toContain("is a nested child");
+      expect(denied.content[0].text).toContain("Nothing was delivered");
+      expect(denied.content[0].text).not.toContain("exists in this process");
+      expect((denied as { isError?: boolean }).isError).toBe(true);
     });
 
     it("attaches queued when the session is not ready yet", async () => {
@@ -592,6 +611,7 @@ describe("instruction rendering", () => {
 
       const queued = await steer.execute("tc", { to: id, message: "queue me" }, undefined, undefined, spawnCtx(cwd));
       expect(queued.details.sendOutcome).toBe("queued");
+      expect((queued as { isError?: boolean }).isError).toBe(false);
       expect(record.pendingSteers).toEqual(["queue me"]);
     });
 
@@ -604,6 +624,7 @@ describe("instruction rendering", () => {
       record.session = { prompt, agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any;
       const sent = await steer.execute("tc", { to: id, message: "go left" }, undefined, undefined, spawnCtx(cwd));
       expect(sent.details.sendOutcome).toBe("delivered");
+      expect((sent as { isError?: boolean }).isError).toBe(false);
       expect(prompt).toHaveBeenCalledWith("go left", expect.objectContaining({ streamingBehavior: "steer" }));
     });
 
@@ -615,9 +636,15 @@ describe("instruction rendering", () => {
 
       const failed = await steer.execute("tc", { to: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
       expect(failed.details.sendOutcome).toBe("failed");
+      expect((failed as { isError?: boolean }).isError).toBe(true);
+      // The answer names the causes as alternatives; stopped with its parent is the branch this test reaches.
+      expect(failed.content[0].text).toBe(
+        `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`,
+      );
       const theme = makeTheme();
       const text = renderResultText(steer, failed, theme, { args: { message: "x" } });
-      expect(text).toContain("did not take the message");
+      expect(text).toBe(`  ⎿  ${failed.content[0].text}`);
+      expect(text).not.toContain("Send again in a moment");
       expect(theme.calls.some(([color]) => color === "error")).toBe(true);
     });
   });

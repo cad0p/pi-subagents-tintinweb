@@ -1339,12 +1339,12 @@ export class AgentManager {
    * activation that adopts a settled subtree does not announce a parent the old activation already reported.
    * A draining manager announces no top-level record: the adopter does. A nested result still reaches its parent here.
    */
-  private notifyCompleted(record: AgentRecord): void {
+  private notifyCompleted(record: AgentRecord, shutdown = false): void {
     if (!this.onComplete || record.notified) return;
     if (this.handover && !record.parentAgentId) return;
     record.notified = true;
     // A shutdown stop already wrote its settle entry (abortAll); every other settle writes it here.
-    if (!this.stopLedgered.delete(record.id)) this.ledgerSettle(record);
+    if (!this.stopLedgered.delete(record.id)) this.ledgerSettle(record, shutdown);
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
   }
 
@@ -1370,12 +1370,13 @@ export class AgentManager {
     }
   }
 
-  /** The settle entry: the record's final status, written into the spawner's session. */
-  ledgerSettle(record: AgentRecord): void {
+  /** The settle entry: the record's final status, written into the spawner's session. A shutdown stop is marked. */
+  ledgerSettle(record: AgentRecord, shutdown = false): void {
     this.writeLedger(record.id, "subagents:record", {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
+      shutdown: shutdown || undefined,
     });
   }
 
@@ -1468,7 +1469,7 @@ export class AgentManager {
    * reference — a resume never creates one, and reclaiming that stale path
    * would clobber the prior run's `worktreeResult`.
    */
-  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string): void {
+  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string, shutdown = false): void {
     record.status = "stopped";
     record.completedAt ??= Date.now();
     // No turn ever executed — zero the run-local counter so the completion
@@ -1482,7 +1483,7 @@ export class AgentManager {
     if (baseCwd) {
       this.reclaimWorktree(record, baseCwd);
     }
-    this.notifyCompleted(record);
+    this.notifyCompleted(record, shutdown);
     record.settled = true;
   }
 
@@ -1823,7 +1824,7 @@ export class AgentManager {
         })
       return "delivered";
     }
-    // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
+    // Still settling: the settle tail has not dropped the session yet, so a send once it has will go through.
     if (record.settled === false) return false;
     // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the log, and callers get false.
     const reopened = await this.restoreSession(id).catch((err: unknown) => {
@@ -2036,7 +2037,7 @@ export class AgentManager {
     );
   }
 
-  /** Abort all running and queued agents immediately. */
+  /** Abort all running and queued agents immediately. Every settle it writes is marked as a shutdown stop. */
   abortAll(): number {
     let count = 0;
     // Clear queued agents first. A gate waiter's run is still running, so only its wait ends here.
@@ -2047,7 +2048,7 @@ export class AgentManager {
       }
       const record = this.agents.get(entry.id);
       if (record) {
-        this.settleStoppedWithoutRun(record);
+        this.settleStoppedWithoutRun(record, undefined, true);
         count++;
       }
     }
@@ -2061,7 +2062,7 @@ export class AgentManager {
         record.status = "stopped";
         record.completedAt = Date.now();
         // A shutdown stop is deliberate, not a crash: its settle entry goes out now, before the session is replaced.
-        this.ledgerSettle(record);
+        this.ledgerSettle(record, true);
         this.stopLedgered.add(record.id);
         count++;
       }

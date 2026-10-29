@@ -91,7 +91,21 @@ export function lastActivityOf(sessionFile: string): number | undefined {
 interface SettleLedgerEntry {
   id: string;
   status: string;
+  type?: string;
+  description?: string;
+  /** A settle `abortAll` wrote at shutdown: the run is stopped for good, not waiting for a resume. */
+  shutdown?: boolean;
 }
+
+/** A run whose last ledger state is a shutdown stop: it is gone, and SendMessage cannot reach it. */
+export interface ShutdownStop {
+  id: string;
+  type?: string;
+  description?: string;
+}
+
+/** Written after the shutdown-stop notice: the ids it named, so a later reopen stays quiet. */
+export const SHUTDOWN_NOTICE_ENTRY = "subagent-shutdown-notice";
 
 /** Where a record's ledger entries go: the session file of the pi that spawned it. */
 export interface LedgerWriter {
@@ -138,6 +152,42 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
     invocation: { modelId: spawned.model, requestedThinking: spawned.thinking, isolated: spawned.isolated },
     settled: true, crashCount,
   };
+}
+
+/** The ids a shutdown-notice marker named; a malformed marker, or one from a later version, names none. */
+function readNoticeIds(data: unknown): string[] {
+  if (typeof data !== "object" || data === null) return [];
+  const notice = data as { v?: number; ids?: unknown };
+  if (notice.v !== undefined && notice.v > LEDGER_VERSION) return [];
+  if (!Array.isArray(notice.ids)) return [];
+  return notice.ids.filter((id): id is string => typeof id === "string");
+}
+
+/**
+ * The runs a shutdown stopped and no notice has named yet. A settle with `shutdown: true` closes the run like any
+ * other, so `replayLedger` recovers nothing: this scan is the only record that the id is unaddressable. A later
+ * spawn or resume reopens the run; a later notice has already told the model.
+ */
+export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] {
+  const state = new Map<string, { shutdown: boolean; type?: string; description?: string }>();
+  const noticed = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== "custom") continue;
+    if (entry.customType === "subagent-spawned" || entry.customType === "subagent-resumed") {
+      const opened = readEntry<{ id: string }>(entry.data);
+      if (opened) state.set(opened.id, { shutdown: false });
+    } else if (entry.customType === "subagents:record") {
+      const settle = readEntry<SettleLedgerEntry>(entry.data);
+      if (!settle) continue;
+      state.set(settle.id, settle.shutdown === true ? { shutdown: true, type: settle.type, description: settle.description } : { shutdown: false });
+      if (settle.shutdown === true) noticed.delete(settle.id);
+    } else if (entry.customType === SHUTDOWN_NOTICE_ENTRY) {
+      for (const id of readNoticeIds(entry.data)) noticed.add(id);
+    }
+  }
+  return [...state]
+    .filter(([id, run]) => run.shutdown && !noticed.has(id))
+    .map(([id, run]) => ({ id, type: run.type, description: run.description }));
 }
 
 /**

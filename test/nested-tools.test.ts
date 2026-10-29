@@ -285,7 +285,7 @@ describe("nested Agent tool", () => {
     records.set("child-2", { id: "child-2", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
     vi.mocked(manager.deliver).mockResolvedValueOnce(false);
     const result = await run(2, { to: "child-2", message: "more" });
-    expect(textOf(result)).toContain("did not take the message");
+    expect(textOf(result)).toContain("Nothing was delivered to agent");
     expect((result as { isError?: boolean }).isError).toBe(true);
   });
 });

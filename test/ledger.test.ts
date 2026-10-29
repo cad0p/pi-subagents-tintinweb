@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { LEDGER_VERSION, lastActivityOf, openChildSession, replayLedger, resumedEntry, spawnedEntry } from "../src/ledger.js";
+import { LEDGER_VERSION, lastActivityOf, openChildSession, replayLedger, resumedEntry, SHUTDOWN_NOTICE_ENTRY, shutdownStops, spawnedEntry } from "../src/ledger.js";
 import type { OwnerHost } from "../src/owner-identity.js";
 import type { AgentRecord } from "../src/types.js";
 
@@ -57,7 +57,9 @@ const dead: OwnerHost = { bootId: undefined, startTime: () => undefined, pidAliv
 const alive: OwnerHost = { bootId: undefined, startTime: () => undefined, pidAlive: () => true };
 const spawn = (pid = 42) => custom("subagent-spawned", spawnedEntry(record, "/s/child.jsonl", { pid }));
 const resume = (pid = 42) => custom("subagent-resumed", resumedEntry("child-1", { pid }));
-const settle = (status: string) => custom("subagents:record", { id: "child-1", status });
+const settle = (status: string, shutdown?: boolean) => custom("subagents:record", {
+  id: "child-1", type: "general-purpose", description: "review auth.ts", status, ...(shutdown ? { shutdown } : {}),
+});
 const replay = (
   entries: SessionEntry[],
   host: OwnerHost = dead,
@@ -108,6 +110,36 @@ describe("ledger replay", () => {
   it("the crash time is the session file's last saved entry; unset when the file is unreadable", () => {
     expect(replay([spawn()], dead, () => false, () => 4000)[0]).toMatchObject({ crashedAt: 4000, interruptedAt: 5000 });
     expect(replay([spawn()])[0]).toMatchObject({ crashedAt: undefined, interruptedAt: 5000 });
+  });
+});
+
+describe("shutdown stops", () => {
+  const notice = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] });
+
+  it("names a run whose last ledger state is a shutdown stop, with its type and description", () => {
+    expect(shutdownStops([spawn(), settle("stopped", true)])).toEqual([
+      { id: "child-1", type: "general-purpose", description: "review auth.ts" },
+    ]);
+  });
+
+  it("leaves a run the user stopped alone", () => {
+    expect(shutdownStops([spawn(), settle("stopped")])).toEqual([]);
+  });
+
+  it("a resume after a shutdown stop reopens the run", () => {
+    expect(shutdownStops([spawn(), settle("stopped", true), resume()])).toEqual([]);
+  });
+
+  it("a notice marker keeps the id quiet; a later shutdown stop names it again", () => {
+    expect(shutdownStops([spawn(), settle("stopped", true), notice])).toEqual([]);
+    expect(shutdownStops([spawn(), settle("stopped", true), notice, resume(), settle("stopped", true)])).toHaveLength(1);
+  });
+
+  it("does not honor a shutdown-notice marker from a later ledger version", () => {
+    // The marker would silence the stop if it were read; the version guard in readNoticeIds is what keeps it named.
+    expect(shutdownStops([spawn(), settle("stopped", true), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"] })])).toEqual([
+      { id: "child-1", type: "general-purpose", description: "review auth.ts" },
+    ]);
   });
 });
 
