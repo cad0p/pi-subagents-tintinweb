@@ -9,7 +9,10 @@
  * - fire-and-forget calls are recorded on the child (`setStatus`, `setWidget`, `notify`) and never
  *   forwarded, because every one writes a single host-global slot;
  * - blocking dialogs (`select`, `confirm`, `input`, `editor`, `custom`) are queued per agent and
- *   resolved only by a human (through the native view), or cancelled when the agent is stopped;
+ *   resolved only by a human (through the native view), or cancelled when the agent is stopped.
+ *   A host where no human can reach the row (`pi -p`, RPC, JSON) does not queue them at all: every
+ *   blocking call resolves to pi's no-op value at once, or the child's await would never settle and
+ *   the process could never exit (see `answerable`);
  * - `onTerminalInput` never forwards: pi's input subscriptions are process-global.
  *
  * The store lives on `globalThis` under `Symbol.for`, like the reload hand-over, so a dialog queued
@@ -269,6 +272,12 @@ export const childFallbackTheme = {
 export interface ChildUIProxyOptions {
   /** The parent's current theme, so child extensions read real colors. */
   theme?: Theme;
+  /**
+   * Whether a human can reach this child's row: only the TUI's FleetView can answer a parked dialog.
+   * A headless host (print, JSON, RPC) passes false, and every blocking call resolves to the value
+   * pi's own no-op `ctx.ui` returns instead of parking the child's await forever.
+   */
+  answerable?: boolean;
 }
 
 /**
@@ -280,15 +289,20 @@ export interface ChildUIProxyOptions {
 export function createChildUIProxy(id: string, options: ChildUIProxyOptions = {}): ExtensionUIContext {
   const theme = options.theme ?? childFallbackTheme;
   const state = childUIState(id);
+  // pi's no-op context answers every dialog at once; an unanswered one must never park the child.
+  const answerable = options.answerable === true;
 
   const proxy: ExtensionUIContext = {
     select(title, choices, opts) {
+      if (!answerable) return Promise.resolve(undefined);
       return new Promise<string | undefined>((resolve) => queueDialog(id, { kind: "select", title, options: choices, opts }, (v) => resolve(v as string | undefined)));
     },
     confirm(title, message, opts) {
+      if (!answerable) return Promise.resolve(false);
       return new Promise<boolean>((resolve) => queueDialog(id, { kind: "confirm", title, message, opts }, (v) => resolve(v === true)));
     },
     input(title, placeholder, opts) {
+      if (!answerable) return Promise.resolve(undefined);
       return new Promise<string | undefined>((resolve) => queueDialog(id, { kind: "input", title, placeholder, opts }, (v) => resolve(v as string | undefined)));
     },
     notify(message, type) {
@@ -318,6 +332,7 @@ export function createChildUIProxy(id: string, options: ChildUIProxyOptions = {}
     setHeader() {},
     setTitle() {},
     custom<T>(factory: Parameters<ExtensionUIContext["custom"]>[0], _customOptions?: Parameters<ExtensionUIContext["custom"]>[1]) {
+      if (!answerable) return Promise.resolve(undefined as T);
       return new Promise<T>((resolve) => {
         const wrapped = (tui: TUI, dialogTheme: Theme, keybindings: KeybindingsManager, done: (result: unknown) => void) =>
           factory(tui, dialogTheme, keybindings, done);
@@ -334,6 +349,7 @@ export function createChildUIProxy(id: string, options: ChildUIProxyOptions = {}
       return "";
     },
     editor(title, prefill) {
+      if (!answerable) return Promise.resolve(undefined);
       return new Promise<string | undefined>((resolve) => queueDialog(id, { kind: "editor", title, prefill }, (v) => resolve(v as string | undefined)));
     },
     addAutocompleteProvider() {},

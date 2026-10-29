@@ -491,7 +491,7 @@ describe("native transcript view", () => {
     const h = harness();
     h.openChild();
     let resolved: string | undefined | "pending" = "pending";
-    const proxy = createChildUIProxy("child-1");
+    const proxy = createChildUIProxy("child-1", { answerable: true });
     void proxy.select("Pick one", ["a", "b"]).then((value) => { resolved = value; });
     await Promise.resolve();
     expect(h.im.dialogs.length).toBe(1);
@@ -505,7 +505,7 @@ describe("native transcript view", () => {
     clearChildUI("proxy-child");
     const flags: Array<{ title: string } | undefined> = [];
     onChildDialogFlag("proxy-child", (flag) => flags.push(flag));
-    const proxy = createChildUIProxy("proxy-child");
+    const proxy = createChildUIProxy("proxy-child", { answerable: true });
     proxy.setStatus("child-status", "working");
     proxy.notify("child notice", "warning");
     expect(childUIState("proxy-child").statuses.get("child-status")).toBe("working");

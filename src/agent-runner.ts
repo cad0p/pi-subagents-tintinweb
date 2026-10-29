@@ -453,6 +453,12 @@ export interface RunOptions {
   onChildDialog?: (dialog: { since: number; title: string } | undefined) => void;
   /** The parent's theme, so a child's `ctx.ui.theme` reads real colors. */
   uiTheme?: Theme;
+  /**
+   * Whether a human can reach this child's parked dialogs. Only the TUI's FleetView can answer one;
+   * every other host (print, JSON, RPC) must resolve them to pi's no-op values instead of parking
+   * the child's await forever.
+   */
+  dialogsAnswerable?: boolean;
   onSessionCreated?: (session: AgentSession, lifecycle: SessionLifecycle) => void;
   /** Called with the resolved child settings before its session is built, so a failed reload can rebuild it. */
   onChildSettings?: (settings: ChildSessionSettings) => void;
@@ -846,7 +852,10 @@ export interface ChildSessionSettings {
 export async function createChildSession(
   settings: ChildSessionSettings,
   sessionManager: SessionManager,
-  options: Pick<RunOptions, "agentId" | "onToolActivity" | "parentAgentId" | "onChildDialog" | "uiTheme">,
+  options: Pick<
+    RunOptions,
+    "agentId" | "onToolActivity" | "parentAgentId" | "onChildDialog" | "uiTheme" | "dialogsAnswerable"
+  >,
 ): Promise<AgentSession> {
   const {
     type,
@@ -1217,7 +1226,10 @@ export async function createChildSession(
   const childId = options.agentId ?? "child";
   if (options.onChildDialog) onChildDialogFlag(childId, options.onChildDialog);
   await session.bindExtensions({
-    uiContext: createChildUIProxy(childId, { theme: options.uiTheme }),
+    uiContext: createChildUIProxy(childId, {
+      theme: options.uiTheme,
+      answerable: options.dialogsAnswerable === true,
+    }),
     onError: (err) => routedExtensionError(err.extensionPath, options.agentId, options.onToolActivity),
   });
 

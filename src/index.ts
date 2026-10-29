@@ -866,6 +866,10 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   async function runSessionStart(event: SessionStartEvent, ctx: ExtensionContext): Promise<void> {
     currentCtx = ctx;
+    // Only the root TUI has a FleetView row a human can answer a parked dialog from. Print, JSON and
+    // RPC hosts must not queue one at all: the child's await would never settle and the process could
+    // never exit. A child activation's own manager never spawns, so it stays false there.
+    manager.setDialogsAnswerable(isRoot && ctx.hasUI && ctx.mode === "tui");
     if (leakedChildContext) {
       const frames = leakedChildContext.split("\n").slice(1, 8).join("\n");
       ctx.ui.notify(`pi-subagents: this load ran inside a finished subagent construction's async context and was loaded as the main session. Please report:\n${frames}`, "warning");

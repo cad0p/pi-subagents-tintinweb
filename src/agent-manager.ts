@@ -362,6 +362,12 @@ export class AgentManager {
   private ledgerWriters = new Map<string, LedgerWriter>();
   /** Supplied by the extension: re-derives the child settings of a recovered record, which has none until its run starts. */
   resolveSettings?: (record: AgentRecord) => Promise<ChildSessionSettings>;
+  /**
+   * Whether a human can reach a child's parked dialog: only the root TUI's FleetView can answer one.
+   * The extension sets it once per activation from the root's context; it stays false in every
+   * headless host (print, JSON, RPC), where a parked dialog would hang the child and the process.
+   */
+  private dialogsAnswerable = false;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -446,6 +452,11 @@ export class AgentManager {
 
   getEvictAfterMinutes(): number {
     return this.evictAfterMinutes;
+  }
+
+  /** Whether a human can answer a child's parked dialogs. See `dialogsAnswerable`. */
+  setDialogsAnswerable(answerable: boolean): void {
+    this.dialogsAnswerable = answerable;
   }
 
   /**
@@ -677,6 +688,7 @@ export class AgentManager {
         record.dialog = dialog;
       },
       uiTheme: ctx.ui?.theme,
+      dialogsAnswerable: this.dialogsAnswerable,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
@@ -1710,6 +1722,7 @@ export class AgentManager {
           return createChildSession(childSettings, sessionManager, {
             agentId: id,
             parentAgentId: record.parentAgentId,
+            dialogsAnswerable: this.dialogsAnswerable,
             onChildDialog: (dialog) => {
               record.dialog = dialog;
             },

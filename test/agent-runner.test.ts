@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ScopedModel } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, ScopedModel } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -167,6 +167,7 @@ import {
 } from "../src/agent-runner.js";
 import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
+import { answerChildDialog, childUIState, clearChildUI, pendingChildDialogs } from "../src/ui/child-ui.js";
 import type { LifetimeUsage } from "../src/usage.js";
 
 function createSession(finalText: string) {
@@ -2586,5 +2587,68 @@ describe("agent-runner model scope", () => {
       toolName: expect.stringContaining("scoped-models-error:"),
     }));
     expect(createAgentSession.mock.calls[0][0].scopedModels).toHaveLength(1);
+  });
+});
+
+describe("agent-runner child ui context", () => {
+  const boundUI = (session: { bindExtensions: { mock: { calls: unknown[][] } } }): ExtensionUIContext =>
+    (session.bindExtensions.mock.calls[0][0] as { uiContext: ExtensionUIContext }).uiContext;
+
+  afterEach(() => {
+    clearChildUI("headless-dialogs");
+    clearChildUI("answerable-dialogs");
+  });
+
+  it("binds the child's ui proxy, so hasUI is true and its fire-and-forget calls are recorded", async () => {
+    const { session } = createSession("BOUND");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "answerable-dialogs", dialogsAnswerable: true });
+
+    // pi derives hasUI from a bound uiContext other than its own no-op one: binding ours is what
+    // flips the child's hasUI to true, which is why the flag cannot be hidden.
+    const ui = boundUI(session);
+    expect(ui).toBeDefined();
+    ui.setStatus("probe", "on");
+    expect(childUIState("answerable-dialogs").statuses.get("probe")).toBe("on");
+  });
+
+  it("resolves a headless child's dialog at once instead of parking its await", async () => {
+    const { session } = createSession("HEADLESS");
+    createAgentSession.mockResolvedValue({ session });
+
+    const run = await runAgent(ctx, "Explore", "go", { pi, agentId: "headless-dialogs" });
+
+    // Print, JSON and RPC hosts bind no human-reachable row: pi's no-op values must come back now.
+    const ui = boundUI(session);
+    const answer = await Promise.race([
+      ui.confirm("Continue?", "nobody is at the row"),
+      new Promise((resolve) => setTimeout(() => resolve("parked"), 50)),
+    ]);
+    expect(answer).toBe(false);
+    await expect(ui.select("Pick one", ["a", "b"])).resolves.toBeUndefined();
+    expect(pendingChildDialogs("headless-dialogs")).toHaveLength(0);
+    // The child's turn finished: the run is not held open by the dialog it asked.
+    expect(run.responseText).toBe("HEADLESS");
+  });
+
+  it("parks the dialog when the root can answer it, and the record flag follows the queue", async () => {
+    const { session } = createSession("ANSWERED");
+    createAgentSession.mockResolvedValue({ session });
+    const flags: Array<{ title: string } | undefined> = [];
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "answerable-dialogs",
+      dialogsAnswerable: true,
+      onChildDialog: (dialog) => flags.push(dialog),
+    });
+
+    const pending = boundUI(session).confirm("Continue?", "a human is at the row");
+    expect(pendingChildDialogs("answerable-dialogs")).toHaveLength(1);
+    expect(flags.at(-1)?.title).toBe("Continue?");
+    answerChildDialog("answerable-dialogs", true);
+    await expect(pending).resolves.toBe(true);
+    expect(flags.at(-1)).toBeUndefined();
   });
 });

@@ -2620,3 +2620,26 @@ describe("AgentManager — PR119 r1 findings", () => {
     }
   });
 });
+
+describe("AgentManager — dialog answerability", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("forwards the root's dialog answerability to a spawn and to a reopen", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    // A headless root never sets it: the default must be "nobody can answer".
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+    expect(vi.mocked(runAgent).mock.lastCall?.[3]).toMatchObject({ dialogsAnswerable: false });
+
+    await vi.waitFor(() => expect(manager.getRecord(id)?.session).toBeUndefined());
+
+    manager.setDialogsAnswerable(true);
+    await reopen(manager, id);
+    expect(vi.mocked(createChildSession).mock.lastCall?.[2]).toMatchObject({ dialogsAnswerable: true });
+  });
+});
