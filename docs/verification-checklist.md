@@ -252,14 +252,23 @@ the merge reports "Already up to date" and the revision check compares two stale
 values. `rev-parse --abbrev-ref HEAD` catches the checkout that fast-forwarded
 while sitting on some other branch.
 
-A refusal means one of two things, with different remedies: local edits the
-fast-forward would overwrite (commit or discard them), or commits on the local
-branch that `origin/main` does not have (`fatal: Not possible to fast-forward`).
-The second is a checkout that drifted, and it needs a human decision, not a
-reset.
+A refusal means one of three things, with different remedies:
 
-Remove the merged branch's worktree here too (`git worktree remove <path>`);
-`git worktree prune` only matters for a directory deleted by hand.
+- `error: Your local changes to the following files would be overwritten by merge`
+  — edits the fast-forward would clobber. Stash or discard them; they belong in
+  the worktree. Committing them is not a remedy, it turns this into the next
+  case.
+- `error: The following untracked working tree files would be overwritten by merge`
+  — move or delete those files first.
+- `fatal: Not possible to fast-forward, aborting.` — the local branch has commits
+  `origin/main` does not. That is a checkout that drifted, and it needs a human
+  decision, not a reset.
+
+Remove the merged branch's worktree here too (`git worktree remove <path>`). It
+refuses while the worktree holds untracked, non-ignored files — capture files
+kept as evidence, for instance — so remove them first, or pass `--force` once
+you have checked that nothing there is worth keeping. `git worktree prune` only
+matters for a directory deleted by hand.
 
 ## Fork release rules
 
