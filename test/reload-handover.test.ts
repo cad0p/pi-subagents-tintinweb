@@ -19,7 +19,6 @@ import {
   ReloadHandover,
   slotHoldersOf,
   takeHandovers,
-  takeHeldHandovers,
   takeNudgeEntries,
   toDto,
   toSpawnData,
@@ -129,25 +128,17 @@ describe("ReloadHandover buffering", () => {
     expect(takeNudgeEntries(older)).toEqual([{ id: "n1" }, { id: "n2" }]);
   });
 
-  it("takes every hand-over it is given once, so a late adoption cannot strand what one carries", () => {
+  it("hands out the unreported spend alone, leaving the queued specs for the activation that adopts it", () => {
     const spec = { id: "q", type: "general-purpose" as const, prompt: "p", options: { description: "d" } };
-    const first = new ReloadHandover([], [spec], [], { input: 1, output: 0, cacheWrite: 0 }, stubPool);
-    const second = new ReloadHandover([], [], [], { input: 2, output: 0, cacheWrite: 0 }, stubPool);
-    const take = vi.spyOn(ReloadHandover.prototype, "take");
-    try {
-      const carried = takeHeldHandovers([first, second]);
+    const delta: LifetimeUsage = { input: 1, output: 0, cacheWrite: 0 };
+    const handover = new ReloadHandover([], [spec], [], delta, stubPool);
 
-      expect(take).toHaveBeenCalledTimes(2);
-      expect(carried.get(first)).toEqual({ queued: [spec], unreported: { input: 1, output: 0, cacheWrite: 0 } });
-      expect(carried.get(second)).toEqual({ queued: [], unreported: { input: 2, output: 0, cacheWrite: 0 } });
-      // A second pass carries nothing: the take ran once per hand-over, not once per reader.
-      expect([...takeHeldHandovers([first, second]).values()]).toEqual([
-        { queued: [], unreported: undefined },
-        { queued: [], unreported: undefined },
-      ]);
-    } finally {
-      take.mockRestore();
-    }
+    // Read once, before anything can stop the hand-over, and only that: a queue taken here would not survive a
+    // republish to the next activation.
+    expect(handover.takeUnreported()).toEqual(delta);
+    expect(handover.takeUnreported()).toBeUndefined();
+    expect(handover.take().queued).toEqual([spec]);
+    expect(handover.takeUnreported()).toBeUndefined();
   });
 
   it("reads the current hand-over's slot holders and nudge targets unchanged", () => {

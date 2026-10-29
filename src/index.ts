@@ -36,7 +36,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeHeldHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -960,7 +960,7 @@ export default function (pi: ExtensionAPI) {
         held = [];
       }
     } else {
-      // Every hand-over in `held` was taken when this activation adopted it (`takeHeldHandovers`), so its unreported
+      // Every hand-over in `held` was read when this activation adopted it (`takeUnreported`), so its unreported
       // delta already sits in this activation's `pendingUsage`. That pool's only consumer is a tool result of this
       // activation (`withUsageReporting`), and `session_shutdown` has run: this activation returns none again. The
       // value is unobservable here and is not read a second time; `stopStranded` is where it is reported, in an
@@ -1012,11 +1012,15 @@ export default function (pi: ExtensionAPI) {
   // replay would otherwise drop items that were not taken yet.
   async function adoptHandovers(ctx: ExtensionContext): Promise<void> {
     held = takeHandovers(ctx.sessionManager.getSessionId());
-    // Take before anything else touches the list: an adoption that returns early must not leave the hand-overs behind
-    // it untaken, and none of them may be stopped before its queued specs and unreported spend are read. The loop
-    // below reads this map, so `take()` runs exactly once per hand-over.
-    const handed = takeHeldHandovers(held);
-    for (const taken of handed.values()) if (taken.unreported) pendingUsage.add(taken.unreported);
+    // Read the unreported spend of every hand-over before anything touches the list: a stop drops it with the
+    // hand-over, and this is the delta the old activation already emitted live. Only that accessor is hoisted. The
+    // queued specs stay in their hand-over until this loop reaches it: an adoption that returns early (a shutdown
+    // mid-way through `held`) republishes every hand-over behind it, and a queue taken by this activation would not
+    // survive that republish (see `takeUnreported`).
+    for (const h of held) {
+      const unreported = h.takeUnreported();
+      if (unreported) pendingUsage.add(unreported);
+    }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
     manager.setDrainingPools(held.map((h) => h.draining));
@@ -1038,7 +1042,10 @@ export default function (pi: ExtensionAPI) {
       }
       fleet.ensureTimer();
     }
-    for (const [h, taken] of handed) {
+    for (const h of held) {
+      // The queued specs are taken here, in the loop, and not with the unreported spend above: this is the activation
+      // that spawns them, and a hand-over this loop has not reached must be republished with its queue intact.
+      const taken = h.take();
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
       const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]

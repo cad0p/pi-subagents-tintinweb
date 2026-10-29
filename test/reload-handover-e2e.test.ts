@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listSubagentWork } from "../src/background-work.js";
 import { type EventBus, type RpcReply } from "../src/cross-extension-rpc.js";
 import { IMPL_KEY, type ImplV1, type RootRoute } from "../src/impl-route.js";
-import { type AgentDto, type DrainingPool, HANDOVER_KEY, type HandoverEvent, publishHandovers, ReloadHandover, takeHandovers } from "../src/reload-handover.js";
+import { type AgentDto, type DrainingPool, fromDto, HANDOVER_KEY, type HandoverEvent, publishHandovers, ReloadHandover, takeHandovers } from "../src/reload-handover.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 import { MANAGER_KEY } from "./helpers/subagents-harness.js";
@@ -1805,7 +1805,7 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(toolResultUsage(started, "Agent")?.totalTokens).toBe(10);
   }, 20_000);
 
-  it("still emits a stopped hand-over's late usage with reportUsage off, and keeps it out of the parent's totals", async () => {
+  it("still emits a stopped hand-over's late usage with reportUsage off", async () => {
     const dto = handoverItem("late-run");
     const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool());
     publishHandovers("replaced-session", [handover]);
@@ -1822,41 +1822,97 @@ describe("subagents across a real /reload (faux provider)", () => {
     handover.emit({ kind: "usage", dto, usage: { input: 7, output: 3, cacheWrite: 0 } });
     off();
 
-    // reportUsage decides whether the parent session's own totals include the spend, not whether it happened.
+    // What this pins is the ungated ledger emit: move the `subagents:usage` emit under `if (reportUsage)` and
+    // it goes red. reportUsage decides whether the parent session's own totals include the spend, not whether it
+    // happened — and the off path adds nothing to a tool result for a reason this cannot discriminate
+    // (`withUsageReporting` returns before draining), so the assertion below records the outcome, it does not gate it.
     expect(reported.map((event) => [event.id, event.usage.totalTokens])).toEqual([["late-run", 10]]);
     await started.prompt("spawn-now");
     expect(toolResultUsage(started, "Agent")?.usage).toBeUndefined();
   }, 20_000);
 
-  it("takes every hand-over a reload publishes before any of its items is adopted", async () => {
+  it("republishes a hand-over it has not reached, queued spec intact, when a reload interrupts the adoption", async () => {
     const root = session;
     if (!root) throw new Error("no session");
-    const first = new ReloadHandover([{ dto: handoverItem("item-a") }], [], [], undefined, emptyPool());
-    const second = new ReloadHandover([{ dto: handoverItem("item-b") }], [], [], undefined, emptyPool());
-    const order: string[] = [];
-    const wrap = (handover: ReloadHandover, id: string) => {
-      const take = handover.take.bind(handover);
-      const removeItem = handover.removeItem.bind(handover);
-      // `take` is the hand-over's, `removeItem` runs once the adoption of its item succeeded.
-      Object.assign(handover, {
-        take: () => {
-          order.push(`take ${id}`);
-          return take();
-        },
-        removeItem: (item: Parameters<ReloadHandover["removeItem"]>[0]) => {
-          order.push(`adopt ${id}`);
-          removeItem(item);
-        },
-      });
-    };
-    wrap(first, "item-a");
-    wrap(second, "item-b");
+    const first = new ReloadHandover([{ dto: handoverItem("item-a") }, { dto: handoverItem("item-b") }], [], [], undefined, emptyPool());
+    const second = new ReloadHandover([], [{ id: "queued-spec", type: "general-purpose", prompt: "p", options: { description: "queued" } }], [], undefined, emptyPool());
+    let fired = false;
+    let shutdown: Promise<unknown> = Promise.resolve();
+    const removeItem = first.removeItem.bind(first);
+    // A reload lands while this activation is adopting `first`: `second` has not been reached yet. Its hand-over is
+    // republished, and a take this activation already ran would leave the successor with an empty queue.
+    Object.assign(first, {
+      removeItem: (item: Parameters<ReloadHandover["removeItem"]>[0]) => {
+        if (!fired) {
+          fired = true;
+          shutdown = root.extensionRunner.emit({ type: "session_shutdown", reason: "reload" });
+        }
+        removeItem(item);
+      },
+    });
     const undo = publishExtra([first, second]);
     try {
       await reloadRoot(root);
-      // Both takes run before the first adoption: a take left in the adoption loop interleaves, and an adoption that
-      // returns early would leave the hand-overs behind it untaken.
-      expect(order).toEqual(["take item-a", "take item-b", "adopt item-a", "adopt item-b"]);
+      await vi.waitFor(() => expect(fired).toBe(true), { timeout: 10_000 });
+      await shutdown;
+      const store = (globalThis as unknown as Record<symbol, Map<string, ReloadHandover[]> | undefined>)[HANDOVER_KEY];
+      const republished = store?.get(root.sessionManager.getSessionId()) ?? [];
+      expect(republished).toContain(second);
+      expect(second.take().queued.map((spec) => spec.id)).toEqual(["queued-spec"]);
+    } finally {
+      undo();
+    }
+  }, 20_000);
+
+  it("reports a stopped hand-over's late usage before announcing the disposal it precedes", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("quit-late");
+    const usage = { input: 7, output: 3, cacheWrite: 0 };
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, {
+      runningCount: () => 1,
+      // The quit site stops the hand-over and then aborts its pool. The last message an aborted run reported arrives
+      // here (a faux child reports none on abort), which is the wiring under test: with `h.stop()` it is dropped.
+      abortAll: () => {
+        handover.emit({ kind: "usage", dto, usage });
+        return 1;
+      },
+      dispose: () => {},
+      ownAgents: () => [fromDto(dto)],
+    });
+    let adopted = false;
+    let markAdopted: () => void = () => {};
+    const adoptedHandover = new Promise<void>((resolve) => {
+      markAdopted = resolve;
+    });
+    const attach = handover.attach.bind(handover);
+    // Attached last in the adoption, after every hand-over's items: the quit site runs once this activation holds it.
+    Object.assign(handover, {
+      attach: (listener: (event: HandoverEvent) => void) => {
+        attach(listener);
+        adopted = true;
+        markAdopted();
+      },
+    });
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+      await vi.waitFor(() => expect(adopted).toBe(true), { timeout: 10_000 });
+      await adoptedHandover;
+      const events = publishedRoot().pi.events;
+      const order: string[] = [];
+      const offUsage = events.on("subagents:usage", (event) => {
+        if ((event as { id?: string }).id === dto.id) order.push("usage:quit-late");
+      });
+      const offDisposed = events.on("subagents:disposed", (event) => order.push(`disposed:${(event as { reason?: string }).reason}`));
+      try {
+        await root.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      } finally {
+        offUsage();
+        offDisposed();
+      }
+      // The ledger event lands before the disposal a ledger flushes on: the sink is wired at the quit site.
+      expect(order).toEqual(["usage:quit-late", "disposed:quit"]);
     } finally {
       undo();
     }

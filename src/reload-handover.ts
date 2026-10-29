@@ -26,6 +26,13 @@ import type { LifetimeUsage } from "./usage.js";
  * know; a hand-over that lacks them stays published for a reader that knows it. A field added after the first release
  * may be absent from an older hand-over: read it through an accessor that tolerates absence (`slotHoldersOf`,
  * `takeNudgeEntries`), never directly. Absence of an added field is never a reason to reject a hand-over.
+ *
+ * The members are permanent, their signatures are not: `stop`'s `replay` sink is this release's addition, and a
+ * hand-over published by an older release carries that release's `stop`, which takes no argument (`stop.length` is 0
+ * there) and drops the `usage` events it never delivered. A reader of this release that stops such a hand-over loses
+ * that delta silently, and nothing on the reader's side recovers it: this is a documented limitation, not a guard to
+ * write. A reader that needs the delta from an older hand-over does not stop it — it attaches a listener for the events
+ * and disposes the hand-over's idle items itself through `teardownChildSession`.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
@@ -117,10 +124,25 @@ export class ReloadHandover {
     this.unreported = unreported;
   }
 
-  /** Hands out the queued specs and unreported usage; each is returned once. Idle items and nudges wait for their own accessors. */
+  /**
+   * Hands out the queued specs and whatever unreported usage `takeUnreported` left; each is returned once. Idle items
+   * and nudges wait for their own accessors.
+   */
   take(): { queued: QueuedSpec[]; unreported?: LifetimeUsage } {
     const taken = { queued: this.queued, unreported: this.unreported };
     this.queued = [];
+    this.unreported = undefined;
+    return taken;
+  }
+
+  /**
+   * Hands out the unreported spend; returned once. Kept apart from `take` so a reader can read it before anything can
+   * stop the hand-over — a stop drops it — without consuming the queued specs, which belong to the activation that
+   * adopts this hand-over: an activation that shuts down mid-list republishes the hand-overs it never reached, and a
+   * queue taken by it would not survive that republish.
+   */
+  takeUnreported(): LifetimeUsage | undefined {
+    const taken = this.unreported;
     this.unreported = undefined;
     return taken;
   }
@@ -177,8 +199,9 @@ export class ReloadHandover {
    *
    * `replay` receives every `usage` event this hand-over never delivered: the ones buffered here, in order, and every
    * one `emit` is given afterwards. A stopped hand-over is never adopted, so that sink is the only reader the spend
-   * has left — pass the consumer a live `usage` event goes through. The parameter is optional only for a reader that
-   * stops a hand-over this release published: it has no sink and drops the events, as it always did.
+   * has left — pass the consumer a live `usage` event goes through. The parameter is optional because it is not part
+   * of the contract: a hand-over published by an older release carries that release's `stop`, which ignores it and
+   * drops the events (see HANDOVER_KEY). Nothing on this side recovers that delta for it.
    */
   stop(replay?: (dto: AgentDto, usage: LifetimeUsage) => void): void {
     this.detach();
@@ -291,23 +314,6 @@ export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
 /** The pending nudges as entries: releases before nested delivery handed plain ids over. */
 export function takeNudgeEntries(handover: ReloadHandover): NudgeEntry[] {
   return (handover.takeNudged() as (NudgeEntry | string)[]).map((nudge) => (typeof nudge === "string" ? { id: nudge } : nudge));
-}
-
-/** What one hand-over handed out when it was taken: its queued specs and the spend no tool result carried away. */
-export interface TakenHandover {
-  queued: QueuedSpec[];
-  unreported?: LifetimeUsage;
-}
-
-/**
- * Takes every hand-over in `held` exactly once, before anything else reads or ends it, and returns what each carried,
- * keyed by hand-over so the caller's adoption loop never calls `take()` a second time.
- *
- * The take has to come first: an adoption that returns early (a shutdown mid-way through `held`) would otherwise
- * leave every hand-over behind it untaken, and a stopped hand-over would lose the queued specs it still holds.
- */
-export function takeHeldHandovers(held: ReloadHandover[]): Map<ReloadHandover, TakenHandover> {
-  return new Map(held.map((handover) => [handover, handover.take()]));
 }
 
 /** Takes the handovers this release reads; each is returned once. Any other hand-over stays published for a reader that knows it. */
