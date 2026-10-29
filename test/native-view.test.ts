@@ -85,6 +85,9 @@ function childSession(over: Record<string, unknown> = {}): any {
       getEntries: () => [],
       getEntryCount: () => 0,
     },
+    // A live session has these too, and pi's render reaches two of them through `this.session`.
+    settingsManager: { getShowCacheMissNotices: () => true, getExternalEditorCommand: () => undefined },
+    retryAttempt: 2,
     thinkingLevel: "off",
     autoCompactionEnabled: false,
     isStreaming: false,
@@ -103,20 +106,37 @@ function childSession(over: Record<string, unknown> = {}): any {
   };
 }
 
-/** pi 1.4.0's InteractiveMode surface: these four are prototype getters, and none has a setter. */
-function interactiveModeProto(): any {
+/**
+ * pi 1.4.0's InteractiveMode surface: the four accessors are prototype getters with no setter, and
+ * renderSessionEntries is a prototype method, not a field on the instance.
+ */
+function interactiveModeProto(
+  renderSessionEntries: (this: any, entries: any[], options?: { populateHistory?: boolean }) => void,
+): any {
   return {
     get session() { return this.runtimeHost.session; },
     get agent() { return this.session.agent; },
     get sessionManager() { return this.session.sessionManager; },
     get settingsManager() { return this.session.settingsManager; },
+    renderSessionEntries,
   };
+}
+
+/** The fields pi's own renderSessionItems reads, as the fake render saw them. */
+interface SeenRuntime {
+  session: any;
+  sessionManager: any;
+  settingsManager: any;
+  extensionRunner: any;
+  retryAttempt: number;
+  hideThinkingBlock: boolean;
+  toolOutputExpanded: boolean;
 }
 
 interface Harness {
   im: any;
   hostSession: any;
-  seenRuntime: Array<{ session: any; sessionManager: any }>;
+  seenRuntime: SeenRuntime[];
   record: AgentRecord;
   manager: any;
   ctx: NativeViewContext;
@@ -125,7 +145,8 @@ interface Harness {
   documentContainer: Container;
   hostDraft: FakeEditor;
   setFooter: ReturnType<typeof vi.fn>;
-  renderSessionEntries: ReturnType<typeof vi.fn>;
+  /** The prototype method, so a test can count or break calls without an own property on the fake. */
+  renderSpy: ReturnType<typeof vi.fn>;
   footerFactory: () => ((tui: any, t: any, d: any) => any) | undefined;
   openChild: () => void;
 }
@@ -147,11 +168,54 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
   // with no setter. A plain writable field here is what let a throwing assignment ship.
   const hostSession = {
     extensionRunner: { getEntryRenderer: () => undefined },
-    sessionManager: { buildContextEntries: () => [message("user", "HOST TEXT")], getCwd: () => "/host" },
-    settingsManager: { getExternalEditorCommand: () => undefined },
+    sessionManager: {
+      buildContextEntries: () => [message("user", "HOST TEXT")],
+      getEntries: () => [],
+      getCwd: () => "/host",
+    },
+    settingsManager: {
+      getExternalEditorCommand: () => undefined,
+      getShowCacheMissNotices: () => false,
+    },
+    retryAttempt: 0,
   };
-  const seenRuntime: Array<{ session: any; sessionManager: any }> = [];
-  const im: any = Object.assign(Object.create(interactiveModeProto()), {
+  const seenRuntime: SeenRuntime[] = [];
+  // pi's real renderSessionEntries is a prototype method that reads every runtime field off this: a
+  // fake that reads only the entries it was handed cannot tell a missing swap from a good render.
+  const renderSpy = vi.fn(function (this: any, entries: any[], renderOptions?: { populateHistory?: boolean }) {
+    const session = this.session;
+    const sessionManager = this.sessionManager;
+    const settingsManager = this.settingsManager;
+    seenRuntime.push({
+      session,
+      sessionManager,
+      settingsManager,
+      extensionRunner: session.extensionRunner,
+      retryAttempt: session.retryAttempt,
+      hideThinkingBlock: this.hideThinkingBlock,
+      toolOutputExpanded: this.toolOutputExpanded,
+    });
+    // renderSessionItems' prelude: the cache-notice setting and the branch behind it, then the map.
+    if (settingsManager.getShowCacheMissNotices()) sessionManager.getEntries();
+    this.pendingTools.clear();
+    for (const entry of entries) {
+      if (entry.type === "custom") {
+        const renderer = session.extensionRunner.getEntryRenderer(entry.customType);
+        const component = renderer?.(entry, {}, theme);
+        if (component) this.chatContainer.addChild(component);
+      } else if (entry.type === "message") {
+        if (entry.message.role === "user") {
+          this.chatContainer.addChild(new UserMessageComponent(textOf(entry.message)));
+          if (renderOptions?.populateHistory) this.editor.addToHistory?.(textOf(entry.message));
+        } else if (entry.message.role === "assistant") {
+          // pi passes its own hideThinkingBlock field here, never a constant.
+          this.chatContainer.addChild(new AssistantMessageComponent(entry.message, this.hideThinkingBlock));
+        }
+      }
+    }
+    this.ui.requestRender();
+  });
+  const im: any = Object.assign(Object.create(interactiveModeProto(renderSpy)), {
     runtimeHost: { session: hostSession },
     chatContainer: hostContainer,
     documentContainer,
@@ -201,28 +265,6 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     },
   });
 
-  im.renderSessionEntries = vi.fn(function (entries: any[], renderOptions?: { populateHistory?: boolean }) {
-    // What the live instance looks like from inside a render: the shadowed accessors, or the host's.
-    seenRuntime.push({ session: this.session, sessionManager: this.sessionManager });
-    this.pendingTools.clear();
-    for (const entry of entries) {
-      if (entry.type === "custom") {
-        const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
-        const component = renderer?.(entry, {}, theme);
-        if (component) this.chatContainer.addChild(component);
-      } else if (entry.type === "message") {
-        if (entry.message.role === "user") {
-          this.chatContainer.addChild(new UserMessageComponent(textOf(entry.message)));
-          if (renderOptions?.populateHistory) this.editor.addToHistory?.(textOf(entry.message));
-        } else if (entry.message.role === "assistant") {
-          const component = new AssistantMessageComponent(entry.message, false);
-          this.chatContainer.addChild(component);
-        }
-      }
-    }
-    this.ui.requestRender();
-  });
-
   const record: AgentRecord = {
     id: "child-1",
     type: "general-purpose",
@@ -266,7 +308,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     documentContainer,
     hostDraft,
     setFooter,
-    renderSessionEntries: im.renderSessionEntries,
+    renderSpy,
     footerFactory: () => im.footerFactory,
     openChild: () => {
       expect(view.open(record.id)).toBe("opened");
@@ -333,11 +375,22 @@ describe("native transcript view", () => {
   it("shadows pi's session accessors for the render and gives the getters back afterwards", () => {
     const h = harness();
     const child = h.record.session;
+    // pi reads hideThinkingBlock off the instance, not off the session: flip it to prove the fake
+    // reads the field rather than a constant. It stays the host's on the child path, by design.
+    h.im.hideThinkingBlock = true;
     h.openChild();
-    // Inside the render the getters resolved to the child, which is what pi's own code reads.
+    // A prototype method in pi, so the instance carries no own property for it either.
+    expect(Object.getOwnPropertyDescriptor(h.im, "renderSessionEntries")).toBeUndefined();
+    // Inside the render every field pi's renderSessionItems reads resolved to the child's, which
+    // is what pi's own code sees; a render that only echoed the entries it was handed would pass
+    // whether or not the view swapped anything.
     const seen = h.seenRuntime.at(-1)!;
     expect(seen.session).toBe(child);
     expect(seen.sessionManager).toBe(child.sessionManager);
+    expect(seen.settingsManager).toBe(child.settingsManager);
+    expect(seen.extensionRunner).toBe(child.extensionRunner);
+    expect(seen.retryAttempt).toBe(2);
+    expect(seen.hideThinkingBlock).toBe(true);
     // Afterwards no own property is left: the prototype getter is the restore, nothing to save.
     for (const name of ["session", "sessionManager"]) {
       expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
@@ -352,7 +405,7 @@ describe("native transcript view", () => {
 
   it("restores the accessors and the host slot when the child render throws", () => {
     const h = harness();
-    h.im.renderSessionEntries.mockImplementationOnce(() => { throw new Error("render boom"); });
+    h.renderSpy.mockImplementationOnce(() => { throw new Error("render boom"); });
     expect(() => h.view.open("child-1")).toThrow("render boom");
 
     for (const name of ["session", "sessionManager"]) {
@@ -397,6 +450,27 @@ describe("native transcript view", () => {
     expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
   });
 
+  // The settled path has no live session, so the sessionManager shadow is the only thing pointing
+  // the render at the child's transcript: everything else derived from the host session stays the
+  // host's, one of the known mixed segments.
+  it("a settled record's render reads the settled manager through the shadowed accessor", () => {
+    const h = harness({ record: { session: undefined } });
+    const settled = {
+      buildContextEntries: () => [message("user", "SETTLED TEXT")],
+      getEntries: () => [],
+      getCwd: () => "/settled",
+    };
+    h.manager.settledSessionManager.mockReturnValue(settled);
+    h.openChild();
+    expect(h.documentContainer.render(120).join("\n")).toContain("SETTLED TEXT");
+    const seen = h.seenRuntime.at(-1)!;
+    // The manager pi's render reads is the settled one, not the host's, and it came from the
+    // shadow rather than from the entries the view built.
+    expect(seen.sessionManager).toBe(settled);
+    expect(seen.session).toBe(h.hostSession);
+    expect(seen.settingsManager).toBe(h.hostSession.settingsManager);
+    expect(seen.extensionRunner).toBe(h.hostSession.extensionRunner);
+  });
   it("T2 open detaches the host and renders only the child, including its custom entry", () => {
     const h = harness();
     (h.record.session as any).sessionManager.buildContextEntries = () => [
@@ -491,10 +565,10 @@ describe("native transcript view", () => {
     h.openChild();
     expect(h.im.showError).not.toBe(saved.showError);
     h.im.isShuttingDown = true;
-    const before = h.renderSessionEntries.mock.calls.length;
+    const before = h.renderSpy.mock.calls.length;
     h.setFooter.mockClear();
     h.view.close("quit");
-    expect(h.renderSessionEntries.mock.calls.length).toBe(before);
+    expect(h.renderSpy.mock.calls.length).toBe(before);
     expect(h.setFooter).not.toHaveBeenCalled();
     for (const [key, fn] of Object.entries(saved)) expect((h.im as any)[key]).toBe(fn);
 
@@ -525,15 +599,15 @@ describe("native transcript view", () => {
     const h = harness();
     h.openChild();
     h.im.isShuttingDown = true;
-    const before = h.renderSessionEntries.mock.calls.length;
+    const before = h.renderSpy.mock.calls.length;
     h.view.onRecordEvent("child-1");
     h.view.repaint();
-    expect(h.renderSessionEntries.mock.calls.length).toBe(before);
+    expect(h.renderSpy.mock.calls.length).toBe(before);
     h.im.isShuttingDown = false;
     h.view.close("quit");
-    const afterClose = h.renderSessionEntries.mock.calls.length;
+    const afterClose = h.renderSpy.mock.calls.length;
     h.view.onRecordEvent("child-1");
-    expect(h.renderSessionEntries.mock.calls.length).toBe(afterClose);
+    expect(h.renderSpy.mock.calls.length).toBe(afterClose);
   });
 
   it("T9 editor surface: draft, history, blocked actions, refresh", () => {
@@ -550,9 +624,9 @@ describe("native transcript view", () => {
     // An action pi may add later is not inherited either: the map starts empty.
     expect(h.im.editor.actionHandlers.has("app.future.action")).toBe(false);
 
-    const before = h.renderSessionEntries.mock.calls.length;
+    const before = h.renderSpy.mock.calls.length;
     expect(h.im.editor.onExtensionShortcut?.("\x12")).toBe(true);
-    expect(h.renderSessionEntries.mock.calls.length).toBeGreaterThan(before);
+    expect(h.renderSpy.mock.calls.length).toBeGreaterThan(before);
 
     h.view.close("escape");
     expect(h.hostDraft.getText()).toBe("half typed");
