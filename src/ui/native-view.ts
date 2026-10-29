@@ -586,21 +586,37 @@ export class NativeTranscriptView {
       pendingTools: im.pendingTools,
       toolOutputExpanded: im.toolOutputExpanded,
     };
-    im.chatContainer = state.childContainer;
-    im.pendingTools = state.childPendingTools;
-    im.toolOutputExpanded = state.childToolOutputExpanded;
-    shadowAccessor(im, "sessionManager", sessionManager);
+    // Every mutation is inside the try, and each one records that it was applied: a throw in the
+    // middle of this sequence must put back exactly the swaps that landed, never less. A throw
+    // before the try used to leave im.chatContainer on the detached child container.
+    let swappedContainer = false;
+    let swappedPendingTools = false;
+    let swappedToolOutputExpanded = false;
+    let shadowedManager = false;
+    let shadowedSession = false;
     try {
+      im.chatContainer = state.childContainer;
+      swappedContainer = true;
+      im.pendingTools = state.childPendingTools;
+      swappedPendingTools = true;
+      im.toolOutputExpanded = state.childToolOutputExpanded;
+      swappedToolOutputExpanded = true;
+      shadowAccessor(im, "sessionManager", sessionManager);
+      shadowedManager = true;
       // Before the first child read: pi derives agent and settingsManager from session.
-      if (childSession) shadowAccessor(im, "session", childSession);
+      if (childSession) {
+        shadowAccessor(im, "session", childSession);
+        shadowedSession = true;
+      }
       fn();
     } finally {
-      // Delete the own property before anything reads again: the getter must see the host session.
-      if (childSession) restoreAccessor(im, "session");
-      restoreAccessor(im, "sessionManager");
-      im.chatContainer = saved.chatContainer;
-      im.pendingTools = saved.pendingTools;
-      im.toolOutputExpanded = saved.toolOutputExpanded;
+      // Delete the own properties before anything reads again: the getters must see the host
+      // session, and a partial swap must not leave one behind either.
+      if (shadowedSession) restoreAccessor(im, "session");
+      if (shadowedManager) restoreAccessor(im, "sessionManager");
+      if (swappedContainer) im.chatContainer = saved.chatContainer;
+      if (swappedPendingTools) im.pendingTools = saved.pendingTools;
+      if (swappedToolOutputExpanded) im.toolOutputExpanded = saved.toolOutputExpanded;
     }
   }
 

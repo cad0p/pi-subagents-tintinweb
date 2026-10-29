@@ -365,6 +365,38 @@ describe("native transcript view", () => {
     expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
     expect(h.view.isOpen()).toBe(false);
   });
+  it("restores every swap it applied when shadowing throws part-way", () => {
+    const h = harness();
+    const hostPendingTools = h.im.pendingTools;
+    const define = Object.defineProperty;
+    // pi 1.4.0 reaches these two through prototype getters; defineProperty is the only write here.
+    const spy = vi.spyOn(Object, "defineProperty").mockImplementation(((
+      target: object,
+      key: PropertyKey,
+      descriptor: PropertyDescriptor,
+    ) => {
+      if (key === "sessionManager") throw new TypeError("Cannot redefine property: sessionManager");
+      return define(target, key, descriptor);
+    }) as typeof Object.defineProperty);
+    try {
+      expect(() => h.view.open("child-1")).toThrow("Cannot redefine property: sessionManager");
+    } finally {
+      spy.mockRestore();
+    }
+    // A throw in the middle of the swap sequence leaves nothing behind: not the child container pi
+    // would render into, not the child's pending-tool map, not an own accessor property.
+    expect(h.view.isOpen()).toBe(false);
+    expect(h.im.chatContainer).toBe(h.hostContainer);
+    expect(h.im.pendingTools).toBe(hostPendingTools);
+    expect(h.im.toolOutputExpanded).toBe(false);
+    expect(h.im.session).toBe(h.hostSession);
+    expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
+    for (const name of ["session", "sessionManager"]) {
+      expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
+    }
+    expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
+  });
+
   it("T2 open detaches the host and renders only the child, including its custom entry", () => {
     const h = harness();
     (h.record.session as any).sessionManager.buildContextEntries = () => [
