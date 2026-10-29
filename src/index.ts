@@ -29,7 +29,7 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
+import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -524,9 +524,10 @@ export default function (pi: ExtensionAPI) {
   /** The stops a shutdown-notice entry names: `stops` when this release wrote it, else the bare `ids` of an older one. */
   function noticeStops(data: unknown): ShutdownStop[] {
     if (typeof data !== "object" || data === null) return [];
-    const { v, ids, stops } = data as { v?: unknown; ids?: unknown; stops?: unknown };
-    // The gate ledger's reader applies: a marker from a later version names no stop, so it must paint none either.
-    if (typeof v === "number" && v > LEDGER_VERSION) return [];
+    const { ids, stops } = data as { v?: unknown; ids?: unknown; stops?: unknown };
+    // The gate ledger's own reader applies, shared rather than copied: a marker from a later version names no
+    // stop, so it must paint none either.
+    if (isNewerLedgerEntry(data)) return [];
     const named = Array.isArray(stops)
       ? stops.flatMap((stop) => {
           if (stop === null || typeof stop !== "object") return [];

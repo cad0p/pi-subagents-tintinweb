@@ -184,4 +184,18 @@ describe("shutdown-stop notice rendering", () => {
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
     expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
+  it("applies the ledger's own version comparison, not a numeric-only copy of it", async () => {
+    // A hand-edited or foreign marker can carry a string version. The ledger compares with > whatever the type,
+    // so a string above ours is a later marker there; painting it here would report the same stop twice.
+    const session = [
+      ...stoppedRun(),
+      custom(SHUTDOWN_NOTICE_ENTRY, { v: String(LEDGER_VERSION + 1), ids: ["child-1"], stops: [{ id: "child-1", description: "review auth.ts" }] }),
+    ];
+    const { pi, lifecycle, renderer } = boot(session);
+
+    expect(renderer(noticeEntries(session)[0], { expanded: false }, theme)).toBeUndefined();
+    await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
+  });
+
 });
