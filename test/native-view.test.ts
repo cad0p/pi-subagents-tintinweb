@@ -103,8 +103,20 @@ function childSession(over: Record<string, unknown> = {}): any {
   };
 }
 
+/** pi 1.4.0's InteractiveMode surface: these four are prototype getters, and none has a setter. */
+function interactiveModeProto(): any {
+  return {
+    get session() { return this.runtimeHost.session; },
+    get agent() { return this.session.agent; },
+    get sessionManager() { return this.session.sessionManager; },
+    get settingsManager() { return this.session.settingsManager; },
+  };
+}
+
 interface Harness {
   im: any;
+  hostSession: any;
+  seenRuntime: Array<{ session: any; sessionManager: any }>;
   record: AgentRecord;
   manager: any;
   ctx: NativeViewContext;
@@ -131,11 +143,18 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
   const defaultHandlers = new Map<string, () => void>([["app.session.new", vi.fn()], ["app.future.action", vi.fn()]]);
   const hostEditor = hostDraft;
   const defaultEditor = Object.assign(hostEditor, { actionHandlers: defaultHandlers });
-  const im: any = {
+  // pi 1.4.0's shape: the session lives on a runtime host and is reached through prototype getters
+  // with no setter. A plain writable field here is what let a throwing assignment ship.
+  const hostSession = {
+    extensionRunner: { getEntryRenderer: () => undefined },
+    sessionManager: { buildContextEntries: () => [message("user", "HOST TEXT")], getCwd: () => "/host" },
+    settingsManager: { getExternalEditorCommand: () => undefined },
+  };
+  const seenRuntime: Array<{ session: any; sessionManager: any }> = [];
+  const im: any = Object.assign(Object.create(interactiveModeProto()), {
+    runtimeHost: { session: hostSession },
     chatContainer: hostContainer,
     documentContainer,
-    session: { extensionRunner: { getEntryRenderer: () => undefined } },
-    sessionManager: { buildContextEntries: () => [message("user", "HOST TEXT")], getCwd: () => "/host" },
     pendingTools: new Map(),
     toolOutputExpanded: false,
     hideThinkingBlock: false,
@@ -146,7 +165,6 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     footer: { invalidate: vi.fn() },
     ui: { requestRender: vi.fn(), hasActiveSelection: () => false },
     keybindings: { matches: (data: string, action: string) => action === "app.session.rename" && data === "\x12" },
-    settingsManager: { getExternalEditorCommand: () => undefined },
     isShuttingDown: false,
     showError: vi.fn(),
     showWarning: vi.fn(),
@@ -181,9 +199,11 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
         im.editor = im.defaultEditor;
       }
     },
-  };
+  });
 
   im.renderSessionEntries = vi.fn(function (entries: any[], renderOptions?: { populateHistory?: boolean }) {
+    // What the live instance looks like from inside a render: the shadowed accessors, or the host's.
+    seenRuntime.push({ session: this.session, sessionManager: this.sessionManager });
     this.pendingTools.clear();
     for (const entry of entries) {
       if (entry.type === "custom") {
@@ -236,6 +256,8 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
   const view = new NativeTranscriptView({ manager: manager as unknown as AgentManager, getContext: () => ctx, getMode: () => im as InteractiveModeView });
   return {
     im,
+    hostSession,
+    seenRuntime,
     record,
     manager,
     ctx,
@@ -302,6 +324,47 @@ describe("native transcript view", () => {
     expect(h.documentContainer.children[0]).toBe(h.hostContainer);
   });
 
+  it("models pi's session accessors: assignment throws, so the view must shadow them", () => {
+    const h = harness();
+    expect(() => { h.im.sessionManager = {}; }).toThrow(TypeError);
+    expect(() => { h.im.session = {}; }).toThrow(TypeError);
+  });
+
+  it("shadows pi's session accessors for the render and gives the getters back afterwards", () => {
+    const h = harness();
+    const child = h.record.session;
+    h.openChild();
+    // Inside the render the getters resolved to the child, which is what pi's own code reads.
+    const seen = h.seenRuntime.at(-1)!;
+    expect(seen.session).toBe(child);
+    expect(seen.sessionManager).toBe(child.sessionManager);
+    // Afterwards no own property is left: the prototype getter is the restore, nothing to save.
+    for (const name of ["session", "sessionManager"]) {
+      expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
+    }
+    expect(h.im.session).toBe(h.hostSession);
+    expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
+
+    h.view.close("escape");
+    expect(h.im.session).toBe(h.hostSession);
+    expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
+  });
+
+  it("restores the accessors and the host slot when the child render throws", () => {
+    const h = harness();
+    h.im.renderSessionEntries.mockImplementationOnce(() => { throw new Error("render boom"); });
+    expect(() => h.view.open("child-1")).toThrow("render boom");
+
+    for (const name of ["session", "sessionManager"]) {
+      expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
+    }
+    expect(h.im.session).toBe(h.hostSession);
+    expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
+    // The host transcript is back in its slot, not left detached for pi's next rebuild.
+    expect(h.im.chatContainer).toBe(h.hostContainer);
+    expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
+    expect(h.view.isOpen()).toBe(false);
+  });
   it("T2 open detaches the host and renders only the child, including its custom entry", () => {
     const h = harness();
     (h.record.session as any).sessionManager.buildContextEntries = () => [

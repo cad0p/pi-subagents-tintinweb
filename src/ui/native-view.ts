@@ -103,8 +103,12 @@ export interface InteractiveModeView {
     removeChild(child: Component): void;
     render(width: number): string[];
   };
-  session: AgentSession;
-  sessionManager: SessionManager;
+  /**
+   * Read-only: pi 1.4.0 declares `session`/`sessionManager` as prototype getters with no setter, so
+   * an assignment here throws. A child render shadows them with defineProperty (see withChildRuntime).
+   */
+  readonly session: AgentSession;
+  readonly sessionManager: SessionManager;
   pendingTools: Map<string, ToolExecutionComponent>;
   toolOutputExpanded: boolean;
   hideThinkingBlock: boolean;
@@ -132,6 +136,26 @@ export interface InteractiveModeView {
   pushExtensionDialog(component: Component, blocked?: { kind: string; message: string }): void;
   removeExtensionDialog(component: Component): void;
   updateEditorBorderColor(): void;
+}
+
+/** The two pi accessors a child render must shadow: writable fields here, prototype getters in pi. */
+type ShadowedAccessor = "session" | "sessionManager";
+
+/**
+ * Put an own value over pi's prototype getter. Assigning these two throws on 1.3.0 and 1.4.0
+ * (`Cannot set property sessionManager of #<_InteractiveMode> which has only a getter`).
+ */
+function shadowAccessor(
+  im: InteractiveModeView,
+  name: ShadowedAccessor,
+  value: AgentSession | SessionManager,
+): void {
+  Object.defineProperty(im, name, { value, writable: true, configurable: true });
+}
+
+/** Drop the own property: the prototype getter is the restore, so there is nothing to save. */
+function restoreAccessor(im: InteractiveModeView, name: ShadowedAccessor): void {
+  delete (im as unknown as Record<string, unknown>)[name];
 }
 
 /** The five symbols the capture probe needs before it trusts the instance. */
@@ -387,6 +411,8 @@ export class NativeTranscriptView {
     this.installNoticeWrappers(im, state);
 
     try {
+      // The swap is inside the try: a throw before or after it must restore the host slot, never
+      // leave pi's transcript pointing at a detached child container.
       im.documentContainer.removeChild(hostContainer);
       im.documentContainer.children.splice(hostIndex, 0, state.childContainer);
       this.installEditor(im, ctx, state);
@@ -395,7 +421,12 @@ export class NativeTranscriptView {
       this.pushDialog(im, ctx, state);
       im.ui.requestRender(true);
     } catch (error) {
-      this.close("escape");
+      try {
+        this.close("escape");
+      } catch {
+        // A restore that throws must not replace the error that caused it. isOpen() already reads
+        // the deactivated state, and the next open finishes the same close.
+      }
       throw error;
     }
 
@@ -497,10 +528,17 @@ export class NativeTranscriptView {
   private reattach(im: InteractiveModeView, state: ViewState): void {
     const children = im.documentContainer.children;
     const index = children.indexOf(state.childContainer);
+    if (index < 0) {
+      // The swap never happened: a throw before it left pi's slot untouched.
+      if (children.includes(state.hostContainer)) return;
+      console.warn("[pi-subagents] native view: the host transcript slot moved; re-attaching at the end");
+      im.documentContainer.addChild(state.hostContainer);
+      return;
+    }
     if (index !== state.hostIndex || children.includes(state.hostContainer)) {
       console.warn("[pi-subagents] native view: the host transcript slot moved; re-attaching at the end");
       im.documentContainer.addChild(state.hostContainer);
-      if (index >= 0) im.documentContainer.removeChild(state.childContainer);
+      im.documentContainer.removeChild(state.childContainer);
       return;
     }
     im.documentContainer.removeChild(state.childContainer);
@@ -531,7 +569,11 @@ export class NativeTranscriptView {
     }
   }
 
-  /** Swap the five instance fields `renderSessionEntries` reads, run the synchronous render, restore. */
+  /**
+   * Point the five things `renderSessionEntries` reads at the child, run the synchronous render,
+   * restore. `chatContainer`, `pendingTools` and `toolOutputExpanded` are pi's own class fields;
+   * `session` and `sessionManager` are prototype getters, so they are shadowed, never assigned.
+   */
   private withChildRuntime(
     im: InteractiveModeView,
     state: ViewState,
@@ -541,22 +583,22 @@ export class NativeTranscriptView {
   ): void {
     const saved = {
       chatContainer: im.chatContainer,
-      session: im.session,
-      sessionManager: im.sessionManager,
       pendingTools: im.pendingTools,
       toolOutputExpanded: im.toolOutputExpanded,
     };
     im.chatContainer = state.childContainer;
-    im.sessionManager = sessionManager;
     im.pendingTools = state.childPendingTools;
     im.toolOutputExpanded = state.childToolOutputExpanded;
-    if (childSession) im.session = childSession;
+    shadowAccessor(im, "sessionManager", sessionManager);
     try {
+      // Before the first child read: pi derives agent and settingsManager from session.
+      if (childSession) shadowAccessor(im, "session", childSession);
       fn();
     } finally {
+      // Delete the own property before anything reads again: the getter must see the host session.
+      if (childSession) restoreAccessor(im, "session");
+      restoreAccessor(im, "sessionManager");
       im.chatContainer = saved.chatContainer;
-      im.session = saved.session;
-      im.sessionManager = saved.sessionManager;
       im.pendingTools = saved.pendingTools;
       im.toolOutputExpanded = saved.toolOutputExpanded;
     }
