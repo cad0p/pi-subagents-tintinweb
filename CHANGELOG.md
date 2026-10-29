@@ -35,6 +35,7 @@ All notable changes to this project will be documented in this file.
 - *(subagents)* Name a broken background-work provider in a warning (closes #135) ([#136](https://github.com/cad0p/pi-subagents-tintinweb/pull/136))
 - *(subagents)* The time-limit label says whether the agent wrapped up or was stopped (closes #134) ([#138](https://github.com/cad0p/pi-subagents-tintinweb/pull/138))
 - *(run-cap)* A user stop owns the label when the cap fires mid-unwind (closes #154) ([#155](https://github.com/cad0p/pi-subagents-tintinweb/pull/155))
+- *(reload)* A throwing init step no longer costs every tool (closes #151) ([#158](https://github.com/cad0p/pi-subagents-tintinweb/pull/158))
 
 ### 🚜 Refactor
 
