@@ -1824,7 +1824,7 @@ export class AgentManager {
         })
       return "delivered";
     }
-    // Still settling: the settle tail has not dropped the session yet. The caller asks for a retry.
+    // Still settling: the settle tail has not dropped the session yet, so a send once it has will go through.
     if (record.settled === false) return false;
     // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the log, and callers get false.
     const reopened = await this.restoreSession(id).catch((err: unknown) => {

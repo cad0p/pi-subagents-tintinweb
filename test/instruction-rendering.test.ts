@@ -446,7 +446,7 @@ describe("instruction rendering", () => {
       { outcome: "not-found", line: 'No agent "abc" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.', color: "error" },
       { outcome: "resumed", line: "Agent abc had finished; resumed it with the message (fresh max_turns budget).", color: "dim" },
       { outcome: "resumedAfterCrash", line: "Agent abc was interrupted by a crash; resumed it from its transcript with a crash note and the message (fresh max_turns budget).", color: "dim" },
-      { outcome: "failed", line: "Nothing was delivered to agent abc: it has no session to reopen, so it was stopped with its parent or is still settling after a reload.", color: "error" },
+      { outcome: "failed", line: "Nothing was delivered to agent abc: it is still settling, was stopped with its parent, or has no session left to reopen.", color: "error" },
     ];
 
     it("renders every outcome verbatim with a ⎿ prefix in the outcome color", () => {
@@ -637,9 +637,13 @@ describe("instruction rendering", () => {
       const failed = await steer.execute("tc", { to: id, message: "x" }, undefined, undefined, spawnCtx(cwd));
       expect(failed.details.sendOutcome).toBe("failed");
       expect((failed as { isError?: boolean }).isError).toBe(true);
+      // The answer names the causes as alternatives; stopped with its parent is the branch this test reaches.
+      expect(failed.content[0].text).toBe(
+        `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`,
+      );
       const theme = makeTheme();
       const text = renderResultText(steer, failed, theme, { args: { message: "x" } });
-      expect(text).toContain("Nothing was delivered to agent");
+      expect(text).toBe(`  ⎿  ${failed.content[0].text}`);
       expect(text).not.toContain("Send again in a moment");
       expect(theme.calls.some(([color]) => color === "error")).toBe(true);
     });

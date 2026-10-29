@@ -7,11 +7,15 @@ import { describe, expect, it } from "vitest";
 import { deliveryText } from "../src/delivery-text.js";
 
 describe("deliveryText", () => {
-  it("leads a refusal with the fact that nothing was delivered", () => {
-    const text = deliveryText("abc", false);
-    expect(text.startsWith("Nothing was delivered to agent abc:")).toBe(true);
-    expect(text).toContain("no session to reopen");
-    expect(text).not.toContain("Send again in a moment");
+  const refusal =
+    "Nothing was delivered to agent abc: it is still settling, was stopped with its parent, or has no session left to reopen.";
+
+  it("leads a refusal with the fact that nothing was delivered and names every cause as an alternative", () => {
+    expect(deliveryText("abc", false)).toBe(refusal);
+    // No retry hint: only the settling cause is transient, so the text cannot promise a retry for all five.
+    expect(refusal).not.toContain("Send again in a moment");
+    // Settling follows any stop, not a reload.
+    expect(refusal).not.toContain("after a reload");
   });
 
   it("says a message was sent only for an outcome that took it", () => {

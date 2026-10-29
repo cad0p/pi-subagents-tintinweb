@@ -1,6 +1,6 @@
 import type { DeliverOutcome } from "./types.js";
 
-/** The tool answer for a `deliver` outcome. `false` is refused: no session to reopen, stopped with its parent, or still settling. */
+/** The tool answer for a `deliver` outcome. `false` is refused: nothing reached the agent — it is still settling, was stopped with its parent, or has no session left to reopen. */
 export function deliveryText(id: string, outcome: DeliverOutcome): string {
   switch (outcome) {
     case "delivered":
@@ -14,7 +14,8 @@ export function deliveryText(id: string, outcome: DeliverOutcome): string {
     case "held":
       return `Message held for agent ${id}; it is delivered when the agent's current hand-over or teardown ends.`;
     case false:
-      // Not a transient state to re-try blindly: the message was never delivered. Lead with that.
-      return `Nothing was delivered to agent ${id}: it has no session to reopen, so it was stopped with its parent or is still settling after a reload.`;
+      // Not a transient state to re-try blindly: the message was never delivered, and four of the five causes are final.
+      // Lead with that, and name the causes as alternatives so the text is true for every branch that returns false.
+      return `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`;
   }
 }
