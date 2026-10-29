@@ -9,7 +9,7 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
 
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
-import { childUIState, clearChildUI, createChildUIProxy, dropChildDialogs, onChildDialogFlag } from "../src/ui/child-ui.js";
+import { childUIState, clearChildUI, createChildUIProxy, dropChildDialogs, onChildDialogFlag, pendingChildDialogs } from "../src/ui/child-ui.js";
 import {
   ChildFooter,
   type InteractiveModeView,
@@ -501,6 +501,58 @@ describe("native transcript view", () => {
     expect(resolved).toBeUndefined();
   });
 
+  it("honours the child's timeout: the dialog expires as cancelled", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const h = harness();
+      onChildDialogFlag("child-1", (flag) => { h.record.dialog = flag; });
+      h.openChild();
+      let resolved: boolean | "pending" = "pending";
+      const proxy = createChildUIProxy("child-1", { answerable: true });
+      void proxy.confirm("Proceed?", "ten seconds", { timeout: 5000 }).then((value) => { resolved = value; });
+      await Promise.resolve();
+      expect(h.im.dialogs).toHaveLength(1);
+      expect(resolved).toBe("pending");
+
+      vi.advanceTimersByTime(5000);
+      await Promise.resolve();
+      expect(resolved).toBe(false);
+      expect(h.record.dialog).toBeUndefined();
+      expect(h.im.removeExtensionDialog).toHaveBeenCalledWith(h.im.dialogs[0]);
+      expect(pendingChildDialogs("child-1")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("honours the child's abort signal: the dialog is dismissed with pi's cancelled value", async () => {
+    const h = harness();
+    onChildDialogFlag("child-1", (flag) => { h.record.dialog = flag; });
+    h.openChild();
+    const controller = new AbortController();
+    let resolved: string | undefined | "pending" = "pending";
+    const proxy = createChildUIProxy("child-1", { answerable: true });
+    void proxy.input("Name?", "type one", { signal: controller.signal }).then((value) => { resolved = value; });
+    await Promise.resolve();
+    expect(h.im.dialogs).toHaveLength(1);
+    expect(resolved).toBe("pending");
+
+    controller.abort();
+    await Promise.resolve();
+    expect(resolved).toBeUndefined();
+    expect(h.record.dialog).toBeUndefined();
+    expect(h.im.removeExtensionDialog).toHaveBeenCalledWith(h.im.dialogs[0]);
+  });
+
+  it("never shows a dialog whose signal is already aborted", async () => {
+    const h = harness();
+    h.openChild();
+    const controller = new AbortController();
+    controller.abort();
+    const proxy = createChildUIProxy("child-1", { answerable: true });
+    await expect(proxy.select("Pick one", ["a"], { signal: controller.signal })).resolves.toBeUndefined();
+    expect(h.im.dialogs).toHaveLength(0);
+  });
   it("records fire-and-forget calls and never forwards them to the host", async () => {
     clearChildUI("proxy-child");
     const flags: Array<{ title: string } | undefined> = [];

@@ -704,35 +704,51 @@ export class NativeTranscriptView {
       return; // adopted record: the flag survives, the queue did not (PR 2 owns the tap)
     }
     const request = head.request;
+    // The options pi resolves a dialog from: its timeout auto-dismisses, its signal dismisses on
+    // abort. Both belong to the child's call, so this view must honour them, not only the human's keys.
+    const opts = "opts" in request ? request.opts : undefined;
     state.dialogRequest = request;
     const done = (value: unknown): void => {
+      opts?.signal?.removeEventListener("abort", cancel);
       if (state.dialogRequest !== request) return;
       state.dialogRequest = undefined;
       if (state.dialogComponent) {
-        im.removeExtensionDialog(state.dialogComponent);
+        const shown = state.dialogComponent;
         state.dialogComponent = undefined;
+        // pi disposes a dialog it built before removing it; ours carries the timeout's countdown.
+        (shown as Component & { dispose?(): void }).dispose?.();
+        im.removeExtensionDialog(shown);
       }
       answerChildDialog(state.id, value, request);
     };
     const cancel = (): void => {
-      if (request.kind === "confirm") done(false);
-      else done(undefined);
+      // The value pi resolves a cancelled dialog with: false for a confirm, undefined for the rest.
+      done(request.kind === "confirm" ? false : undefined);
     };
+    // An already-aborted signal never shows anything, as in pi's own handlers.
+    if (opts?.signal?.aborted) {
+      cancel();
+      return;
+    }
+    opts?.signal?.addEventListener("abort", cancel, { once: true });
     let component: Component;
     switch (request.kind) {
       case "select":
         component = new ExtensionSelectorComponent(request.title, request.options, (option) => done(option), cancel, {
           tui: im.ui as unknown as TUI,
+          timeout: opts?.timeout,
         });
         break;
       case "confirm":
         component = new ExtensionSelectorComponent(`${request.title}\n${request.message}`, ["Yes", "No"], (option) => done(option === "Yes"), cancel, {
           tui: im.ui as unknown as TUI,
+          timeout: opts?.timeout,
         });
         break;
       case "input":
         component = new ExtensionInputComponent(request.title, request.placeholder, (value) => done(value), cancel, {
           tui: im.ui as unknown as TUI,
+          timeout: opts?.timeout,
         });
         break;
       case "editor":
