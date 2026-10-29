@@ -44,19 +44,20 @@ versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
 `xhigh`; for checks that do not exercise a Visual proof step, fall back to
-`opencode-go/deepseek-v4.1-flash` at `max` when Anthropic is unavailable.
-`--no-extensions` drops discovered extensions, so pass the global
-ones explicitly with `-e` (the global `system-prompt.ts` is required for native
-Anthropic). Add the branch build with `-e <repo>/src/index.ts`, so the two don't
-collide. Subagents spawned from the session follow the same `-e` flags (#92).
+`opencode-go-2/deepseek-v4.1-flash` at `max` when Anthropic is unavailable, then
+`opencode-go-3`, `opencode-go-4`, ... on each `429 GoUsageLimitError` (one
+account per attempt). `--no-extensions` drops discovered extensions, so pass the
+global ones explicitly with `-e`: the global `system-prompt.ts` is required for
+native Anthropic. Add the branch build with `-e <repo>/src/index.ts`, so the two
+don't collide; subagents spawned from the session follow the same `-e` flags (#92).
 
 ```bash
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
   -e <repo>/src/index.ts --provider anthropic --model claude-haiku-5-5 --thinking xhigh
 
-# fallback
+# fallback; next account (opencode-go-3, -4, ...) on a 429 GoUsageLimitError
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
-  -e <repo>/src/index.ts --provider opencode-go --model deepseek-v4.1-flash --thinking max
+  -e <repo>/src/index.ts --provider opencode-go-2 --model deepseek-v4.1-flash --thinking max
 ```
 
 - Exercise the changed surface end to end in a real session — spawn, steer,
