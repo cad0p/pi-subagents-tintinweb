@@ -41,7 +41,7 @@ pi install npm:@cad0p/pi-subagents-tintinweb
 
 Releases also land on the `next` tag, the unstable build from `main`: `pi install npm:@cad0p/pi-subagents-tintinweb@next`.
 
-The footer line that counts pending background work is rendered by [`@cad0p/pi-background-work`](https://www.npmjs.com/package/@cad0p/pi-background-work), installed as its own pi package: `pi install npm:@cad0p/pi-background-work@next` (its `latest` is still the placeholder library release). The provider that fills the segment comes from this extension, so the two have to match — a subagents build that predates the dependency registers no provider, and then there is no `⏳` footer segment and no pending count, silently, with no error. Everything else works either way. Install `@next` for both, or wait for the next stable release.
+The footer line that counts pending background work is rendered by [`@cad0p/pi-background-work`](https://www.npmjs.com/package/@cad0p/pi-background-work), installed as its own pi package: `pi install npm:@cad0p/pi-background-work`, no tag (`latest` is `0.0.2`, the build that ships the footer extension). The provider that fills the segment comes from this extension, so the two have to match — a subagents build that predates the dependency registers no provider, and then there is no `⏳` footer segment and no pending count, silently, with no error. Everything else works either way. This extension's dependency range stops short of `0.1.0` for the same reason: the provider registry is process-global, and a 0.x minor may change it, in which case the two copies stop seeing each other.
 
 Or load directly for development:
 

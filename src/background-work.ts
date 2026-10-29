@@ -1,6 +1,8 @@
 /**
  * Background-work provider: lists this process's subagents to @cad0p/pi-background-work, so consumers
  * such as bg_wait see a subagent until its result is delivered. Mirrors pi-heartbeat's provider.
+ * `package.json` caps the dependency below 0.1.0: the provider registry is process-global, so a 0.x minor
+ * that changes it would let a second, nested copy go unseen.
  */
 
 import {

@@ -31,7 +31,7 @@
     "@sinclair/typebox": "*"
   },
   "dependencies": {
-    "@cad0p/pi-background-work": ">=0.0.2 <1.0.0",
+    "@cad0p/pi-background-work": ">=0.0.2 <0.1.0",
     "croner": "^10.0.1",
     "nanoid": "^5.0.0"
   },
