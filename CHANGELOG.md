@@ -40,6 +40,7 @@ All notable changes to this project will be documented in this file.
 - *(reload)* Name every member a hand-over reader needs (closes #162) ([#161](https://github.com/cad0p/pi-subagents-tintinweb/pull/161))
 - *(init-guard)* Report init failures only on the root activation, and drop the dead helper (closes #159) ([#160](https://github.com/cad0p/pi-subagents-tintinweb/pull/160))
 - *(reload)* A stopped hand-over last usage reaches the parent like a live one ([#166](https://github.com/cad0p/pi-subagents-tintinweb/pull/166)) (closes #164)
+- *(sendmessage)* A refused delivery is a failed tool result, and a shutdown stop is named ([#172](https://github.com/cad0p/pi-subagents-tintinweb/pull/172)) (closes #171)
 
 ### 🚜 Refactor
 
@@ -49,6 +50,7 @@ All notable changes to this project will be documented in this file.
 
 - One subagents extension per process (closes #131) ([#132](https://github.com/cad0p/pi-subagents-tintinweb/pull/132))
 - *(verification)* A live proof must show the planned outcome, not only the mechanism (closes #126) ([#127](https://github.com/cad0p/pi-subagents-tintinweb/pull/127))
+- *(checklist)* Name a numbered opencode-go account and load its provider ([#170](https://github.com/cad0p/pi-subagents-tintinweb/pull/170)) (closes #169)
 
 
 ## [0.22.0] - 2026-10-21
