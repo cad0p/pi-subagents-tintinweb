@@ -36,16 +36,19 @@ import type { LifetimeUsage } from "./usage.js";
  * that delta silently, and this release does not take the route that would keep it: it stops an older hand-over as it
  * always has and accepts the loss as a documented limitation, not a guard to write. A reader that must have the delta
  * does not call `stop` on such a hand-over: it `attach`es a listener for its `usage` events, disposes its idle items
- * itself through `teardownChildSession`, ends the pool as this release's shutdown paths do after `stop` —
- * `draining.abortAll`, then `draining.dispose` — and leaves the listener attached. `abortAll` emits nothing itself:
- * it aborts each run's signal, and that run's messages reach `onUsage` afterwards, once `session.abort()` has awaited
- * the session's idle state — a promise that resolves at the tail of the session's settle emission, after the last
- * `message_end` was handed to subscribers. A listener removed in the same frame as `abortAll` therefore misses
- * exactly the delta this paragraph is about, which is the loss #164 was filed for. Detach once `draining.ownAgents()`
- * has emptied — the predicate `retireDrained()` uses (`src/index.ts:1232`); `runningCount()` is not it, because a
- * pool that has handed its runs over reports 0. A detached hand-over buffers into `pending`, which nothing reads when
- * `stop` is skipped. `stop` may detach first because its sink takes every later `usage` too, not only what `pending`
- * holds. Ending at the idle items, before `draining.abortAll`, leaves the pool, its runs and their slots alive.
+ * itself through `teardownChildSession`, aborts the runs (`draining.abortAll`), and disposes the pool only once every
+ * record it still owns reads `settled` — `draining.ownAgents().every((r) => r.settled !== false)`. `abortAll` emits
+ * nothing itself: it aborts each run's signal, and that run's messages reach `onUsage` afterwards, once
+ * `session.abort()` has awaited the session's idle state — a promise that resolves at the tail of the session's
+ * settle emission, after the last `message_end` was handed to subscribers. Disposing before that point drops exactly
+ * the delta this paragraph is about, which is the loss #164 was filed for: `dispose()` removes the records, and
+ * removing one detaches its lifecycle, which is the subscription those events ride. Three plausible predicates are
+ * wrong: a record's `status`, because `abortAll` writes `stopped` in its own frame; `runningCount()`, because a pool
+ * that handed its runs over reports 0; and `ownAgents()` alone, because `dispose()` empties it synchronously.
+ * A detached hand-over buffers into `pending`, which nothing reads when `stop` is skipped, so detach last, once the
+ * pool is gone and nothing can arrive. `stop` may detach first because its sink takes every later `usage` too, not
+ * only what `pending` holds. Ending at the idle items, before `draining.abortAll`, leaves the pool, its runs and
+ * their slots alive.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
