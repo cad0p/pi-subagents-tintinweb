@@ -1093,3 +1093,151 @@ describe("FleetList selection follows the record (#146)", () => {
     expect(h.render().find(l => l.includes("sibling job"))).toContain("⏺");
   });
 });
+
+/**
+ * A native view as FleetView sees it: what it shows, what it was asked to show, and what closed it.
+ * The real one rebuilds pi's transcript; here only the bookkeeping matters.
+ */
+function fakeNativeView() {
+  const view = {
+    opened: [] as string[],
+    closes: [] as string[],
+    shown: undefined as string | undefined,
+    /** What open() answers; a refused record has nothing to show, an unavailable one falls back. */
+    result: "opened" as "opened" | "refused" | "unavailable",
+    isOpen: () => view.shown !== undefined && view.result !== "unavailable",
+    shownId: () => view.shown,
+    open: (id: string) => {
+      view.opened.push(id);
+      // open() closes whatever it was showing first: a refused or unavailable record leaves nothing up.
+      view.shown = view.result === "opened" ? id : undefined;
+      return view.result;
+    },
+    close: (reason: "switch") => {
+      view.closes.push(reason);
+      view.shown = undefined;
+    },
+    /** The view closing itself, the way Esc in a child does. */
+    closeSelf: () => { view.shown = undefined; },
+  };
+  return view;
+}
+
+describe("FleetList owns navigation (#178)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+
+  it("enters the agent under the cursor and gives `main` back when the cursor returns to it", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+
+    expect(h.press(DOWN)).toEqual({ consume: true }); // activate: the cursor is on `main`
+    expect(view.opened).toEqual([]);
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+
+    expect(h.press(DOWN)).toEqual({ consume: true }); // onto the agent row
+    expect(view.opened).toEqual(["a1"]);
+    expect(h.render().find(l => l.includes("one"))).toContain("⏺");
+    expect(h.render()[0]).toContain("esc interrupts");
+
+    expect(h.press(UP)).toEqual({ consume: true }); // back onto `main`
+    expect(view.closes).toEqual(["switch"]);
+    expect(view.isOpen()).toBe(false);
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("one"))).toContain("◯");
+  });
+
+  it("does not rebuild the view it already shows", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    h.press(RIGHT); // → on a leaf stays on its row, which is already open
+    h.press(ENTER); // Enter re-affirms the same choice
+    expect(view.opened).toEqual(["a1"]);
+    expect(view.closes).toEqual([]);
+  });
+
+  it("switches the view as the cursor steps from one agent to the next", () => {
+    const h = harness([mk({ id: "a1", description: "one", startedAt: 1000 }), mk({ id: "a2", description: "two", startedAt: 2000 })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // a1
+    h.press(DOWN); // a2
+    h.press(UP); // a1 again
+    expect(view.opened).toEqual(["a1", "a2", "a1"]);
+  });
+
+  it("opens the child a → moves to, not the parent it came from", () => {
+    const parent = makeRecord({ id: "p", description: "parent job", startedAt: 1000 });
+    const child = makeRecord({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" });
+    const h = harness([parent, child]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // the parent row
+    expect(view.opened).toEqual(["p"]);
+    h.press(RIGHT); // its first child becomes the selection
+    expect(view.opened).toEqual(["p", "c"]);
+    h.press(LEFT); // collapsing selects the parent again
+    expect(view.opened).toEqual(["p", "c", "p"]);
+  });
+
+  it("leaves a child prompt's own keys alone while it has a draft", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    h.setEditorText("half a thought");
+    expect(h.press(DOWN)).toBeUndefined(); // the child's history, not the list
+    expect(h.press(UP)).toBeUndefined();
+    expect(h.press(ESC)).toBeUndefined(); // its autocomplete, or the interrupt
+    expect(view.opened).toEqual(["a1"]);
+    expect(view.isOpen()).toBe(true);
+    h.setEditorText("");
+    expect(h.press(DOWN)).toEqual({ consume: true }); // an empty prompt: the list navigates again
+  });
+
+  it("hands Esc to the child editor instead of leaving the list", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.press(ESC)).toBeUndefined();
+    expect(view.isOpen()).toBe(true);
+  });
+
+  it("returns the cursor to `main` when the view closes itself", () => {
+    const h = harness([mk({ id: "a1", description: "one", startedAt: 1000 }), mk({ id: "a2", description: "two", startedAt: 2000 })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // a2
+    view.closeSelf(); // Esc in the child, or pi's own teardown behind the list's back
+    h.fleet.returnToMain();
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("two"))).toContain("◯");
+  });
+
+  it("keeps the cursor on the row when the view has nothing to show, and opens no overlay", () => {
+    const h = harness([makeRecord({ id: "q", description: "queued one", status: "queued", session: undefined })]);
+    const view = fakeNativeView();
+    view.result = "refused";
+    h.fleet.setNativeView(view);
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(h.press(DOWN)).toEqual({ consume: true });
+    expect(view.opened).toEqual(["q"]);
+    expect(h.overlayOpened()).toBe(false); // an arrow is not a request for the overlay
+    expect(h.render().find(l => l.includes("queued one"))).toContain("⏺");
+  });
+
+  it("falls back to the overlay from Enter when no view can be captured", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    view.result = "unavailable";
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    expect(h.overlayOpened()).toBe(false); // arrowing never falls back
+    h.press(ENTER);
+    expect(view.opened).toEqual(["a1", "a1"]);
+    expect(h.overlayOpened()).toBe(true);
+  });
+});

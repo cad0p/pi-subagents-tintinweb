@@ -5,9 +5,12 @@
  * another one is nested under its parent (↳, two spaces per level), and a collapsed parent
  * carries a `▸ N nested (…)` label. Pressing ↓ (or ←) at an empty prompt activates the list;
  * ↑/↓ move the selection (filled ⏺ marker), → expands a parent and selects its first child,
- * ← collapses the selected row's parent and selects it, Enter opens the selected agent's live
- * conversation overlay, Esc returns to the prompt. A viewer stays open when its agent finishes;
- * finished agents linger briefly in the list.
+ * ← collapses the selected row's parent and selects it. The list owns navigation: the cursor is
+ * the view, so landing on an agent row opens that agent's live transcript in place and `main`
+ * gives the host transcript back (Enter re-affirms the same choice, and opens the conversation
+ * overlay when the native view is unavailable). Esc stays the child editor's — it interrupts the
+ * shown run and returns to `main` — and, with no view open, returns to the prompt. A viewer stays
+ * open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
@@ -66,7 +69,11 @@ export type FleetUICtx = {
 /** The native transcript view FleetView opens into; `unavailable` falls back to the overlay. */
 export interface FleetNativeView {
   isOpen(): boolean;
+  /** The record the open view shows; landing on a row it already shows is not a rebuild. */
+  shownId(): string | undefined;
   open(id: string): "opened" | "refused" | "unavailable";
+  /** Close the view from the list itself (the cursor moved to `main`); safe when nothing is open. */
+  close(reason: "switch"): void;
 }
 
 type MainEntry = { kind: "main" };
@@ -344,12 +351,16 @@ export class FleetList {
 
   // ---- Key handling ----
 
-  /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
+  /**
+   * Returns `{consume:true}` to swallow a key, or undefined to let it through.
+   *
+   * The list owns navigation (#178): the cursor is the view, so a key that moves it moves the
+   * transcript with it. Only the keys the list does not use reach the editor — and while a child
+   * view is open, the child's editor is the focused one, so a draft there keeps all of its keys
+   * (↑/↓ walk its history, Esc cancels its autocomplete).
+   */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
     if (!this.ui) return undefined;
-    // The native view owns the keyboard (its editor is focused): the process-global listener must
-    // not steal ↓ from a child prompt whose draft happens to be empty.
-    if (this.nativeView?.isOpen()) return undefined;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
@@ -365,22 +376,29 @@ export class FleetList {
       return undefined;
     }
 
+    const viewing = this.nativeView?.isOpen() === true;
+    // A child view's editor is the focused one: its draft keeps its own keys.
+    if (viewing && this.ui.getEditorText() !== "") return undefined;
+
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
       const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
       if (isActivator && this.agentRows().length > 0 && this.ui.getEditorText() === "") {
         this.active = true;
-        this.moveSelection(this.roster(), 0); // `main`
+        // An open view already put the cursor on the agent it shows: activation never resets it.
+        if (!viewing) this.moveSelection(this.roster(), 0); // `main`
         this.update();
         return { consume: true };
       }
       return undefined;
     }
 
-    // Active — arrows navigate, → / ← expand and collapse nested rows, Enter opens, Esc / Up-past-top exits.
+    // Active — arrows move the cursor (and the view follows it), → / ← expand and collapse nested
+    // rows, Enter re-affirms the view, Esc leaves the list unless a child view is open.
     if (matchesKey(data, "down")) {
       const roster = this.roster();
       this.moveSelection(roster, this.resolveIndex(roster) + 1);
+      this.followSelection();
       this.update();
       return { consume: true };
     }
@@ -389,6 +407,7 @@ export class FleetList {
       const idx = this.resolveIndex(roster);
       if (idx === 0) { this.deactivate(); return { consume: true }; }
       this.moveSelection(roster, idx - 1);
+      this.followSelection();
       this.update();
       return { consume: true };
     }
@@ -400,8 +419,9 @@ export class FleetList {
         this.expanded.add(entry.record.id);
         const opened = this.roster(); // its first child is the next row
         this.moveSelection(opened, this.resolveIndex(opened) + 1);
-        this.update();
       }
+      this.followSelection();
+      this.update();
       return { consume: true };
     }
     if (matchesKey(data, "left")) {
@@ -415,15 +435,24 @@ export class FleetList {
         // An orphan row (its parent was evicted) has no row to collapse to, so ← stays put
         // instead of falling back to the nearest row.
         if (parentIdx >= 0) this.moveSelection(collapsed, parentIdx);
+        this.followSelection();
         this.update();
       }
       return { consume: true };
     }
-    if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
+    if (matchesKey(data, "escape")) {
+      // The child view's Esc is the child editor's: it interrupts the shown run and returns to
+      // `main`, so the list must not swallow it.
+      if (viewing) return undefined;
+      this.deactivate();
+      return { consume: true };
+    }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
 
-    // Any other key cancels navigation and flows to the editor.
-    this.deactivate();
+    // Any other key cancels navigation and flows to the editor. While a view is open the cursor
+    // stays on the agent it shows (a keystroke cannot leave the view behind), so only the host
+    // prompt gives the list up.
+    if (!viewing) this.deactivate();
     return undefined;
   }
 
@@ -447,27 +476,73 @@ export class FleetList {
     this.update();
   }
 
+  /**
+   * Show `id` natively. `refused` means there is no transcript and the user has already been told;
+   * `unavailable` means the capture never fired or the record is gone, so Enter falls back to the
+   * overlay. A row the view already shows is left alone: `open()` would rebuild it for nothing.
+   */
+  private openNative(id: string): "opened" | "refused" | "unavailable" {
+    const view = this.nativeView;
+    if (!view) return "unavailable";
+    if (view.isOpen() && view.shownId() === id) return "opened";
+    try {
+      const result = view.open(id);
+      if (result === "opened") this.viewingAgentId = id;
+      return result;
+    } catch {
+      // The capture guard failed mid-open and the view restored itself: a keystroke must not throw.
+      return "unavailable";
+    }
+  }
+
+  /** Close a child view because the cursor is on `main`: the host transcript is what it shows. */
+  private closeNative(): void {
+    this.viewingAgentId = undefined;
+    this.nativeView?.close("switch");
+  }
+
+  /**
+   * The list owns navigation, so the cursor IS the view: an agent row opens that agent, `main`
+   * closes the child view. Called after every move, before the repaint.
+   */
+  private followSelection(): void {
+    if (!this.nativeView) return;
+    const id = this.selectedId;
+    if (id === undefined) {
+      this.closeNative();
+      return;
+    }
+    this.openNative(id);
+  }
+
+  /**
+   * Put the cursor back on `main` because the view closed itself — Esc interrupted the run, or pi
+   * tore the view down for a reload. The list must never point at an agent nobody is showing.
+   */
+  returnToMain(): void {
+    this.viewingAgentId = undefined;
+    this.moveSelection(this.roster(), 0);
+    this.update();
+  }
+
   private openSelected(): void {
     const roster = this.roster();
     const entry = roster[this.resolveIndex(roster)];
     if (!entry || entry.kind === "main") {
-      // `main` = return to the prompt; the native transcript is already shown.
+      // `main` = the host transcript: close a child view and leave the cursor on `main`.
+      if (this.nativeView) {
+        this.closeNative();
+        this.update();
+        return;
+      }
       this.deactivate();
       return;
     }
     const record = entry.record;
     if (!this.ui) return;
-    if (this.nativeView) {
-      try {
-        const result = this.nativeView.open(record.id);
-        if (result === "opened") {
-          this.deactivate();
-          return;
-        }
-        if (result === "refused") return;
-      } catch {
-        // The capture guard failed: fall back to the overlay, exactly as today.
-      }
+    if (this.openNative(record.id) !== "unavailable") {
+      this.update();
+      return;
     }
     const session = record.session ?? this.manager.settledTranscript(record.id);
     if (!session) {
@@ -524,9 +599,12 @@ export class FleetList {
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
-    const hint = this.active
-      ? "↑↓ select · → nested · enter view · esc back"
-      : "esc to interrupt · ← for agents · ↓ to manage";
+    // A child view's Esc interrupts its run (the list no longer swallows it), so the hint says so.
+    const hint = this.nativeView?.isOpen() === true
+      ? "↑↓ select · → nested · esc interrupts"
+      : this.active
+        ? "↑↓ select · → nested · enter view · esc back"
+        : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");

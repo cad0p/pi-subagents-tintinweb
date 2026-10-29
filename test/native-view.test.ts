@@ -149,9 +149,11 @@ interface Harness {
   renderSpy: ReturnType<typeof vi.fn>;
   footerFactory: () => ((tui: any, t: any, d: any) => any) | undefined;
   openChild: () => void;
+  /** What the view reports to its owner when it stops being open. */
+  onClosed: ReturnType<typeof vi.fn>;
 }
 
-function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): Harness {
+function harness(options: { record?: Partial<AgentRecord>; child?: any; abortResult?: boolean } = {}): Harness {
   const documentContainer = new Container();
   const hostContainer = new Container();
   hostContainer.addChild(new Text("HOST TEXT"));
@@ -282,7 +284,10 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     getRecord: vi.fn((id: string) => id === record.id ? record : undefined),
     settledSessionManager: vi.fn(() => undefined),
     steer: vi.fn(async () => "delivered" as const),
+    // A settled record refuses the stop; that is the only thing Esc branches on.
+    abort: vi.fn(() => options.abortResult ?? true),
   };
+  const onClosed = vi.fn();
   const setFooter = vi.fn((factory: any) => {
     im.footerFactory = factory;
     im.customFooter = factory ? factory(im.ui, theme, footerData) : undefined;
@@ -295,7 +300,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
       notify: vi.fn(),
     },
   };
-  const view = new NativeTranscriptView({ manager: manager as unknown as AgentManager, getContext: () => ctx, getMode: () => im as InteractiveModeView });
+  const view = new NativeTranscriptView({ manager: manager as unknown as AgentManager, getContext: () => ctx, getMode: () => im as InteractiveModeView, onClosed });
   return {
     im,
     hostSession,
@@ -313,6 +318,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any } = {}): 
     openChild: () => {
       expect(view.open(record.id)).toBe("opened");
     },
+    onClosed,
   };
 }
 
@@ -614,7 +620,9 @@ describe("native transcript view", () => {
     const h = harness();
     h.openChild();
     expect(h.im.editor.getText()).toBe("");
-    expect(h.im.editor.embedWorkingStatus).toBe(false);
+    // pi only embeds its working indicator in the editor border when the editor asks for it;
+    // without this it draws a separate status row that does not line up with the editor.
+    expect(h.im.editor.embedWorkingStatus).toBe(true);
     h.im.editor.setText("child draft");
     expect(h.im.editor.history).toContain("CHILD TEXT");
 
@@ -659,6 +667,70 @@ describe("native transcript view", () => {
     const recordFooter = recordFactory!(h.im.ui, theme, footerData);
     expect(recordFooter).toBeInstanceOf(RecordFooter);
     expect(() => recordFooter.render(120)).not.toThrow();
+  });
+
+  it("Esc interrupts the run it shows, says so, and leaves the view", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onEscape?.();
+    expect(h.manager.abort).toHaveBeenCalledWith("child-1");
+    expect(h.ctx.ui.notify).toHaveBeenCalledWith('Stopped "one".', "info");
+    expect(h.view.isOpen()).toBe(false);
+    expect(h.im.editor).toBe(h.im.defaultEditor);
+    // The host transcript is back in pi's slot, not left detached behind a closed view.
+    expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
+  });
+
+  it("Esc on a record that already settled still leaves the view, without a notice", () => {
+    const h = harness({ abortResult: false });
+    h.openChild();
+    h.record.status = "completed";
+    h.im.editor.onEscape?.();
+    // Never a no-op: the stop is refused (there is nothing to stop), and the view still closes.
+    expect(h.manager.abort).toHaveBeenCalledWith("child-1");
+    expect(h.ctx.ui.notify).not.toHaveBeenCalled();
+    expect(h.view.isOpen()).toBe(false);
+  });
+
+  it("reports the close to its owner once it is no longer open — but not when it only switches records", () => {
+    const h = harness();
+    h.openChild();
+    expect(h.onClosed).not.toHaveBeenCalled();
+    // open() closes the record it was showing to take the next one: that is the caller's own doing.
+    expect(h.view.open("child-1")).toBe("opened");
+    expect(h.onClosed).not.toHaveBeenCalled();
+    h.view.close("escape");
+    expect(h.onClosed).toHaveBeenCalledTimes(1);
+  });
+
+  it("a close that throws still reports, so the list never points at a view that is gone", () => {
+    const h = harness();
+    h.openChild();
+    h.setFooter.mockImplementationOnce(() => { throw new Error("footer boom"); });
+    expect(() => h.view.close("escape")).toThrow("footer boom");
+    expect(h.onClosed).toHaveBeenCalledTimes(1);
+  });
+
+  it("states the child's state once: the record's status, never a second streaming fragment", () => {
+    const h = harness();
+    h.openChild();
+    // A running record is streaming by definition, so a live session saying so repeats the line.
+    (h.record.session as any).isStreaming = true;
+    (h.record.session as any).agent.state.isStreaming = true;
+    const childLine = h.footerFactory()!(h.im.ui, theme, footerData).render(160).at(-1)!;
+    expect(childLine.match(/running/g)).toHaveLength(1);
+    expect(childLine).not.toContain("streaming");
+  });
+
+  it("never inherits the host's extension status line into the child footer", () => {
+    const h = harness();
+    h.openChild();
+    const hostStatuses = { ...footerData, getExtensionStatuses: () => new Map([["host-ext", "host working"]]) };
+    expect(h.footerFactory()!(h.im.ui, theme, hostStatuses).render(160).join("\n")).not.toContain("host working");
+    // The child's own statuses are the only place a child extension can report, so they stay.
+    createChildUIProxy("child-1", { answerable: true }).setStatus("child-ext", "child working");
+    const rendered = h.footerFactory()!(h.im.ui, theme, hostStatuses).render(160).join("\n");
+    expect(rendered).toContain("child working");
   });
 
   it("queues child dialogs through pi, and close drops them as cancelled", async () => {
