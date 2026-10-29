@@ -61,8 +61,9 @@ function liveRegistry(): Registry {
 
 /**
  * Makes every hand-over published from now on look like one from a release before the slot gate (#107): no
- * slotHolders field, nudges as plain ids. With `beforeDelivery`, also like one from before the background-work
- * provider: its settled records carry no spawnerSessionId or resultDelivered. Returns the undo.
+ * slotHolders field, nudges as plain ids, no takeUnreported accessor (added after both), so only `take` hands the
+ * spend out. With `beforeDelivery`, also like one from before the background-work provider: its settled records
+ * carry no spawnerSessionId or resultDelivered. Returns the undo.
  */
 function publishAsOlderRelease(beforeDelivery = false): () => void {
   const globals = globalThis as unknown as Record<symbol, Map<string, ReloadHandover[]> | undefined>;
@@ -71,6 +72,8 @@ function publishAsOlderRelease(beforeDelivery = false): () => void {
     override set(key: string, list: ReloadHandover[]): this {
       for (const handover of list) {
         Reflect.deleteProperty(handover, "slotHolders");
+        // On the prototype in this release: shadowed with undefined, which is what a release without it looks like.
+        Object.defineProperty(handover, "takeUnreported", { value: undefined, configurable: true });
         const take = handover.takeNudged.bind(handover);
         Object.assign(handover, { takeNudged: () => take().map((nudge) => nudge.id) });
         if (!beforeDelivery) continue;
@@ -543,6 +546,33 @@ describe("subagents across a real /reload (faux provider)", () => {
     } finally {
       undo();
     }
+  }, 20_000);
+
+  it("adopts a hand-over from a release without takeUnreported, and folds in the spend its take still carries", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("older-idle");
+    const delta = { input: 7, output: 3, cacheWrite: 0 };
+    const handover = new ReloadHandover([{ dto }], [], [], delta, emptyPool());
+    // The accessor is this release's addition: an older release has no such member, and only `take` carries the delta.
+    Object.defineProperty(handover, "takeUnreported", { value: undefined, configurable: true });
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    // Before the fix the hoist called the missing member: `subagents:init-error` recorded `handover-adoption` and,
+    // because `takeHandovers` had already emptied the store, the hand-over was adopted by nobody and stopped by nobody.
+    const initErrors = root.sessionManager
+      .getEntries()
+      .filter((entry) => entry.type === "custom" && entry.customType === "subagents:init-error");
+    expect(initErrors).toEqual([]);
+    expect(publishedRoot().manager.getRecord(dto.id)?.status).toBe("completed");
+    // Its delta is not stranded either: the older `take` hands it out with the queue, and it rides the next tool result.
+    await root.prompt("spawn-now");
+    expect(toolResultUsage(root, "Agent")?.totalTokens).toBe(10);
   }, 20_000);
 
   it("hands the draining run's AgentSession to the reloaded root's viewer", async () => {

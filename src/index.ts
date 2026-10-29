@@ -36,7 +36,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -1016,9 +1016,11 @@ export default function (pi: ExtensionAPI) {
     // hand-over, and this is the delta the old activation already emitted live. Only that accessor is hoisted. The
     // queued specs stay in their hand-over until this loop reaches it: an adoption that returns early (a shutdown
     // mid-way through `held`) republishes every hand-over behind it, and a queue taken by this activation would not
-    // survive that republish (see `takeUnreported`).
+    // survive that republish (see `takeUnreported`). Read through `takeUnreportedOf`, never directly: an older
+    // hand-over has no such member, and a call on it throws here, before anything is adopted — and `takeHandovers`
+    // has already emptied the store, so that hand-over would be adopted by nobody and stopped by nobody.
     for (const h of held) {
-      const unreported = h.takeUnreported();
+      const unreported = takeUnreportedOf(h);
       if (unreported) pendingUsage.add(unreported);
     }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
@@ -1046,6 +1048,10 @@ export default function (pi: ExtensionAPI) {
       // The queued specs are taken here, in the loop, and not with the unreported spend above: this is the activation
       // that spawns them, and a hand-over this loop has not reached must be republished with its queue intact.
       const taken = h.take();
+      // A hand-over from an older release has no `takeUnreported`: its delta is still in `take`, where it always was,
+      // and dropping it here would lose spend the old activation already emitted live. This release's own hand-over
+      // reported its delta in the hoist above, so its `take` carries none and nothing is counted twice.
+      if (taken.unreported) pendingUsage.add(taken.unreported);
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
       const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]

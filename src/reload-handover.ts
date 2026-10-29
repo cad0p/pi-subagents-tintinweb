@@ -25,14 +25,19 @@ import type { LifetimeUsage } from "./usage.js";
  * A reader of any release takes a hand-over that carries them, whatever its version, and ignores members it does not
  * know; a hand-over that lacks them stays published for a reader that knows it. A field added after the first release
  * may be absent from an older hand-over: read it through an accessor that tolerates absence (`slotHoldersOf`,
- * `takeNudgeEntries`), never directly. Absence of an added field is never a reason to reject a hand-over.
+ * `takeNudgeEntries`, `takeUnreportedOf`), never directly. Absence of an added field is never a reason to reject a
+ * hand-over. A direct call on one is not a late failure but an immediate one: it throws inside the adoption, and the
+ * hand-over it threw on has already left the store, so nothing adopts it and nothing stops it — which is what an
+ * unguarded `takeUnreported()` did, and why that accessor exists.
  *
  * The members are permanent, their signatures are not: `stop`'s `replay` sink is this release's addition, and a
  * hand-over published by an older release carries that release's `stop`, which takes no argument (`stop.length` is 0
  * there) and drops the `usage` events it never delivered. A reader of this release that stops such a hand-over loses
- * that delta silently, and nothing on the reader's side recovers it: this is a documented limitation, not a guard to
- * write. A reader that needs the delta from an older hand-over does not stop it — it attaches a listener for the events
- * and disposes the hand-over's idle items itself through `teardownChildSession`.
+ * that delta silently, and this release does not take the route that would keep it: it stops an older hand-over as it
+ * always has and accepts the loss as a documented limitation, not a guard to write. A reader that must have the delta
+ * does not call `stop` on such a hand-over: it `attach`es a listener for its `usage` events, disposes its idle items
+ * itself through `teardownChildSession`, and then ends the pool the way `stop` would have — `detach`,
+ * `draining.abortAll`, `draining.dispose`; stopping at the disposal leaves the pool, its runs and their slots alive.
  */
 export const HANDOVER_KEY = Symbol.for("pi-subagents:reload-handover");
 
@@ -309,6 +314,17 @@ function isReadableHandover(value: unknown): value is ReloadHandover {
  */
 export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
   return (handover as { slotHolders?: Set<string> }).slotHolders ?? [];
+}
+
+/**
+ * Takes the spend a hand-over never reported. Read through this accessor, never as `handover.takeUnreported()`:
+ * `takeUnreported` is this release's addition, and an older hand-over has no such member, so a direct call throws and
+ * costs the whole adoption. That hand-over's delta is still in `take` where it always was, and the adoption loop folds
+ * it in there.
+ */
+export function takeUnreportedOf(handover: ReloadHandover): LifetimeUsage | undefined {
+  const take = (handover as { takeUnreported?: () => LifetimeUsage | undefined }).takeUnreported;
+  return typeof take === "function" ? take.call(handover) : undefined;
 }
 
 /** The pending nudges as entries: releases before nested delivery handed plain ids over. */

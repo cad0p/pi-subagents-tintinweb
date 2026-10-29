@@ -20,6 +20,7 @@ import {
   slotHoldersOf,
   takeHandovers,
   takeNudgeEntries,
+  takeUnreportedOf,
   toDto,
   toSpawnData,
 } from "../src/reload-handover.js";
@@ -126,6 +127,22 @@ describe("ReloadHandover buffering", () => {
     Object.assign(older, { takeNudged: () => ["n1", "n2"] });
     expect([...slotHoldersOf(older)]).toEqual([]);
     expect(takeNudgeEntries(older)).toEqual([{ id: "n1" }, { id: "n2" }]);
+  });
+
+  it("reads a hand-over published before takeUnreported: its delta is still in take", () => {
+    const delta: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const older = new ReloadHandover([], [], [], delta, stubPool);
+    Object.defineProperty(older, "takeUnreported", { value: undefined, configurable: true });
+    expect(takeUnreportedOf(older)).toBeUndefined();
+    expect(older.take().unreported).toEqual(delta);
+  });
+
+  it("takes the unreported spend through the accessor, leaving it in take for a hand-over that has no accessor", () => {
+    const delta: LifetimeUsage = { input: 1, output: 0, cacheWrite: 0 };
+    const current = new ReloadHandover([], [], [], delta, stubPool);
+    expect(takeUnreportedOf(current)).toEqual(delta);
+    expect(takeUnreportedOf(current)).toBeUndefined();
+    expect(current.take().unreported).toBeUndefined();
   });
 
   it("hands out the unreported spend alone, leaving the queued specs for the activation that adopts it", () => {
