@@ -701,6 +701,10 @@ describe("native transcript view", () => {
     for (const name of ["showError", "showWarning", "showStatus", "showExtensionError"] as const) {
       (h.im as any)[name] = function (this: any, ...args: unknown[]) { this.seen.push(`${name}:${String(args[0])}`); };
     }
+    // These two take no argument to identify them, so each records the receiver it ran on.
+    for (const name of ["resetExtensionUI", "setupAutocompleteProvider"] as const) {
+      (h.im as any)[name] = function (this: any) { this.seen.push(name); };
+    }
     (h.im as any).seen = seen;
     h.openChild();
     expect(() => h.im.showError("boom")).not.toThrow();
@@ -709,7 +713,14 @@ describe("native transcript view", () => {
     expect(() => h.im.showExtensionError("ext", "bad")).not.toThrow();
     expect(() => h.im.resetExtensionUI()).not.toThrow();
     expect(() => h.im.setupAutocompleteProvider()).not.toThrow();
-    expect(seen).toEqual(["showError:boom", "showWarning:careful", "showStatus:working on it", "showExtensionError:ext"]);
+    expect(seen).toEqual([
+      "showError:boom",
+      "showWarning:careful",
+      "showStatus:working on it",
+      "showExtensionError:ext",
+      "resetExtensionUI",
+      "setupAutocompleteProvider",
+    ]);
   });
 
   it("refuses a record with no transcript without dropping the view already on screen", () => {

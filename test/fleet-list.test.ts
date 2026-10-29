@@ -1254,7 +1254,7 @@ describe("FleetList owns navigation (#178)", () => {
 describe("FleetView keeps its marker and its transcript in step (#178 review)", () => {
   const mk = (over: Partial<AgentRecord>) => makeRecord(over);
 
-  it("a row it cannot show does not keep the row it was showing before pinned", () => {
+  it("keeps the row of the transcript a refusal leaves on screen", () => {
     const now = Date.now();
     const shown = mk({ id: "shown", description: "shown one", startedAt: now - 5000 });
     const refused = mk({ id: "refused", description: "refused one", startedAt: now - 4000, status: "queued", session: undefined });
@@ -1264,17 +1264,22 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     h.press(DOWN); h.press(DOWN); // onto the shown record
     expect(view.shown).toBe("shown");
 
-    // The next row cannot be shown. A refusal must drop the pin the previous record earned, or that
-    // record's row outlives every rule the list has for dropping rows.
+    // The next row cannot be shown. The refusal leaves the transcript on screen, so the pin must
+    // follow what is painted rather than the cursor: the row it belongs to would otherwise lose its
+    // exemption and age out from under the very transcript still displayed.
     view.result = "refused";
     h.press(DOWN);
-    expect(view.notices).toEqual(["refused"]);
+    expect(h.render().find(l => l.includes("refused one"))).toContain("⏺"); // the cursor did move
+    expect(view.notices).toEqual(["refused"]); // and the refusal was reported
     expect(h.notifications).toEqual(["queued, not started yet"]);
 
     shown.status = "completed";
     shown.completedAt = now - 60_000; // past the linger window
     h.fleet.update();
-    expect(h.render().some(l => l.includes("shown one"))).toBe(false);
+    expect(view.isOpen()).toBe(true);
+    expect(view.shown).toBe("shown");
+    expect(h.render().find(l => l.includes("shown one"))).toContain("◯"); // still listed, not the cursor
+    expect(h.render().find(l => l.includes("refused one"))).toContain("⏺");
   });
 
   it("keeps the pin when the cursor returns to the row already on screen", () => {
@@ -1288,7 +1293,7 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     expect(view.shown).toBe("shown");
 
     view.result = "refused";
-    h.press(DOWN); // the next row has nothing to show: the refusal drops the pin
+    h.press(DOWN); // the next row has nothing to show: its transcript stays on screen
     h.press(UP); // and back onto the row whose transcript is still on screen
     expect(view.opened).toEqual(["shown", "refused"]); // no rebuild: the view already shows it
 
