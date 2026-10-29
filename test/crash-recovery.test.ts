@@ -267,6 +267,8 @@ describe("crash recovery — startup report", () => {
     expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
     expect(message.content).toContain(NOTE);
     expect(message.content).not.toContain("SendMessage(");
+    // Even the crash-loop record is resumable on request, just not autonomously.
+    expect(message.content).toContain("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
   });
 
   it("tells the main agent to resume a first interruption itself with SendMessage, naming its id", async () => {
@@ -280,6 +282,7 @@ describe("crash recovery — startup report", () => {
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
     const [message] = made.pi.sendMessage.mock.calls[0];
     expect(message.content).toContain('Resume first now: SendMessage({ to: "first", message: "continue" }) without asking the user');
+    expect(message.content).toContain("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
     expect(message.content).not.toContain(NOTE);
   });
 

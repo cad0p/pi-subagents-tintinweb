@@ -488,6 +488,7 @@ export default function (pi: ExtensionAPI) {
       const calls = resumable.map((id) => `SendMessage({ to: "${id}", message: "continue" })`).join(", ");
       lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a crash note. Do not start a new Agent for them.`);
     }
+    lines.push("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
     for (const record of records) {
       const note = crash.get(record.id)?.note;
       if (note) lines.push(`${record.id}: ${note}`);
