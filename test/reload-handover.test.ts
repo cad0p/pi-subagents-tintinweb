@@ -183,6 +183,32 @@ describe("published handovers", () => {
     expect(takeHandovers(sessionId)).toEqual([]);
     publishHandovers(sessionId, []);
   });
+
+  it("keeps a hand-over published when its activity is missing", () => {
+    const sessionId = "session-missing-activity";
+    const known = new ReloadHandover([], [], [], undefined, stubPool);
+    const noActivity = new ReloadHandover([], [], [], undefined, stubPool);
+    Reflect.deleteProperty(noActivity, "activity");
+    publishHandovers(sessionId, [known, noActivity]);
+
+    expect(takeHandovers(sessionId)).toEqual([known]);
+    const store = (globalThis as Record<symbol, unknown>)[HANDOVER_KEY] as Map<string, ReloadHandover[]>;
+    expect(store.get(sessionId)).toEqual([noActivity]);
+    publishHandovers(sessionId, []);
+  });
+
+  it("keeps a hand-over whose draining pool lacks ownAgents published", () => {
+    const sessionId = "session-missing-own-agents";
+    const known = new ReloadHandover([], [], [], undefined, stubPool);
+    const noOwnAgents = new ReloadHandover([], [], [], undefined, { ...stubPool });
+    Reflect.deleteProperty(noOwnAgents.draining, "ownAgents");
+    publishHandovers(sessionId, [known, noOwnAgents]);
+
+    expect(takeHandovers(sessionId)).toEqual([known]);
+    const store = (globalThis as Record<symbol, unknown>)[HANDOVER_KEY] as Map<string, ReloadHandover[]>;
+    expect(store.get(sessionId)).toEqual([noOwnAgents]);
+    publishHandovers(sessionId, []);
+  });
 });
 
 describe("DTO and spawn data", () => {
