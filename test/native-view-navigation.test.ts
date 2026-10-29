@@ -119,6 +119,8 @@ interface Harness {
   im: any;
   /** Feed a key to the fleet's terminal listener; returns its consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
+  /** Feed a key the way pi does: the fleet's listener first, the focused editor if it passes. */
+  type: (data: string) => { consume?: boolean } | undefined;
   /** What pi would paint: the document container in the transcript slot. */
   transcript: () => string;
   /** The below-editor widget's painted lines. */
@@ -277,6 +279,13 @@ async function harness(): Promise<Harness> {
     ui,
     im,
     press: (data) => inputHandler?.(data),
+    type: (data) => {
+      const result = inputHandler?.(data);
+      // pi hands an unconsumed key to the focused component, which is the child's editor while its
+      // view is open. Driving this path is what pins the routing: the fleet must not take Esc.
+      if (result === undefined) im.editor.handleInput(data);
+      return result;
+    },
     transcript: () => documentContainer.render(120).join("\n"),
     painted: () => widgetLines,
     notifications,
@@ -382,7 +391,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       h.press(DOWN); h.press(DOWN); // open the settled record's view
       expect(h.transcript()).not.toContain("HOST TEXT");
 
-      h.im.editor.handleInput(ESC); // the child editor's Esc: abort() is false for a settled record
+      expect(h.type(ESC)).toBeUndefined(); // the fleet passes it: the child editor's Esc, abort() is false
       expect(h.transcript()).toContain("HOST TEXT");
       expect(row(h, "main")).toContain("⏺");
       expect(h.notifications).toEqual([]); // nothing to stop, so nothing to say
@@ -400,7 +409,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       h.press(DOWN); h.press(DOWN);
       expect(h.transcript()).toContain("CHILD hang");
 
-      h.im.editor.handleInput(ESC);
+      expect(h.type(ESC)).toBeUndefined(); // routed past the fleet, into the child editor
 
       // The list returns to the host transcript, and the stop is announced to the human.
       expect(h.transcript()).toContain("HOST TEXT");

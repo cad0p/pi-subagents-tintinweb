@@ -692,6 +692,23 @@ describe("native transcript view", () => {
     expect(h.view.isOpen()).toBe(false);
   });
 
+  it("refuses a record with no transcript without dropping the view already on screen", () => {
+    const h = harness();
+    h.openChild();
+    const shownBefore = h.documentContainer.children.slice();
+    // The record loses its session and has no settled one: the next open() has nothing to show.
+    h.record.session = undefined;
+    h.ctx.ui.notify = vi.fn();
+    expect(h.view.open("child-1")).toBe("refused");
+    // The refusal is announced once and changes nothing else: dropping the transcript and
+    // repeating the notice on every keypress is what a close-first open() did.
+    expect(h.ctx.ui.notify).toHaveBeenCalledTimes(1);
+    expect(h.ctx.ui.notify).toHaveBeenCalledWith("Agent is running — no session available.", "info");
+    expect(h.view.isOpen()).toBe(true);
+    expect(h.documentContainer.children).toEqual(shownBefore);
+    expect(h.im.editor).not.toBe(h.im.defaultEditor);
+  });
+
   it("reports the close to its owner once it is no longer open — but not when it only switches records", () => {
     const h = harness();
     h.openChild();

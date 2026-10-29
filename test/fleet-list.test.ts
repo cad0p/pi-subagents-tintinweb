@@ -1098,8 +1098,10 @@ describe("FleetList selection follows the record (#146)", () => {
  * A native view as FleetView sees it: what it shows, what it was asked to show, and what closed it.
  * The real one rebuilds pi's transcript; here only the bookkeeping matters.
  */
-function fakeNativeView() {
+function fakeNativeView(notify: (message: string) => void = () => {}) {
   const view = {
+    /** Rows it was asked to show and could not: the real view notices this to the human. */
+    notices: [] as string[],
     opened: [] as string[],
     closes: [] as string[],
     shown: undefined as string | undefined,
@@ -1109,7 +1111,14 @@ function fakeNativeView() {
     shownId: () => view.shown,
     open: (id: string) => {
       view.opened.push(id);
-      // open() closes whatever it was showing first: a refused or unavailable record leaves nothing up.
+      // The real view refuses before it closes anything: a row it cannot show leaves the transcript
+      // on screen untouched, and says why.
+      if (view.result === "refused") {
+        view.notices.push(id);
+        notify("queued, not started yet");
+        return view.result;
+      }
+      // open() closes whatever it was showing first: an unavailable record leaves nothing up.
       view.shown = view.result === "opened" ? id : undefined;
       return view.result;
     },
@@ -1239,5 +1248,85 @@ describe("FleetList owns navigation (#178)", () => {
     h.press(ENTER);
     expect(view.opened).toEqual(["a1", "a1"]);
     expect(h.overlayOpened()).toBe(true);
+  });
+});
+
+describe("FleetView keeps its marker and its transcript in step (#178 review)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+
+  it("a row it cannot show does not keep the row it was showing before pinned", () => {
+    const now = Date.now();
+    const shown = mk({ id: "shown", description: "shown one", startedAt: now - 5000 });
+    const refused = mk({ id: "refused", description: "refused one", startedAt: now - 4000, status: "queued", session: undefined });
+    const h = harness([shown, refused]);
+    const view = fakeNativeView((message) => h.notifications.push(message));
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // onto the shown record
+    expect(view.shown).toBe("shown");
+
+    // The next row cannot be shown. A refusal must drop the pin the previous record earned, or that
+    // record's row outlives every rule the list has for dropping rows.
+    view.result = "refused";
+    h.press(DOWN);
+    expect(view.notices).toEqual(["refused"]);
+    expect(h.notifications).toEqual(["queued, not started yet"]);
+
+    shown.status = "completed";
+    shown.completedAt = now - 60_000; // past the linger window
+    h.fleet.update();
+    expect(h.render().some(l => l.includes("shown one"))).toBe(false);
+  });
+
+  it("says why once per row it cannot show, not once per repaint", () => {
+    const h = harness([makeRecord({ id: "q", description: "queued one", status: "queued", session: undefined })]);
+    const view = fakeNativeView((message) => h.notifications.push(message));
+    view.result = "refused";
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    h.fleet.update();
+    h.fleet.update(); // the 200ms tick re-resolves the selection; it must not re-ask
+    expect(view.notices).toEqual(["q"]);
+    expect(h.notifications).toEqual(["queued, not started yet"]);
+  });
+
+  it("drops the marker to `main` when a deactivation cannot follow it", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    h.press(UP); // onto `main`: the host transcript is back and the marker left the agent
+    expect(view.isOpen()).toBe(false);
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+  });
+
+  it("keeps the marker on the shown agent when another component takes the keys", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // the agent row, shown
+    expect(view.shown).toBe("a1");
+
+    // A dialog takes focus. The list drops out of navigation (its keys are not its own any more),
+    // but the marker stays on the record whose transcript is on screen.
+    h.widgetTui.focusedComponent = { kind: "dialog" };
+    h.render();
+    expect(h.press(DOWN)).toBeUndefined();
+    expect(h.render().find(l => l.includes("one"))).toContain("⏺");
+    expect(h.render().find(l => l.includes("main"))).toContain("◯");
+    expect(view.isOpen()).toBe(true);
+  });
+
+  it("closes the view when the roster empties under it, instead of leaving the marker nowhere", () => {
+    const agents: AgentRecord[] = [mk({ id: "a1", description: "one" })];
+    const h = harness(agents);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN);
+    expect(view.shown).toBe("a1");
+
+    agents.length = 0; // the record is dropped from the manager under the open view
+    h.fleet.update();
+    expect(view.isOpen()).toBe(false);
+    expect(h.render()).toEqual([]); // no rows, so the widget clears itself
   });
 });

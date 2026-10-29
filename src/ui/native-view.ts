@@ -398,17 +398,21 @@ export class NativeTranscriptView {
     const ctx = this.options.getContext();
     const record = this.options.manager.getRecord(id);
     if (!ctx || !record) return "unavailable";
-    if (this.state) this.close("switch");
-
-    const hostContainer = im.chatContainer;
-    const hostIndex = im.documentContainer.children.indexOf(hostContainer);
-    if (hostIndex < 0) return "unavailable";
+    // Refuse before anything is closed: a row with no transcript must not drop the transcript
+    // already on screen, nor repeat its notice on every keypress that lands on it.
     const childSession = record.session;
     const sessionManager = childSession?.sessionManager ?? this.options.manager.settledSessionManager(id);
     if (!sessionManager) {
       ctx.ui.notify(noTranscriptMessage(record), "info");
       return "refused";
     }
+    if (this.state) this.close("switch");
+
+    // Read after the close: while a view is open the host container is detached, so its index is
+    // only meaningful once the close put it back.
+    const hostContainer = im.chatContainer;
+    const hostIndex = im.documentContainer.children.indexOf(hostContainer);
+    if (hostIndex < 0) return "unavailable";
 
     const state: ViewState = {
       active: true,

@@ -269,6 +269,9 @@ export class FleetList {
       this.active = false;
       this.selectedId = undefined;
       this.selectedIndex = 0;
+      // Nothing is left to hold the cursor: a child view on a record that is gone is closed with it,
+      // so the list never claims a row it no longer has.
+      this.closeNative();
       return;
     }
 
@@ -343,10 +346,16 @@ export class FleetList {
     this.selectedId = entry?.kind === "agent" ? entry.record.id : undefined;
   }
 
-  /** Re-resolve the row index from the selected record after the roster changed under the cursor. */
+  /**
+   * Re-resolve the row index from the selected record after the roster changed under the cursor.
+   * A roster change that moves the cursor moves the view with it, exactly as a key does: otherwise
+   * the marker would sit on a row whose transcript is not the one on screen.
+   */
   private syncSelection(): void {
     const roster = this.roster();
+    const before = this.selectedId;
     this.moveSelection(roster, this.resolveIndex(roster));
+    if (this.selectedId !== before) this.followSelection();
   }
 
   // ---- Key handling ----
@@ -443,6 +452,7 @@ export class FleetList {
     if (matchesKey(data, "escape")) {
       // The child view's Esc is the child editor's: it interrupts the shown run and returns to
       // `main`, so the list must not swallow it.
+
       if (viewing) return undefined;
       this.deactivate();
       return { consume: true };
@@ -471,6 +481,13 @@ export class FleetList {
 
   private deactivate(): void {
     this.active = false;
+    // A child view's marker is the record it shows; re-pointing it while that view is up would
+    // leave the cursor on a row nobody is showing. The list only gives the cursor up with the view.
+    if (this.nativeView?.isOpen() === true) {
+      this.update();
+      return;
+    }
+    this.viewingAgentId = undefined;
     this.selectedId = undefined; // back to `main`
     this.selectedIndex = 0;
     this.update();
@@ -487,7 +504,9 @@ export class FleetList {
     if (view.isOpen() && view.shownId() === id) return "opened";
     try {
       const result = view.open(id);
-      if (result === "opened") this.viewingAgentId = id;
+      // Only a shown record may pin its row: a refused or unavailable one must not keep the list
+      // from dropping a row it no longer qualifies for.
+      this.viewingAgentId = result === "opened" ? id : undefined;
       return result;
     } catch {
       // The capture guard failed mid-open and the view restored itself: a keystroke must not throw.
