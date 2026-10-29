@@ -52,7 +52,6 @@ export interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
-  isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isolation?: IsolationMode;
@@ -149,7 +148,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(
         Type.Number({ description: "Maximum number of agentic turns before stopping. Omit for the agent's own limit.", minimum: 1 }),
       ),
-      isolated: Type.Optional(Type.Boolean({ description: "If true, the nested agent gets no extension tools." })),
       inherit_context: Type.Optional(
         Type.Boolean({ description: "If true, fork this agent's conversation into the nested agent." }),
       ),
@@ -226,14 +224,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         description: params.description,
         model,
         maxTurns: invocation.maxTurns,
-        isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,
         isolation: invocation.isolation,
         invocation: {
           thinking: invocation.thinking,
           maxTurns: invocation.maxTurns,
-          isolated: invocation.isolated,
           inheritContext: invocation.inheritContext,
           isolation: invocation.isolation,
         },

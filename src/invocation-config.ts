@@ -55,7 +55,6 @@ export function isolationParam(enabled: boolean): Partial<typeof isolationParamS
 interface AgentInvocationParams {
   max_turns?: number;
   inherit_context?: boolean;
-  isolated?: boolean;
   /**
    * Untyped on purpose. The tool schema builds this field conditionally and
    * spreads it, which erases TypeBox's literal inference to `unknown`. The
@@ -86,7 +85,6 @@ export function resolveAgentInvocationConfig(
   thinking?: ThinkingLevel;
   maxTurns?: number;
   inheritContext: boolean;
-  isolated: boolean;
   isolation?: IsolationMode;
 } {
   // Precedence first, collapse second — reversing these loses the veto, since
@@ -100,7 +98,6 @@ export function resolveAgentInvocationConfig(
     thinking: agentConfig?.thinking,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
-    isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,
   };
 }

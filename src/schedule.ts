@@ -67,7 +67,6 @@ export interface NewJobInput {
   model?: string;
   thinking?: ThinkingLevel;
   max_turns?: number;
-  isolated?: boolean;
   isolation?: IsolationMode;
 }
 
@@ -138,7 +137,6 @@ export class SubagentScheduler {
       model: input.model,
       thinking: input.thinking,
       max_turns: input.max_turns,
-      isolated: input.isolated,
       isolation: input.isolation,
       enabled: true,
       createdAt: new Date().toISOString(),
@@ -366,7 +364,6 @@ export class SubagentScheduler {
         bypassQueue: true,
         model: resolvedModel,
         maxTurns: job.max_turns,
-        isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
       });

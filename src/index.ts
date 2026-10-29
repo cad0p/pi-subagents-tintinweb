@@ -1226,7 +1226,6 @@ export default function (pi: ExtensionAPI) {
       agentId: record.id,
       parentAgentId: record.parentAgentId,
       model,
-      isolated: record.invocation?.isolated,
       thinkingLevel: requested === "off" ? undefined : requested,
       cwd,
       configCwd: record.configCwd && existsSync(record.configCwd) ? record.configCwd : cwd,
@@ -1658,11 +1657,6 @@ Terse command-style prompts produce shallow, generic work.
           minimum: 1,
         }),
       ),
-      isolated: Type.Optional(
-        Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-        }),
-      ),
       inherit_context: Type.Optional(
         Type.Boolean({
           description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
@@ -1770,7 +1764,6 @@ Terse command-style prompts produce shallow, generic work.
 
       const thinking = resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
-      const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
       // Whether this spawn writes its .output transcript. Per-agent
       // frontmatter (`output_transcript`) wins; otherwise the project/global
@@ -1852,7 +1845,6 @@ Terse command-style prompts produce shallow, generic work.
             prompt: params.prompt as string,
             thinking: thinking,
             max_turns: effectiveMaxTurns,
-            isolated: isolated,
             isolation: isolation,
           });
           warnOnOutOfScopeModel();
@@ -1877,7 +1869,6 @@ Terse command-style prompts produce shallow, generic work.
           // Explicit value only — the default fallback would just add noise.
           // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
           maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
-          isolated,
           inheritContext,
           isolation,
         };
@@ -1917,7 +1908,6 @@ Terse command-style prompts produce shallow, generic work.
             description: params.description,
             model,
             maxTurns: effectiveMaxTurns,
-            isolated,
             inheritContext,
             thinkingLevel: thinking,
             isolation,
@@ -2480,7 +2470,6 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
     if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
-    if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
     if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
     if (cfg.allowedSubagents !== undefined) {
@@ -2610,7 +2599,6 @@ skills: <true (inherit all), false (none), or comma-separated skill names to pre
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
-isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
       // Offering the field on a project that turned worktrees off would bake a
       // request that is refused at spawn time into a file that outlives the
@@ -2632,7 +2620,7 @@ Guidelines for choosing settings:
 - Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
-- Set isolated: true if the agent should NOT have access to MCP servers or other extensions
+- To keep an agent hermetic (no MCP/extension tools, no skills), set extensions: false and skills: false, and omit allowed_subagents
 - Set output_transcript: false to skip writing this agent's transcript; it doesn't keep the run off disk — every run writes a pi session file while it runs (kept after it settles only with persist_session: true), and isolation: worktree commits and memory still write
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 

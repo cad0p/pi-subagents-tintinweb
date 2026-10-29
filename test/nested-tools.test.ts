@@ -381,7 +381,7 @@ describe("nested tool set shape", () => {
   it("offers no model, thinking, or run_in_background parameter", () => {
     const schema = tools()[0].parameters as unknown as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(
-      ["description", "inherit_context", "isolated", "isolation", "max_turns", "prompt", "subagent_type"],
+      ["description", "inherit_context", "isolation", "max_turns", "prompt", "subagent_type"],
     );
   });
 

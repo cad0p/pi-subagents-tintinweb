@@ -106,7 +106,6 @@ vi.mock("../src/agent-types.js", () => ({
     systemPrompt: "You are Explore.",
     promptMode: "replace",
     inheritContext: false,
-    isolated: false,
   })),
   getMemoryToolNames: vi.fn(() => []),
   getReadOnlyMemoryToolNames: vi.fn(() => []),
@@ -845,7 +844,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     systemPrompt: "Test.",
     promptMode: "replace" as const,
     inheritContext: false,
-    isolated: false,
     ...overrides,
   };
 }
@@ -1879,19 +1877,6 @@ describe("agent-runner exclude_extensions", () => {
     ]);
   });
 
-  it("isolated: true + exclude — excludes nulled, no warnings", async () => {
-    setupAgent({ extensions: true, excludeExtensions: ["notify"] });
-    withExtensions({ "/ext/notify.ts": ["notify_send"] });
-    const { session } = createSession("OK");
-    createAgentSession.mockResolvedValue({ session });
-    const onToolActivity = vi.fn();
-
-    await runAgent(ctx, "Explore", "go", { pi, onToolActivity, isolated: true });
-
-    expect(lastToolsPassed()).not.toContain("notify_send");
-    expect(extensionErrors(onToolActivity)).toEqual([]);
-  });
-
   it("tools: ext:foo referencing an excluded extension — existing orphan warning fires", async () => {
     setupAgent({
       extensions: true,
@@ -2340,13 +2325,13 @@ describe("agent-runner ext: tool selectors", () => {
     );
   });
 
-  it("isolated: true ignores extSelectors — no extension tools", async () => {
-    setupExtAgent({ extensions: true, builtinToolNames: ["read"], extSelectors: ["ext:foo"] });
+  it("extensions: false drops ext: selectors — no extension tools", async () => {
+    setupExtAgent({ extensions: false, builtinToolNames: ["read"], extSelectors: ["ext:foo"] });
     withExtensions({ "/ext/foo.ts": ["foo_tool"] });
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+    await runAgent(ctx, "Explore", "go", { pi });
 
     const tools = lastToolsPassed();
     expect(tools).toContain("read");
@@ -2487,7 +2472,6 @@ describe("agent-runner model scope", () => {
       systemPrompt: "You are Explore.",
       promptMode: "replace",
       inheritContext: false,
-      isolated: false,
       scopedModels,
     };
   }
@@ -2541,29 +2525,41 @@ describe("agent-runner model scope", () => {
     expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
   });
 
-  it("isolated agents never inherit a scope", async () => {
-    const { session } = createSession("ISOLATED");
-    createAgentSession.mockResolvedValue({ session });
-    const context = { ...ctx, scopedModels: parentScoped };
-
-    await runAgent(context, "Explore", "go", { pi, isolated: true });
-
-    expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
-  });
-
-  it("warns when isolation discards an explicit scoped_models list", async () => {
-    const { session } = createSession("ISOLATED-LIST");
+  it("scoped_models: none gives the child an empty scope, parent scope or not", async () => {
+    const { session } = createSession("NONE-PARENT");
     createAgentSession.mockResolvedValue({ session });
     const context = { ...ctx, scopedModels: parentScoped };
     const onToolActivity = vi.fn();
-    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(["acme/m1"]));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(false));
 
-    await runAgent(context, "Explore", "go", { pi, isolated: true, onToolActivity });
+    await runAgent(context, "Explore", "go", { pi, onToolActivity });
 
-    expect(onToolActivity).toHaveBeenCalledWith(expect.objectContaining({
-      type: "end",
+    expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
+    // `none` is a legal scope, not a discarded one — nothing to warn about.
+    expect(onToolActivity).not.toHaveBeenCalledWith(expect.objectContaining({
       toolName: expect.stringContaining("scoped-models-error:"),
     }));
+  });
+
+  // Replaces the `isolated: true` coverage: that flag is gone, and its recipe
+  // (`extensions: false` + `skills: false` + `scoped_models: false`, no
+  // `allowed_subagents`) must produce the same hermetic child — built-ins only.
+  it("a hermetic agent (extensions/skills/scoped_models: false) keeps built-ins only", async () => {
+    const { session } = createSession("HERMETIC");
+    createAgentSession.mockResolvedValue({ session });
+    const context = { ...ctx, scopedModels: parentScoped };
+    withExtensions({ "/ext/leak.ts": ["leak_tool"] });
+    vi.mocked(getConfig).mockReturnValueOnce(
+      makeConfig({ builtinToolNames: ["read"], extensions: false, skills: false }),
+    );
+    vi.mocked(getAgentConfig).mockReturnValueOnce(configWithScopedModels(false));
+
+    await runAgent(context, "Explore", "go", { pi });
+
+    // No extension tools, no skills, no model scope, no nested delegation tools.
+    expect(lastLoaderOpts().noExtensions).toBe(true);
+    expect(lastLoaderOpts().noSkills).toBe(true);
+    expect(lastToolsPassed()).toEqual(["read"]);
     expect(createAgentSession.mock.calls[0][0].scopedModels).toEqual([]);
   });
 

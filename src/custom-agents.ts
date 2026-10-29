@@ -82,7 +82,6 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
-      isolated: fm.isolated != null ? fm.isolated === true : undefined,
       memory: parseMemory(fm.memory),
       isolation: parseIsolation(fm.isolation),
       enabled: fm.enabled !== false,  // default true; explicitly false disables
@@ -157,7 +156,6 @@ const KNOWN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
   "max_subagent_depth",
   "prompt_mode",
   "inherit_context",
-  "isolated",
   "memory",
   "isolation",
   "enabled",

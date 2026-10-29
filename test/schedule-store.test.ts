@@ -374,6 +374,24 @@ describe("ScheduleStore", () => {
     expect(store.remove("bad-model")).toBe(true);
   });
 
+  // Job files from releases with the removed `isolated` flag are still on disk.
+  // The build is field-by-field, so the stale key is ignored, not fatal.
+  it("ignores the removed isolated key on a job written by an older release", () => {
+    const file = join(tmp, "s.json");
+    writeStoreFile(file, [{ ...makeJob({ id: "legacy-isolated" }), isolated: true }]);
+
+    const store = new ScheduleStore(file);
+    expect(store.list()).toHaveLength(1);
+    const job = store.get("legacy-isolated") as unknown as Record<string, unknown> | undefined;
+    expect(job?.prompt).toBe("hello");
+    expect(job?.isolated).toBeUndefined();
+
+    // A save rewrites the record without the stale key.
+    store.update("legacy-isolated", { prompt: "second" });
+    const onDisk = JSON.parse(readFileSync(file, "utf-8"));
+    expect(onDisk.jobs[0]).not.toHaveProperty("isolated");
+  });
+
   it("loads a non-boolean enabled as disabled", () => {
     const file = join(tmp, "s.json");
     writeStoreFile(file, [{ ...makeJob({ id: "bad-enabled" }), enabled: "yes" }]);

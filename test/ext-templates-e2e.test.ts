@@ -124,9 +124,10 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 
-    // Mirror production: the caller resolves frontmatter-locked fields (isolated,
-    // inherit_context, …) into runAgent options via resolveAgentInvocationConfig.
-    // isolated is the one that affects tool gating (forces extensions:false + drops ext:).
+    // Mirror production: the caller resolves frontmatter-locked fields
+    // (inherit_context, isolation, …) into runAgent options via
+    // resolveAgentInvocationConfig. Tool gating itself comes from the template's
+    // own extensions:/skills:/tools: — a hermetic template sets them to false.
     const resolved = resolveAgentInvocationConfig(getAgentConfig(agentName), {} as any);
 
     let active: string[] = [];
@@ -136,7 +137,6 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
         pi,
         model,
         cwd: FIXTURES_DIR,
-        isolated: resolved.isolated,
         inheritContext: resolved.inheritContext,
         onSessionCreated: (s) => {
           // Both fixed at construction (before any prompt turn): the gated tool

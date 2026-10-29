@@ -27,6 +27,11 @@ export interface SpawnedLedgerEntry {
   thinking?: ThinkingLevel;
   runCwd?: string;
   configCwd?: string;
+  /**
+   * Legacy: written by releases that had an `isolated` flag. Nothing reads it
+   * any more, and new entries omit it — the field stays optional so a ledger
+   * entry from an older session still parses instead of being dropped.
+   */
   isolated?: boolean;
   spawnedAt: number;
   ownerPid: number;
@@ -58,7 +63,6 @@ export function spawnedEntry(record: AgentRecord, sessionFile: string, owner: Ow
     thinking: record.childSettings?.thinkingLevel,
     runCwd: record.childSettings?.effectiveCwd,
     configCwd: record.childSettings?.configCwd,
-    isolated: record.invocation?.isolated,
     spawnedAt: record.startedAt,
     ownerPid: owner.pid,
     bootId: owner.bootId,
@@ -149,7 +153,7 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
     sessionFile: spawned.sessionFile, persistSession: spawned.persistSession,
     parentAgentId: spawned.parentId, cwd: spawned.cwd, worktree: spawned.worktree,
     runCwd: spawned.runCwd, configCwd: spawned.configCwd,
-    invocation: { modelId: spawned.model, requestedThinking: spawned.thinking, isolated: spawned.isolated },
+    invocation: { modelId: spawned.model, requestedThinking: spawned.thinking },
     settled: true, crashCount,
   };
 }

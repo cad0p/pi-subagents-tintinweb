@@ -34,7 +34,6 @@ function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     systemPrompt: "You are a test agent.",
     promptMode: "replace",
     inheritContext: false,
-    isolated: false,
     ...overrides,
   };
 }
@@ -109,11 +108,10 @@ describe("agent type registry", () => {
     // Regression guard for #37 — default agents must not bake in callsite-strategy fields.
     // An explicit `false` here would silently win over the caller's `true` via `??` in
     // resolveAgentInvocationConfig, breaking documented Agent tool params.
-    it("default agents do not lock strategy fields (inherit_context / isolated)", () => {
+    it("default agents do not lock strategy fields (inherit_context)", () => {
       for (const name of ["general-purpose", "Explore", "Plan"]) {
         const cfg = getAgentConfig(name);
         expect(cfg?.inheritContext, `${name}.inheritContext`).toBeUndefined();
-        expect(cfg?.isolated, `${name}.isolated`).toBeUndefined();
       }
     });
 

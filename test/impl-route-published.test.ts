@@ -69,7 +69,6 @@ async function buildChild(runOpts: { agentId?: string; onToolActivity?: (activit
           systemPrompt: "You are published.",
           promptMode: "replace",
           inheritContext: false,
-          isolated: false,
           extensions: [FIXTURE],
           extSelectors: [`ext:${extensionCanonicalName(FIXTURE)}`],
         } as AgentConfig,

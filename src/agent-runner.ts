@@ -409,7 +409,6 @@ export interface RunOptions {
   /** Receives this lifecycle's run boundaries (start, end, settle). */
   observer?: RunObserver;
   signal?: AbortSignal;
-  isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /** Override working directory (e.g. for worktree isolation). */
@@ -895,13 +894,13 @@ export async function createChildSession(
   //
   // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md — upstream's
   // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace and isolated: true. Parent context, if
+  // would defeat prompt_mode: replace. Parent context, if
   // wanted, reaches the subagent via prompt_mode: append (parentSystemPrompt
   // is embedded in systemPromptOverride) or inherit_context (conversation).
   // `ext:` selectors from the `tools:` CSV narrow which extension tools surface to
   // the LLM. They do NOT control loading — `extensions:` is the sole authority for
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
-  // is an orphan and warns after reload. `isolated` means no extension tools at all.
+  // is an orphan and warns after reload.
   const { extNames, narrowing } = parseExtSelectors(extSelectors);
   const noExtensions = extensions === false;
   const disallowed = agentConfig?.disallowedTools?.length
@@ -1300,12 +1299,7 @@ export async function resolveChildSettings(ctx: ExtensionContext, type: Subagent
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = { worktree: options.worktree };
 
-  // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
-  // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
-  // isolation is an intentional override, not a misconfiguration.
-  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
+  const { extensions, excludeExtensions, skills } = config;
 
   // Skill preloading: when skills is string[], preload their content into prompt
   if (Array.isArray(skills)) {
@@ -1371,7 +1365,7 @@ export async function resolveChildSettings(ctx: ExtensionContext, type: Subagent
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
     ? options.nestedRuntime
     : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime
     ? createNestedSubagentTools({
         // Getters: a child reloaded by the new code keeps these closures, so the live root is read per call.
         // A parent still held by a draining pool keeps its nested calls on that pool's manager.
@@ -1397,22 +1391,13 @@ export async function resolveChildSettings(ctx: ExtensionContext, type: Subagent
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
 
   // Child-session model scope: agent frontmatter override, else inherit the
-  // parent's resolved scope. Isolated agents load no extensions, so the
-  // fallback consumer can never bind — an empty scope is the honest value.
+  // parent's resolved scope.
   const scopedModels = resolveScopedModels(
-    options.isolated ? false : agentConfig?.scopedModels,
+    agentConfig?.scopedModels,
     parentScopedModels,
     parentModelRegistry,
     (message) => options.onToolActivity?.({ type: "end", toolName: `scoped-models-error:${message}` }),
   );
-  // An explicit list under isolation is silently unreachable — flag it the
-  // same way the loader flags contradictory extensions:/exclude_extensions:.
-  if (options.isolated && Array.isArray(agentConfig?.scopedModels)) {
-    options.onToolActivity?.({
-      type: "end",
-      toolName: `scoped-models-error:scoped_models has no effect for agent "${type}" — isolated agents load no extensions`,
-    });
-  }
 
   // ExtensionContext exposes only the ModelRegistry facade; the runtime it wraps
   // is what createAgentSession needs to keep extension-registered providers
@@ -1428,7 +1413,7 @@ export async function resolveChildSettings(ctx: ExtensionContext, type: Subagent
     projectTrusted,
     extensions,
     excludeExtensions,
-    extSelectors: options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    extSelectors: agentConfig?.extSelectors ?? [],
     noSkills,
     systemPrompt,
     toolNames,

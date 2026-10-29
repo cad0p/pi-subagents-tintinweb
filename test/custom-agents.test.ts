@@ -132,10 +132,11 @@ You are a security auditor.`);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
-    // `run_in_background` is no longer a recognized key — the parser reads
-    // frontmatter field-by-field and ignores it (with a load-time warning).
+    // `run_in_background` and `isolated` are no longer recognized keys — the
+    // parser reads frontmatter field-by-field and ignores them (with a load-time
+    // warning).
     expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
-    expect(agent.isolated).toBe(true);
+    expect((agent as { isolated?: unknown }).isolated).toBeUndefined();
     expect(agent.systemPrompt).toBe("You are a security auditor.");
   });
 
@@ -162,7 +163,6 @@ Just a prompt.`);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect((agent as { runInBackground?: unknown }).runInBackground).toBeUndefined();
-    expect(agent.isolated).toBeUndefined();
     expect(agent.systemPrompt).toBe("Just a prompt.");
   });
 
@@ -920,6 +920,7 @@ description: Stale keys
 run_in_background: true
 join_mode: smart
 name: renamed
+isolated: true
 ---
 
 Stale.`);
@@ -929,14 +930,16 @@ Stale.`);
       // The agent still loads — the warning is the only surface for the no-op.
       expect(result.get("stale")?.description).toBe("Stale keys");
       const messages = warn.mock.calls.map(args => String(args[0]));
-      expect(messages).toHaveLength(3);
-      for (const key of ["run_in_background", "join_mode", "name"]) {
+      expect(messages).toHaveLength(4);
+      // `isolated` is the removed hermetic flag: an agent file that still sets
+      // it loads, warns, and is otherwise unaffected.
+      for (const key of ["run_in_background", "join_mode", "name", "isolated"]) {
         expect(messages.some(m => m.includes(key) && m.includes(path))).toBe(true);
       }
 
       // One-time: a reload of the same file stays quiet.
       loadCustomAgents(tmpDir);
-      expect(warn).toHaveBeenCalledTimes(3);
+      expect(warn).toHaveBeenCalledTimes(4);
     } finally {
       warn.mockRestore();
     }
@@ -970,7 +973,6 @@ allowed_subagents: general-purpose, Explore
 max_subagent_depth: 2
 prompt_mode: append
 inherit_context: true
-isolated: false
 memory: project
 isolation: off
 enabled: true

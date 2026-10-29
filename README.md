@@ -226,12 +226,22 @@ All fields are optional — sensible defaults for everything.
 | `session_dir` | parent session's dir | Directory for this agent's pi session file (written during the run; retained after it only with `persist_session: true`). Omitted, the file goes in the parent session's directory (honours `--session-dir`, `PI_CODING_AGENT_SESSION_DIR` and the `sessionDir` setting, like the main session; a nested agent's spawner is its parent). Relative paths resolve from the agent's cwd before its own worktree isolation, never from that worktree, so the file survives its cleanup. A nested agent spawned by a worktree-isolated agent still resolves from its spawner's worktree ([#87](https://github.com/cad0p/pi-subagents-tintinweb/issues/87)) |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
-| `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `allowed_subagents` | — | Opt this agent into nested delegation: `all`, or a comma-separated list of agent types it may spawn. Omitted = no nested tools at all |
 | `max_subagent_depth` | inherit | Per-agent nesting cap. Can only tighten the project's `maxSubagentDepth`, never raise it |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
+**Hermetic agents — the old `isolated: true` is gone.** That flag was removed; write the fields above instead:
+
+```yaml
+extensions: false      # no extension/MCP tools
+skills: false          # no skills loaded or preloaded
+scoped_models: false   # no model scope
+# and do not declare allowed_subagents — that leaves no nested delegation tools
+```
+
+That combination is exactly what `isolated: true` used to force: the agent keeps only the built-in tools listed in `tools:` (or all of them when it is omitted). A file that still sets `isolated:` warns as an unknown key and is otherwise ignored.
+
+Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` and `thinking` are frontmatter-only — the `Agent` tool doesn't expose them. When an agent file leaves them unset, the subagent inherits the parent session's model and uses pi's configured thinking level for that model (per-model setting, else `defaultThinkingLevel`).
 
 A key this extension doesn't read (a typo, or a field from another tool such as `run_in_background`, `join_mode`, or `name:`) is a silent no-op in the field-by-field parser, so it is reported once per file per key at load — same warning channel as a malformed file — instead of being dropped quietly. A file whose frontmatter cannot be parsed is skipped with a warning naming the path (and, when it was overriding another agent, the file that now wins); `strictAgentFiles` turns that skip into a startup failure.
 
@@ -261,7 +271,10 @@ exclude_extensions: builtin:mcp   # everything except pi's built-in MCP
 extensions: [mcp]
 tools: "*, ext:mcp/search"
 
-isolated: true                    # hermetic: built-ins only, no extensions/skills/context
+# Hermetic (replaces the removed `isolated: true`): built-ins only
+extensions: false
+skills: false
+scoped_models: false
 ```
 
 A few rules the examples don't make obvious:
@@ -296,7 +309,6 @@ Launch a sub-agent.
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
-| `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"worktree"` or `"off"` | no | `worktree` runs in an isolated git worktree; `off` declines one (the default) |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
