@@ -129,31 +129,67 @@ describe("ledger replay", () => {
 
 describe("shutdown stops", () => {
   const notice = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] });
+  const newerNotice = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"] });
 
-  it("names a run whose last ledger state is a shutdown stop, with its type and description", () => {
-    expect(shutdownStops([spawn(), settle("stopped", true)])).toEqual([
+  it("a run the quit stopped is recovered as an interrupted record, marked as a shutdown stop", () => {
+    expect(replay([spawn(), settle("stopped", true)])).toEqual([
+      expect.objectContaining({ id: "child-1", status: "interrupted", sessionFile: "/s/child.jsonl", stoppedAtShutdown: true, crashCount: 1 }),
+    ]);
+    expect(replay([spawn()])[0].stoppedAtShutdown).toBeUndefined();
+  });
+
+  it("is recovered whatever its owner: the settle says it is not running", () => {
+    expect(replay([spawn(), settle("stopped", true)], alive, () => true)).toHaveLength(1);
+  });
+
+  it("leaves a run the user stopped alone", () => {
+    expect(replay([spawn(), settle("stopped")])).toEqual([]);
+  });
+
+  it("a resume after the stop makes it a live run again, owned by its resumer", () => {
+    expect(replay([spawn(), settle("stopped", true), resume()], alive)).toEqual([]);
+    expect(replay([spawn(), settle("stopped", true), resume()])[0].stoppedAtShutdown).toBeUndefined();
+  });
+
+  it("ends the crash streak, and the settle that delivers its recovery does not extend it", () => {
+    expect(replay([spawn(), settle("interrupted"), resume(), settle("stopped", true)])[0]).toMatchObject({ crashCount: 1 });
+    expect(replay([spawn(), settle("stopped", true), settle("interrupted"), resume()])[0]).toMatchObject({ crashCount: 1 });
+    // A crash after the recovered run resumed counts again.
+    expect(replay([spawn(), settle("stopped", true), settle("interrupted"), resume(), settle("interrupted"), resume()])[0]).toMatchObject({ crashCount: 2 });
+    // Resumed before its recovery was delivered: the next interrupted settle is a crash's.
+    expect(replay([spawn(), settle("stopped", true), resume(), settle("interrupted"), resume()])[0]).toMatchObject({ crashCount: 2 });
+  });
+
+  it("an older release's notice marker keeps the stop closed; a later shutdown stop reopens it", () => {
+    expect(replay([spawn(), settle("stopped", true), notice])).toEqual([]);
+    expect(replay([spawn(), settle("stopped", true), notice, resume(), settle("stopped", true)])).toHaveLength(1);
+  });
+
+  it("a marker closes only a shutdown stop, and a marker from a later version closes nothing", () => {
+    expect(replay([spawn(), notice])).toHaveLength(1);
+    expect(replay([spawn(), settle("stopped", true), newerNotice])).toHaveLength(1);
+  });
+
+  it("names a run the quit stopped before it started, with its type and description", () => {
+    expect(shutdownStops([settle("stopped", true)])).toEqual([
       { id: "child-1", type: "general-purpose", description: "review auth.ts" },
     ]);
   });
 
-  it("leaves a run the user stopped alone", () => {
-    expect(shutdownStops([spawn(), settle("stopped")])).toEqual([]);
-  });
-
-  it("a resume after a shutdown stop reopens the run", () => {
-    expect(shutdownStops([spawn(), settle("stopped", true), resume()])).toEqual([]);
+  it("leaves a run that started to the replay, and a run the user stopped alone", () => {
+    expect(shutdownStops([spawn(), settle("stopped", true)])).toEqual([]);
+    expect(shutdownStops([resume(), settle("stopped", true)])).toEqual([]);
+    expect(shutdownStops([settle("stopped")])).toEqual([]);
   });
 
   it("a notice marker keeps the id quiet; a later shutdown stop names it again", () => {
-    expect(shutdownStops([spawn(), settle("stopped", true), notice])).toEqual([]);
-    expect(shutdownStops([spawn(), settle("stopped", true), notice, resume(), settle("stopped", true)])).toHaveLength(1);
+    expect(shutdownStops([settle("stopped", true), notice])).toEqual([]);
+    expect(shutdownStops([settle("stopped", true), notice, settle("stopped", true)])).toHaveLength(1);
   });
 
   it("does not honor a shutdown-notice marker from a later ledger version", () => {
     // The marker would silence the stop if it were read; the version guard in readNoticeIds is what keeps it named.
-    expect(shutdownStops([spawn(), settle("stopped", true), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"] })])).toEqual([
-      { id: "child-1", type: "general-purpose", description: "review auth.ts" },
-    ]);
+    expect(shutdownStops([settle("stopped", true), newerNotice])).toHaveLength(1);
   });
 });
 
