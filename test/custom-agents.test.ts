@@ -552,6 +552,28 @@ scoped_models: "*sonnet*"
     expect(agents.get("scope-quoted-glob")!.scopedModels).toEqual(["*sonnet*"]);
   });
 
+  it("a [-leading glob is a YAML flow sequence, so it must be quoted too", () => {
+    writeAgent("scope-bracket-bare", `---
+scoped_models: [ab]
+---
+`);
+    writeAgent("scope-bracket-glob", `---
+scoped_models: [ab]*/x
+---
+`);
+    writeAgent("scope-bracket-quoted", `---
+scoped_models: "[ab]*/x"
+---
+`);
+
+    const agents = loadCustomAgents(tmpDir);
+    // A bare [ab] is a list, not a pattern: it loads as the id "ab", which silently
+    // matches nothing. Anything after the ] is a parse error, so the file is skipped.
+    expect(agents.get("scope-bracket-bare")!.scopedModels).toEqual(["ab"]);
+    expect(agents.has("scope-bracket-glob")).toBe(false);
+    expect(agents.get("scope-bracket-quoted")!.scopedModels).toEqual(["[ab]*/x"]);
+  });
+
   it("scoped_models: None (any casing) is the sentinel, not a pattern", () => {
     writeAgent("scope-none-caps", `---
 scoped_models: None

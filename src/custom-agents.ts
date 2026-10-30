@@ -403,9 +403,10 @@ function inheritField(val: unknown): true | string[] | false {
  * scope); false/"none"/empty → false; csv → explicit list of model patterns
  * (pi's `--models` grammar — globs and `:thinking` suffixes are resolved
  * later, by pi, in agent-runner's resolveScopedModels). Quote a glob that
- * starts with `*` or `[` (`scoped_models: "*sonnet*"`): unquoted, YAML reads it as
- * an alias and rejects the whole file, not just that entry. A mid-token `*`
- * (a provider glob in front of the model path) needs no quotes.
+ * starts with `*` or `[`: a leading `*` is a YAML alias and rejects the whole
+ * file, and a leading `[` opens a flow sequence — `[ab]` parses as the list
+ * `["ab"]`, not as a pattern, and anything after the `]` is a parse error. A
+ * mid-token `*` (a provider glob in front of the model path) needs no quotes.
  * Unlike inheritField, the literal "inherit" is accepted as a readable alias,
  * but only as the sole value — mixed `inherit, foo` stays an explicit list.
  * Its sentinels are case-insensitive like `inherit`, unlike the shared CSV
