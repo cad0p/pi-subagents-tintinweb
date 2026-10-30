@@ -277,7 +277,7 @@ describe("run cap", () => {
     expect(child.abort).toHaveBeenCalledTimes(1);
     await settle();
     expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
-    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("was interrupted");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
     expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("1 minute left");
     expect(child.abort.mock.invocationCallOrder[0]).toBeLessThan(child.sendCustomMessage.mock.invocationCallOrder[0]);
     child.deliver();
@@ -301,7 +301,7 @@ describe("run cap", () => {
     await settle();
     expect(child.abort).toHaveBeenCalledTimes(1);
     expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
-    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("was interrupted");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
     expect(child.abort.mock.invocationCallOrder[0]).toBeLessThan(child.sendCustomMessage.mock.invocationCallOrder[0]);
     child.deliver();
     child.begin();
@@ -327,7 +327,7 @@ describe("run cap", () => {
     await settle();
     expect(child.abort).toHaveBeenCalledTimes(1);
     expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
-    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("was interrupted");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
     child.deliver();
     child.begin();
     child.end("report");
@@ -435,7 +435,7 @@ describe("run cap", () => {
     child.releaseAbort();
     await settle();
     expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
-    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("was interrupted");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
     expect(child.sendCustomMessage.mock.lastCall?.[0].content).not.toContain("nested result text");
   });
 

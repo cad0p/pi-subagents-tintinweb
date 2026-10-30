@@ -1005,7 +1005,7 @@ export class AgentManager {
     const s = Math.max(0, Math.round((timers.due - Date.now()) / 1000));
     const left = s >= 60 ? "1 minute" : `${s} seconds`;
     const content = interrupted
-      ? `You have ${left} left. Your running command was interrupted to deliver this message, so its result is an abort, not the command's own failure. Do not start another command. Write your report now: name the command that was interrupted, say what is done and what is left, how to continue, and say to run it in the background if it must keep running. It is your result.`
+      ? `You have ${left} left. This message interrupted the command you had running, or that command finished while the message was being delivered. If it was cut, its result is an abort, not the command's own failure. Do not start another command. Write your report now: name the command, say what is done and what is left, how to continue, and say to run it in the background if it must keep running. It is your result.`
       : `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
     this.wake(record, session, content, {
       delivered: () => {
