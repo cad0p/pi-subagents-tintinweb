@@ -183,7 +183,7 @@ describe("toolDescriptionMode", () => {
     const tool = tools.get("get_subagent_result");
     expect(tool.description).toBe(
       "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool. " +
-      "An id may be given as any unique prefix of at least 4 characters.",
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     );
     expect(tool.promptSnippet).toBe("Check a subagent's status and retrieve its result");
     expect(tool.description).not.toContain("run_in_background");
@@ -195,11 +195,11 @@ describe("toolDescriptionMode", () => {
     expect(tool.description).toBe(
       "Send a message to a subagent by its ID. A running agent takes it as a steer: it is injected into the " +
       "conversation after the current tool execution. A finished agent is resumed with it and keeps its full context. " +
-      "An id may be given as any unique prefix of at least 4 characters.",
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     );
     expect(tool.promptSnippet).toBe("Send a message to a subagent (resumes it if it has finished)");
     expect(tool.parameters.properties.to.description).toBe(
-      "The agent ID to message (running, queued, or finished), or any unique prefix of at least 4 characters.",
+      "The agent ID to message (running, queued, or finished), or any unique prefix of at least 4 characters, case-insensitive.",
     );
   });
 

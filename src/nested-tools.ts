@@ -313,10 +313,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     description:
       "Report a nested agent owned by this parent as it stands now. It never waits: a running agent is " +
       "reported as running, and the parent is woken when it settles. " +
-      "An id may be given as any unique prefix of at least 4 characters.",
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Check a nested subagent's result without waiting",
     parameters: Type.Object({
-      agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool, or any unique prefix of at least 4 characters." }),
+      agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool, or any unique prefix of at least 4 characters, case-insensitive." }),
     }),
     execute: async (_toolCallId, params) => {
       const resolved = ownedResolution(context.manager.resolveRecord(params.agent_id), context.parentAgentId);
@@ -335,10 +335,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     description:
       "Send a message to a nested agent owned by this parent. A running agent takes it as a steer; " +
       "a finished agent is resumed with it. Use the agent's ID as `to`; " +
-      "an id may be given as any unique prefix of at least 4 characters.",
+      "an id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Send a message to a nested subagent (resumes it if it has finished)",
     parameters: Type.Object({
-      to: Type.String({ description: "The nested agent ID to message, or any unique prefix of at least 4 characters." }),
+      to: Type.String({ description: "The nested agent ID to message, or any unique prefix of at least 4 characters, case-insensitive." }),
       message: Type.String({ description: "The message to send." }),
     }),
     execute: async (_toolCallId, params) => {

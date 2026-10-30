@@ -2050,11 +2050,11 @@ Terse command-style prompts produce shallow, generic work.
     label: "Get Agent Result",
     description:
       "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool. " +
-      "An id may be given as any unique prefix of at least 4 characters.",
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Check a subagent's status and retrieve its result",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to check, or any unique prefix of at least 4 characters.",
+        description: "The agent ID to check, or any unique prefix of at least 4 characters, case-insensitive.",
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
@@ -2101,11 +2101,11 @@ Terse command-style prompts produce shallow, generic work.
     description:
       "Send a message to a subagent by its ID. A running agent takes it as a steer: it is injected into the " +
       "conversation after the current tool execution. A finished agent is resumed with it and keeps its full context. " +
-      "An id may be given as any unique prefix of at least 4 characters.",
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Send a message to a subagent (resumes it if it has finished)",
     parameters: Type.Object({
       to: Type.String({
-        description: "The agent ID to message (running, queued, or finished), or any unique prefix of at least 4 characters.",
+        description: "The agent ID to message (running, queued, or finished), or any unique prefix of at least 4 characters, case-insensitive.",
       }),
       message: Type.String({
         description: "The message to send. It appears as a user message in the agent's conversation.",

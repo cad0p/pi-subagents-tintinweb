@@ -261,7 +261,7 @@ describe("RPC stop", () => {
   });
 });
 
-describe("main get_subagent_result", () => {
+describe("main tools", () => {
   let cwd: string;
   let agentDir: string;
   let previousCwd: string;
@@ -316,5 +316,55 @@ describe("main get_subagent_result", () => {
     expect(result.isError).toBe(false);
     expect(textOf(result)).toContain(id);
     expect(textOf(result)).toContain("scan deps");
+  });
+
+  it("delivers to the agent a prefix names, not to the prefix", async () => {
+    const spawned = await tools.get("Agent")!.execute(
+      "spawn-tc",
+      { prompt: "go", description: "scan deps", subagent_type: "general-purpose" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+    const id = agentIdOf(spawned);
+    const manager = (globalThis as Record<symbol, unknown>)[MANAGER_KEY] as AgentManager;
+
+    const sent = await tools.get("SendMessage")!.execute(
+      "send-tc",
+      { to: id.slice(0, 8), message: "go on" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    expect((sent as { isError?: boolean }).isError).toBe(false);
+    expect(manager.getRecord(id)?.pendingSteers).toEqual(["go on"]);
+  });
+
+  it("refuses a SendMessage prefix that names two agents, and delivers nothing", async () => {
+    const manager = (globalThis as Record<symbol, unknown>)[MANAGER_KEY] as {
+      listAgents(): AgentRecord[];
+    };
+    // Two real spawns, renamed onto a shared 5-character prefix: the resolver is the
+    // only thing under test here, and two agents spawned in the same millisecond are
+    // the case a prefix has to refuse rather than guess.
+    for (const description of ["scan deps", "run tests"]) {
+      await tools.get("Agent")!.execute(
+        "spawn-tc",
+        { prompt: "go", description, subagent_type: "general-purpose" },
+        undefined, undefined, spawnCtx(cwd),
+      );
+    }
+    const [first, second] = manager.listAgents();
+    first.id = A_ID;
+    second.id = B_ID;
+
+    const sent = await tools.get("SendMessage")!.execute(
+      "send-tc",
+      { to: "065a8", message: "go on" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    expect((sent as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(sent)).toContain("065a8d25");
+    expect(textOf(sent)).toContain("065a8e11");
+    expect(first.pendingSteers).toBeUndefined();
+    expect(second.pendingSteers).toBeUndefined();
   });
 });

@@ -1,10 +1,11 @@
 /**
  * agent-id.ts — the one place a caller-supplied agent id becomes a record.
  *
- * Agent ids are UUIDs, but the id a human and a model read is the 8-character
- * prefix the transcript prints. Every surface that takes an id — both
- * `get_subagent_result` tools, `SendMessage`, and the RPC verbs — resolves
- * through here, so none of them can drift into its own matching rule.
+ * An agent id is a 17-character slice of a UUID (`randomUUID().slice(0, 17)`),
+ * but the id a human and a model read is the 8-character prefix the transcript
+ * prints. Every surface that takes an id — both `get_subagent_result` tools,
+ * `SendMessage`, and the RPC verbs — resolves through here, so none of them can
+ * drift into its own matching rule.
  *
  * An exact id always wins, unchanged. A prefix is ambiguous by construction
  * (two agents spawned in the same millisecond share their first characters), so
@@ -14,7 +15,7 @@
  */
 
 /** Shortest prefix a caller may abbreviate an agent id to. A shorter query is not a lookup. */
-export const MIN_AGENT_ID_PREFIX = 4;
+const MIN_AGENT_ID_PREFIX = 4;
 
 /** A resolved id, or the records a prefix matched. */
 export type AgentResolution<T> = { record: T } | { ambiguous: T[] };
@@ -38,11 +39,6 @@ export function resolveAgentRecord<T extends { id: string }>(
   return matches.length === 1 ? { record: matches[0] } : { ambiguous: matches };
 }
 
-/** The 8 characters the transcript prints for an agent id. */
-export function shortAgentId(id: string): string {
-  return id.slice(0, 8);
-}
-
 /**
  * The ambiguity error: a prefix that names more than one agent is refused, never
  * guessed. Each candidate is listed by its short id, type and description so the
@@ -53,7 +49,7 @@ export function ambiguousAgentIdText(
   candidates: readonly { id: string; type: string; description: string }[],
 ): string {
   const listed = candidates
-    .map((record) => `${shortAgentId(record.id)} (${record.type}${record.description ? ` — "${record.description}"` : ""})`)
+    .map((record) => `${record.id.slice(0, 8)} (${record.type}${record.description ? ` — "${record.description}"` : ""})`)
     .join(", ");
   return `Agent id "${query}" matches ${candidates.length} agents: ${listed}. Use more characters.`;
 }

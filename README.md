@@ -324,7 +324,7 @@ Check a subagent's status and retrieve its result. Use the agent ID returned by 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to check, or a unique prefix of at least 4 characters |
+| `agent_id` | string | yes | Agent ID to check, or a unique prefix of at least 4 characters, case-insensitive |
 
 ### `SendMessage`
 
@@ -332,7 +332,7 @@ Send a message to an agent by ID. One path serves every case: a running agent ge
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `to` | string | yes | Agent ID to message, or a unique prefix of at least 4 characters |
+| `to` | string | yes | Agent ID to message, or a unique prefix of at least 4 characters, case-insensitive |
 | `message` | string | yes | Message to deliver to the agent |
 
 The message shows as a one-line preview in the tool row; press ctrl+o to expand the full text.
