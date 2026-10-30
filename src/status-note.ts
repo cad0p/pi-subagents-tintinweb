@@ -21,6 +21,8 @@ import type { AgentRecord } from "./types.js";
 export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number, timeLimit?: "wrapped" | "stopped"): string {
   if (limitReason === "time") {
     const minutes = capMinutes === undefined ? "" : ` ${capMinutes} min`;
+    // Mirrors getStatusWord (src/index.ts): change both together.
+    if (timeLimit === "wrapped" && status === "error") return ` (errored while wrapping up for the${minutes} time limit; the report was not written; resume with SendMessage to continue)`;
     if (timeLimit === "wrapped") return ` (wrapped up for the${minutes} time limit; resume with SendMessage to continue)`;
     if (timeLimit === "stopped") return ` (stopped at the${minutes} time limit; resume with SendMessage to continue)`;
     // A record without `timeLimit` predates the wrapped/stopped split and keeps the plain wording.

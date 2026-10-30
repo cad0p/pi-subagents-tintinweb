@@ -120,6 +120,8 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 /** Human-readable status word for the completion report header. */
 function getStatusWord(status: string, limitReason?: "time", timeLimit?: "wrapped" | "stopped"): string {
   if (limitReason === "time") {
+    // Mirrors getStatusNote (src/status-note.ts): change both together.
+    if (timeLimit === "wrapped" && status === "error") return "errored while wrapping up for the time limit";
     if (timeLimit === "wrapped") return "wrapped up for the time limit";
     if (timeLimit === "stopped") return "stopped at the time limit";
     return "time limit reached";

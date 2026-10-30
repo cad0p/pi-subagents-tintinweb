@@ -69,6 +69,17 @@ const fakeChild = () => {
     finishPrompt?.();
     finishPrompt = undefined;
   };
+  /** The final turn fails and pi resolves it: no text, stopReason "error" (#144), so the run settles with a failure. */
+  const fail = (errorMessage: string) => {
+    setStreaming(false);
+    const message = { role: "assistant", content: [], stopReason: "error", errorMessage };
+    messages.push(message);
+    emit({ type: "message_end", message });
+    emit({ type: "agent_end" });
+    emit({ type: "agent_settled" });
+    finishPrompt?.();
+    finishPrompt = undefined;
+  };
   /** The parent's wake reaches the session: its message_start is what the manager observes. */
   const deliver = () => {
     const last = child.sendCustomMessage.mock.lastCall?.[0];
@@ -102,6 +113,7 @@ const fakeChild = () => {
     sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     begin,
     end,
+    fail,
     deliver,
   };
   return child;
@@ -448,6 +460,37 @@ describe("run cap", () => {
     await settle();
     expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(wrapped up for the 2 min time limit; resume with SendMessage to continue)");
+  });
+  it("a wrap-up whose report turn fails reads errored while wrapping up, in the notification header and the result note", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    child.begin();
+    child.fail("provider down");
+    await settle();
+    expect(record).toMatchObject({ status: "error", limitReason: "time", timeLimit: "wrapped" });
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent errored while wrapping up for the time limit: work** — provider down (errored while wrapping up for the 2 min time limit; the report was not written; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(errored while wrapping up for the 2 min time limit; the report was not written; resume with SendMessage to continue)");
+  });
+  it("a run that fails and then hits the cap is a hard stop: it reads stopped at the time limit, not errored while wrapping up", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.fail("provider down");
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "error", limitReason: "time", timeLimit: "stopped" });
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent stopped at the time limit: work** — provider down (stopped at the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
   it("a hard stop reads stopped at the time limit, in the notification header and the result note", async () => {
     const child = fakeChild();
