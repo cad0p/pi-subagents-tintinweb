@@ -29,7 +29,9 @@ describe("cross-extension RPC", () => {
       spawn: vi.fn().mockReturnValue("agent-42"),
       abort: vi.fn().mockReturnValue(true),
       // A top-level record by default: the ownership guard lets it through.
-      getRecord: vi.fn(() => ({ parentAgentId: undefined })),
+      resolveRecord: vi.fn((idOrPrefix: string) => ({
+        record: { id: idOrPrefix, type: "general-purpose", description: "d", parentAgentId: undefined },
+      })),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
     };
@@ -221,7 +223,7 @@ describe("cross-extension RPC", () => {
     it("returns error when agent not found", async () => {
       // No record behind the id — the ownership check refuses it before abort is
       // even consulted, which is what a stale id from a caller looks like.
-      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      (manager.resolveRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:stop:reply:req-st2", reply);
