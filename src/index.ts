@@ -2061,9 +2061,12 @@ Terse command-style prompts produce shallow, generic work.
       const resolved = ownedResolution(manager.resolveRecord(params.agent_id), undefined);
       if (resolved && "ambiguous" in resolved) return agentAmbiguousResponse(params.agent_id, resolved.ambiguous);
       const record = resolved?.record;
-      const adopting = record ? undefined : manager.adoptingIdFor(params.agent_id);
-      if (adopting) {
-        return textResult(`Agent "${adopting}" is handing over after a reload; retry in a moment.`);
+      const adopting = record ? [] : manager.adoptingIdsFor(params.agent_id);
+      if (adopting.length > 0) {
+        // One id names it; more than one is a prefix that matches two hand-overs, which is
+        // still a hand-over and not a cleanup — say which, never "it was evicted".
+        const named = adopting.length === 1 ? `"${adopting[0]}" is` : `${adopting.length} agents are`;
+        return textResult(`Agent ${named} handing over after a reload; retry in a moment.`);
       }
       if (!record) return agentNotFoundResponse(params.agent_id);
 
@@ -2121,7 +2124,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // Freeze the first resolved description so record eviction cannot flip the row.
       if (!state.sendDesc && agentId) {
-        const desc = toSingleLine(manager.getRecord(agentId)?.description);
+        // Resolve, like every other path that takes a caller's id: a row keyed by the 8
+        // characters the transcript prints must still freeze the agent's description.
+        const resolved = manager.resolveRecord(agentId);
+        const desc = toSingleLine(resolved && "record" in resolved ? resolved.record.description : undefined);
         if (desc) state.sendDesc = desc;
       }
       // Both header parts are display copies: sanitize + cap.
@@ -2185,15 +2191,21 @@ Terse command-style prompts produce shallow, generic work.
       }
       const record = owned?.record;
       // An id in its adoption window has no record yet, but its input is parked, not lost.
-      const adopting = record ? undefined : manager.adoptingIdFor(params.to);
-      if (!record && !adopting) {
+      const adopting = record ? [] : manager.adoptingIdsFor(params.to);
+      if (!record && adopting.length === 0) {
         return sendResult(
           `No agent "${params.to}" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.`,
           "not-found",
         );
       }
+      if (adopting.length > 1) {
+        return sendResult(
+          `Agent id "${params.to}" matches ${adopting.length} agents handing over after a reload: ${adopting.map((id) => id.slice(0, 8)).join(", ")}. Use more characters.`,
+          "not-found",
+        );
+      }
       // An adopting id has no record to name yet; the resolved adopting id is the key its parked input answers to.
-      const targetId = record?.id ?? adopting ?? params.to;
+      const targetId = record?.id ?? adopting[0] ?? params.to;
       const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => targetId, record?.effectiveMaxTurns);
       const outcome = await manager.steer(targetId, params.message, sendCallbacks);
       if (outcome === false) return sendResult(deliveryText(targetId, false), "failed");

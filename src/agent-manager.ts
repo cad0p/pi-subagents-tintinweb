@@ -2026,15 +2026,18 @@ export class AgentManager {
   }
 
   /**
-   * The adopting id a caller-supplied id or prefix names, or undefined. A hand-over is
+   * The ids a caller-supplied id or prefix names in the hand-over window. A hand-over is
    * transient — the record does not exist here yet — so the same prefix rule applies over
    * the ids currently in that window, and a caller who read an 8-character id off the
-   * transcript is not told the agent is gone while it is still handing over.
+   * transcript is not told the agent is gone while it is still handing over. The whole
+   * match is returned, not one id, because two agents can hand over at once and picking
+   * one would be the guess the resolver exists to refuse.
    */
-  adoptingIdFor(idOrPrefix: string): string | undefined {
+  adoptingIdsFor(idOrPrefix: string): string[] {
     const ids = [...this.adopting.keys()].map((id) => ({ id }));
     const resolved = resolveAgentRecord(ids, idOrPrefix);
-    return resolved && "record" in resolved ? resolved.record.id : undefined;
+    if (!resolved) return [];
+    return "record" in resolved ? [resolved.record.id] : resolved.ambiguous.map((entry) => entry.id);
   }
 
   /** Send a steering message from the UI or the RPC. Fires `onSteered` on every outcome that took the text. */

@@ -360,6 +360,38 @@ describe("main tools", () => {
     expect(textOf(result)).toContain(A_ID);
   });
 
+  it("says two agents are handing over when the prefix matches both, never that one was evicted", async () => {
+    const manager = rootManager();
+    manager.beginAdoption(A_ID);
+    manager.beginAdoption(B_ID);
+
+    const result = await tools.get("get_subagent_result")!.execute(
+      "pull-tc",
+      { agent_id: "065a8" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    expect(textOf(result)).toContain("2 agents are handing over after a reload");
+    expect(textOf(result)).not.toContain("evicted");
+  });
+
+  it("refuses a SendMessage prefix that names two hand-overs, naming both", async () => {
+    const manager = rootManager();
+    manager.beginAdoption(A_ID);
+    manager.beginAdoption(B_ID);
+
+    const sent = await tools.get("SendMessage")!.execute(
+      "send-tc",
+      { to: "065a8", message: "go on" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    expect((sent as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(sent)).toContain("matches 2 agents handing over");
+    expect(textOf(sent)).toContain("065a8d25");
+    expect(textOf(sent)).toContain("065a8e11");
+  });
+
   it("parks a SendMessage prefix on the adopting id, not on the prefix", async () => {
     const manager = rootManager();
     manager.beginAdoption(A_ID);
