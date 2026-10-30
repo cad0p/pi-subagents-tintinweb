@@ -353,14 +353,19 @@ export type ResumeCallbacks = Pick<
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
 
-/** The prefix a resumed interrupted run carries; names the worktree's fate when it is gone (its run then uses the parent cwd). */
-function crashNote(record: AgentRecord, text: string): string {
+/**
+ * The prefix a resumed interrupted run carries: what cut it short (a crash, or pi shutting down) and when. Names the
+ * worktree's fate when it is gone (its run then uses the parent cwd).
+ */
+function interruptionNote(record: AgentRecord, text: string): string {
+  const event = record.stoppedAtShutdown ? "stop" : "crash";
   const when =
     record.crashedAt === undefined
-      ? `The crash time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
-      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the crash came after it.`;
+      ? `The ${event} time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
+      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the ${event} came after it.`;
   const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
-  return `You were interrupted by a crash. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
+  const cause = record.stoppedAtShutdown ? "stopped when pi shut down" : "interrupted by a crash";
+  return `You were ${cause}. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
 }
 
 export class AgentManager {
@@ -1974,7 +1979,7 @@ export class AgentManager {
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     const interrupted = current.status === "interrupted";
-    const prompt = interrupted ? crashNote(current, text) : text;
+    const prompt = interrupted ? interruptionNote(current, text) : text;
     if (!this.resume(id, prompt, callbacks)) return false;
     return interrupted ? "resumedAfterCrash" : "resumed";
   }

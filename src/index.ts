@@ -507,26 +507,38 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Completion notification ----
   /**
-   * One notice for the crash-recovered records of a batch: their ids, the resume each one allows, then each note the policy gave.
-   * A first interruption is resumed by the main agent at once; a crash loop waits for the user, and its note says so.
+   * One notice for the recovered records of a batch: their ids by cause (a crash, or a quit that stopped them), the
+   * resume each one allows, then each note the policy gave. A first interruption is resumed by the main agent at once;
+   * a crash loop waits for the user, and its note says so.
    */
   function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
-    const names = records.map((record) => `${record.id} (${sanitizeHeaderText(record.description)})`).join(", ");
-    const lines = [`${records.length} ${records.length === 1 ? "subagent was" : "subagents were"} interrupted by a crash: ${names}`];
+    const headline = (group: AgentRecord[], cause: string) => {
+      if (group.length === 0) return [];
+      const names = group.map((record) => `${record.id} (${sanitizeHeaderText(record.description)})`).join(", ");
+      return [`${group.length} ${group.length === 1 ? "subagent was" : "subagents were"} ${cause}: ${names}`];
+    };
+    const lines = [
+      ...headline(records.filter((record) => !record.stoppedAtShutdown), "interrupted by a crash"),
+      ...headline(records.filter((record) => record.stoppedAtShutdown), "stopped when pi shut down"),
+    ];
     const resumable = records.filter((record) => crash.get(record.id)?.triggerTurn).map((record) => record.id);
     if (resumable.length > 0) {
       const calls = resumable.map((id) => `SendMessage({ to: "${id}", message: "continue" })`).join(", ");
-      lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a crash note. Do not start a new Agent for them.`);
+      lines.push(`Resume ${resumable.join(", ")} now: ${calls} without asking the user; each resumes from its transcript with a note on what interrupted it. Do not start a new Agent for them.`);
     }
     lines.push("SendMessage to any of them with a real instruction resumes it from its transcript first, and its answer says so.");
     for (const record of records) {
       const note = crash.get(record.id)?.note;
-      if (note) lines.push(`${record.id}: ${note}`);
+      // The policy's note counts crashes; a shutdown stop is held by a policy that resumes nothing, and says only that.
+      if (note) lines.push(`${record.id}: ${record.stoppedAtShutdown ? "ask the user before resuming" : note}`);
     }
     return lines.join("\n");
   }
 
-  /** One notice for the runs a shutdown stopped: they are gone, and no SendMessage can reach them. */
+  /**
+   * One notice for the runs a shutdown stopped that cannot be resumed: they are gone, and no SendMessage can reach them.
+   * This release names only runs stopped before they started; an older release's marker drawn with it named every stop.
+   */
   function formatShutdownNotice(stops: readonly ShutdownStop[]): string {
     const one = stops.length === 1;
     const names = stops.map((stop) => `${stop.id}${stop.description ? ` (${sanitizeHeaderText(stop.description)})` : ""}`).join(", ");
@@ -555,7 +567,10 @@ export default function (pi: ExtensionAPI) {
     return (Array.isArray(ids) ? ids : []).filter((id): id is string => typeof id === "string").map((id) => ({ id }));
   }
 
-  /** Posts the shutdown-stop notice once per session file: the marker keeps a later reopen quiet. */
+  /**
+   * Posts the notice for runs the quit stopped before they started, once per session file: the marker keeps a later
+   * reopen quiet. A run that started is recovered and resumed instead (`replayLedger`).
+   */
   function reportShutdownStops(entries: readonly SessionEntry[]): void {
     const stops = shutdownStops(entries);
     if (stops.length === 0) return;
@@ -1292,7 +1307,10 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  /** Lists the runs a crashed pi left in this session's ledger. Never on reload: live runs are handed over instead. */
+  /**
+   * Lists the runs a crashed pi, or a quit, left in this session's ledger. Never on reload: live runs are handed over
+   * instead.
+   */
   function recoverCrashed(ctx: ExtensionContext): void {
     const options: ReplayOptions = {
       host: localOwnerHost(),
@@ -1304,7 +1322,7 @@ export default function (pi: ExtensionAPI) {
     const entries = ctx.sessionManager.getEntries();
     const crashed = replayLedger(entries, options);
     for (const record of crashed) record.spawnerSessionId = spawnerSessionId;
-    // A shutdown stop settles the run, so replayLedger recovers nothing: name the ids it left, once.
+    // A run the quit stopped before it started has no transcript, so replayLedger cannot recover it: name it, once.
     guardInitVoid("shutdown-stops", () => reportShutdownStops(entries));
     const adopted = manager.adoptInterrupted(crashed, pi);
     if (adopted.length === 0) return;

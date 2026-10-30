@@ -97,11 +97,11 @@ interface SettleLedgerEntry {
   status: string;
   type?: string;
   description?: string;
-  /** A settle `abortAll` wrote at shutdown: the run is stopped for good, not waiting for a resume. */
+  /** A settle `abortAll` wrote at shutdown: the run was cut short by the quit, and is recovered like a crashed one. */
   shutdown?: boolean;
 }
 
-/** A run whose last ledger state is a shutdown stop: it is gone, and SendMessage cannot reach it. */
+/** A run a shutdown stopped before it ever started (queued at the quit): it has no transcript to resume from. */
 export interface ShutdownStop {
   id: string;
   type?: string;
@@ -144,8 +144,8 @@ function ownerLive(owner: OwnerStamp, id: string, options: ReplayOptions): boole
   return owner.pid !== process.pid || options.isLiveHere(id);
 }
 
-/** The record a crashed run becomes: settled as interrupted, its session file kept for a resume. */
-function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number, crashedAt: number | undefined): AgentRecord {
+/** The record a crashed or shutdown-stopped run becomes: settled as interrupted, its session file kept for a resume. */
+function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number, crashedAt: number | undefined, shutdown: boolean): AgentRecord {
   return {
     id: spawned.id, type: spawned.type, description: spawned.description,
     status: "interrupted", toolUses: 0, lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, compactionCount: 0,
@@ -154,7 +154,7 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
     parentAgentId: spawned.parentId, cwd: spawned.cwd, worktree: spawned.worktree,
     runCwd: spawned.runCwd, configCwd: spawned.configCwd,
     invocation: { modelId: spawned.model, requestedThinking: spawned.thinking },
-    settled: true, crashCount,
+    settled: true, crashCount, stoppedAtShutdown: shutdown || undefined,
   };
 }
 
@@ -178,18 +178,19 @@ function readNoticeIds(data: unknown): string[] {
 }
 
 /**
- * The runs a shutdown stopped and no notice has named yet. A settle with `shutdown: true` closes the run like any
- * other, so `replayLedger` recovers nothing: this scan is the only record that the id is unaddressable. A later
- * spawn or resume reopens the run; a later notice has already told the model.
+ * The runs a shutdown stopped before they ever started, that no notice has named yet. A run that started has a
+ * spawn entry and a transcript, and `replayLedger` recovers it; one stopped while queued has neither, so this scan
+ * is the only record that the id is unaddressable. A later notice has already told the model.
  */
 export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] {
   const state = new Map<string, { shutdown: boolean; type?: string; description?: string }>();
   const noticed = new Set<string>();
+  const started = new Set<string>();
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
     if (entry.customType === "subagent-spawned" || entry.customType === "subagent-resumed") {
       const opened = readEntry<{ id: string }>(entry.data);
-      if (opened) state.set(opened.id, { shutdown: false });
+      if (opened) started.add(opened.id);
     } else if (entry.customType === "subagents:record") {
       const settle = readEntry<SettleLedgerEntry>(entry.data);
       if (!settle) continue;
@@ -200,20 +201,25 @@ export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] 
     }
   }
   return [...state]
-    .filter(([id, run]) => run.shutdown && !noticed.has(id))
+    .filter(([id, run]) => run.shutdown && !noticed.has(id) && !started.has(id))
     .map(([id, run]) => ({ id, type: run.type, description: run.description }));
 }
 
 /**
  * Replays a parent session's ledger. A run has crashed when its last spawn or
- * resume has no settle after it and its last owner is dead. A settle with status
- * `interrupted` closes the run (its report was delivered) and extends the streak
- * that the crash-loop guard counts.
+ * resume has no settle after it and its last owner is dead. A run whose last
+ * settle is a shutdown stop is recovered the same way, whatever its owner: the
+ * settle says it is not running. A settle with status `interrupted` closes the
+ * run (its report was delivered) and extends the streak that the crash-loop
+ * guard counts, except the one that delivers a shutdown stop's recovery: a
+ * deliberate quit is not a crash, so it ends the streak instead.
  */
 export function replayLedger(entries: readonly SessionEntry[], options: ReplayOptions): AgentRecord[] {
   const spawns = new Map<string, SpawnedLedgerEntry>();
-  const open = new Map<string, { spawned: SpawnedLedgerEntry; owner: OwnerStamp }>();
+  const open = new Map<string, { spawned: SpawnedLedgerEntry; owner: OwnerStamp; shutdown?: boolean }>();
   const streak = new Map<string, number>();
+  /** Runs whose last settle is a shutdown stop: the interrupted settle that delivers their recovery is not a crash. */
+  const stopped = new Set<string>();
   for (const entry of entries) {
     if (entry.type !== "custom") continue;
     if (entry.customType === "subagent-spawned") {
@@ -224,18 +230,33 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
     } else if (entry.customType === "subagent-resumed") {
       const resumed = readEntry<ResumedLedgerEntry>(entry.data);
       const spawned = resumed && spawns.get(resumed.id);
-      if (resumed && spawned) open.set(resumed.id, { spawned, owner: ownerOf(resumed) });
+      if (resumed && spawned) {
+        open.set(resumed.id, { spawned, owner: ownerOf(resumed) });
+        stopped.delete(resumed.id);
+      }
     } else if (entry.customType === "subagents:record") {
       const settle = readEntry<SettleLedgerEntry>(entry.data);
       if (!settle) continue;
+      const run = open.get(settle.id);
       open.delete(settle.id);
-      streak.set(settle.id, settle.status === "interrupted" ? (streak.get(settle.id) ?? 0) + 1 : 0);
+      const recoveredStop = stopped.delete(settle.id) && settle.status === "interrupted";
+      // A run with no spawn entry never started, so it has no transcript: `shutdownStops` names it instead.
+      if (settle.shutdown === true && run) {
+        open.set(settle.id, { ...run, shutdown: true });
+        stopped.add(settle.id);
+      }
+      streak.set(settle.id, settle.status === "interrupted" && !recoveredStop ? (streak.get(settle.id) ?? 0) + 1 : 0);
+    } else if (entry.customType === SHUTDOWN_NOTICE_ENTRY) {
+      // An older release reported these shutdown stops with a notice instead of recovering them: they stay closed.
+      for (const id of readNoticeIds(entry.data)) {
+        if (open.get(id)?.shutdown) open.delete(id);
+      }
     }
   }
   const crashed: AgentRecord[] = [];
   for (const [id, run] of open) {
-    if (ownerLive(run.owner, id, options)) continue;
-    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now, options.lastActivity(run.spawned.sessionFile)));
+    if (!run.shutdown && ownerLive(run.owner, id, options)) continue;
+    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now, options.lastActivity(run.spawned.sessionFile), run.shutdown === true));
   }
   return crashed;
 }
