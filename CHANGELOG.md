@@ -44,6 +44,7 @@ All notable changes to this project will be documented in this file.
 - *(sendmessage)* A refused delivery is a failed tool result, and a shutdown stop is named ([#172](https://github.com/cad0p/pi-subagents-tintinweb/pull/172)) (closes #171)
 - *(notice)* Draw the shutdown-stop notice at session start (closes #173) ([#176](https://github.com/cad0p/pi-subagents-tintinweb/pull/176))
 - *(deps)* Admit the pi-background-work 0.0.2 stable, so the footer package stops nesting a duplicate (closes #186) ([#188](https://github.com/cad0p/pi-subagents-tintinweb/pull/188))
+- *(native-view)* The footer follows a model change, and a repaint keeps an open expansion (closes #184) ([#187](https://github.com/cad0p/pi-subagents-tintinweb/pull/187))
 
 ### 🚜 Refactor
 
