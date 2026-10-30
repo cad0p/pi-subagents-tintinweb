@@ -30,7 +30,12 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", async () => ({
+  // The scope resolver under test IS pi's, so it stays real; everything else is
+  // stubbed below.
+  resolveModelScopeWithDiagnostics: (
+    await vi.importActual<typeof import("@earendil-works/pi-coding-agent")>("@earendil-works/pi-coding-agent")
+  ).resolveModelScopeWithDiagnostics,
   createAgentSession,
   // The runner forwards these to the child loader's `extensionFactories`. Stubbed
   // to the shape pi returns: a factory that registers nothing.
@@ -156,6 +161,7 @@ import {
   EXCLUDED_TOOL_NAMES,
   extensionCanonicalName,
   extensionCanonicalNames,
+  isDiagnosticActivity,
   parseExtensionsSpec,
   parseExtSelectors,
   resolveScopedModels,
@@ -339,25 +345,13 @@ describe("agent-runner final output capture", () => {
     expect(result.failure).toBeUndefined();
   });
 
-  it("sets the agent name as session name before binding extensions", async () => {
-    const { session } = createSession("NAMED");
-    createAgentSession.mockResolvedValue({ session });
-
-    await runAgent(ctx, "Explore", "go", { pi });
-
-    expect(session.setSessionName).toHaveBeenCalledWith("Explore");
-    const setOrder = session.setSessionName.mock.invocationCallOrder[0];
-    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
-    expect(setOrder).toBeLessThan(bindOrder);
-  });
-
-  it("suffixes the session name with a short agentId so parallel spawns are distinguishable", async () => {
+  it("does not name the child session, leaving pi's /name field to the user", async () => {
     const { session } = createSession("NAMED");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
 
-    expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+    expect(session.setSessionName).not.toHaveBeenCalled();
   });
 });
 
@@ -2418,9 +2412,9 @@ describe("resolveScopedModels", () => {
     { model: { provider: "acme", id: "m2" } as any },
   ];
 
-  it("undefined/true inherit the parent scope as a copy", () => {
-    const viaUndefined = resolveScopedModels(undefined, parent, makeRegistry([]));
-    const viaTrue = resolveScopedModels(true, parent, makeRegistry([]));
+  it("undefined/true inherit the parent scope as a copy", async () => {
+    const viaUndefined = await resolveScopedModels(undefined, parent, makeRegistry([]));
+    const viaTrue = await resolveScopedModels(true, parent, makeRegistry([]));
 
     expect(viaUndefined).toEqual(parent);
     expect(viaTrue).toEqual(parent);
@@ -2428,19 +2422,19 @@ describe("resolveScopedModels", () => {
     expect(viaTrue).not.toBe(parent);
   });
 
-  it("treats a missing parent scope as empty", () => {
-    expect(resolveScopedModels(undefined, undefined, makeRegistry([]))).toEqual([]);
+  it("treats a missing parent scope as empty", async () => {
+    expect(await resolveScopedModels(undefined, undefined, makeRegistry([]))).toEqual([]);
   });
 
-  it("false gives an empty scope even when the parent has one", () => {
-    expect(resolveScopedModels(false, parent, makeRegistry([]))).toEqual([]);
+  it("false gives an empty scope even when the parent has one", async () => {
+    expect(await resolveScopedModels(false, parent, makeRegistry([]))).toEqual([]);
   });
 
-  it("resolves an explicit list in order, deduplicating, and warns on unresolved entries", () => {
+  it("resolves an explicit list in order, deduplicating, and warns on unresolved entries", async () => {
     const models = [{ provider: "acme", id: "m1", name: "m1" }, { provider: "acme", id: "m2", name: "m2" }];
     const warn = vi.fn();
 
-    const resolved = resolveScopedModels(
+    const resolved = await resolveScopedModels(
       ["acme/m2", "acme/m1", "acme/m2", "missing/model"],
       parent,
       makeRegistry(models),
@@ -2452,12 +2446,148 @@ describe("resolveScopedModels", () => {
     expect(warn.mock.calls[0][0]).toContain("missing/model");
   });
 
-  it("resolves an explicit entry under another provider like model: does", () => {
-    const models = [{ provider: "acme", id: "m1", name: "m1" }];
+  it("does not fall back to unauthenticated models when the registry has no availability list", async () => {
+    const warn = vi.fn();
+    const noAvailability = { find: () => undefined, getAll: () => catalogue };
 
-    const resolved = resolveScopedModels(["other/m1"], [], makeRegistry(models));
+    // getAll() would admit unauthenticated models and silently break pi's
+    // available-only filtering, so the absence must fail into the catch.
+    expect(await resolveScopedModels(["acme/m1"], parent, noAvailability as any, warn)).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("availability list");
+  });
 
-    expect(resolved.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["acme/m1"]);
+  it("degrades to an empty scope, not a failed spawn, when the registry throws", async () => {
+    const warn = vi.fn();
+    const broken = {
+      ...makeRegistry([]),
+      getAvailable: () => {
+        throw new Error("credential store unavailable");
+      },
+    };
+
+    expect(await resolveScopedModels(["acme/m1"], parent, broken, warn)).toEqual([]);
+    // Fail closed, like an entry that matches nothing — never the parent's scope.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("credential store unavailable");
+  });
+});
+
+describe("isDiagnosticActivity", () => {
+  // One test body for all three prefixes: a synthetic event that slips through
+  // is counted as a tool use, which the fleet row and the conversation header
+  // then report as work the run never did.
+  it("recognises every synthetic prefix and nothing else", () => {
+    for (const name of ["scoped-models-error:", "extension-error:", "tools-error:"]) {
+      expect(isDiagnosticActivity(`${name}anything`)).toBe(true);
+    }
+    for (const name of ["read", "bash", "tool_search", "scoped-models", "extension-error", "tools-error-x"]) {
+      expect(isDiagnosticActivity(name)).toBe(false);
+    }
+  });
+});
+
+describe("resolveScopedModels — pi pattern parity", () => {
+  // A golden table, not a live comparison against pi's resolver: these
+  // expectations ARE pi's `--models` semantics (globs against `provider/id` and
+  // the bare id, `:thinking` suffixes, an ambiguous entry widening to every
+  // match), pinned literally so a pi upgrade that changes scope resolution
+  // fails here instead of silently changing which models a subagent may fall
+  // back to.
+  const catalogue = [
+    { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5 5" },
+    { provider: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    { provider: "opencode-go-2", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    { provider: "opencode-go-3", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+  ];
+
+  function registry() {
+    return {
+      find: (provider: string, id: string) => catalogue.find((m) => m.provider === provider && m.id === id),
+      getAll: () => catalogue,
+      getAvailable: () => catalogue,
+    };
+  }
+
+  async function scopeOf(patterns: string[]) {
+    const warn = vi.fn();
+    const scope = await resolveScopedModels(patterns, [], registry(), warn);
+    return {
+      ids: scope.map((e) => `${e.model.provider}/${e.model.id}:${e.thinkingLevel ?? "none"}`),
+      warnings: warn.mock.calls.map((call) => String(call[0])),
+    };
+  }
+
+  it("expands a provider glob, carrying its :thinking suffix per entry", async () => {
+    expect(await scopeOf(["opencode-go*/deepseek-v4.1-flash:max"])).toEqual({
+      ids: [
+        "opencode-go/deepseek-v4.1-flash:max",
+        "opencode-go-2/deepseek-v4.1-flash:max",
+        "opencode-go-3/deepseek-v4.1-flash:max",
+      ],
+      warnings: [],
+    });
+  });
+
+  it("matches a glob against the bare model id too", async () => {
+    const { ids, warnings } = await scopeOf(["*deepseek*"]);
+
+    expect(ids).toEqual([
+      "opencode-go/deepseek-v4.1-flash:none",
+      "opencode-go-2/deepseek-v4.1-flash:none",
+      "opencode-go-3/deepseek-v4.1-flash:none",
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("pins a single model and its thinking level", async () => {
+    expect(await scopeOf(["anthropic/claude-opus-5-5:high"])).toEqual({
+      ids: ["anthropic/claude-opus-5-5:high"],
+      warnings: [],
+    });
+  });
+
+  it("widens an ambiguous bare id to every match, and says so", async () => {
+    const { ids, warnings } = await scopeOf(["deepseek-v4.1-flash"]);
+
+    expect(ids).toEqual([
+      "opencode-go/deepseek-v4.1-flash:none",
+      "opencode-go-2/deepseek-v4.1-flash:none",
+      "opencode-go-3/deepseek-v4.1-flash:none",
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("several providers");
+  });
+
+  it("drops an unmatched pattern with a diagnostic and keeps the rest", async () => {
+    const { ids, warnings } = await scopeOf(["anthropic/claude-opus-5-5", "nope/nothing"]);
+
+    expect(ids).toEqual(["anthropic/claude-opus-5-5:none"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("nope/nothing");
+  });
+
+  it("drops an entry that names a provider nothing matches", async () => {
+    const { ids, warnings } = await scopeOf(["acme/claude-opus-5-5"]);
+
+    expect(ids).toEqual([]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("acme/claude-opus-5-5");
+  });
+
+  it("lets a gateway that serves the whole id satisfy a provider-prefixed entry", async () => {
+    // pi's provider prefix is a preference, not a constraint: when no model has
+    // provider "zai", the literal id "zai/glm-5" still matches on the gateway.
+    const gateway = [{ provider: "vercel-ai-gateway", id: "zai/glm-5", name: "GLM 5" }];
+    const registry = {
+      find: (provider: string, id: string) => gateway.find((m) => m.provider === provider && m.id === id),
+      getAll: () => gateway,
+      getAvailable: () => gateway,
+    };
+
+    const scope = await resolveScopedModels(["zai/glm-5"], [], registry);
+
+    expect(scope.map((e) => `${e.model.provider}/${e.model.id}`)).toEqual(["vercel-ai-gateway/zai/glm-5"]);
   });
 });
 

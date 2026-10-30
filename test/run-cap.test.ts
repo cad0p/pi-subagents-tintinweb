@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type BackgroundWorkItem, registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
 import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentManager, setQuietMs } from "../src/agent-manager.js";
+import { AgentManager, type CapEvent, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, runAgent } from "../src/agent-runner.js";
 import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
@@ -59,11 +59,23 @@ const fakeChild = () => {
   };
   const end = (text: string) => {
     setStreaming(false);
+    child.agent.state.pendingToolCalls.clear();
     if (text) {
       const message = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
       messages.push(message);
       emit({ type: "message_end", message });
     }
+    emit({ type: "agent_end" });
+    emit({ type: "agent_settled" });
+    finishPrompt?.();
+    finishPrompt = undefined;
+  };
+  /** The final turn fails and pi resolves it: no text, stopReason "error" (#144), so the run settles with a failure. */
+  const fail = (errorMessage: string) => {
+    setStreaming(false);
+    const message = { role: "assistant", content: [], stopReason: "error", errorMessage };
+    messages.push(message);
+    emit({ type: "message_end", message });
     emit({ type: "agent_end" });
     emit({ type: "agent_settled" });
     finishPrompt?.();
@@ -75,11 +87,28 @@ const fakeChild = () => {
     if (!last) throw new Error("no wake was sent");
     emit({ type: "message_start", message: { role: "custom", customType: last.customType, content: last.content, details: last.details } });
   };
+  /** The run ends on a microtask, as an abort ends it. The check runs again then, so two aborts in one tick end it once. */
+  const stopRun = () => {
+    if (child.isStreaming) queueMicrotask(() => { if (child.isStreaming) end(""); });
+  };
+  /** A tool call inside the run: pi fills the set before it emits the start. */
+  const toolStart = (id = "tool-1") => {
+    child.agent.state.pendingToolCalls.add(id);
+    emit({ type: "tool_execution_start", toolCallId: id, toolName: "bash", args: {} });
+  };
+  const toolEnd = (id = "tool-1") => {
+    child.agent.state.pendingToolCalls.delete(id);
+    emit({ type: "tool_execution_end", toolCallId: id, toolName: "bash", result: {}, isError: false });
+  };
+  /** A settle that does not clear the streaming flag: a stale settle from a run that is still going. */
+  const settleWhileStreaming = () => emit({ type: "agent_settled" });
+  let nextAbort: "pending" | "reject" | undefined;
+  let releaseAbortFn: (() => void) | undefined;
   const child = {
     sessionId: "child-session-id",
     isStreaming: false,
     messages,
-    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+    agent: { state: { isStreaming: false, pendingToolCalls: new Set<string>() }, hasQueuedMessages: () => false },
     clearQueue: () => ({ steering: [], followUp: [] }),
     subscribe: (listen: (event: AgentSessionEvent) => void) => {
       listeners.add(listen);
@@ -91,8 +120,19 @@ const fakeChild = () => {
         finishPrompt = resolve;
       });
     }),
-    abort: vi.fn(() => {
-      if (child.isStreaming) queueMicrotask(() => end(""));
+    abort: vi.fn((): Promise<void> => {
+      const mode = nextAbort;
+      nextAbort = undefined;
+      if (mode === "reject") return Promise.reject(new Error("abort failed"));
+      if (mode === "pending") {
+        return new Promise<void>((resolve) => {
+          releaseAbortFn = () => {
+            stopRun();
+            resolve();
+          };
+        });
+      }
+      stopRun();
       return Promise.resolve();
     }),
     steer: vi.fn(),
@@ -102,7 +142,20 @@ const fakeChild = () => {
     sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
     begin,
     end,
+    fail,
     deliver,
+    toolStart,
+    toolEnd,
+    settleWhileStreaming,
+    /** The next abort stays pending until `releaseAbort`, or rejects. */
+    holdNextAbort: (mode: "pending" | "reject") => {
+      nextAbort = mode;
+    },
+    releaseAbort: () => {
+      const release = releaseAbortFn;
+      releaseAbortFn = undefined;
+      release?.();
+    },
   };
   return child;
 };
@@ -185,21 +238,28 @@ describe("run cap", () => {
     expect(pending).toHaveLength(1);
   });
 
-  it("streaming: the heads-up is steered into the running turn, and the turn's end settles the run", async () => {
+  it("streaming with no tool: the heads-up waits for the response to end, then warns the idle session and the run settles", async () => {
     pending = [bgItem];
     const child = fakeChild();
     runChild(child);
     const record = spawnChild(capDir);
     await settle();
     vi.advanceTimersByTime(LEAD_MS);
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    child.end("");
+    await settle();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
     expect(child.sendCustomMessage).toHaveBeenCalledWith(
       expect.objectContaining({ content: expect.stringContaining("1 minute left") }),
       { triggerTurn: true, deliverAs: "steer" },
     );
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).not.toContain("interrupted");
+    expect(child.abort).not.toHaveBeenCalled();
     child.deliver();
+    child.begin();
     child.end("report");
     await settle();
-    expect(record).toMatchObject({ status: "completed", limitReason: "time", result: "report" });
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
     expect(completions).toHaveLength(1);
   });
   it("streaming hard stop: the session is aborted, not the id, and the run settles once with the time limit", async () => {
@@ -213,8 +273,258 @@ describe("run cap", () => {
     // The hard stop's session.abort ends the turn; the teardown after the settle aborts again, so the count is not pinned.
     expect(child.abort).toHaveBeenCalled();
     expect(abortById).not.toHaveBeenCalled();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
     expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     expect(completions).toHaveLength(1);
+  });
+
+  it("a heads-up inside a tool execution aborts the tool, and the warning starts a turn that settles the run", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    await settle();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("1 minute left");
+    expect(child.abort.mock.invocationCallOrder[0]).toBeLessThan(child.sendCustomMessage.mock.invocationCallOrder[0]);
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
+    expect(completions).toHaveLength(1);
+  });
+
+  it("streaming with no tool: a tool that starts after the deadline is interrupted, and the warning follows the abort", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(child.abort).not.toHaveBeenCalled();
+    child.toolStart();
+    await settle();
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
+    expect(child.abort.mock.invocationCallOrder[0]).toBeLessThan(child.sendCustomMessage.mock.invocationCallOrder[0]);
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
+    expect(completions).toHaveLength(1);
+  });
+
+  it("a stale settle during the hold leaves it armed: a tool that starts after it is still interrupted", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    // A settle from a racing run while the session still streams: not the idle end the hold waits for.
+    child.settleWhileStreaming();
+    await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(child.abort).not.toHaveBeenCalled();
+    child.toolStart();
+    await settle();
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
+  });
+
+  it("a tool that starts and ends before the deferred interrupt runs is not aborted; the warning waits for the response to end", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.toolStart();
+    child.toolEnd();
+    await settle();
+    expect(child.abort).not.toHaveBeenCalled();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    child.end("");
+    await settle();
+    expect(child.abort).not.toHaveBeenCalled();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("1 minute left");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).not.toContain("interrupted");
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "wrapped", result: "report" });
+  });
+
+  it("a tool that never ends: the hard stop runs after the abort, no warning follows, and the run settles once with the time limit", async () => {
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("pending");
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(CAP_MS - LEAD_MS);
+    expect(child.abort).toHaveBeenCalledTimes(2);
+    child.releaseAbort();
+    await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(completions).toHaveLength(1);
+  });
+
+  it("the debug channel records the interrupt before the warning, with the tool count and the abort time", async () => {
+    pending = [bgItem];
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("pending");
+    vi.advanceTimersByTime(LEAD_MS);
+    await settle();
+    // The interrupt is recorded when the abort resolves, not when it is requested.
+    expect(capEvents.map((event) => event.kind)).not.toContain("interrupt");
+    child.releaseAbort();
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["interrupt"]);
+    expect(capEvents[0]).toMatchObject({ kind: "interrupt", pendingTools: 1, abortMs: expect.any(Number) });
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["interrupt", "headsUp", "settle"]);
+    expect(capEvents[1]).toMatchObject({ kind: "headsUp", interrupted: true, left: "1 minute" });
+  });
+
+  it("the debug channel's hard stop records the tools still in flight", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("pending");
+    vi.advanceTimersByTime(LEAD_MS);
+    vi.advanceTimersByTime(CAP_MS - LEAD_MS);
+    child.releaseAbort();
+    await settle();
+    expect(capEvents.find((event) => event.kind === "hardStop")).toMatchObject({ pendingTools: 1, streaming: true });
+  });
+
+  it("a nested result queued during the abort waits behind the heads-up, which is the first message the child receives", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("pending");
+    vi.advanceTimersByTime(LEAD_MS);
+    // The nested child settles while the abort is in flight: its batch timer fires with the waking slot held.
+    manager.deliverNested({ id: "nested-1", parentAgentId: record.id, resultDelivered: false, ownerAborted: false } as unknown as AgentRecord, "nested result text");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    child.releaseAbort();
+    await settle();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("If it was cut");
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).not.toContain("nested result text");
+  });
+
+  it("a user stop during the abort sends no warning and settles stopped, with no time label", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("pending");
+    vi.advanceTimersByTime(LEAD_MS);
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    expect(manager.abort(record.id)).toBe(true);
+    child.releaseAbort();
+    await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(record).toMatchObject({ status: "stopped" });
+    expect(record.limitReason).toBeUndefined();
+    expect(record.timeLimit).toBeUndefined();
+  });
+
+  it("a heads-up whose abort rejects logs once, sends nothing, and the hard stop still settles the run", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.toolStart();
+    child.holdNextAbort("reject");
+    vi.advanceTimersByTime(LEAD_MS);
+    await settle();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("heads-up interrupt failed"));
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(CAP_MS - LEAD_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(completions).toHaveLength(1);
+  });
+
+  it("a user stop while the hold waits sends no warning, and a tool that starts during the unwind is not aborted again", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    // The user's abort unwinds the run and stays in flight, so the hold is still armed when a tool starts.
+    child.holdNextAbort("pending");
+    expect(manager.abort(record.id)).toBe(true);
+    await settle();
+    child.toolStart();
+    await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    expect(child.abort).toHaveBeenCalledTimes(1);
+    expect(record).toMatchObject({ status: "stopped" });
+    expect(record.limitReason).toBeUndefined();
+    expect(record.timeLimit).toBeUndefined();
+    child.releaseAbort();
+    await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+  });
+
+  it("the warning one millisecond after the lead says 1 minute left", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    // The hold fires at 60 001 ms, 59 999 ms before the cap: an unrounded count would print "60 seconds".
+    vi.advanceTimersByTime(LEAD_MS + 1);
+    child.end("");
+    await settle();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("You have 1 minute left");
   });
 
   it("a parked child is not killed at the cap; the check resumes after its dialog clears", async () => {
@@ -243,6 +553,36 @@ describe("run cap", () => {
     await settle();
     expect(record).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
     expect(completions).toHaveLength(1);
+    unsubscribe();
+  });
+
+  it("a heads-up released after a parked hard stop moved the deadline counts down from the moved deadline", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    // Streaming with no tool: the hold arms at the lead (60 s). A tool starts at 70 s while a dialog opens.
+    vi.advanceTimersByTime(LEAD_MS + 10_000);
+    child.toolStart();
+    const unsubscribe = onChildDialogFlag(record.id, vi.mocked(runAgent).mock.lastCall![3].onChildDialog!);
+    void createChildUIProxy(record.id, { answerable: true }).confirm("Pick one", "held open");
+    await settle();
+    // The entry parks and retries at 100 s. At 120 s the hard stop parks too and moves its due time to 150 s.
+    vi.advanceTimersByTime(CAP_MS - (LEAD_MS + 10_000));
+    await settle();
+    expect(record.status).toBe("running");
+    expect(child.abort).not.toHaveBeenCalled();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(5_000);
+    answerChildDialog(record.id, true);
+    await settle();
+    expect(record.dialog).toBeUndefined();
+    // The 130 s retry releases the heads-up: 20 s are left to the moved due time, not 0 s to the original deadline.
+    vi.advanceTimersByTime(5_000);
+    await settle();
+    expect(child.sendCustomMessage).toHaveBeenCalledTimes(1);
+    expect(child.sendCustomMessage.mock.lastCall?.[0].content).toContain("You have 20 seconds left");
     unsubscribe();
   });
 
@@ -326,8 +666,11 @@ describe("run cap", () => {
     expect(runA).toMatchObject({ status: "completed", limitReason: "time", gated: false });
     expect(manager.runningCount()).toBe(1);
     vi.advanceTimersByTime(10_000);
-    // B's heads-up woke it while it streamed; its report is the answer to that wake.
+    // B streamed through its heads-up with no tool in flight, so the warning waits for the response to end; its report answers that wake.
+    childB.end("");
+    await settle();
     childB.deliver();
+    childB.begin();
     childB.end("report");
     await settle();
     // Finishing takes two quiet ticks: the first observes the idle record, the next one finishes it.
@@ -449,6 +792,37 @@ describe("run cap", () => {
     expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent wrapped up for the time limit: work** (wrapped up for the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(wrapped up for the 2 min time limit; resume with SendMessage to continue)");
   });
+  it("a wrap-up whose report turn fails reads errored while wrapping up, in the notification header and the result note", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    child.deliver();
+    child.begin();
+    child.fail("provider down");
+    await settle();
+    expect(record).toMatchObject({ status: "error", limitReason: "time", timeLimit: "wrapped" });
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent errored while wrapping up for the time limit: work** — provider down (errored while wrapping up for the 2 min time limit; the report was not written; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(errored while wrapping up for the 2 min time limit; the report was not written; resume with SendMessage to continue)");
+  });
+  it("a run that fails and then hits the cap is a hard stop: it reads stopped at the time limit, not errored while wrapping up", async () => {
+    pending = [bgItem];
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.fail("provider down");
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(record).toMatchObject({ status: "error", limitReason: "time", timeLimit: "stopped" });
+    expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent stopped at the time limit: work** — provider down (stopped at the 2 min time limit; resume with SendMessage to continue)");
+    expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
+  });
   it("a hard stop reads stopped at the time limit, in the notification header and the result note", async () => {
     const child = fakeChild();
     runChild(child);
@@ -456,9 +830,81 @@ describe("run cap", () => {
     await settle();
     vi.advanceTimersByTime(CAP_MS);
     await settle();
+    expect(child.sendCustomMessage).not.toHaveBeenCalled();
     expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
+  it("the debug channel reports the observed heads-up and the wrapped settle, in that order", async () => {
+    pending = [bgItem];
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    // The line means "the child observed the wake", so it lands only at the delivery.
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["headsUp", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "headsUp", id: record.id, left: "1 minute", capMinutes: 2, startedAt: record.startedAt, at: record.startedAt + LEAD_MS });
+    expect(capEvents[1]).toMatchObject({ kind: "settle", id: record.id, status: "completed", limitReason: "time", timeLimit: "wrapped", capMinutes: 2 });
+  });
+
+  it("the debug channel reports an idle hard stop and the stopped settle, stamped at the cap", async () => {
+    pending = [bgItem];
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    // The heads-up's wake was never delivered, so its line is absent and the run is stopped at the cap.
+    expect(capEvents.map((event) => event.kind)).toEqual(["hardStop", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", id: record.id, streaming: false, capMinutes: 2, startedAt: record.startedAt, at: record.startedAt + CAP_MS });
+    expect(capEvents[1]).toMatchObject({ kind: "settle", id: record.id, status: "completed", limitReason: "time", timeLimit: "stopped", startedAt: record.startedAt, at: record.startedAt + CAP_MS });
+  });
+
+  it("the debug channel's hard stop records a still-streaming session as streaming", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["hardStop", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
+  });
+
+  it("the debug channel's hard stop reads the stream from agent.state when the session flag reads false", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    // pi reports a nested child's stream on agent.state while the session flag can still read false: the two are
+    // independent, and this case is what tells the composite predicate from the session flag alone.
+    child.isStreaming = false;
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
+    expect(child.abort).toHaveBeenCalled();
+    // The fake unwinds only a session that still reports streaming in its own flag; finish the run by hand.
+    child.end("");
+    await settle();
+  });
+
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
     const halfDir = policyDir(0.5);
     pending = [bgItem];

@@ -75,6 +75,35 @@ const resolvedRun = (session?: any) =>
     return { responseText: "done", session: child, aborted: false, steered: false } as any;
   });
 
+describe("AgentManager — tool-use counting", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("counts real tool events, not the spawn-time diagnostics that ride the same channel", async () => {
+    manager = new AgentManager(() => {});
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
+      const child = mockSession();
+      hostChild(opts, child);
+      opts.onToolActivity?.({ type: "start", toolName: "read" });
+      opts.onToolActivity?.({ type: "end", toolName: "read" });
+      // Diagnostics from all three channels — a dropped scoped_models entry, an
+      // extension mismatch, a refused tool. None of them is a tool use.
+      opts.onToolActivity?.({ type: "end", toolName: 'scoped-models-error:scoped_models: no models match pattern "x"' });
+      opts.onToolActivity?.({ type: "end", toolName: "extension-error:unknown extension" });
+      opts.onToolActivity?.({ type: "end", toolName: 'tools-error:tool "nope" requested by agent "general-purpose" is not a known built-in' });
+      return { responseText: "done", session: child, aborted: false, steered: false } as any;
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.toolUses).toBe(1);
+  });
+});
+
 describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)", () => {
   let manager: AgentManager;
 

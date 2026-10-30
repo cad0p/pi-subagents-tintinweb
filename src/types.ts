@@ -50,10 +50,11 @@ export interface AgentConfig {
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   /** Child-session model scope (`ctx.scopedModels`). true/undefined = inherit
-   *  the parent session's resolved scope, string[] = only the listed
-   *  `provider/modelId` entries, false = no scope. Controls which models the
-   *  child session offers for cycling and to in-session extensions that read
-   *  the scope (e.g. pi-fallback-provider's settle-boundary fallback). */
+   *  the parent session's resolved scope, string[] = only the listed model
+   *  patterns (pi's `--models` grammar: globs and `:thinking` suffixes
+   *  included), false = no scope. Controls which models the child session
+   *  offers for cycling and to in-session extensions that read the scope
+   *  (e.g. pi-fallback-provider's settle-boundary fallback). */
   scopedModels?: true | string[] | false;
   model?: string;
   thinking?: ThinkingLevel;

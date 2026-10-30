@@ -18,13 +18,14 @@ import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, S
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
-import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
+import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { isStrictAgentFilesEnabled, loadCustomAgents, setStrictAgentFiles } from "./custom-agents.js";
+import { capDebugEnabled } from "./debug.js";
 import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
@@ -66,7 +67,8 @@ function applyToolActivity(state: AgentActivity, activity: { type: "start" | "en
     for (const [key, name] of state.activeTools) {
       if (name === activity.toolName) { state.activeTools.delete(key); break; }
     }
-    state.toolUses++;
+    // A spawn-time diagnostic rides this channel as an `end` event; it is not a tool use.
+    if (!isDiagnosticActivity(activity.toolName)) state.toolUses++;
   }
 }
 
@@ -118,6 +120,8 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 /** Human-readable status word for the completion report header. */
 function getStatusWord(status: string, limitReason?: "time", timeLimit?: "wrapped" | "stopped"): string {
   if (limitReason === "time") {
+    // Mirrors getStatusNote (src/status-note.ts): change both together.
+    if (timeLimit === "wrapped" && status === "error") return "errored while wrapping up for the time limit";
     if (timeLimit === "wrapped") return "wrapped up for the time limit";
     if (timeLimit === "stopped") return "stopped at the time limit";
     return "time limit reached";
@@ -767,6 +771,11 @@ export default function (pi: ExtensionAPI) {
   // A resumed child is rebuilt outside any spawn's context: read the live root theme instead of
   // letting its extensions see the fallback one.
   manager.uiTheme = () => currentCtx?.ui?.theme;
+  // The cap's diagnostic lines, on only with PI_SUBAGENTS_DEBUG set (#112 item 4). Assigned unconditionally: the gate
+  // is checked here, so the emit sites build the payload either way and this sink drops it when the variable is off.
+  manager.onCapEvent = (event) => {
+    if (capDebugEnabled()) pi.events.emit("subagents:debug", event);
+  };
 
   // ---- Native transcript view (root only) ----
   // The capture probe runs at factory time; the view is inert until the probe fires.

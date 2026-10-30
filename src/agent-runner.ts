@@ -19,7 +19,9 @@ import {
   type ExtensionAPI,
   getAgentDir,
   type InlineExtension,
+  type ModelRuntime,
   type PackageManager,
+  resolveModelScopeWithDiagnostics,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -30,11 +32,12 @@ import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { routedAcquireSlot, routedExtensionError, routedManagerFor, routedRoot, routedScopeBlockReason } from "./impl-route.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { type ModelRegistry as ModelLookupRegistry, resolveModel } from "./model-resolver.js";
+import type { ModelRegistry as ModelLookupRegistry } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { parentExtensionFlags } from "./parent-cli.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
+import { toSingleLine } from "./text-safety.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 import { createChildUIProxy, onChildDialogFlag } from "./ui/child-ui.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -358,35 +361,66 @@ function resolveDefaultModel(
  * undefined/true → inherit the parent session's resolved scope, so in-session
  * extensions that read `ctx.scopedModels` — notably pi-fallback-provider's
  * settle-boundary fallback — work inside subagents too. false → no scope;
- * string[] → an explicit replacement list resolved like `model:` (exact, then
- * fuzzy, then the same model under another provider). Unresolved entries are
- * skipped with a warning; they never fail the spawn.
+ * string[] → an explicit list, resolved by pi.
+ *
+ * Delegated, not re-implemented: a pattern means what it means in pi's
+ * `enabledModels` / `--models` (globs, `:thinking` suffixes, available-only
+ * filtering), and delegating is the only way that survives a pi upgrade.
+ * Diagnostics never fail the spawn.
  */
-export function resolveScopedModels(
+export async function resolveScopedModels(
   configured: true | string[] | false | undefined,
   parentScoped: readonly ScopedModel[] | undefined,
   registry: ModelLookupRegistry,
   warn: (message: string) => void = () => {},
-): ScopedModel[] {
+): Promise<ScopedModel[]> {
   if (configured === undefined || configured === true) {
     return parentScoped ? [...parentScoped] : [];
   }
   if (configured === false) return [];
 
-  const resolved: ScopedModel[] = [];
-  const seen = new Set<string>();
-  for (const entry of configured) {
-    const model = resolveModel(entry, registry);
-    if (typeof model === "string") {
-      warn(`scoped_models: "${entry}" did not resolve — skipping`);
-      continue;
-    }
-    const key = `${model.provider}/${model.id}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    resolved.push({ model });
+  // pi's resolver reads only `getAvailable`, so it gets the registry's list
+  // rather than the live ModelRuntime: there, `getAvailable(undefined)` queues a
+  // per-provider auth refresh on every spawn and rethrows a credential error.
+  // Only the availability list: `getAll()` would admit uncredentialed models.
+  // The stand-in is cast because ModelRuntime is a class with private fields, so
+  // a pi release that reads another member, or a failing registry, throws here —
+  // caught below rather than failing the spawn. Read per call, so it is current.
+  try {
+    const runtime = {
+      getAvailable: async () => {
+        const available = registry.getAvailable?.();
+        if (!available) throw new Error("the model registry exposes no availability list");
+        return available;
+      },
+    } as unknown as ModelRuntime;
+    const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(configured, runtime);
+    // Embeds the user's pattern: a multi-line YAML scalar would put a newline
+    // into an activity name.
+    for (const diagnostic of diagnostics) warn(`scoped_models: ${toSingleLine(diagnostic.message)}`);
+    return scopedModels;
+  } catch (err) {
+    // An empty scope, never the parent's (it may carry the models this list
+    // excludes). Not a fence — pi reads empty as no scope — but it is what an
+    // unmatched entry already produced, and pi-fallback-provider finds no
+    // candidates in it.
+    const reason = toSingleLine(err instanceof Error ? err.message : String(err));
+    warn(`scoped_models: "${configured.join(", ")}" could not be resolved — no scope${reason ? ` (${reason})` : ""}`);
+    return [];
   }
-  return resolved;
+}
+
+/**
+ * Prefixes of the synthetic `end` events that carry a spawn-time diagnostic
+ * through the tool-activity channel. They ride the same callback as real tool
+ * events but are not tool uses; counting them inflated `toolUses` — and the
+ * fleet row and header built from it — by one per warning.
+ */
+const DIAGNOSTIC_ACTIVITY_PREFIXES = ["scoped-models-error:", "extension-error:", "tools-error:"];
+
+/** True for a diagnostic event masquerading as a tool activity. */
+export function isDiagnosticActivity(toolName: string): boolean {
+  return DIAGNOSTIC_ACTIVITY_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 }
 
 /** Info about a tool event in the subagent. */
@@ -398,7 +432,7 @@ export interface ToolActivity {
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
-  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
+  /** Manager-assigned id; routes this run's child dialogs, extension errors, and slot gate. */
   agentId?: string;
   /** Id of the agent that spawned this one; undefined for a top-level agent. A nested child holds a pool slot like any other run. */
   parentAgentId?: string;
@@ -1220,11 +1254,6 @@ export async function createChildSession(
     session.setActiveToolsByName([...keep]);
   }
 
-  const baseSessionName = agentConfig?.name ?? type;
-  session.setSessionName(
-    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
-  );
-
   // Bind extensions so that session_start fires and extensions can initialize
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
@@ -1392,7 +1421,7 @@ export async function resolveChildSettings(ctx: ExtensionContext, type: Subagent
 
   // Child-session model scope: agent frontmatter override, else inherit the
   // parent's resolved scope.
-  const scopedModels = resolveScopedModels(
+  const scopedModels = await resolveScopedModels(
     agentConfig?.scopedModels,
     parentScopedModels,
     parentModelRegistry,

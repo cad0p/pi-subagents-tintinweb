@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeActivity, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-display.js";
+import { describeActivity, fgPreservingNestedStyles, finishedStatus, formatSessionTokens } from "../src/ui/agent-display.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -37,6 +37,15 @@ describe("formatSessionTokens", () => {
     expect(fgPreservingNestedStyles(ansiTheme, "accent", tokenText)).toBe(
       "\u001b[35m1.2k token (\u001b[33m70%\u001b[39m\u001b[35m)\u001b[39m",
     );
+  });
+});
+
+describe("finishedStatus", () => {
+  const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
+
+  it("an errored wrap-up reads as an error with its message, not as wrapped up (#194)", () => {
+    const status = finishedStatus({ status: "error", error: "provider down", limitReason: "time", timeLimit: "wrapped" }, theme);
+    expect(status).toEqual({ icon: "<error>✗</error>", statusText: "<error> error: provider down</error>" });
   });
 });
 
