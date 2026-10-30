@@ -212,7 +212,8 @@ type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 /**
  * Write a session's resolved model and thinking level back to its record, so every surface reads
  * one place instead of re-deriving "session, else the request". Extracted because the native view
- * calls it on every paint: a model change made inside a child view has to reach the record, or the
+ * calls it when the child's session reports a switch (`onSessionEvent`, on `model_change` or
+ * `thinking_level_changed`): a model change made inside a child view has to reach the record, or the
  * FleetView row, the usage ledger and the settled footer keep naming the old model.
  */
 export function adoptSessionModel(record: AgentRecord, session: AgentSession): void {
