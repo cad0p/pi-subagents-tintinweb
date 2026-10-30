@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - *(probe)* A daily, gated upstream compatibility probe (closes #156) ([#157](https://github.com/cad0p/pi-subagents-tintinweb/pull/157))
 - *(fleetview)* Show a subagent session in place, on pi own transcript ([#168](https://github.com/cad0p/pi-subagents-tintinweb/pull/168)) (closes #167)
 - *(fleetview)* The arrows enter a session, Esc interrupts it (closes #178) ([#182](https://github.com/cad0p/pi-subagents-tintinweb/pull/182))
+- *(debug)* A gated channel for the run cap's heads-up, hard stop and settle (closes #112) ([#193](https://github.com/cad0p/pi-subagents-tintinweb/pull/193))
 
 ### 🐛 Bug Fixes
 
