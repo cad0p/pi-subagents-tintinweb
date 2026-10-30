@@ -371,8 +371,7 @@ describe("main tools", () => {
       undefined, undefined, spawnCtx(cwd),
     );
 
-    expect(textOf(result)).toContain("2 agents are handing over after a reload");
-    expect(textOf(result)).not.toContain("evicted");
+    expect(textOf(result)).toBe("2 agents are handing over after a reload; retry in a moment.");
   });
 
   it("refuses a SendMessage prefix that names two hand-overs, naming both", async () => {

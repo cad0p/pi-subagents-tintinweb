@@ -2065,8 +2065,8 @@ Terse command-style prompts produce shallow, generic work.
       if (adopting.length > 0) {
         // One id names it; more than one is a prefix that matches two hand-overs, which is
         // still a hand-over and not a cleanup — say which, never "it was evicted".
-        const named = adopting.length === 1 ? `"${adopting[0]}" is` : `${adopting.length} agents are`;
-        return textResult(`Agent ${named} handing over after a reload; retry in a moment.`);
+        const subject = adopting.length === 1 ? `Agent "${adopting[0]}" is` : `${adopting.length} agents are`;
+        return textResult(`${subject} handing over after a reload; retry in a moment.`);
       }
       if (!record) return agentNotFoundResponse(params.agent_id);
 
