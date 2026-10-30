@@ -337,6 +337,45 @@ describe("main tools", () => {
     expect(manager.getRecord(id)?.pendingSteers).toEqual(["go on"]);
   });
 
+  /** The live root's manager, the way a nested child reaches it. */
+  function rootManager(): AgentManager {
+    const impl = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:impl")] as
+      | { root(): { manager: AgentManager } }
+      | undefined;
+    if (!impl) throw new Error("the extension published no impl route");
+    return impl.root().manager;
+  }
+
+  it("names the hand-over, not a cleanup, when a prefix is still being adopted", async () => {
+    rootManager().beginAdoption(A_ID);
+
+    const result = await tools.get("get_subagent_result")!.execute(
+      "pull-tc",
+      { agent_id: A_ID.slice(0, 8) },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
+    expect(textOf(result)).toContain("handing over after a reload");
+    expect(textOf(result)).toContain(A_ID);
+  });
+
+  it("parks a SendMessage prefix on the adopting id, not on the prefix", async () => {
+    const manager = rootManager();
+    manager.beginAdoption(A_ID);
+
+    const sent = await tools.get("SendMessage")!.execute(
+      "send-tc",
+      { to: A_ID.slice(0, 8), message: "go on" },
+      undefined, undefined, spawnCtx(cwd),
+    );
+
+    // "held" is the adoption window's outcome: the text is parked for the id the
+    // hand-over will adopt. A prefix key parks nowhere and reports not-found.
+    expect((sent as { isError?: boolean }).isError).toBe(false);
+    expect(sent.details.sendOutcome).toBe("held");
+  });
+
   it("refuses a SendMessage prefix that names two agents, and delivers nothing", async () => {
     const manager = (globalThis as Record<symbol, unknown>)[MANAGER_KEY] as {
       listAgents(): AgentRecord[];

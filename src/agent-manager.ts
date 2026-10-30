@@ -2025,6 +2025,18 @@ export class AgentManager {
     return this.adopting.has(id);
   }
 
+  /**
+   * The adopting id a caller-supplied id or prefix names, or undefined. A hand-over is
+   * transient — the record does not exist here yet — so the same prefix rule applies over
+   * the ids currently in that window, and a caller who read an 8-character id off the
+   * transcript is not told the agent is gone while it is still handing over.
+   */
+  adoptingIdFor(idOrPrefix: string): string | undefined {
+    const ids = [...this.adopting.keys()].map((id) => ({ id }));
+    const resolved = resolveAgentRecord(ids, idOrPrefix);
+    return resolved && "record" in resolved ? resolved.record.id : undefined;
+  }
+
   /** Send a steering message from the UI or the RPC. Fires `onSteered` on every outcome that took the text. */
   async steer(id: string, message: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome> {
     const outcome = await this.deliver(id, message, callbacks);
