@@ -379,7 +379,11 @@ export class AgentManager {
    * Without it a resumed child's `ctx.ui.theme` falls back to the identity stand-in.
    */
   uiTheme?: () => Theme | undefined;
-  /** Diagnostic sink (#112 item 4): the cap's heads-up, hard stop and settle. Unset with the gate off. */
+  /**
+   * Diagnostic sink (#112 item 4): the cap's heads-up, hard stop and settle. The extension always assigns it; the
+   * PI_SUBAGENTS_DEBUG gate lives inside the sink, so each emit site builds the payload and its `Date.now()` and the
+   * sink discards them when the gate is off.
+   */
   onCapEvent?: (event: CapEvent) => void;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();

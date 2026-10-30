@@ -511,6 +511,25 @@ describe("run cap", () => {
     expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
   });
 
+  it("the debug channel's hard stop reads the stream from agent.state when the session flag reads false", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    // pi reports a nested child's stream on agent.state while the session flag can still read false: the two are
+    // independent, and this case is what tells the composite predicate from the session flag alone.
+    child.isStreaming = false;
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
+    expect(child.abort).toHaveBeenCalled();
+    // The fake unwinds only a session that still reports streaming in its own flag; finish the run by hand.
+    child.end("");
+    await settle();
+  });
+
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
     const halfDir = policyDir(0.5);
     pending = [bgItem];
