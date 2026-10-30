@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.23.0]
+## [0.23.0] - 2026-10-30
 
 > **⚠️ Breaking — `steer_subagent` is now `SendMessage`, and the `Agent` tool no longer takes `resume`.** Steering a running subagent and resuming a finished one are one operation: `SendMessage({ to: "<agent id>", message: "..." })`. Agent files, orchestrator prompts and codemode scripts that name `steer_subagent`, pass `resume`, or allowlist the old tool name must be updated.
 >
