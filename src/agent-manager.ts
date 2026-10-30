@@ -210,11 +210,6 @@ interface GateEntry {
 type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 
 /**
- * Bind a live session to its record: identity, the persistent lifecycle and the model and
- * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
- * same way as a fresh one.
- */
-/**
  * Write a session's resolved model and thinking level back to its record, so every surface reads
  * one place instead of re-deriving "session, else the request". Extracted because the native view
  * calls it on every paint: a model change made inside a child view has to reach the record, or the
@@ -239,6 +234,11 @@ export function adoptSessionModel(record: AgentRecord, session: AgentSession): v
   }
 }
 
+/**
+ * Bind a live session to its record: identity, the persistent lifecycle and the model and
+ * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
+ * same way as a fresh one.
+ */
 function bindSession(record: AgentRecord, session: AgentSession, lifecycle: SessionLifecycle): void {
   record.session = session;
   record.lifecycle = lifecycle;
