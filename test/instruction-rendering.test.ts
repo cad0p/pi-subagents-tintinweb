@@ -455,7 +455,7 @@ describe("instruction rendering", () => {
       { outcome: "queued", line: "Message queued for agent abc. It is delivered once the session initializes.", color: "dim" },
       { outcome: "not-found", line: 'No agent "abc" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.', color: "error" },
       { outcome: "resumed", line: "Agent abc had finished; resumed it with the message (fresh max_turns budget).", color: "dim" },
-      { outcome: "resumedAfterCrash", line: "Agent abc was interrupted by a crash; resumed it from its transcript with a crash note and the message (fresh max_turns budget).", color: "dim" },
+      { outcome: "resumedAfterCrash", line: "Agent abc was interrupted; resumed it from its transcript with a note on what interrupted it and the message (fresh max_turns budget).", color: "dim" },
       { outcome: "failed", line: "Nothing was delivered to agent abc: it is still settling, was stopped with its parent, or has no session left to reopen.", color: "error" },
     ];
 

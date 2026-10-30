@@ -1,6 +1,6 @@
 /**
- * shutdown-notice-rendering.test.ts — the notice a reopened session owes when a shutdown stopped runs.
- * It rides on its own transcript entry, drawn by a renderer registered at factory time: the `nextTurn`
+ * shutdown-notice-rendering.test.ts — the notice a reopened session owes when a shutdown stopped runs before they
+ * started (queued at the quit: no transcript, so nothing to resume; a run that started is recovered instead). It rides on its own transcript entry, drawn by a renderer registered at factory time: the `nextTurn`
  * message the model gets waits for a turn a fresh session may never take, so the entry is the only
  * surface that paints at startup. These cases pin the paint, its absence with nothing stopped, the
  * single copy the first turn sees, and the ids-only entry an older release wrote.
@@ -18,11 +18,16 @@ function custom(customType: string, data: unknown): SessionEntry {
   return { type: "custom", customType, data, id: customType, parentId: null, timestamp: "2026-01-01T00:00:00Z" } as unknown as SessionEntry;
 }
 
-/** A session file holding one run a shutdown stopped: its spawn, then the settle that closed it for good. */
+/** A session file holding one run a shutdown stopped while it was queued: only the settle, no spawn entry. */
 function stoppedRun(id = "child-1", description = "review auth.ts"): SessionEntry[] {
+  return [custom("subagents:record", { v: LEDGER_VERSION, id, type: "general-purpose", description, status: "stopped", shutdown: true })];
+}
+
+/** A run a shutdown stopped mid-flight, as an older release left it: its spawn, then the shutdown settle. */
+function startedStop(id = "child-1", description = "review auth.ts"): SessionEntry[] {
   return [
     custom("subagent-spawned", { v: LEDGER_VERSION, id, type: "general-purpose", description, spawnedAt: 1, ownerPid: 999_999_999 }),
-    custom("subagents:record", { v: LEDGER_VERSION, id, type: "general-purpose", description, status: "stopped", shutdown: true }),
+    ...stoppedRun(id, description),
   ];
 }
 
@@ -157,9 +162,12 @@ describe("shutdown-stop notice rendering", () => {
   });
 
   it("renders the older ids-only entry, and counts it as reported", async () => {
-    const session = [...stoppedRun(), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] })];
+    // An older release named every shutdown stop, started ones included: its marker keeps that run from a recovery.
+    const session = [...startedStop(), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] })];
     const { pi, lifecycle, renderer } = boot(session);
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    // Past the nudge window: a recovery would have sent its notification by now.
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(pi.sendMessage).not.toHaveBeenCalled();
     expect(noticeEntries(session)).toHaveLength(1);
