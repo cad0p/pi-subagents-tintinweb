@@ -536,6 +536,37 @@ scoped_models: false
     expect(agents.get("scope-false")!.scopedModels).toBe(false);
   });
 
+  it("an unquoted *-leading glob is a YAML alias error, so the whole file is skipped", () => {
+    writeAgent("scope-unquoted-glob", `---
+scoped_models: *sonnet*
+---
+`);
+    writeAgent("scope-quoted-glob", `---
+scoped_models: "*sonnet*"
+---
+`);
+
+    const agents = loadCustomAgents(tmpDir);
+    // Not just that entry: the file never loads, which is why the docs say to quote it.
+    expect(agents.has("scope-unquoted-glob")).toBe(false);
+    expect(agents.get("scope-quoted-glob")!.scopedModels).toEqual(["*sonnet*"]);
+  });
+
+  it("scoped_models: None (any casing) is the sentinel, not a pattern", () => {
+    writeAgent("scope-none-caps", `---
+scoped_models: None
+---
+`);
+    writeAgent("scope-none-upper", `---
+scoped_models: NONE
+---
+`);
+
+    const agents = loadCustomAgents(tmpDir);
+    expect(agents.get("scope-none-caps")!.scopedModels).toBe(false);
+    expect(agents.get("scope-none-upper")!.scopedModels).toBe(false);
+  });
+
   it("scoped_models: inherit / true → true", () => {
     writeAgent("scope-inherit", `---
 scoped_models: inherit

@@ -28,6 +28,7 @@ import {
   type ChildSessionSettings,
   createChildSession,
   getDefaultMaxTurns,
+  isDiagnosticActivity,
   normalizeMaxTurns,
   type RunObserver,
   type RunOutcome,
@@ -699,7 +700,7 @@ export class AgentManager {
       uiTheme: ctx.ui?.theme,
       dialogsAnswerable: this.dialogsAnswerable,
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        if (activity.type === "end" && !isDiagnosticActivity(activity.toolName)) record.toolUses++;
         options.onToolActivity?.(activity);
       },
       onTurnEnd: (turnCount) => {
@@ -1676,7 +1677,7 @@ export class AgentManager {
     this.armCap(record, life);
     resumeAgent(record.session, prompt, {
       onToolActivity: (activity) => {
-        if (activity.type === "end") record.toolUses++;
+        if (activity.type === "end" && !isDiagnosticActivity(activity.toolName)) record.toolUses++;
         callbacks?.onToolActivity?.(activity);
       },
       onTextDelta: callbacks?.onTextDelta,

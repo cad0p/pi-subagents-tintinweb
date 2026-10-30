@@ -400,13 +400,22 @@ function inheritField(val: unknown): true | string[] | false {
 /**
  * Parse scoped_models (alias inherit_scoped_models), the child session's
  * model scope. omitted/true/"inherit" → true (inherit the parent session's
- * scope); false/"none"/empty → false; csv → explicit provider/modelId list.
+ * scope); false/"none"/empty → false; csv → explicit list of model patterns
+ * (pi's `--models` grammar — globs and `:thinking` suffixes are resolved
+ * later, by pi, in agent-runner's resolveScopedModels). Quote a glob that
+ * starts with `*` or `[` (`scoped_models: "*sonnet*"`): unquoted, YAML reads it as
+ * an alias and rejects the whole file, not just that entry. A mid-token `*`
+ * (a provider glob in front of the model path) needs no quotes.
  * Unlike inheritField, the literal "inherit" is accepted as a readable alias,
  * but only as the sole value — mixed `inherit, foo` stays an explicit list.
+ * Its sentinels are case-insensitive like `inherit`, unlike the shared CSV
+ * parser's exact-match `none`, so `None`/NONE can't slip through as a pattern.
  */
 function scopedModelsField(val: unknown): true | string[] | false {
-  // `inherit` must be the sole value: a scalar or a single-item YAML list.
+  // Both sentinels must be the sole value: a scalar or a single-item YAML list.
   const sole = Array.isArray(val) ? (val.length === 1 ? val[0] : undefined) : val;
-  if (typeof sole === "string" && sole.trim().toLowerCase() === "inherit") return true;
+  const lowered = typeof sole === "string" ? sole.trim().toLowerCase() : undefined;
+  if (lowered === "inherit") return true;
+  if (lowered === "none") return false;
   return inheritField(val);
 }
