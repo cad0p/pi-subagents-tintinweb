@@ -395,7 +395,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 2. When that run ends, the agent finishes, whatever background work it still has listed.
 3. At the cap a still-running turn is aborted; an idle or queued agent finishes at once.
 
-The result is the last run's text, status `completed`, with the note *wrapped up for the N min time limit; resume with SendMessage to continue* when it wrapped up after the heads-up, or *stopped at the N min time limit; resume with SendMessage to continue* when the hard stop ended it. A resume starts a fresh cap.
+The result is the last run's text. A wrap-up that finished has status `completed` and the note *wrapped up for the N min time limit; resume with SendMessage to continue*. A wrap-up whose report turn failed has status `error` and the note *errored while wrapping up for the N min time limit; the report was not written; resume with SendMessage to continue*. A hard stop has the note *stopped at the N min time limit; resume with SendMessage to continue*, with status `completed`, or `error` when the run had failed. A resume starts a fresh cap.
 
 Why 30 minutes: pi keeps an idle session's prompt cache warm for 30 minutes after its last real request (`MAX_IDLE_WARMING_AGE_MS`, pi 1.4.0 `dist/core/cache-warmer.js`). The parent's last request is at or after the spawn, so a report by 30:00 reaches the parent while its cache is still warm.
 

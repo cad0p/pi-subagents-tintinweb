@@ -4,6 +4,7 @@
  * a string. Drives the registered `Agent` / `get_subagent_result` tools and
  * inspects the text delivered back, for a turn-limit abort and a user stop.
  */
+import type { AgentSession, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -24,7 +25,7 @@ setQuietMs(20);
 // sessionId-less ctx makes startScheduler short-circuit (no filesystem touch).
 async function bind(lifecycle: Map<string, any>) {
   const bindCtx = ctx();
-  bindCtx.sessionManager.getSessionId = vi.fn(() => undefined);
+  bindCtx.sessionManager.getSessionId = vi.fn(() => undefined) as unknown as () => string; // the absent id is the point
   await lifecycle.get("session_start")({}, bindCtx);
 }
 
@@ -37,7 +38,7 @@ function ctx() {
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
     sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
     getSystemPrompt: vi.fn(() => "parent"),
-  } as any;
+  } as unknown as ExtensionContext;
 }
 
 describe("status note reaches the parent through the real handlers", () => {
@@ -46,7 +47,7 @@ describe("status note reaches the parent through the real handlers", () => {
   it("background turn-limit abort → get_subagent_result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "partial work so far",
-      session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any,
+      session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession,
       aborted: true, // hard turn-limit abort
       steered: false,
     });
@@ -75,7 +76,7 @@ describe("status note reaches the parent through the real handlers", () => {
 
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {
     // A background agent that never settles on its own — only a stop ends it.
-    vi.mocked(runAgent).mockReturnValue(new Promise(() => {}) as any);
+    vi.mocked(runAgent).mockReturnValue(new Promise<never>(() => {}));
     const { pi, tools, busHandlers, lifecycle } = makePi();
     subagentsExtension(pi);
     await bind(lifecycle); // register RPC channels via session_start (#142)
@@ -101,14 +102,17 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).not.toContain("Done"); // not surfaced as a normal completion
   });
 
-  it("a wrap-up whose report turn failed reads errored while wrapping up in get_subagent_result (#194)", async () => {
-    // The cap leaves capForced and capMinutes on the record, then the run ends in a provider failure.
+  it("the errored-wrap note reaches the parent via get_subagent_result, for a record the runAgent mock produces (#194)", async () => {
+    // The mock writes the cap fields the settle path sets (it does not run that path), then fails the run.
     vi.mocked(runAgent).mockImplementation(async () => {
       const manager = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY];
       const record = manager.listAgents().at(-1);
       if (!record) throw new Error("the running record should be listed");
-      Object.assign(record, { capForced: true, capMinutes: 2, limitReason: "time", timeLimit: "wrapped" });
-      return { responseText: "", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as any, aborted: false, steered: false, failure: "provider down" };
+      record.capForced = true;
+      record.capMinutes = 2;
+      record.limitReason = "time";
+      record.timeLimit = "wrapped";
+      return { responseText: "", session: { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession, aborted: false, steered: false, failure: "provider down" };
     });
     const { pi, tools } = makePi();
     subagentsExtension(pi);
