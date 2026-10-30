@@ -23,6 +23,7 @@ import {
   SessionManager,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { type AgentResolution, resolveAgentRecord } from "./agent-id.js";
 import {
   attachSessionLifecycle,
   type ChildSessionSettings,
@@ -2044,6 +2045,17 @@ export class AgentManager {
 
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
+  }
+
+  /**
+   * Resolve a caller-supplied id: the exact id first, then a unique
+   * case-insensitive prefix of at least 4 characters, over the same records
+   * `getRecord` sees. `getRecord` itself stays exact — it is the internal
+   * identity lookup, and a prefix there would make every internal call
+   * ambiguous. Only the surfaces that take an id from a caller resolve.
+   */
+  resolveRecord(idOrPrefix: string): AgentResolution<AgentRecord> | undefined {
+    return resolveAgentRecord([...this.agents.values(), ...this.drainingRecords()], idOrPrefix);
   }
 
   listAgents(): AgentRecord[] {

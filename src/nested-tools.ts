@@ -21,8 +21,9 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { type AgentResolution, ambiguousAgentIdText } from "./agent-id.js";
 import { type ResumeCallbacks } from "./agent-manager.js";
-import { agentNotFoundResponse, agentReportResponse, alreadyDeliveredResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
+import { agentAmbiguousResponse, agentNotFoundResponse, agentReportResponse, alreadyDeliveredResponse, consumeResult, ownedResolution } from "./agent-result-tool.js";
 import { buildAgentRegistry, getAgentConfigIn, getAvailableTypesIn, isValidTypeIn, resolveTypeIn } from "./agent-types.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { isStrictAgentFilesEnabled, loadCustomAgents } from "./custom-agents.js";
@@ -73,6 +74,8 @@ export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
   deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome>;
   getRecord(id: string): AgentRecord | undefined;
+  /** Resolve a caller-supplied id or prefix; ownership is applied by the tool, after resolution. */
+  resolveRecord(idOrPrefix: string): AgentResolution<AgentRecord> | undefined;
   /** True when a settled child's result is already in its parent's context (sent batch or delivered). */
   resultReachedParent(child: AgentRecord): boolean;
   /** True while a draining activation still holds the run; its children stay with it. */
@@ -309,14 +312,17 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     label: "Get Nested Agent Result",
     description:
       "Report a nested agent owned by this parent as it stands now. It never waits: a running agent is " +
-      "reported as running, and the parent is woken when it settles.",
+      "reported as running, and the parent is woken when it settles. " +
+      "An id may be given as any unique prefix of at least 4 characters.",
     promptSnippet: "Check a nested subagent's result without waiting",
     parameters: Type.Object({
-      agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool." }),
+      agent_id: Type.String({ description: "The nested agent ID returned by the Agent tool, or any unique prefix of at least 4 characters." }),
     }),
     execute: async (_toolCallId, params) => {
-      const record = context.manager.getRecord(params.agent_id);
-      if (!isOwnedRecord(record, context.parentAgentId)) return agentNotFoundResponse(params.agent_id);
+      const resolved = ownedResolution(context.manager.resolveRecord(params.agent_id), context.parentAgentId);
+      if (resolved && "ambiguous" in resolved) return agentAmbiguousResponse(params.agent_id, resolved.ambiguous);
+      const record = resolved?.record;
+      if (!record) return agentNotFoundResponse(params.agent_id);
       if (context.manager.resultReachedParent(record)) return alreadyDeliveredResponse(params.agent_id);
       consumeResult(record);
       return agentReportResponse(record);
@@ -328,21 +334,26 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     label: "Send Message",
     description:
       "Send a message to a nested agent owned by this parent. A running agent takes it as a steer; " +
-      "a finished agent is resumed with it. Use the agent's ID as `to`.",
+      "a finished agent is resumed with it. Use the agent's ID as `to`; " +
+      "an id may be given as any unique prefix of at least 4 characters.",
     promptSnippet: "Send a message to a nested subagent (resumes it if it has finished)",
     parameters: Type.Object({
-      to: Type.String({ description: "The nested agent ID to message." }),
+      to: Type.String({ description: "The nested agent ID to message, or any unique prefix of at least 4 characters." }),
       message: Type.String({ description: "The message to send." }),
     }),
     execute: async (_toolCallId, params) => {
-      const record = context.manager.getRecord(params.to);
-      if (!isOwnedRecord(record, context.parentAgentId)) {
+      const resolved = ownedResolution(context.manager.resolveRecord(params.to), context.parentAgentId);
+      if (resolved && "ambiguous" in resolved) {
+        return textResult(ambiguousAgentIdText(params.to, resolved.ambiguous), true);
+      }
+      const record = resolved?.record;
+      if (!record) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.to}".`, true);
       }
-      const outcome = await context.manager.deliver(params.to, params.message, {
+      const outcome = await context.manager.deliver(record.id, params.message, {
         onAssistantUsage: foldUsageIntoAncestors,
       });
-      return textResult(deliveryText(params.to, outcome), outcome === false);
+      return textResult(deliveryText(record.id, outcome), outcome === false);
     },
   });
 

@@ -9,6 +9,7 @@
  * lives here: the ownership predicate, the not-found response, result consumption,
  * and the report with its error convention.
  */
+import { type AgentResolution, ambiguousAgentIdText } from "./agent-id.js";
 import { renderAgentReport } from "./result-report.js";
 import type { AgentRecord } from "./types.js";
 
@@ -23,6 +24,24 @@ export function isOwnedRecord(record: AgentRecord | undefined, parentAgentId: st
 }
 
 /**
+ * The part of a resolution a surface may act on. Resolution runs over every
+ * record, then ownership filters the candidates — never the other way around, so
+ * a prefix cannot reach another parent's child, and an ambiguous prefix never
+ * names one. A resolution with no owned candidate is undefined: to this surface
+ * the record does not exist.
+ */
+export function ownedResolution(
+  resolved: AgentResolution<AgentRecord> | undefined,
+  parentAgentId: string | undefined,
+): AgentResolution<AgentRecord> | undefined {
+  if (!resolved) return undefined;
+  const candidates = "record" in resolved ? [resolved.record] : resolved.ambiguous;
+  const owned = candidates.filter((record) => isOwnedRecord(record, parentAgentId));
+  if (owned.length === 0) return undefined;
+  return owned.length === 1 ? { record: owned[0] } : { ambiguous: owned };
+}
+
+/**
  * The one not-found response, worded as the cleanup hint it is. An unknown id is an
  * error on both surfaces: a caller that asked for a report and got nothing must see
  * a failure, not an empty success it could mistake for a quiet child.
@@ -30,6 +49,19 @@ export function isOwnedRecord(record: AgentRecord | undefined, parentAgentId: st
 export function agentNotFoundResponse(agentId: string) {
   return {
     content: [{ type: "text" as const, text: `Agent not found: "${agentId}". It may have been cleaned up.` }],
+    details: undefined,
+    isError: true,
+  };
+}
+
+/**
+ * The ambiguity error: a prefix that matches more than one agent is refused, with
+ * the candidates named. Never a silent pick — two agents can share a prefix, and
+ * the caller is the only one that knows which it meant.
+ */
+export function agentAmbiguousResponse(query: string, candidates: AgentRecord[]) {
+  return {
+    content: [{ type: "text" as const, text: ambiguousAgentIdText(query, candidates) }],
     details: undefined,
     isError: true,
   };
