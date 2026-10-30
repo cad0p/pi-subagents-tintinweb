@@ -108,7 +108,6 @@ describe("status note reaches the parent through the real handlers", () => {
       const manager = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY];
       const record = manager.listAgents().at(-1);
       if (!record) throw new Error("the running record should be listed");
-      record.capForced = true;
       record.capMinutes = 2;
       record.limitReason = "time";
       record.timeLimit = "wrapped";
