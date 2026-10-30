@@ -29,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - *(fleetview)* The arrows enter a session, Esc interrupts it (closes #178) ([#182](https://github.com/cad0p/pi-subagents-tintinweb/pull/182))
 - *(debug)* A gated channel for the run cap's heads-up, hard stop and settle (closes #112) ([#193](https://github.com/cad0p/pi-subagents-tintinweb/pull/193))
 - *(scoped-models)* Resolve patterns with pi's scope resolver (closes #199)
+- *(agent-id)* Accept a unique short prefix on every caller surface (closes #205) ([#206](https://github.com/cad0p/pi-subagents-tintinweb/pull/206))
 
 ### 🐛 Bug Fixes
 
