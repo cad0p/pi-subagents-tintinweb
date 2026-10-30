@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveAgentRecord } from "../src/agent-id.js";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents, setStrictAgentFiles } from "../src/custom-agents.js";
 import { ISOLATED_REMOVED } from "../src/invocation-config.js";
@@ -60,6 +61,7 @@ function makeManager(): NestedAgentManager {
     deliver: vi.fn(async () => "delivered" as const),
     resultReachedParent: () => false,
     getRecord: (id: string) => records.get(id),
+    resolveRecord: (idOrPrefix: string) => resolveAgentRecord([...records.values()], idOrPrefix),
     listAgents: () => [...records.values()],
   };
 }

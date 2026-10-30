@@ -16,8 +16,9 @@ import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@
 import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type SessionEntry, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { ambiguousAgentIdText } from "./agent-id.js";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
-import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
+import { agentAmbiguousResponse, agentNotFoundResponse, agentReportResponse, consumeResult, ownedResolution } from "./agent-result-tool.js";
 import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
@@ -976,7 +977,7 @@ export default function (pi: ExtensionAPI) {
         // consume a nested child it does not own.
         manager: {
           spawn: spawnTopLevel,
-          getRecord: (id) => manager.getRecord(id),
+          resolveRecord: (idOrPrefix) => manager.resolveRecord(idOrPrefix),
           abort: (id) => {
             const record = manager.getRecord(id);
             return !record?.parentAgentId && manager.abort(id);
@@ -2048,23 +2049,30 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
-      "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool.",
+      "Check a subagent's status and retrieve its result. Use the agent ID returned by the Agent tool. " +
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Check a subagent's status and retrieve its result",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to check.",
+        description: "The agent ID to check, or any unique prefix of at least 4 characters, case-insensitive.",
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
-      const record = manager.getRecord(params.agent_id);
-      if (!record && manager.isAdopting(params.agent_id)) {
-        return textResult(`Agent "${params.agent_id}" is handing over after a reload; retry in a moment.`);
+      const resolved = ownedResolution(manager.resolveRecord(params.agent_id), undefined);
+      if (resolved && "ambiguous" in resolved) return agentAmbiguousResponse(params.agent_id, resolved.ambiguous);
+      const record = resolved?.record;
+      const adopting = record ? [] : manager.adoptingIdsFor(params.agent_id);
+      if (adopting.length > 0) {
+        // One id names it; more than one is a prefix that matches two hand-overs, which is
+        // still a hand-over and not a cleanup — say which, never "it was evicted".
+        const subject = adopting.length === 1 ? `Agent "${adopting[0]}" is` : `${adopting.length} agents are`;
+        return textResult(`${subject} handing over after a reload; retry in a moment.`);
       }
-      if (!isOwnedRecord(record, undefined)) return agentNotFoundResponse(params.agent_id);
+      if (!record) return agentNotFoundResponse(params.agent_id);
 
       // Consuming suppresses the completion notification. Safe for every status:
       // only a settled record has a nudge parked, so a running one has none to cancel.
-      if (consumeResult(record)) cancelNudge(params.agent_id);
+      if (consumeResult(record)) cancelNudge(record.id);
 
       return agentReportResponse(record);
     },
@@ -2096,11 +2104,12 @@ Terse command-style prompts produce shallow, generic work.
     label: "SendMessage",
     description:
       "Send a message to a subagent by its ID. A running agent takes it as a steer: it is injected into the " +
-      "conversation after the current tool execution. A finished agent is resumed with it and keeps its full context.",
+      "conversation after the current tool execution. A finished agent is resumed with it and keeps its full context. " +
+      "An id may be given as any unique prefix of at least 4 characters, case-insensitive.",
     promptSnippet: "Send a message to a subagent (resumes it if it has finished)",
     parameters: Type.Object({
       to: Type.String({
-        description: "The agent ID to message (running, queued, or finished).",
+        description: "The agent ID to message (running, queued, or finished), or any unique prefix of at least 4 characters, case-insensitive.",
       }),
       message: Type.String({
         description: "The message to send. It appears as a user message in the agent's conversation.",
@@ -2115,7 +2124,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // Freeze the first resolved description so record eviction cannot flip the row.
       if (!state.sendDesc && agentId) {
-        const desc = toSingleLine(manager.getRecord(agentId)?.description);
+        // Resolve, like every other path that takes a caller's id: a row keyed by the 8
+        // characters the transcript prints must still freeze the agent's description.
+        const resolved = manager.resolveRecord(agentId);
+        const desc = toSingleLine(resolved && "record" in resolved ? resolved.record.description : undefined);
         if (desc) state.sendDesc = desc;
       }
       // Both header parts are display copies: sanitize + cap.
@@ -2164,28 +2176,46 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (_toolCallId, params) => {
-      const record = manager.getRecord(params.to);
-      // An id in its adoption window has no record yet, but its input is parked, not lost.
-      if (record?.parentAgentId || (!record && !manager.isAdopting(params.to))) {
-        // State the fact, not a hedge: the hop was not attempted, so nothing reached the run. A nested child exists
-        // but only its parent can steer it, which is a different fact from an id this process has no record of.
+      const resolved = manager.resolveRecord(params.to);
+      // State the fact, not a hedge: the hop was not attempted, so nothing reached the run. A nested child exists
+      // but only its parent can steer it, which is a different fact from an id this process has no record of.
+      if (resolved && "record" in resolved && resolved.record.parentAgentId) {
         return sendResult(
-          record?.parentAgentId
-            ? `Agent "${params.to}" is a nested child: only its parent's SendMessage reaches it. Nothing was delivered.`
-            : `No agent "${params.to}" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.`,
+          `Agent "${params.to}" is a nested child: only its parent's SendMessage reaches it. Nothing was delivered.`,
           "not-found",
         );
       }
-      const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => params.to, record?.effectiveMaxTurns);
-      const outcome = await manager.steer(params.to, params.message, sendCallbacks);
-      if (outcome === false) return sendResult(deliveryText(params.to, false), "failed");
-      const current = manager.getRecord(params.to);
+      const owned = ownedResolution(resolved, undefined);
+      if (owned && "ambiguous" in owned) {
+        return sendResult(ambiguousAgentIdText(params.to, owned.ambiguous), "not-found");
+      }
+      const record = owned?.record;
+      // An id in its adoption window has no record yet, but its input is parked, not lost.
+      const adopting = record ? [] : manager.adoptingIdsFor(params.to);
+      if (!record && adopting.length === 0) {
+        return sendResult(
+          `No agent "${params.to}" exists in this process: it was evicted, or the process that owned it exited. Nothing was delivered. Start a new Agent if that work is still needed.`,
+          "not-found",
+        );
+      }
+      if (adopting.length > 1) {
+        return sendResult(
+          `Agent id "${params.to}" matches ${adopting.length} agents handing over after a reload: ${adopting.map((id) => id.slice(0, 8)).join(", ")}. Use more characters.`,
+          "not-found",
+        );
+      }
+      // An adopting id has no record to name yet; the resolved adopting id is the key its parked input answers to.
+      const targetId = record?.id ?? adopting[0] ?? params.to;
+      const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => targetId, record?.effectiveMaxTurns);
+      const outcome = await manager.steer(targetId, params.message, sendCallbacks);
+      if (outcome === false) return sendResult(deliveryText(targetId, false), "failed");
+      const current = manager.getRecord(targetId);
       // A resumed run already has its session: seed the row's activity, as the Agent resume path did.
       if ((outcome === "resumed" || outcome === "resumedAfterCrash") && current?.session) {
         sendState.session = current.session;
-        agentActivity.set(params.to, sendState);
+        agentActivity.set(targetId, sendState);
       }
-      if (!current) return sendResult(deliveryText(params.to, outcome), outcome);
+      if (!current) return sendResult(deliveryText(targetId, outcome), outcome);
       const stateParts: string[] = [];
       const tokens = formatLifetimeTokens(current);
       if (tokens) stateParts.push(tokens);

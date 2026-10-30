@@ -23,6 +23,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import { resolveAgentRecord } from "../src/agent-id.js";
 import { runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -167,6 +168,7 @@ describe("get_subagent_result output shapes", () => {
       spawn: () => "",
       deliver: async () => "delivered",
       getRecord: (id: string) => (id === record.id ? record : undefined),
+      resolveRecord: (idOrPrefix: string) => resolveAgentRecord([record], idOrPrefix),
       isDraining: () => false,
       listAgents: () => [record],
       resultReachedParent: () => false,
