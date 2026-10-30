@@ -9,6 +9,7 @@
  *   error   → { success: false, error: string }
  */
 
+import { type AgentResolution, ambiguousAgentIdText } from "./agent-id.js";
 import { deliveryText } from "./delivery-text.js";
 import { isolatedParamError } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -33,11 +34,14 @@ export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
   abort(id: string): boolean;
   /**
-   * The record behind an id, for the ownership check stop, consume and steer
-   * share. Narrowed to the one field that check reads, so the RPC layer keeps
-   * its deliberately shallow view of the manager.
+   * Resolve a caller-supplied id or prefix, for the ownership check stop,
+   * consume and steer share. Narrowed to the fields that check and its
+   * ambiguity error read, so the RPC layer keeps its deliberately shallow view
+   * of the manager.
    */
-  getRecord(id: string): Pick<AgentRecord, "parentAgentId"> | undefined;
+  resolveRecord(
+    idOrPrefix: string,
+  ): AgentResolution<Pick<AgentRecord, "id" | "type" | "description" | "parentAgentId">> | undefined;
   /**
    * Mark a settled agent's result as read by the caller, suppressing the
    * completion notification — what `get_subagent_result` does when it returns
@@ -145,16 +149,24 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // into a failed step here. Defence in depth rather than a live hole: no RPC
   // hands out agent ids, so a caller has no ordinary way to name one it does not
   // own — but the guard is cheap and the id may leak some other way.
-  const assertOwned = (agentId: string): void => {
-    const record = manager.getRecord(agentId);
-    if (!record) throw new Error("Agent not found");
-    if (record.parentAgentId) throw new Error("Agent is owned by another agent");
+  //
+  // Resolution comes first, then ownership filters the candidates: a prefix that
+  // matches a nested child and a top-level agent resolves to the top-level one,
+  // and an ambiguous prefix never names another owner's child. Returns the
+  // resolved id, which is what the verb acts on — never the caller's prefix.
+  const assertOwned = (agentId: string): string => {
+    const resolved = manager.resolveRecord(agentId);
+    if (!resolved) throw new Error("Agent not found");
+    const candidates = "record" in resolved ? [resolved.record] : resolved.ambiguous;
+    const owned = candidates.filter((record) => !record.parentAgentId);
+    if (owned.length === 0) throw new Error("Agent is owned by another agent");
+    if (owned.length > 1) throw new Error(ambiguousAgentIdText(agentId, owned));
+    return owned[0].id;
   };
 
   const unsubStop = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:stop", ({ agentId }) => {
-      assertOwned(agentId);
-      if (!manager.abort(agentId)) throw new Error("Agent not found");
+      if (!manager.abort(assertOwned(agentId))) throw new Error("Agent not found");
     },
   );
 
@@ -165,8 +177,7 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // handshake: an extension built against protocol v2 simply never calls it.
   const unsubConsume = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:consume", ({ agentId }) => {
-      assertOwned(agentId);
-      if (!manager.consumeResult(agentId)) throw new Error("Agent not found or still running");
+      if (!manager.consumeResult(assertOwned(agentId))) throw new Error("Agent not found or still running");
     },
   );
 
@@ -180,9 +191,9 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
       if (typeof message !== "string" || message.trim().length === 0) {
         throw new Error("Steer message must be a non-empty string");
       }
-      assertOwned(agentId);
-      const outcome = await manager.steer(agentId, message);
-      if (outcome === false) throw new Error(deliveryText(agentId, outcome));
+      const id = assertOwned(agentId);
+      const outcome = await manager.steer(id, message);
+      if (outcome === false) throw new Error(deliveryText(id, outcome));
     },
   );
 

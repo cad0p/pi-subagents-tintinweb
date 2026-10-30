@@ -320,11 +320,11 @@ Press ctrl+o to show the initial prompt in the tool row (the collapsed row shows
 
 ### `get_subagent_result`
 
-Check a subagent's status and retrieve its result. Use the agent ID returned by the `Agent` tool.
+Check a subagent's status and retrieve its result. Use the agent ID returned by the `Agent` tool. An id may be given as any unique prefix of at least 4 characters, case-insensitive; an ambiguous prefix is refused with the matching agents listed.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `agent_id` | string | yes | Agent ID to check |
+| `agent_id` | string | yes | Agent ID to check, or a unique prefix of at least 4 characters, case-insensitive |
 
 ### `SendMessage`
 
@@ -332,7 +332,7 @@ Send a message to an agent by ID. One path serves every case: a running agent ge
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `to` | string | yes | Agent ID to message |
+| `to` | string | yes | Agent ID to message, or a unique prefix of at least 4 characters, case-insensitive |
 | `message` | string | yes | Message to deliver to the agent |
 
 The message shows as a one-line preview in the tool row; press ctrl+o to expand the full text.

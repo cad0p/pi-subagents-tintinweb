@@ -165,6 +165,16 @@ describe("instruction rendering", () => {
       expect(text).toBe("▸ SendMessage  abc  Re-run the failing test first.");
     });
 
+    it("freezes the description for a prefix, like it does for a full id", async () => {
+      const { tools } = registerTools();
+      const theme = makeTheme();
+      const { id } = await spawnBackground(tools, "Find auth files");
+
+      const text = renderCallText(tools.get("SendMessage"), { to: id.slice(0, 8), message: "go on" }, theme);
+
+      expect(text).toBe("▸ SendMessage  Find auth files  go on");
+    });
+
     it("clips a long single-line preview to 80 columns with an ellipsis", () => {
       const { tools } = registerTools();
       const theme = makeTheme();

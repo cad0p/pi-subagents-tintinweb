@@ -23,6 +23,7 @@ import {
   SessionManager,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { type AgentResolution, resolveAgentRecord } from "./agent-id.js";
 import {
   attachSessionLifecycle,
   type ChildSessionSettings,
@@ -2024,6 +2025,21 @@ export class AgentManager {
     return this.adopting.has(id);
   }
 
+  /**
+   * The ids a caller-supplied id or prefix names in the hand-over window. A hand-over is
+   * transient — the record does not exist here yet — so the same prefix rule applies over
+   * the ids currently in that window, and a caller who read an 8-character id off the
+   * transcript is not told the agent is gone while it is still handing over. The whole
+   * match is returned, not one id, because two agents can hand over at once and picking
+   * one would be the guess the resolver exists to refuse.
+   */
+  adoptingIdsFor(idOrPrefix: string): string[] {
+    const ids = [...this.adopting.keys()].map((id) => ({ id }));
+    const resolved = resolveAgentRecord(ids, idOrPrefix);
+    if (!resolved) return [];
+    return "record" in resolved ? [resolved.record.id] : resolved.ambiguous.map((entry) => entry.id);
+  }
+
   /** Send a steering message from the UI or the RPC. Fires `onSteered` on every outcome that took the text. */
   async steer(id: string, message: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome> {
     const outcome = await this.deliver(id, message, callbacks);
@@ -2044,6 +2060,17 @@ export class AgentManager {
 
   getRecord(id: string): AgentRecord | undefined {
     return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
+  }
+
+  /**
+   * Resolve a caller-supplied id: the exact id first, then a unique
+   * case-insensitive prefix of at least 4 characters, over the same records
+   * `getRecord` sees. `getRecord` itself stays exact — it is the internal
+   * identity lookup, and a prefix there would make every internal call
+   * ambiguous. Only the surfaces that take an id from a caller resolve.
+   */
+  resolveRecord(idOrPrefix: string): AgentResolution<AgentRecord> | undefined {
+    return resolveAgentRecord([...this.agents.values(), ...this.drainingRecords()], idOrPrefix);
   }
 
   listAgents(): AgentRecord[] {

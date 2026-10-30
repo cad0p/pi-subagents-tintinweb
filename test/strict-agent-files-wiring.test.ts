@@ -194,6 +194,7 @@ describe("strictAgentFiles gates extension activation", () => {
         },
         deliver: async () => "delivered",
         getRecord: () => undefined,
+        resolveRecord: () => undefined,
         resultReachedParent: () => false,
         isDraining: () => false,
         listAgents: () => [],

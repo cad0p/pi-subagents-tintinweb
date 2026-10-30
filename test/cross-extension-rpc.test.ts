@@ -29,7 +29,9 @@ describe("cross-extension RPC", () => {
       spawn: vi.fn().mockReturnValue("agent-42"),
       abort: vi.fn().mockReturnValue(true),
       // A top-level record by default: the ownership guard lets it through.
-      getRecord: vi.fn(() => ({ parentAgentId: undefined })),
+      resolveRecord: vi.fn((idOrPrefix: string) => ({
+        record: { id: idOrPrefix, type: "general-purpose", description: "d", parentAgentId: undefined },
+      })),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
     };
@@ -221,7 +223,7 @@ describe("cross-extension RPC", () => {
     it("returns error when agent not found", async () => {
       // No record behind the id — the ownership check refuses it before abort is
       // even consulted, which is what a stale id from a caller looks like.
-      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      (manager.resolveRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:stop:reply:req-st2", reply);
@@ -272,6 +274,21 @@ describe("cross-extension RPC", () => {
       expect(reply).toHaveBeenCalledWith({ success: true });
     });
 
+    it("acts on the resolved id, not the caller's prefix", async () => {
+      (manager.resolveRecord as ReturnType<typeof vi.fn>).mockReturnValue({
+        record: { id: "agent-42-full", type: "general-purpose", description: "d", parentAgentId: undefined },
+      });
+      (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue("delivered");
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-sg3", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-sg3", agentId: "agent-4", message: "go on" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.steer).toHaveBeenCalledWith("agent-42-full", "go on");
+      expect(reply).toHaveBeenCalledWith({ success: true });
+    });
+
     it("replies the delivery text when the outcome is refused", async () => {
       (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue(false);
       registerRpcHandlers(deps);
@@ -287,6 +304,42 @@ describe("cross-extension RPC", () => {
     });
   });
 
+  describe("consume RPC", () => {
+    it("marks the agent's result read and replies success", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-cs1", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-cs1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.consumeResult).toHaveBeenCalledWith("agent-42");
+      expect(reply).toHaveBeenCalledWith({ success: true });
+    });
+
+    it("acts on the resolved id, not the caller's prefix", async () => {
+      (manager.resolveRecord as ReturnType<typeof vi.fn>).mockReturnValue({
+        record: { id: "agent-42-full", type: "general-purpose", description: "d", parentAgentId: undefined },
+      });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-cs2", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-cs2", agentId: "agent-4" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.consumeResult).toHaveBeenCalledWith("agent-42-full");
+    });
+
+    it("replies an error when there is no result to consume", async () => {
+      (manager.consumeResult as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-cs3", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-cs3", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found or still running" });
+    });
+  });
   describe("concurrent requests", () => {
     it("handles multiple simultaneous spawn requests independently", async () => {
       let callCount = 0;
