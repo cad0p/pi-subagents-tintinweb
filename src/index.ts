@@ -18,7 +18,7 @@ import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, S
 import { Type } from "@sinclair/typebox";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentNotFoundResponse, agentReportResponse, consumeResult, isOwnedRecord } from "./agent-result-tool.js";
-import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
+import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -67,7 +67,8 @@ function applyToolActivity(state: AgentActivity, activity: { type: "start" | "en
     for (const [key, name] of state.activeTools) {
       if (name === activity.toolName) { state.activeTools.delete(key); break; }
     }
-    state.toolUses++;
+    // A spawn-time diagnostic rides this channel as an `end` event; it is not a tool use.
+    if (!isDiagnosticActivity(activity.toolName)) state.toolUses++;
   }
 }
 
