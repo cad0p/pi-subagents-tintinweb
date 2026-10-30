@@ -41,7 +41,6 @@ function fakeSession(sessionManager: SessionManager, onPrompt: () => void) {
     sessionManager,
     getActiveToolNames: () => [] as string[],
     setActiveToolsByName: () => {},
-    setSessionName: () => {},
     bindExtensions: async () => {},
     subscribe: () => () => {},
     abort: () => {},

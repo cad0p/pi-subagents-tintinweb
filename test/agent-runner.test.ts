@@ -345,25 +345,13 @@ describe("agent-runner final output capture", () => {
     expect(result.failure).toBeUndefined();
   });
 
-  it("sets the agent name as session name before binding extensions", async () => {
-    const { session } = createSession("NAMED");
-    createAgentSession.mockResolvedValue({ session });
-
-    await runAgent(ctx, "Explore", "go", { pi });
-
-    expect(session.setSessionName).toHaveBeenCalledWith("Explore");
-    const setOrder = session.setSessionName.mock.invocationCallOrder[0];
-    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
-    expect(setOrder).toBeLessThan(bindOrder);
-  });
-
-  it("suffixes the session name with a short agentId so parallel spawns are distinguishable", async () => {
+  it("does not name the child session, leaving pi's /name field to the user", async () => {
     const { session } = createSession("NAMED");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
 
-    expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+    expect(session.setSessionName).not.toHaveBeenCalled();
   });
 });
 
