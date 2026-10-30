@@ -49,6 +49,7 @@ All notable changes to this project will be documented in this file.
 - *(native-view)* The footer follows a model change, and a repaint keeps an open expansion (closes #184) ([#187](https://github.com/cad0p/pi-subagents-tintinweb/pull/187))
 - *(run-cap)* A wrap whose run resolved with a failure is not "wrapped up" (closes #194) ([#196](https://github.com/cad0p/pi-subagents-tintinweb/pull/196))
 - *(run-cap)* Deliver the heads-up to a child inside a long tool call (closes #192) ([#201](https://github.com/cad0p/pi-subagents-tintinweb/pull/201))
+- *(agent-runner)* Stop naming child sessions, leaving /name to the user (closes #195) ([#197](https://github.com/cad0p/pi-subagents-tintinweb/pull/197))
 
 ### 🚜 Refactor
 
