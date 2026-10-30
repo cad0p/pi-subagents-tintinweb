@@ -398,7 +398,7 @@ export interface ToolActivity {
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
-  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
+  /** Manager-assigned id; routes this run's child dialogs, extension errors, and slot gate. */
   agentId?: string;
   /** Id of the agent that spawned this one; undefined for a top-level agent. A nested child holds a pool slot like any other run. */
   parentAgentId?: string;
@@ -1219,11 +1219,6 @@ export async function createChildSession(
     for (const name of undeclared) keep.delete(name);
     session.setActiveToolsByName([...keep]);
   }
-
-  const baseSessionName = agentConfig?.name ?? type;
-  session.setSessionName(
-    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
-  );
 
   // Bind extensions so that session_start fires and extensions can initialize
   // (e.g. loading credentials, setting up state). Tool gating already happened
