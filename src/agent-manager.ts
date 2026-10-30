@@ -341,8 +341,9 @@ export interface SpawnOptions {
 
 /** One line of the cap diagnostic channel: when the heads-up was observed, when the hard stop fired, when the lifecycle settled. */
 export type CapEvent =
-  | { kind: "headsUp"; id: string; at: number; startedAt: number; capMinutes?: number; left: string }
-  | { kind: "hardStop"; id: string; at: number; startedAt: number; capMinutes?: number; streaming: boolean }
+  | { kind: "headsUp"; id: string; at: number; startedAt: number; capMinutes?: number; left: string; interrupted: boolean }
+  | { kind: "interrupt"; id: string; at: number; startedAt: number; capMinutes?: number; pendingTools: number; abortMs: number }
+  | { kind: "hardStop"; id: string; at: number; startedAt: number; capMinutes?: number; streaming: boolean; pendingTools: number }
   | { kind: "settle"; id: string; at: number; startedAt: number; capMinutes?: number; status: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" };
 
 /** The five activity callbacks a resumed run forwards to its caller. */
@@ -422,7 +423,14 @@ export class AgentManager {
   /** Run-cap timers per record: the heads-up and the hard stop. Cleared at the final settle, teardown and dispose. */
   private capTimers = new Map<
     string,
-    { headsUp: ReturnType<typeof setTimeout>; hardStop: ReturnType<typeof setTimeout> }
+    {
+      headsUp: ReturnType<typeof setTimeout>;
+      hardStop: ReturnType<typeof setTimeout>;
+      /** When the hard stop fires. A parked hard stop moves it; the heads-up's "left" is counted from it. */
+      due: number;
+      /** Releases the heads-up's hold on the session, when a streaming child with no tool is waiting for an event. */
+      hold?: () => void;
+    }
   >();
   /** Pools of older activations whose runs still count against `maxConcurrent`. */
   private drainingPools: DrainingPool[] = [];
@@ -952,12 +960,11 @@ export class AgentManager {
     record.capMinutes = capMinutes;
     const capMs = capMinutes * 60_000;
     const leadMs = capMs <= 2 * HEADS_UP_LEAD_MS ? capMs / 2 : capMs - HEADS_UP_LEAD_MS;
-    const left = capMs - leadMs >= 60_000 ? "1 minute" : `${Math.round((capMs - leadMs) / 1000)} seconds`;
-    const headsUp = setTimeout(() => this.headsUp(record, life, left), leadMs);
+    const headsUp = setTimeout(() => this.headsUp(record, life), leadMs);
     const hardStop = setTimeout(() => this.hardStop(record, life), capMs);
     headsUp.unref();
     hardStop.unref();
-    this.capTimers.set(record.id, { headsUp, hardStop });
+    this.capTimers.set(record.id, { headsUp, hardStop, due: Date.now() + capMs });
   }
 
   /**
@@ -965,22 +972,137 @@ export class AgentManager {
    * flight (the hard stop backstops that case). The wake counts as pending until observed; its observation forces the
    * settle at the next finish (`capForced`).
    */
-  private headsUp(record: AgentRecord, life: Life, left: string): void {
+  private headsUp(record: AgentRecord, life: Life): void {
     const session = record.session;
     if (this.lives.get(record.id) !== life) return;
     if (record.dialog) {
-      this.retryParkedCap(record, life, "headsUp", left);
+      this.retryParkedCap(record, life, "headsUp");
       return;
     }
     if (life.hardStopped || record.capForced || !session) return;
     if (record.status !== "running" || this.waking.has(record.id)) return;
-    const content = `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
+    const streaming = session.isStreaming || session.agent.state.isStreaming;
+    if (!streaming) {
+      this.warnHeadsUp(record, session, false);
+      return;
+    }
+    // pi polls steering only at loop start, after prepareNextTurn and after turn_end. A steer sent while a tool runs
+    // waits behind it, so the tool is interrupted; a streamed response with no tool waits for the next event.
+    if (session.agent.state.pendingToolCalls.size > 0) {
+      void this.interruptForHeadsUp(record, life, session);
+      return;
+    }
+    this.holdHeadsUp(record, life, session);
+  }
+
+  /**
+   * Sends the heads-up wake. `left` is counted from the hard stop's due time at send time, so a late warning, or one
+   * after a parked hard stop moved the due time, does not still say "1 minute". The interrupted variant says the command
+   * was cut, so the child reports on it rather than treating the abort as its own failure.
+   */
+  private warnHeadsUp(record: AgentRecord, session: AgentSession, interrupted: boolean): void {
+    const timers = this.capTimers.get(record.id);
+    if (!timers) return;
+    const s = Math.max(0, Math.round((timers.due - Date.now()) / 1000));
+    const left = s >= 60 ? "1 minute" : `${s} seconds`;
+    const content = interrupted
+      ? `You have ${left} left. This message interrupted the command you had running, or that command finished while the message was being delivered. If it was cut, its result is an abort, not the command's own failure. Do not start another command. Write your report now: name the command, say what is done and what is left, how to continue, and say to run it in the background if it must keep running. It is your result.`
+      : `You have ${left} left. Write your report now: what is done, what is left, how to continue. It is your result.`;
     this.wake(record, session, content, {
       delivered: () => {
         record.capForced = true;
-        this.onCapEvent?.({ kind: "headsUp", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, left });
+        this.onCapEvent?.({ kind: "headsUp", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, left, interrupted });
       },
     });
+  }
+
+  /**
+   * A streaming child with no tool in flight. The first of two events decides: `tool_execution_start` interrupts the tool
+   * (deferred one tick, so an approval hook can open its dialog first); `agent_settled` warns the idle session. Nothing
+   * else releases the hold except `clearCap`.
+   */
+  private holdHeadsUp(record: AgentRecord, life: Life, session: AgentSession): void {
+    const timers = this.capTimers.get(record.id);
+    if (!timers) return;
+    let observed = false;
+    const release = (): void => {
+      if (observed) return;
+      observed = true;
+      // pi's emit walks its live listener array: splicing this listener out mid-emit would skip the one after it.
+      queueMicrotask(off);
+    };
+    const off = session.subscribe((event) => {
+      if (observed) return;
+      if (event.type !== "tool_execution_start" && event.type !== "agent_settled") return;
+      // Another message to the child is in flight: the hold stays armed, and the hard stop is the backstop.
+      if (this.waking.has(record.id)) return;
+      // The runner's own idle check (agent-runner.ts): a stale settle from a racing run leaves the hold armed.
+      if (event.type === "agent_settled" && session.agent.state.isStreaming) return;
+      release();
+      if (!this.warnable(record, life, session)) return;
+      if (record.dialog) {
+        this.retryParkedCap(record, life, "headsUp");
+        return;
+      }
+      if (event.type === "agent_settled") this.warnHeadsUp(record, session, false);
+      else setImmediate(() => void this.interruptForHeadsUp(record, life, session));
+    });
+    this.capTimers.set(record.id, { ...timers, hold: release });
+  }
+
+  /**
+   * Interrupts the tool in flight so the warning can be delivered: abort, await, re-check, then warn. A steer queued
+   * before the abort is swallowed by the aborted run, so the order is fixed. The deadline's three-way decision runs again
+   * here, because a deferred call can find the tool already finished or the run idle.
+   */
+  private async interruptForHeadsUp(record: AgentRecord, life: Life, session: AgentSession): Promise<void> {
+    if (!this.warnable(record, life, session)) return;
+    if (this.waking.has(record.id)) return;
+    if (record.dialog) {
+      this.retryParkedCap(record, life, "headsUp");
+      return;
+    }
+    if (!(session.isStreaming || session.agent.state.isStreaming)) {
+      this.warnHeadsUp(record, session, false);
+      return;
+    }
+    if (session.agent.state.pendingToolCalls.size === 0) {
+      this.holdHeadsUp(record, life, session);
+      return;
+    }
+    // The waking slot is held across the await: flushNested and the held-input wake must not start a run in between.
+    this.waking.set(record.id, undefined);
+    const pendingTools = session.agent.state.pendingToolCalls.size;
+    const started = Date.now();
+    try {
+      await session.abort();
+    } catch (error) {
+      if (this.lives.get(record.id) === life) this.waking.delete(record.id);
+      console.warn(`[pi-subagents] heads-up interrupt failed for ${record.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    // finalize has already cleared the slot; a resumed lifecycle may own it now.
+    if (this.lives.get(record.id) !== life) return;
+    if (!this.warnable(record, life, session)) {
+      this.waking.delete(record.id);
+      return;
+    }
+    // A dialog that appeared during the abort parks the record: the cap's parked path owns the warning now.
+    if (record.dialog) {
+      this.waking.delete(record.id);
+      this.retryParkedCap(record, life, "headsUp");
+      return;
+    }
+    this.onCapEvent?.({ kind: "interrupt", id: record.id, at: started, startedAt: record.startedAt, capMinutes: record.capMinutes, pendingTools, abortMs: Date.now() - started });
+    this.warnHeadsUp(record, session, true);
+  }
+
+  /**
+   * The heads-up's terminal guards, shared by the deadline, the hold and the interrupt: the lifecycle is current, the run
+   * is not hard-stopped or already forced, and the record still runs on this session.
+   */
+  private warnable(record: AgentRecord, life: Life, session: AgentSession): boolean {
+    return this.lives.get(record.id) === life && !life.hardStopped && !record.capForced && record.status === "running" && record.session === session;
   }
 
   /**
@@ -1014,7 +1136,7 @@ export class AgentManager {
       this.endGate(gate, "aborted");
     }
     const session = record.session;
-    this.onCapEvent?.({ kind: "hardStop", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, streaming: !!(session?.isStreaming || session?.agent.state.isStreaming) });
+    this.onCapEvent?.({ kind: "hardStop", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, streaming: !!(session?.isStreaming || session?.agent.state.isStreaming), pendingTools: session?.agent.state.pendingToolCalls.size ?? 0 });
     if (session && (session.isStreaming || session.agent.state.isStreaming)) {
       void session.abort();
       return;
@@ -1031,26 +1153,27 @@ export class AgentManager {
    * Re-arm the cap event a parked record skipped. The other timer keeps its original schedule; this
    * only replaces the one that fired. A record still parked at the next check repeats.
    */
-  private retryParkedCap(record: AgentRecord, life: Life, kind: "headsUp" | "hardStop", left?: string): void {
+  private retryParkedCap(record: AgentRecord, life: Life, kind: "headsUp" | "hardStop"): void {
     const timers = this.capTimers.get(record.id);
     if (!timers) return;
     const run = (): void => {
       if (this.lives.get(record.id) !== life) return;
       if (record.dialog) {
-        this.retryParkedCap(record, life, kind, left);
+        this.retryParkedCap(record, life, kind);
         return;
       }
-      if (kind === "headsUp") this.headsUp(record, life, left ?? "1 minute");
+      if (kind === "headsUp") this.headsUp(record, life);
       else this.hardStop(record, life);
     };
     const timer = setTimeout(run, AgentManager.PARKED_CAP_RECHECK_MS);
     timer.unref();
-    this.capTimers.set(record.id, kind === "headsUp" ? { ...timers, headsUp: timer } : { ...timers, hardStop: timer });
+    this.capTimers.set(record.id, kind === "headsUp" ? { ...timers, headsUp: timer } : { ...timers, hardStop: timer, due: Date.now() + AgentManager.PARKED_CAP_RECHECK_MS });
   }
 
   private clearCap(id: string): void {
     const timers = this.capTimers.get(id);
     if (!timers) return;
+    timers.hold?.();
     clearTimeout(timers.headsUp);
     clearTimeout(timers.hardStop);
     this.capTimers.delete(id);
