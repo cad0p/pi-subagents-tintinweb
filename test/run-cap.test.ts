@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type BackgroundWorkItem, registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
 import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentManager, setQuietMs } from "../src/agent-manager.js";
+import { AgentManager, type CapEvent, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, runAgent } from "../src/agent-runner.js";
 import { formatTaskNotification } from "../src/index.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
@@ -459,6 +459,77 @@ describe("run cap", () => {
     expect(formatTaskNotification(record, { failurePreviewMaxChars: 65536 }).split("\n")[0]).toContain("Agent stopped at the time limit: work** (stopped at the 2 min time limit; resume with SendMessage to continue)");
     expect(renderAgentReport(record)).toContain("(stopped at the 2 min time limit; resume with SendMessage to continue)");
   });
+  it("the debug channel reports the observed heads-up and the wrapped settle, in that order", async () => {
+    pending = [bgItem];
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(LEAD_MS);
+    // The line means "the child observed the wake", so it lands only at the delivery.
+    child.deliver();
+    child.begin();
+    child.end("report");
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["headsUp", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "headsUp", id: record.id, left: "1 minute", capMinutes: 2, startedAt: record.startedAt, at: record.startedAt + LEAD_MS });
+    expect(capEvents[1]).toMatchObject({ kind: "settle", id: record.id, status: "completed", limitReason: "time", timeLimit: "wrapped", capMinutes: 2 });
+  });
+
+  it("the debug channel reports an idle hard stop and the stopped settle, stamped at the cap", async () => {
+    pending = [bgItem];
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    const record = spawnChild(capDir);
+    await settle();
+    child.end("first");
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    // The heads-up's wake was never delivered, so its line is absent and the run is stopped at the cap.
+    expect(capEvents.map((event) => event.kind)).toEqual(["hardStop", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", id: record.id, streaming: false, capMinutes: 2, startedAt: record.startedAt, at: record.startedAt + CAP_MS });
+    expect(capEvents[1]).toMatchObject({ kind: "settle", id: record.id, status: "completed", limitReason: "time", timeLimit: "stopped", startedAt: record.startedAt, at: record.startedAt + CAP_MS });
+  });
+
+  it("the debug channel's hard stop records a still-streaming session as streaming", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(capEvents.map((event) => event.kind)).toEqual(["hardStop", "settle"]);
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
+  });
+
+  it("the debug channel's hard stop reads the stream from agent.state when the session flag reads false", async () => {
+    const capEvents: CapEvent[] = [];
+    manager.onCapEvent = (event) => capEvents.push(event);
+    const child = fakeChild();
+    runChild(child);
+    spawnChild(capDir);
+    await settle();
+    // pi reports a nested child's stream on agent.state while the session flag can still read false: the two are
+    // independent, and this case is what tells the composite predicate from the session flag alone.
+    child.isStreaming = false;
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(capEvents[0]).toMatchObject({ kind: "hardStop", streaming: true });
+    expect(child.abort).toHaveBeenCalled();
+    // The fake unwinds only a session that still reports streaming in its own flag; finish the run by hand.
+    child.end("");
+    await settle();
+  });
+
   it("a fractional maxBackgroundWait sets both timers: the heads-up at half the cap, the hard stop at the cap", async () => {
     const halfDir = policyDir(0.5);
     pending = [bgItem];
