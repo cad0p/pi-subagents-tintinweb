@@ -209,33 +209,6 @@ interface GateEntry {
 type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 
 /**
- * Write what a live session reports as its model and thinking level back to its record.
- *
- * The two are only knowable once pi has resolved its defaults and clamped the level to what the
- * model supports, so the record is made authoritative here and every surface reads one place
- * instead of each re-deriving "session, else the request" for itself. `bindSession` calls it at
- * spawn and the native view on an in-place model switch inside a run.
- */
-export function adoptSessionModel(record: AgentRecord, session: AgentSession): void {
-  if (!session.model) return;
-  record.invocation ??= {};
-  // Read the kept request first: a caller's level survives being clamped
-  // AND, one line later, being replaced by the effective one.
-  const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
-  Object.assign(record.invocation, describeModel(session.model));
-  // Guarded: a session that reports no level keeps the request rather
-  // than losing it. Overwriting unconditionally would turn a stubbed or
-  // older session into a blank `thinking:` tag, which is worse than the
-  // stale-but-true value it replaced.
-  if (session.thinkingLevel) {
-    record.invocation.thinking = session.thinkingLevel;
-    if (requested && requested !== session.thinkingLevel) {
-      record.invocation.requestedThinking = requested;
-    }
-  }
-}
-
-/**
  * Bind a live session to its record: identity, the persistent lifecycle and the model and
  * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
  * same way as a fresh one.
@@ -245,7 +218,29 @@ function bindSession(record: AgentRecord, session: AgentSession, lifecycle: Sess
   record.lifecycle = lifecycle;
   record.sessionId = session.sessionId;
   record.sessionFile = session.sessionManager.getSessionFile();
-  adoptSessionModel(record, session);
+  // The model and thinking level are only knowable once pi has resolved
+  // its defaults and clamped the level to what the model supports. Writing
+  // them back here makes the record authoritative, so every surface reads
+  // one place instead of each re-deriving "session, else the request" for
+  // itself. An agent started outside the Agent tool (RPC, scheduler) has
+  // no invocation yet and gains one here.
+  if (session.model) {
+    record.invocation ??= {};
+    // Read the kept request first: a caller's level survives being clamped
+    // AND, one line later, being replaced by the effective one.
+    const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+    Object.assign(record.invocation, describeModel(session.model));
+    // Guarded: a session that reports no level keeps the request rather
+    // than losing it. Overwriting unconditionally would turn a stubbed or
+    // older session into a blank `thinking:` tag, which is worse than the
+    // stale-but-true value it replaced.
+    if (session.thinkingLevel) {
+      record.invocation.thinking = session.thinkingLevel;
+      if (requested && requested !== session.thinkingLevel) {
+        record.invocation.requestedThinking = requested;
+      }
+    }
+  }
   // Flush any steers that arrived before the session was ready
   if (record.pendingSteers?.length) {
     for (const msg of record.pendingSteers) {
@@ -343,6 +338,12 @@ export interface SpawnOptions {
   agentConfig?: AgentConfig;
 }
 
+/** One line of the cap diagnostic channel: when the heads-up was observed, when the hard stop fired, when the lifecycle settled. */
+export type CapEvent =
+  | { kind: "headsUp"; id: string; at: number; startedAt: number; capMinutes?: number; left: string }
+  | { kind: "hardStop"; id: string; at: number; startedAt: number; capMinutes?: number; streaming: boolean }
+  | { kind: "settle"; id: string; at: number; startedAt: number; capMinutes?: number; status: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" };
+
 /** The five activity callbacks a resumed run forwards to its caller. */
 export type ResumeCallbacks = Pick<
   SpawnOptions,
@@ -378,6 +379,12 @@ export class AgentManager {
    * Without it a resumed child's `ctx.ui.theme` falls back to the identity stand-in.
    */
   uiTheme?: () => Theme | undefined;
+  /**
+   * Diagnostic sink (#112 item 4): the cap's heads-up, hard stop and settle. The extension always assigns it; the
+   * PI_SUBAGENTS_DEBUG gate lives inside the sink, so each emit site builds the payload and its `Date.now()` and the
+   * sink discards them when the gate is off.
+   */
+  onCapEvent?: (event: CapEvent) => void;
   /** Records whose shutdown stop already wrote its settle entry (abortAll), so the settle does not write it twice. */
   private stopLedgered = new Set<string>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -970,6 +977,7 @@ export class AgentManager {
     this.wake(record, session, content, {
       delivered: () => {
         record.capForced = true;
+        this.onCapEvent?.({ kind: "headsUp", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, left });
       },
     });
   }
@@ -1005,6 +1013,7 @@ export class AgentManager {
       this.endGate(gate, "aborted");
     }
     const session = record.session;
+    this.onCapEvent?.({ kind: "hardStop", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, streaming: !!(session?.isStreaming || session?.agent.state.isStreaming) });
     if (session && (session.isStreaming || session.agent.state.isStreaming)) {
       void session.abort();
       return;
@@ -1289,6 +1298,7 @@ export class AgentManager {
     this.nestedSendFailures.delete(record.id);
     const notes = [this.dropUndelivered(record, unsent), this.nameUnobservedNested(record.id)].filter(Boolean);
     const finished = life.finish(life.lastRun ?? { text: "", aborted: false, steered: false }, life.failed);
+    this.onCapEvent?.({ kind: "settle", id: record.id, at: Date.now(), startedAt: record.startedAt, capMinutes: record.capMinutes, status: record.status, limitReason: record.limitReason, timeLimit: record.timeLimit });
     const text = notes.length > 0 ? [finished, ...notes].join("\n\n") : finished;
     if (notes.length > 0) record.result = text;
     void this.afterRun(record).then(() => life.resolve(text));
