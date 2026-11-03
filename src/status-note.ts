@@ -16,9 +16,10 @@ import type { AgentRecord } from "./types.js";
  *
  * `stopped` (a human aborted it) is deliberately distinct from `aborted` (the
  * turn limit was hit) — the parent should treat human intervention differently
- * from a budget cutoff.
+ * from a budget cutoff. `interrupted` names its cause: a crash, or pi shutting down.
  */
-export function getStatusNote(status: string, limitReason?: "time", capMinutes?: number, timeLimit?: "wrapped" | "stopped"): string {
+export function getStatusNote(record: Pick<AgentRecord, "status" | "limitReason" | "capMinutes" | "timeLimit" | "stoppedAtShutdown">): string {
+  const { status, limitReason, capMinutes, timeLimit } = record;
   if (limitReason === "time") {
     const minutes = capMinutes === undefined ? "" : ` ${capMinutes} min`;
     // Mirrors getStatusWord (src/index.ts): change both together.
@@ -33,7 +34,7 @@ export function getStatusNote(status: string, limitReason?: "time", capMinutes?:
     case "stopped":
       return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
     case "interrupted":
-      return " (INTERRUPTED by a crash before completion — output is partial; the task was NOT finished)";
+      return ` (INTERRUPTED ${record.stoppedAtShutdown ? "when pi shut down" : "by a crash"} before completion — output is partial; the task was NOT finished)`;
     case "aborted":
       return " (aborted — hit the turn limit before completion; output may be incomplete)";
     case "steered":

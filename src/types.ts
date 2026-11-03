@@ -101,7 +101,7 @@ export interface AgentConfig {
 /**
  * How `AgentManager.deliver` took a message: "queued" (no session yet), "delivered" (steered into the running
  * session), "resumed" (a finished record restarted from its file with a fresh max_turns), "resumedAfterCrash" (an
- * interrupted record restarted from its file with a crash note), "held" (parked until a teardown or a hand-over's
+ * interrupted record — crashed, or stopped at a shutdown — restarted from its file with a note on its interruption), "held" (parked until a teardown or a hand-over's
  * adoption ends), or false (nothing was delivered: still settling, stopped with its parent, or no session left to reopen).
  */
 export type DeliverOutcome = "delivered" | "queued" | "resumed" | "resumedAfterCrash" | "held" | false;
@@ -110,7 +110,7 @@ export interface AgentRecord {
   id: string;
   type: SubagentType;
   description: string;
-  /** `interrupted`: a run cut short by a crash and rebuilt from the ledger. A final, resumable status that behaves like `stopped`. */
+  /** `interrupted`: a run cut short by a crash or a quit and rebuilt from the ledger. A final, resumable status that behaves like `stopped`. */
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "interrupted";
   result?: string;
   error?: string;
@@ -123,6 +123,8 @@ export interface AgentRecord {
   crashedAt?: number;
   /** Interrupted settles in a row for this run, including this crash (the crash-loop guard's count). */
   crashCount?: number;
+  /** Set on a run recovered from a shutdown stop: pi quit while it ran. It is resumed like a crashed run, but it did not crash. */
+  stoppedAtShutdown?: boolean;
   /** Directory the run executed in (its worktree for an isolated run). A recovered run restores it when it still exists. */
   runCwd?: string;
   /** Directory the run loaded its agent config from. */

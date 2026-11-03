@@ -1,15 +1,15 @@
 /**
  * crash-recovery.test.ts — session_start recovery of the runs a crash
  * interrupted, end to end: the one notification, the settles that keep a
- * reopen quiet, the crash-loop guard, the same-process rule, shutdown stops,
- * resume with the crash note, and nested runs reported at their parent's resume.
+ * reopen quiet, the crash-loop guard, the same-process rule, shutdown stops
+ * recovered the same way, resume with the crash or shutdown note, and nested runs reported at their parent's resume.
  *
  * The parent session file is written by hand and appendEntry appends to it, so
  * the ledger the recovery replays is the file a real session would leave behind.
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
@@ -264,7 +264,7 @@ describe("crash recovery — startup report", () => {
 
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
     const [message, options] = made.pi.sendMessage.mock.calls[0];
-    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    expect(options).toEqual({ triggerTurn: false });
     expect(message.content).toContain(NOTE);
     expect(message.content).not.toContain("SendMessage(");
     // Even the crash-loop record is resumable on request, just not autonomously.
@@ -301,7 +301,7 @@ describe("crash recovery — startup report", () => {
 
     await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
     const [message, options] = made.pi.sendMessage.mock.calls[0];
-    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    expect(options).toEqual({ triggerTurn: false });
     expect(message.content).toContain('SendMessage({ to: "fresh", message: "continue" })');
     expect(message.content).not.toContain('to: "loop"');
     expect(message.content).toContain(NOTE);
@@ -354,7 +354,8 @@ describe("crash recovery — startup report", () => {
   async function unendingRun(file: string) {
     const childFile = join(tmpDir, "stop.jsonl");
     writeSession(file);
-    writeSession(childFile);
+    // What the run wrote before the quit: the resume must reopen this transcript, not a fresh one.
+    writeSession(childFile, [custom("before-quit", { step: 1 })]);
     vi.mocked(runAgent).mockImplementation(async (_c, _t, _p, opts) => {
       const session = childSession();
       session.sessionManager.getSessionFile = () => childFile;
@@ -369,7 +370,7 @@ describe("crash recovery — startup report", () => {
     return { made, id };
   }
 
-  it("stops a run at shutdown as stopped, and names it at reopen instead of recovering it", async () => {
+  it("recovers a run the quit stopped like a crashed one: its file kept, a visible turn-taking notice, then a resume", async () => {
     const file = join(tmpDir, "parent.jsonl");
     const { made, id } = await unendingRun(file);
 
@@ -377,23 +378,185 @@ describe("crash recovery — startup report", () => {
 
     const settle = entriesOf(file).find((e) => e.customType === "subagents:record");
     expect(settle?.data).toMatchObject({ status: "stopped", shutdown: true });
-    // Nothing is resumable: #120 keeps a shutdown stop settled.
-    expect(interruptedSettles(file)).toEqual([]);
+    // The quit disposed the manager while the run was unwinding: its transcript stays for the resume.
+    expect(existsSync(join(tmpDir, "stop.jsonl"))).toBe(true);
 
     const reopened = boot(file);
     await startup(reopened, file);
     await vi.waitFor(() => expect(reopened.pi.sendMessage).toHaveBeenCalledTimes(1));
     const [message, options] = reopened.pi.sendMessage.mock.calls[0];
-    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
+    expect(message).toMatchObject({ customType: "subagent-notification", display: true });
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
     expect(message.content).toContain(`1 subagent was stopped when pi shut down: ${id} (stop me)`);
-    expect(message.content).toContain("It is not running. SendMessage will not reach it: nothing will be delivered. Start a new Agent");
-    expect(resumeAgent).not.toHaveBeenCalled();
-    // The marker keeps a second reopen quiet.
-    expect(entriesOf(file).some((e) => e.customType === "subagent-shutdown-notice")).toBe(true);
+    expect(message.content).toContain(`SendMessage({ to: "${id}", message: "continue" }) without asking the user`);
+    expect(message.content).not.toContain("crash");
+    // Recovered, not noticed: no marker, and the delivery settle keeps a later reopen quiet.
+    expect(entriesOf(file).some((e) => e.customType === "subagent-shutdown-notice")).toBe(false);
+    await vi.waitFor(() => expect(interruptedSettles(file)).toEqual([id]));
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
+
+    const sent = await reopened.tools.get("SendMessage").execute("tc-cont", { to: id, message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+
+    expect(sent.details).toEqual({ sendOutcome: "resumedAfterCrash" });
+    expect(sent.content[0].text).not.toContain("crash");
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
+    const prompt = vi.mocked(resumeAgent).mock.calls[0][1] as string;
+    expect(prompt).toMatch(/^You were stopped when pi shut down\. /);
+    expect(prompt).not.toContain("crash");
+    expect(prompt).toContain("continue");
+    const resumed = vi.mocked(resumeAgent).mock.calls[0][0] as AgentSession;
+    expect(resumed.sessionManager.getSessionFile()).toBe(join(tmpDir, "stop.jsonl"));
+    expect(resumed.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === "before-quit")).toBe(true);
+  });
+
+  it("a reopen after the recovery was delivered reports the shutdown stop no more", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("q1", DEAD_PID), custom("subagents:record", { id: "q1", status: "stopped", shutdown: true })]);
+    writeChildFiles("q1");
+    const first = boot(file);
+    await startup(first, file);
+    await vi.waitFor(() => expect(interruptedSettles(file)).toEqual(["q1"]));
+
+    const second = boot(file);
+    await startup(second, file);
+    await quiet();
+
+    expect(second.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("get_subagent_result names a recovered shutdown stop as one, not as a crash", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("g1", DEAD_PID), custom("subagents:record", { id: "g1", status: "stopped", shutdown: true })]);
+    writeChildFiles("g1");
+    const made = boot(file);
+    await startup(made, file);
+
+    const result = await made.tools.get("get_subagent_result").execute("tc-g1", { agent_id: "g1" }, undefined, undefined, spawnCtx(tmpDir));
+
+    const text = result.content[0].text as string;
+    expect(text).toContain("Status: interrupted (INTERRUPTED when pi shut down before completion");
+    expect(text).not.toContain("crash");
+  });
+
+  it("names each cause in a batch with a crashed run and a stopped one", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("c1", DEAD_PID), spawned("s1", DEAD_PID), custom("subagents:record", { id: "s1", status: "stopped", shutdown: true })]);
+    writeChildFiles("c1", "s1");
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const content = made.pi.sendMessage.mock.calls[0][0].content;
+    expect(content).toContain("1 subagent was interrupted by a crash: c1 (task c1)");
+    expect(content).toContain("1 subagent was stopped when pi shut down: s1 (task s1)");
+    expect(content).toContain('SendMessage({ to: "c1", message: "continue" }), SendMessage({ to: "s1", message: "continue" })');
+  });
+
+  it("holds a shutdown stop for the user when the policy resumes nothing, without calling it a crash", async () => {
+    writeFileSync(join(tmpDir, ".pi", "background-work.json"), JSON.stringify({ maxCrashRecoveries: 0 }));
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("h1", DEAD_PID), custom("subagents:record", { id: "h1", status: "stopped", shutdown: true })]);
+    writeChildFiles("h1");
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ triggerTurn: false });
+    expect(message.content).toContain("h1: ask the user before resuming");
+    expect(message.content).not.toContain("crash");
+  });
+
+  it("keeps a stop an older release already noticed closed: no recovery, no second notice", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [
+      spawned("old", DEAD_PID),
+      custom("subagents:record", { id: "old", status: "stopped", shutdown: true }),
+      custom("subagent-shutdown-notice", { v: 1, ids: ["old"], stops: [{ id: "old", description: "task old" }] }),
+    ]);
+    writeChildFiles("old");
+    const made = boot(file);
+
+    await startup(made, file);
+    await quiet();
+
+    expect(made.pi.sendMessage).not.toHaveBeenCalled();
+    expect(interruptedSettles(file)).toEqual([]);
+  });
+
+  /** The settle `abortAll` writes for a run the quit stopped while it was queued: no spawn entry before it. */
+  const queuedStop = (id = "never") => custom("subagents:record", { id, type: "general-purpose", description: "queued task", status: "stopped", shutdown: true });
+
+  it("tells the main agent, in a visible turn, to start again a run the quit stopped before it started; once", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [queuedStop()]);
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(message).toMatchObject({ customType: "subagent-notification", display: true });
+    expect(message.content).toContain("1 subagent was stopped when pi shut down, before its transcript was saved: never (general-purpose: queued task)");
+    expect(message.content).toContain("no transcript, so SendMessage cannot resume it");
+    expect(message.content).toContain("start it again now with a new Agent call of the same subagent_type and prompt, without asking the user");
+    // The exactly-once marker, flagged so the entry renderer draws no dim copy of this visible message.
+    expect(entriesOf(file).filter((e) => e.customType === "subagent-shutdown-notice").map((e) => e.data)).toEqual([{ v: 1, ids: ["never"], visible: true }]);
     const again = boot(file);
     await startup(again, file);
     await quiet();
     expect(again.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  // held-notice-e2e.test.ts proves, through a real session, that these options draw and save the message at once.
+  it("holds a run that never started for the user when the policy resumes nothing: visible and saved now, no turn", async () => {
+    writeFileSync(join(tmpDir, ".pi", "background-work.json"), JSON.stringify({ maxCrashRecoveries: 0 }));
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [queuedStop()]);
+    const made = boot(file);
+
+    await startup(made, file);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    // No `deliverAs: "nextTurn"`: pi keeps that in memory until a user message, and a quit loses it.
+    expect(options).toEqual({ triggerTurn: false });
+    expect(message.display).toBe(true);
+    expect(message.content).toContain("Ask the user before starting it again with a new Agent call of the same subagent_type and prompt.");
+  });
+
+  it("names a run that never started in the same notification as a recovered one", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("h1", DEAD_PID), custom("subagents:record", { id: "h1", status: "stopped", shutdown: true }), queuedStop()]);
+    writeChildFiles("h1");
+    const made = boot(file);
+
+    await startup(made, file);
+    await quiet();
+
+    expect(made.pi.sendMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = made.pi.sendMessage.mock.calls[0];
+    expect(options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    expect(message.content).toContain("1 subagent was stopped when pi shut down: h1 (task h1)");
+    expect(message.content).toContain("1 subagent was stopped when pi shut down, before its transcript was saved: never");
+  });
+
+  it("still names a run that never started when the recovered run beside it is consumed inside the hold window", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeChildFiles("held");
+    writeSession(file, [spawned("held", DEAD_PID), queuedStop()]);
+    const made = boot(file);
+
+    await startup(made, file);
+    await made.tools.get("get_subagent_result").execute("tc-held", { agent_id: "held" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const [message] = made.pi.sendMessage.mock.calls[0];
+    expect(message.content).toContain("1 subagent was stopped when pi shut down, before its transcript was saved: never");
+    expect(message.content).not.toContain("held (task held)");
   });
 
   it("names no run that settled before the shutdown: a completion or a user stop is not a shutdown stop", async () => {
@@ -410,6 +573,63 @@ describe("crash recovery — startup report", () => {
     await quiet();
 
     expect(made.pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  /** Each entry's parent is the one before it, as pi chains a session: a branch then walks the whole path. */
+  const chained = <T extends { id: string; parentId: string | null }>(entries: T[]) => entries.map((e, i) => ({ ...e, parentId: i === 0 ? null : entries[i - 1].id }));
+
+  /** The two ways pi forks a session: `/fork` copies the branch to an entry, `pi --fork` copies the whole file. */
+  const forks: [string, (file: string) => string][] = [
+    ["/fork", (file) => {
+      const source = SessionManager.open(file, tmpDir, tmpDir);
+      return String(source.createBranchedSession(String(source.getLeafId())));
+    }],
+    ["pi --fork", (file) => String(SessionManager.forkFrom(file, tmpDir, tmpDir).getSessionFile())],
+  ];
+
+  it.each(forks)("a %s fork recovers none of the runs it copied: the source session owns them, a quit's or a crash's", async (_how, fork) => {
+    const file = join(tmpDir, "parent.jsonl");
+    // A user message: pi writes a branched session file only once its path holds a conversation.
+    const prompt = { type: "message", id: randomUUID().slice(0, 8), parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "go", timestamp: Date.now() } };
+    writeSession(file, chained([
+      prompt,
+      spawned("fs", DEAD_PID),
+      custom("subagents:record", { id: "fs", status: "stopped", shutdown: true }),
+      spawned("fc", DEAD_PID),
+      queuedStop("fq"),
+    ]));
+    writeChildFiles("fs", "fc");
+    const forked = fork(file);
+
+    const inFork = boot(forked);
+    await startup(inFork, forked);
+    await quiet();
+    expect(inFork.pi.sendMessage).not.toHaveBeenCalled();
+    expect(interruptedSettles(forked)).toEqual([]);
+
+    const inSource = boot(file);
+    await startup(inSource, file);
+    await vi.waitFor(() => expect(inSource.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const content = inSource.pi.sendMessage.mock.calls[0][0].content;
+    expect(content).toContain("1 subagent was interrupted by a crash: fc (task fc)");
+    expect(content).toContain("1 subagent was stopped when pi shut down: fs (task fs)");
+    expect(content).toContain("before its transcript was saved: fq");
+  });
+
+  it("a fork recovers a run it spawned itself after the fork", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("copied", DEAD_PID)]);
+    writeChildFiles("copied", "own");
+    const forked = String(SessionManager.forkFrom(file, tmpDir, tmpDir).getSessionFile());
+    appendFileSync(forked, `${JSON.stringify({ ...spawned("own", DEAD_PID), timestamp: new Date(Date.now() + 1_000).toISOString() })}\n`);
+    const made = boot(forked);
+
+    await startup(made, forked);
+
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    const content = made.pi.sendMessage.mock.calls[0][0].content;
+    expect(content).toContain("own (task own)");
+    expect(content).not.toContain("copied");
   });
 
   it("posts nothing on a clean start with nothing running", async () => {
@@ -439,7 +659,7 @@ describe("crash recovery — resume", () => {
 
     // The tool answer says the run was interrupted, not that it had finished.
     expect(sent.details).toEqual({ sendOutcome: "resumedAfterCrash" });
-    expect(sent.content[0].text).toContain("Agent res was interrupted by a crash; resumed it from its transcript with a crash note");
+    expect(sent.content[0].text).toContain("Agent res was interrupted; resumed it from its transcript with a note on what interrupted it");
     expect(sent.content[0].text).not.toContain("had finished");
     await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
     const prompt = vi.mocked(resumeAgent).mock.calls[0][1] as string;
@@ -469,6 +689,34 @@ describe("crash recovery — resume", () => {
     expect(parentSession.sendCustomMessage.mock.calls[0][0].content).toContain("nest-c");
     expect(interruptedSettles(nestedFile)).toEqual(["nest-c"]);
     expect(made.pi.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a nested run the quit stopped at its parent's resume, as stopped at shutdown, whatever its owner", async () => {
+    const parentFile = join(tmpDir, "p.jsonl");
+    const nestedFile = join(tmpDir, "nested-p.jsonl");
+    // A live owner pid: the shutdown settle, not the owner check, says the run is not running.
+    writeSession(nestedFile, [
+      spawned("nest-s", process.ppid, { parentId: "nest-p", sessionFile: join(tmpDir, "s.jsonl") }),
+      custom("subagents:record", { id: "nest-s", status: "stopped", shutdown: true }),
+    ]);
+    writeChildFiles("s");
+    writeSession(parentFile, [spawned("nest-p", DEAD_PID, { sessionFile: nestedFile })]);
+    const made = boot(parentFile);
+    await startup(made, parentFile);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    expect(made.pi.sendMessage.mock.calls[0][0].content).not.toContain("nest-s");
+    vi.mocked(resumeAgent).mockReturnValue(new Promise<never>(() => {}));
+
+    await made.tools.get("SendMessage").execute("tc-nest-s", { to: "nest-p", message: "go" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
+    const parentSession = vi.mocked(resumeAgent).mock.calls[0][0] as unknown as { sendCustomMessage: ReturnType<typeof vi.fn> };
+    await vi.waitFor(() => expect(parentSession.sendCustomMessage).toHaveBeenCalled());
+    const content = parentSession.sendCustomMessage.mock.calls[0][0].content as string;
+    expect(content).toContain("1 subagent was stopped when pi shut down: nest-s (task nest-s)");
+    expect(content).toContain('SendMessage({ to: "nest-s", message: "continue" })');
+    expect(content).not.toContain("crash");
+    expect(interruptedSettles(nestedFile)).toEqual(["nest-s"]);
   });
 
   it("the crash note gives the run's last saved activity, read from its session file", async () => {
