@@ -648,9 +648,9 @@ describe("native transcript view", () => {
     expect(h.im.editor.history).toContain("CHILD TEXT");
 
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; select main (← then ↑) to use it");
+    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press ← to go back to main");
     h.im.editor.onSubmit?.("/model");
-    expect(h.documentContainer.render(120).join("\n")).toContain("Slash commands act on the main session; select main (← then ↑) to use them");
+    expect(h.documentContainer.render(120).join("\n")).toContain("Slash commands act on the main session; press ← to go back to main");
     expect((h.im.defaultEditor as any).actionHandlers.get("app.session.new")).not.toHaveBeenCalled();
     // An action pi may add later is not inherited either: the map starts empty.
     expect(h.im.editor.actionHandlers.has("app.future.action")).toBe(false);

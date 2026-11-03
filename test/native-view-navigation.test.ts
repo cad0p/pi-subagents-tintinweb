@@ -220,7 +220,7 @@ async function harness(): Promise<Harness> {
     isShuttingDown: false,
     // pi's four notice methods read `this` (showStatus draws into this.chatContainer), so the saved
     // copies must be called on the instance: a detached call throws, which on the Esc path would
-    // abort before the view closes. `hostStatuses` is the human-facing log the tests assert on.
+    // abort before the stop notice is shown. `hostStatuses` is the human-facing log the tests assert on.
     hostStatuses: notifications,
     showError(this: any, message: string) { this.hostStatuses.push(message); },
     showWarning(this: any, message: string) { this.hostStatuses.push(message); },
@@ -325,6 +325,11 @@ function record(id: string): any {
   return (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
 }
 
+/** The `main` row; the open view's hint also names `main`, so match the row's ending. */
+function mainRow(h: Harness): string {
+  return h.painted().find((line) => line.trimEnd().endsWith(" main")) ?? "";
+}
+
 /** The row carrying `text` in the painted list. */
 function row(h: Harness, text: string): string {
   return h.painted().find((line) => line.includes(text)) ?? "";
@@ -365,7 +370,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(h.transcript()).toContain("hang: CHILD hang");
       expect(h.transcript()).not.toContain("HOST TEXT");
       expect(row(h, "nav one")).toContain("⏺");
-      expect(h.painted()[0]).toContain(`${TO_MAIN_KEYS} to main · esc interrupts`);
+      expect(h.painted()[0]).toContain(`${TO_MAIN_KEYS} back to main · esc interrupts`);
 
       h.press(UP); // back onto `main`
       expect(h.transcript()).toContain("HOST TEXT");
@@ -400,7 +405,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
     }
   });
 
-  it("Esc on a settled agent stays in its view; ← then ↑ is the way back to `main`", async () => {
+  it("Esc on a settled agent stays in its view; ← is the way back to `main`", async () => {
     mockRuns();
     const h = await harness();
     try {
@@ -416,10 +421,35 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(row(h, "finished job")).toContain("⏺");
       expect(h.notifications).toEqual([]); // nothing to stop, so nothing to say
 
-      // The keys the hint names are the way out.
-      h.press(LEFT); h.press(UP);
+      // The key the hint names is the way out.
+      h.press(LEFT);
       expect(h.transcript()).toContain("HOST TEXT");
-      expect(row(h, "main")).toContain("⏺");
+      expect(mainRow(h)).toContain("⏺");
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("← from the second agent's view lands on `main`, not the agent above it", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("first job", "one");
+      await flush();
+      await h.spawn("second job", "two");
+      await flush();
+      h.press(DOWN); h.press(DOWN); h.press(DOWN); // second job
+      expect(h.transcript()).toContain("two: CHILD two");
+
+      expect(h.press(LEFT)).toEqual({ consume: true });
+      expect(h.transcript()).toContain("HOST TEXT");
+      expect(h.transcript()).not.toContain("CHILD one");
+      expect(mainRow(h)).toContain("⏺");
+      expect(row(h, "first job")).toContain("◯");
+
+      expect(h.press(LEFT)).toEqual({ consume: true }); // on `main`: nowhere further to go
+      expect(h.transcript()).toContain("HOST TEXT");
+      expect(mainRow(h)).toContain("⏺");
     } finally {
       await h.shutdown();
     }

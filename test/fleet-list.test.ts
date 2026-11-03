@@ -903,12 +903,13 @@ describe("FleetList nested rows (#146)", () => {
     expect(h.render().some(l => l.includes("child job"))).toBe(false);
   });
 
-  it("← on a level-1 row does nothing: the parent stays expanded and selected", () => {
+  it("← on a top-level parent selects `main` and leaves the parent expanded", () => {
     const h = harness([parent(), child()]);
     h.press(DOWN); h.press(DOWN); h.press(RIGHT); h.press(UP); // back on the parent
     expect(h.press(LEFT)).toEqual({ consume: true });
     const lines = h.render();
-    expect(lines.find(l => l.includes("parent job"))).toMatch(/⏺.*▾/);
+    expect(lines.find(l => l.trimEnd().endsWith(" main"))).toContain("⏺");
+    expect(lines.find(l => l.includes("parent job"))).toMatch(/◯.*▾/);
     expect(lines.some(l => l.includes("child job"))).toBe(true);
   });
 
@@ -1037,7 +1038,7 @@ describe("FleetList selection follows the record (#146)", () => {
     expect(lines.some(l => l.includes("child job"))).toBe(false);
   });
 
-  it("leaves the selection on an orphan row when ← has no parent row to collapse to", () => {
+  it("goes back to `main` from an orphan row, which has no parent row to collapse to", () => {
     const agents: AgentRecord[] = [
       mk({ id: "p", description: "parent job", startedAt: 1000, status: "completed", completedAt: Date.now() - 600_000 }),
       mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" }),
@@ -1047,7 +1048,10 @@ describe("FleetList selection follows the record (#146)", () => {
     h.press(DOWN); h.press(DOWN); h.press(RIGHT); // open the parent, child selected
     agents.splice(0, 1); // the parent is evicted; the child is now an orphan row
     h.press(LEFT);
-    expect(h.render().find(l => l.includes("child job"))).toContain("⏺");
+    // The level above an orphan is `main`, not the nearest row (the sibling below it).
+    expect(h.render().find(l => l.includes("child job"))).toContain("◯");
+    expect(h.render().find(l => l.includes("sibling job"))).toContain("◯");
+    expect(h.render().find(l => l.trimEnd().endsWith(" main"))).toContain("⏺");
   });
 
   it("opens the record the marker is on, after a row appeared above the selection", () => {
@@ -1156,7 +1160,7 @@ describe("FleetList owns navigation (#178)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true }); // onto the agent row
     expect(view.opened).toEqual(["a1"]);
     expect(h.render().find(l => l.includes("one"))).toContain("⏺");
-    expect(h.render()[0]).toContain(`${TO_MAIN_KEYS} to main · esc interrupts`);
+    expect(h.render()[0]).toContain(`${TO_MAIN_KEYS} back to main · esc interrupts`);
 
     expect(h.press(UP)).toEqual({ consume: true }); // back onto `main`
     expect(view.closes).toEqual(["switch"]);
@@ -1257,6 +1261,96 @@ describe("FleetList owns navigation (#178)", () => {
     h.press(ENTER);
     expect(view.opened).toEqual(["a1", "a1"]);
     expect(h.overlayOpened()).toBe(true);
+  });
+});
+
+describe("FleetView ← goes back one level, with `main` at the top (#211)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+  const mainRow = (lines: string[]) => lines.find(l => l.trimEnd().endsWith(" main")) ?? "";
+
+  it("goes from the second top-level agent's view straight to `main`", () => {
+    const h = harness([mk({ id: "a1", description: "one", startedAt: 1000 }), mk({ id: "a2", description: "two", startedAt: 2000 })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // a2, shown
+    expect(view.shown).toBe("a2");
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(view.isOpen()).toBe(false); // the main session is back, not "one"
+    expect(view.opened).toEqual(["a1", "a2"]);
+    expect(mainRow(h.render())).toContain("⏺");
+    expect(h.render().find(l => l.includes("one"))).toContain("◯");
+  });
+
+  it("reaches `main` from a depth-2 row one level per ←, the view following each step", () => {
+    const parent = mk({ id: "p", description: "parent job", startedAt: 1000 });
+    const child = mk({ id: "c", description: "child job", startedAt: 2000, parentAgentId: "p" });
+    const grand = mk({ id: "g", description: "grand job", startedAt: 3000, parentAgentId: "c" });
+    const h = harness([mk({ id: "z", description: "first job", startedAt: 500 }), parent, child, grand]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // the parent, under "first job"
+    h.press(RIGHT); h.press(RIGHT); // the grandchild at depth 2
+    expect(view.shown).toBe("g");
+    h.press(LEFT);
+    expect(view.shown).toBe("c");
+    h.press(LEFT);
+    expect(view.shown).toBe("p");
+    h.press(LEFT); // a top-level row: the level above is `main`, not "first job" above it
+    expect(view.isOpen()).toBe(false);
+    expect(view.opened).toEqual(["z", "p", "c", "g", "c", "p"]);
+    expect(mainRow(h.render())).toContain("⏺");
+  });
+
+  it("does nothing on `main`: the key is consumed and the list stays active there", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); // active, on `main`
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(view.opened).toEqual([]);
+    expect(mainRow(h.render())).toContain("⏺");
+    expect(h.press(DOWN)).toEqual({ consume: true }); // still navigating: the next ↓ opens the agent
+    expect(view.opened).toEqual(["a1"]);
+  });
+
+  it("reaches `main` in one press from a top-level row past the overflow window", () => {
+    const agents = Array.from({ length: 7 }, (_, i) => mk({ id: `r${i}`, description: `root ${i}`, startedAt: 1000 + i }));
+    const h = harness(agents);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    for (let i = 0; i < 8; i++) h.press(DOWN); // the last root, with the window scrolled down
+    expect(view.shown).toBe("r6");
+    expect(h.render().some(l => l.includes("↑ 2 more"))).toBe(true);
+    h.press(LEFT);
+    expect(view.isOpen()).toBe(false);
+    expect(mainRow(h.render())).toContain("⏺");
+    expect(h.render().some(l => l.includes("↑ 2 more"))).toBe(false);
+  });
+
+  it("with no view open, ← on a top-level row selects `main` and closes nothing", () => {
+    const h = harness([mk({ id: "a1", description: "one", startedAt: 1000 }), mk({ id: "a2", description: "two", startedAt: 2000 })]);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // overlay mode: the cursor moves, nothing opens
+    expect(h.render().find(l => l.includes("two"))).toContain("⏺");
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(mainRow(h.render())).toContain("⏺");
+    expect(h.overlayOpened()).toBe(false);
+  });
+
+  it("on an inactive list with a view open, the first ← only activates and the next one goes back", () => {
+    const h = harness([mk({ id: "a1", description: "one", startedAt: 1000 }), mk({ id: "a2", description: "two", startedAt: 2000 })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // a2, shown
+    h.widgetTui.focusedComponent = { kind: "dialog" }; // a child dialog takes the keys
+    h.render();
+    expect(h.press(LEFT)).toBeUndefined(); // the dialog's key; the list drops out of navigation
+    h.widgetTui.focusedComponent = undefined; // the dialog settles
+    expect(h.press(LEFT)).toEqual({ consume: true }); // activation keeps the cursor on the shown agent
+    expect(view.shown).toBe("a2");
+    expect(h.render().find(l => l.includes("two"))).toContain("⏺");
+    expect(h.press(LEFT)).toEqual({ consume: true });
+    expect(view.isOpen()).toBe(false);
+    expect(mainRow(h.render())).toContain("⏺");
   });
 });
 

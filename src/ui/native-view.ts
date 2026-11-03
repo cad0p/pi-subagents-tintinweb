@@ -55,7 +55,7 @@ const PROBE_KEY = Symbol.for("pi-subagents:native-view-probe");
 const DEFERRED_REBUILD_MS = 100;
 
 /**
- * pi's 13 app-action handlers that are not kept. Each one acts on the host session or replaces it;
+ * pi's 13 app-action handlers that are not kept. Each one acts on the main session or replaces it;
  * a notice is the only honest thing to print. `app.interrupt` and `app.exit` are not in this map
  * (they are the onEscape/onCtrlD fallbacks in CustomEditor.handleInput), so they cannot print one.
  */
@@ -76,14 +76,15 @@ const BLOCKED_ACTIONS: readonly AppKeybinding[] = [
 ];
 
 /**
- * The keys that leave a child view: back to the list, then the cursor onto `main`. FleetView's hint
- * and the view's notices both read this, so the two cannot name different keys.
+ * The key that leaves a child view: ← goes back one level in FleetView, and repeated it reaches
+ * `main` from any depth. FleetView's hint and the view's notices both read this, so the two cannot
+ * name different keys.
  */
-export const TO_MAIN_KEYS = "← then ↑";
+export const TO_MAIN_KEYS = "←";
 
 /** The notice for something the child view refuses because only the main session can do it. */
-export function mainSessionNotice(what: string, plural: boolean): string {
-  return `${what} ${plural ? "act" : "acts"} on the main session; select main (${TO_MAIN_KEYS}) to use ${plural ? "them" : "it"}`;
+function mainSessionNotice(what: string, plural: boolean): string {
+  return `${what} ${plural ? "act" : "acts"} on the main session; press ${TO_MAIN_KEYS} to go back to main`;
 }
 
 export interface EditorLike {
@@ -859,7 +860,7 @@ export class NativeTranscriptView {
       ed.setAutocompleteProvider(provider);
     }
     // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
-    // replace or clear the host session. Only three act on something the view can honour.
+    // replace or clear the main session. Only three act on something the view can honour.
     ed.actionHandlers.clear();
     ed.onAction("app.tools.expand", () => this.toggleExpansion(im, state));
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });

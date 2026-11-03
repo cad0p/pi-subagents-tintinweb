@@ -4,14 +4,15 @@
  * Shows `main` plus each running/queued subagent as a navigable tree: an agent spawned by
  * another one is nested under its parent (↳, two spaces per level), and a collapsed parent
  * carries a `▸ N nested (…)` label. Pressing ↓ (or ←) at an empty prompt activates the list;
- * ↑/↓ move the selection (filled ⏺ marker), → expands a parent and selects its first child,
- * ← collapses the selected row's parent and selects it. The list owns navigation: the cursor is
- * the view, so landing on an agent row opens that agent's live transcript in place and `main`
- * gives the host transcript back (Enter re-affirms the same choice, and opens the conversation
- * overlay when the native view is unavailable). Esc stays the child editor's — it interrupts the
- * shown run and never leaves the view; only the cursor on `main` does — and, with no view open,
- * returns to the prompt. A viewer stays open when its agent finishes; finished agents linger
- * briefly in the list.
+ * ↑/↓ move the selection (filled ⏺ marker), → expands a parent and selects its first child, and
+ * ← goes back one level: a nested row collapses its parent and selects it, a top-level row selects
+ * `main`, and `main` is the top, so repeated ← reaches `main` from any depth. The list owns
+ * navigation: the cursor is the view, so landing on an agent row opens that agent's live transcript
+ * in place and `main` gives the main session back (Enter re-affirms the same choice, and opens the
+ * conversation overlay when the native view is unavailable). In a child view Esc is the child
+ * editor's: it interrupts the shown run and never leaves the view. With no view open, Esc returns
+ * to the prompt. A viewer stays open when its agent finishes; finished agents linger briefly in the
+ * list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
@@ -403,8 +404,8 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows move the cursor (and the view follows it), → / ← expand and collapse nested
-    // rows, Enter re-affirms the view, Esc leaves the list unless a child view is open.
+    // Active — arrows move the cursor (and the view follows it), → expands nested rows, ← goes back
+    // one level, Enter re-affirms the view, Esc leaves the list unless a child view is open.
     if (matchesKey(data, "down")) {
       const roster = this.roster();
       this.moveSelection(roster, this.resolveIndex(roster) + 1);
@@ -435,19 +436,19 @@ export class FleetList {
       return { consume: true };
     }
     if (matchesKey(data, "left")) {
+      // ← goes back one level, with `main` at the top: on `main` there is nowhere further to go.
       const roster = this.roster();
       const entry = roster[this.resolveIndex(roster)];
-      const parentId = entry?.kind === "agent" ? entry.record.parentAgentId : undefined;
-      if (parentId) {
-        this.expanded.delete(parentId);
-        const collapsed = this.roster();
-        const parentIdx = collapsed.findIndex(e => e.kind === "agent" && e.record.id === parentId);
-        // An orphan row (its parent was evicted) has no row to collapse to, so ← stays put
-        // instead of falling back to the nearest row.
-        if (parentIdx >= 0) this.moveSelection(collapsed, parentIdx);
-        this.followSelection();
-        this.update();
-      }
+      if (entry?.kind !== "agent") return { consume: true };
+      const parentId = entry.record.parentAgentId;
+      if (parentId) this.expanded.delete(parentId);
+      const collapsed = this.roster();
+      const parentIdx = parentId ? collapsed.findIndex(e => e.kind === "agent" && e.record.id === parentId) : -1;
+      // A top-level row, or an orphan whose parent was evicted, has no agent row above it: the
+      // level above is `main`, never the nearest row.
+      this.moveSelection(collapsed, parentIdx >= 0 ? parentIdx : 0);
+      this.followSelection();
+      this.update();
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {
@@ -627,7 +628,7 @@ export class FleetList {
     // A child view's Esc interrupts its run and stays (the list no longer swallows it); leaving is
     // the cursor on `main`, with the same keys the view's notices name.
     const hint = this.nativeView?.isOpen() === true
-      ? `↑↓ select · → nested · ${TO_MAIN_KEYS} to main · esc interrupts`
+      ? `↑↓ select · → nested · ${TO_MAIN_KEYS} back to main · esc interrupts`
       : this.active
         ? "↑↓ select · → nested · enter view · esc back"
         : "esc to interrupt · ← for agents · ↓ to manage";
