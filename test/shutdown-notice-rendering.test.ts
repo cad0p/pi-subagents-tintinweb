@@ -1,9 +1,9 @@
 /**
- * shutdown-notice-rendering.test.ts — the notice a reopened session owes when a shutdown stopped runs.
- * It rides on its own transcript entry, drawn by a renderer registered at factory time: the `nextTurn`
- * message the model gets waits for a turn a fresh session may never take, so the entry is the only
- * surface that paints at startup. These cases pin the paint, its absence with nothing stopped, the
- * single copy the first turn sees, and the ids-only entry an older release wrote.
+ * shutdown-notice-rendering.test.ts — the notice a reopened session owes when a shutdown stopped runs before they
+ * started (queued at the quit: no transcript, so nothing to resume; a run that started is recovered instead). This
+ * release sends it as a visible notification and writes a marker the entry renderer skips; an older release wrote a
+ * dim-only marker, which the renderer registered at factory time still draws. These cases pin the single visible
+ * copy, its absence with nothing stopped, and the stored markers older and newer releases wrote.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,11 +18,16 @@ function custom(customType: string, data: unknown): SessionEntry {
   return { type: "custom", customType, data, id: customType, parentId: null, timestamp: "2026-01-01T00:00:00Z" } as unknown as SessionEntry;
 }
 
-/** A session file holding one run a shutdown stopped: its spawn, then the settle that closed it for good. */
+/** A session file holding one run a shutdown stopped while it was queued: only the settle, no spawn entry. */
 function stoppedRun(id = "child-1", description = "review auth.ts"): SessionEntry[] {
+  return [custom("subagents:record", { v: LEDGER_VERSION, id, type: "general-purpose", description, status: "stopped", shutdown: true })];
+}
+
+/** A run a shutdown stopped mid-flight, as an older release left it: its spawn, then the shutdown settle. */
+function startedStop(id = "child-1", description = "review auth.ts"): SessionEntry[] {
   return [
     custom("subagent-spawned", { v: LEDGER_VERSION, id, type: "general-purpose", description, spawnedAt: 1, ownerPid: 999_999_999 }),
-    custom("subagents:record", { v: LEDGER_VERSION, id, type: "general-purpose", description, status: "stopped", shutdown: true }),
+    ...stoppedRun(id, description),
   ];
 }
 
@@ -46,7 +51,8 @@ function visibleText(pi: any, session: SessionEntry[], renderer: any): string {
   return [...entries, ...messages.map((m: any) => m.content)].join("\n");
 }
 
-const countNotices = (text: string) => (text.match(/stopped when pi shut down/g) ?? []).length;
+/** The old dim notice and the visible one this release sends, each counted once. */
+const countNotices = (text: string) => (text.match(/stopped when pi shut down|never started/g) ?? []).length;
 
 /** Boots the extension against a session file the fake `appendEntry` keeps writing to, as pi does. */
 function boot(session: SessionEntry[]) {
@@ -108,15 +114,19 @@ function makeCtx(session: SessionEntry[]) {
 }
 
 describe("shutdown-stop notice rendering", () => {
-  it("draws the notice at session start, with no user message", async () => {
+  it("sends the notice at session start as a visible message that takes a turn, with no user message", async () => {
     const session = stoppedRun();
     const { pi, lifecycle, renderer } = boot(session);
     // Registered by the factory, not by `session_start`: pi paints the stored entries before a turn.
     expect(renderer).toBeTypeOf("function");
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
 
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
+    expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
     const text = visibleText(pi, session, renderer);
-    expect(text).toContain("1 subagent was stopped when pi shut down: child-1 (review auth.ts)");
+    expect(text).toContain("1 subagent was stopped when pi shut down, before its transcript was saved: child-1 (general-purpose: review auth.ts)");
+    // One copy: the marker it wrote draws nothing beside the message.
+    expect(noticeEntries(session)).toHaveLength(1);
     expect(countNotices(text)).toBe(1);
   });
 
@@ -138,12 +148,8 @@ describe("shutdown-stop notice rendering", () => {
     const ctx = makeCtx(session);
     await lifecycle.get("session_start")({ reason: "startup" }, ctx);
 
-    // The model still gets the notice in context at its first turn; only the entry paints it.
-    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
-    const [message, options] = pi.sendMessage.mock.calls[0];
-    expect(options).toEqual({ deliverAs: "nextTurn", triggerTurn: false });
-    expect(message.display).toBe(false);
-    expect(message.content).toContain("1 subagent was stopped when pi shut down: child-1 (review auth.ts)");
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
+    expect(pi.sendMessage.mock.calls[0][0].display).toBe(true);
 
     await lifecycle.get("turn_start")({}, ctx);
     await lifecycle.get("turn_end")({}, ctx);
@@ -151,15 +157,19 @@ describe("shutdown-stop notice rendering", () => {
 
     // A reopen of the same file finds the marker it appended: nothing new is drawn or sent.
     await lifecycle.get("session_start")({ reason: "startup" }, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     expect(noticeEntries(session)).toHaveLength(1);
     expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
 
   it("renders the older ids-only entry, and counts it as reported", async () => {
-    const session = [...stoppedRun(), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] })];
+    // An older release named every shutdown stop, started ones included: its marker keeps that run from a recovery.
+    const session = [...startedStop(), custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] })];
     const { pi, lifecycle, renderer } = boot(session);
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    // Past the nudge window: a recovery would have sent its notification by now.
+    await new Promise((resolve) => setTimeout(resolve, 300));
 
     expect(pi.sendMessage).not.toHaveBeenCalled();
     expect(noticeEntries(session)).toHaveLength(1);
@@ -182,6 +192,7 @@ describe("shutdown-stop notice rendering", () => {
     // Ledger ignores a later-version marker, so the stop is named again; the stale marker must stay silent.
     expect(renderer(noticeEntries(session)[0], { expanded: false }, theme)).toBeUndefined();
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
     expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
   it("applies the ledger's own version comparison, not a numeric-only copy of it", async () => {
@@ -195,7 +206,13 @@ describe("shutdown-stop notice rendering", () => {
 
     expect(renderer(noticeEntries(session)[0], { expanded: false }, theme)).toBeUndefined();
     await lifecycle.get("session_start")({ reason: "startup" }, makeCtx(session));
+    await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
     expect(countNotices(visibleText(pi, session, renderer))).toBe(1);
   });
 
+  it("still draws an older release's dim marker that names its stops", () => {
+    const { renderer } = boot([]);
+    const old = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"], stops: [{ id: "child-1", description: "review auth.ts" }] });
+    expect(renderer(old, { expanded: false }, theme).render(80).join("\n")).toContain("<dim>1 subagent was stopped when pi shut down: child-1 (review auth.ts)");
+  });
 });

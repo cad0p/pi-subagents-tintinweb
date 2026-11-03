@@ -37,6 +37,14 @@ function sessionWithContext(percent: number | null, contextWindow?: number | nul
 }
 
 describe("markdown completion report", () => {
+  // The report a nested child's interrupted record carries to its parent (a hand-over delivers it this way).
+  it("names the cause of an interrupted run: a crash, or pi shutting down", () => {
+    const crashed = formatTaskNotification(createRecord({ status: "interrupted" }), settings).split("\n")[0];
+    const stopped = formatTaskNotification(createRecord({ status: "interrupted", stoppedAtShutdown: true }), settings).split("\n")[0];
+    expect(crashed).toContain("(INTERRUPTED by a crash before completion");
+    expect(stopped).toContain("(INTERRUPTED when pi shut down before completion");
+    expect(stopped).not.toContain("crash");
+  });
   it("keeps the plain time-limit wording for a record without timeLimit", () => {
     const report = formatTaskNotification(createRecord({ limitReason: "time", capMinutes: 2 }), settings);
     expect(report.split("\n")[0]).toBe(

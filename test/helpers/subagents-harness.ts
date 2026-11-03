@@ -99,7 +99,7 @@ export function childCtx(sessionId: string) {
 export function spawnCtx(cwd: string) {
   return {
     cwd,
-    sessionManager: { getSessionId: vi.fn(() => "parent-session"), getEntries: vi.fn(() => []) },
+    sessionManager: { getSessionId: vi.fn(() => "parent-session"), getHeader: vi.fn(() => null), getEntries: vi.fn(() => []) },
     isProjectTrusted: vi.fn(() => true),
     getSystemPrompt: vi.fn(() => "parent"),
     model: undefined,
