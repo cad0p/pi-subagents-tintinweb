@@ -1,5 +1,5 @@
-import { AssistantMessageComponent, copyToClipboard, initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { AssistantMessageComponent, BranchSummaryMessageComponent, copyToClipboard, initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@earendil-works/pi-coding-agent", async () => {
@@ -74,8 +74,17 @@ class FakeEditor {
 }
 
 function childSession(over: Record<string, unknown> = {}): any {
+  const listeners = new Set<(event: any) => void>();
   return {
     sessionId: "child-sid",
+    // pi's AgentSession.subscribe: the child's own bus, which the view watches for a model switch.
+    subscribe: (listener: (event: any) => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    /** Test hook: what pi emits on the child's own bus. */
+    emit: (event: any) => { for (const listener of [...listeners]) listener(event); },
+    listenerCount: () => listeners.size,
     sessionManager: {
       buildContextEntries: () => [message("user", "CHILD TEXT")],
       getCwd: () => "/child",
@@ -205,6 +214,18 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
         const renderer = session.extensionRunner.getEntryRenderer(entry.customType);
         const component = renderer?.(entry, {}, theme);
         if (component) this.chatContainer.addChild(component);
+      } else if (entry.type === "branch_summary") {
+        // pi's addMessageToChat: a branch summary is expandable, and pi seeds the flag from its own
+        // toolOutputExpanded field — the field the view swaps for the child's on every render.
+        this.chatContainer.addChild(new Spacer(1));
+        const summary = new BranchSummaryMessageComponent({
+          role: "branchSummary",
+          summary: entry.summary,
+          fromId: null,
+          timestamp: Date.now(),
+        });
+        summary.setExpanded(this.toolOutputExpanded);
+        this.chatContainer.addChild(summary);
       } else if (entry.type === "message") {
         if (entry.message.role === "user") {
           this.chatContainer.addChild(new UserMessageComponent(textOf(entry.message)));
@@ -669,6 +690,173 @@ describe("native transcript view", () => {
     expect(() => recordFooter.render(120)).not.toThrow();
   });
 
+  // A FooterComponent is not a snapshot: it reads `session.state.model` and `getContextUsage()` on
+  // every frame. The view is what fails to follow a model that moves inside the child, so these
+  // tests hold the footer instance pi already has and read it after the record moved.
+  it("A1 the installed footer follows a model change between renders", () => {
+    const h = harness();
+    h.openChild();
+    const footer = h.footerFactory()!(h.im.ui, theme, footerData);
+    expect(footer.render(120).join("\n")).toContain("child-model");
+    expect(footer.render(120).join("\n")).toContain("1.0k");
+
+    const child = h.record.session;
+    child.state.model = { id: "next-model", provider: "openai", contextWindow: 200000, reasoning: false };
+    child.model = child.state.model;
+    child.getContextUsage = () => ({ tokens: 0, contextWindow: 200000, percent: 0 });
+    const lines = footer.render(120).join("\n");
+    expect(lines).toContain("next-model");
+    expect(lines).toContain("200k");
+  });
+
+  // afterRun repaints once before retireSession clears the record, and a resume brings a new
+  // session under the SAME session id. The id matched, so the footer kept the retired session: the
+  // model name and the window were the finished run's. Identity decides now.
+  it("A2 a repaint after the session was retired binds the live one, not the dead one", () => {
+    const h = harness();
+    h.openChild();
+    const footer = h.footerFactory()!(h.im.ui, theme, footerData);
+    expect(footer.render(120).join("\n")).toContain("child-model");
+
+    const live = childSession({
+      state: { model: { id: "live-model", provider: "openai", contextWindow: 200000, reasoning: false }, thinkingLevel: "off" },
+      model: { id: "live-model", provider: "openai", contextWindow: 200000, reasoning: false },
+      getContextUsage: () => ({ tokens: 0, contextWindow: 200000, percent: 0 }),
+    });
+    // The id is reused, so the id cannot tell the two sessions apart.
+    expect(live.sessionId).toBe("child-sid");
+    h.record.session = live;
+    h.view.repaint();
+
+    // pi keeps the component it holds, so the view rebinds it instead of reinstalling it.
+    expect(h.footerFactory()!(h.im.ui, theme, footerData)).toBeInstanceOf(ChildFooter);
+    const lines = footer.render(120).join("\n");
+    expect(lines).toContain("live-model");
+    expect(lines).toContain("200k");
+    expect(lines).not.toContain("child-model");
+    expect(h.documentContainer.render(120).join("\n")).toContain("CHILD TEXT");
+  });
+
+  // A model switch inside the child emits neither a child-UI nor a record event, so nothing the view
+  // subscribed to could see it: the footer stayed stale, and `record.invocation` kept the spawned
+  // model for the FleetView row and the RecordFooter.
+  it("A3 an in-place model switch refreshes the record's invocation and asks for a frame", () => {
+    const h = harness();
+    h.record.invocation = { modelId: "anthropic/child-model", modelName: "child-model", thinking: "low", requestedThinking: "max" };
+    h.openChild();
+    const child = h.record.session;
+    expect(child.listenerCount()).toBe(1);
+    vi.mocked(h.im.ui.requestRender).mockClear();
+
+    // pi's setModel: the agent's model moves, a model_change entry is appended, and the level is
+    // re-clamped to what the new model supports.
+    child.state.model = { id: "next-model", provider: "openai", contextWindow: 200000, reasoning: true };
+    child.model = child.state.model;
+    child.thinkingLevel = "high";
+    child.emit({ type: "entry_appended", entry: { type: "model_change", provider: "openai", modelId: "next-model" } });
+
+    expect(h.record.invocation).toMatchObject({
+      modelId: "openai/next-model",
+      modelName: "next-model",
+      thinking: "high",
+      // The caller's request survives the clamp, as it does at spawn.
+      requestedThinking: "max",
+    });
+    expect(h.im.ui.requestRender).toHaveBeenCalled();
+
+    h.view.close("escape");
+    expect(child.listenerCount()).toBe(0);
+    vi.mocked(h.im.ui.requestRender).mockClear();
+    child.emit({ type: "entry_appended", entry: { type: "model_change", provider: "openai", modelId: "next-model" } });
+    expect(h.im.ui.requestRender).not.toHaveBeenCalled();
+  });
+
+  // Eviction removes the record outright (retireSession only clears its session). `syncSession`
+  // returned on the missing record before it reached watchSession, so the view kept a listener on a
+  // session it no longer showed.
+  it("A4 a record that disappears drops its session watch, and the next repaint takes it back", () => {
+    const h = harness();
+    h.openChild();
+    const child = h.record.session as any;
+    expect(child.listenerCount()).toBe(1);
+
+    h.manager.getRecord.mockImplementation(() => undefined);
+    h.view.repaint();
+    expect(child.listenerCount()).toBe(0);
+
+    h.manager.getRecord.mockImplementation((id: string) => id === h.record.id ? h.record : undefined);
+    h.view.repaint();
+    expect(child.listenerCount()).toBe(1);
+  });
+
+  // pi's host `showStatus` fires on every ctrl+o toggle, and the wrapper used to answer it with a
+  // full child render: the components were recreated (an expansion reset) and pi's alt-screen
+  // render reset the text selection, so a selection lasted a moment.
+  it("B1 a showStatus while the view is open updates the notice in place, never the transcript", () => {
+    const h = harness();
+    h.openChild();
+    const childContainer = h.documentContainer.children[0] as Container;
+    const before = [...childContainer.children];
+    expect(before.length).toBeGreaterThan(0);
+
+    h.im.showStatus("drawing");
+
+    // Same component instances under the notice: a rebuild clears the container and renders new ones.
+    expect(childContainer.children.slice(0, before.length).every((child, index) => child === before[index])).toBe(true);
+    expect(h.documentContainer.render(120).join("\n")).toContain("drawing");
+
+    // The same for the child-UI bus, which also used to repaint the transcript.
+    const rendered = [...childContainer.children];
+    createChildUIProxy("child-1", { answerable: true }).setStatus("phase", "working");
+    expect(childContainer.children.every((child, index) => child === rendered[index])).toBe(true);
+  });
+
+  // A rebuild clears the child container, and pi's alt-screen render drops the text selection with
+  // it. A structural event that arrives mid-selection waits for the selection to end.
+  it("B2 a rebuild waits for an open selection and flushes once it ends", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const h = harness();
+      h.openChild();
+      h.record.session.sessionManager.buildContextEntries = () => [message("user", "LATER TEXT")];
+      let selecting = true;
+      h.im.ui.hasActiveSelection = () => selecting;
+
+      h.view.repaint();
+      expect(h.documentContainer.render(120).join("\n")).toContain("CHILD TEXT");
+      expect(h.documentContainer.render(120).join("\n")).not.toContain("LATER TEXT");
+
+      selecting = false;
+      vi.advanceTimersByTime(200);
+      const lines = h.documentContainer.render(120).join("\n");
+      expect(lines).toContain("LATER TEXT");
+      expect(lines.match(/LATER TEXT/g)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // pi renders a branch summary with `setExpanded(this.toolOutputExpanded)`, and the view swaps that
+  // field for the child's on every render — but its ctrl+o handler only toggled tool components, so
+  // a branch summary never expanded. The flag lives on the view, so a rebuild keeps it.
+  it("B3 ctrl+o expands every expandable, and a rebuild keeps it expanded", () => {
+    const h = harness();
+    h.record.session.sessionManager.buildContextEntries = () => [
+      message("user", "CHILD TEXT"),
+      { type: "branch_summary", id: "b1", parentId: null, timestamp: new Date().toISOString(), summary: "SUMMARISED BRANCH" },
+    ];
+    h.openChild();
+    expect(h.documentContainer.render(200).join("\n")).toContain("to expand");
+
+    h.im.editor.actionHandlers.get("app.tools.expand")?.();
+    expect(h.documentContainer.render(200).join("\n")).toContain("SUMMARISED BRANCH");
+    // Applied to the child's instance, never the host's.
+    expect(h.im.toolOutputExpanded).toBe(false);
+
+    h.view.repaint();
+    expect(h.documentContainer.render(200).join("\n")).toContain("SUMMARISED BRANCH");
+  });
+
   it("Esc interrupts the run it shows, says so, and leaves the view", () => {
     const h = harness();
     h.openChild();
@@ -831,6 +1019,33 @@ describe("native transcript view", () => {
     // The child transcript is in pi's slot exactly once; the host container is still detached.
     expect(h.documentContainer.children).not.toContain(h.hostContainer);
     expect(h.documentContainer.children).toHaveLength(2);
+  });
+
+  it("a child UI change raised during a render waits for the paint, it never re-enters it", () => {
+    const h = harness();
+    const child = h.record.session as any;
+    const pushedDuringRender: boolean[] = [];
+    child.extensionRunner.getEntryRenderer = (type: string) => type === "child-only" ? () => {
+      // A child extension parks a dialog from inside its own entry render: the child-UI bus fires
+      // synchronously, and the refresh it asks for must not push a component into pi's dialog stack
+      // while pi is still drawing the transcript.
+      const before = h.im.dialogs.length;
+      void createChildUIProxy("child-1", { answerable: true }).select("Pick one", ["a", "b"]);
+      pushedDuringRender.push(h.im.dialogs.length !== before);
+      return new Text("CUSTOM CHILD");
+    } : undefined;
+    h.openChild();
+    child.sessionManager.buildContextEntries = () => [
+      message("user", "CHILD TEXT"),
+      { type: "custom", customType: "child-only", data: {}, timestamp: Date.now() },
+    ];
+    // A repaint, not the open render: the child-UI subscriptions are only live afterwards.
+    h.view.repaint();
+
+    expect(pushedDuringRender.length).toBeGreaterThan(0);
+    expect(pushedDuringRender.every((pushed) => pushed === false)).toBe(true);
+    // Deferred, not dropped: the paint pushes the parked dialog once its render returns.
+    expect(h.im.dialogs.length).toBe(1);
   });
 
   it("repaints replace the transcript instead of appending it", () => {
