@@ -51,6 +51,7 @@ All notable changes to this project will be documented in this file.
 - *(run-cap)* A wrap whose run resolved with a failure is not "wrapped up" (closes #194) ([#196](https://github.com/cad0p/pi-subagents-tintinweb/pull/196))
 - *(run-cap)* Deliver the heads-up to a child inside a long tool call (closes #192) ([#201](https://github.com/cad0p/pi-subagents-tintinweb/pull/201))
 - *(agent-runner)* Stop naming child sessions, leaving /name to the user (closes #195) ([#197](https://github.com/cad0p/pi-subagents-tintinweb/pull/197))
+- *(native-view)* Restore #187, reverted by the #193 squash (closes #203) ([#204](https://github.com/cad0p/pi-subagents-tintinweb/pull/204))
 
 ### 🚜 Refactor
 
