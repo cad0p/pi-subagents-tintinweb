@@ -4,7 +4,7 @@
  * The view is built from three substitutions on the live `InteractiveMode` instance:
  * the transcript container (a child `Container` spliced into `documentContainer` where the host
  * chat container sat), the editor (`setEditorComponent` with pi's `CustomEditor`), and the footer
- * (`ctx.ui.setFooter`). Esc puts the host container back at its saved index; it is re-attached,
+ * (`ctx.ui.setFooter`). A close puts the host container back at its saved index; it is re-attached,
  * never rebuilt, so a host turn that was streaming keeps its components.
  *
  * PR 1 is a snapshot: the transcript is read when the view opens, on the refresh key, on a queued
@@ -74,6 +74,17 @@ const BLOCKED_ACTIONS: readonly AppKeybinding[] = [
   "app.session.fork",
   "app.session.resume",
 ];
+
+/**
+ * The keys that leave a child view: back to the list, then the cursor onto `main`. FleetView's hint
+ * and the view's notices both read this, so the two cannot name different keys.
+ */
+export const TO_MAIN_KEYS = "← then ↑";
+
+/** The notice for something the child view refuses because only the main session can do it. */
+export function mainSessionNotice(what: string, plural: boolean): string {
+  return `${what} ${plural ? "act" : "acts"} on the main session; select main (${TO_MAIN_KEYS}) to use ${plural ? "them" : "it"}`;
+}
 
 export interface EditorLike {
   getText(): string;
@@ -217,8 +228,11 @@ export function capturedInteractiveMode(): InteractiveModeView | undefined {
   return capturedMode;
 }
 
-/** What a close is for. Only Esc does the whole job; reload and quit have pi-owned halves. */
-export type CloseReason = "escape" | "switch" | "reload" | "session" | "quit";
+/**
+ * What a close is for. `restore` (an open that failed) and `session` do the whole job; reload and
+ * quit have pi-owned halves; `switch` is FleetView or `open()` moving to another record.
+ */
+export type CloseReason = "restore" | "switch" | "reload" | "session" | "quit";
 
 interface SavedWrappers {
   showError: InteractiveModeView["showError"];
@@ -287,7 +301,7 @@ export interface NativeViewOptions {
   /**
    * Called once this view is no longer open, whatever ended it — except a `switch`, which is only
    * `open()` closing the record it was replacing. FleetView owns the cursor, so this is how it
-   * learns that the row it points at is no longer the transcript on screen (Esc, or pi's reload).
+   * learns that the row it points at is no longer the transcript on screen (a failed open, or pi's reload).
    */
   onClosed?: () => void;
 }
@@ -499,7 +513,7 @@ export class NativeTranscriptView {
       im.ui.requestRender(true);
     } catch (error) {
       try {
-        this.close("escape");
+        this.close("restore");
       } catch (restoreError) {
         // A restore that throws must not replace the error that caused it. isOpen() already reads
         // the deactivated state, and the next open finishes the same close — but say so, because a
@@ -667,8 +681,8 @@ export class NativeTranscriptView {
     const band = (text: string): void => this.notice(im, state, text);
     // Every method saved here is called on the instance it was saved from, never detached: pi's
     // showStatus reads `this.chatContainer` (and its siblings `this.editor`), so a bare
-    // `state.saved.showStatus(...)` throws before the notice is drawn — which on the Esc path is
-    // before close("escape"), leaving the host transcript behind and the parent unnotified.
+    // `state.saved.showStatus(...)` throws before the notice is drawn — on the Esc path that is the
+    // "Stopped" notice, and the throw escapes into pi's own input handler.
     state.wrappers.showError = (message: string) => {
       state.saved.showError.call(im, message);
       band(`Error: ${message}`);
@@ -828,7 +842,7 @@ export class NativeTranscriptView {
     // pi's copied onChange writes im.isBashMode from the text; a child ! must not flip host state.
     ed.onChange = () => {};
     ed.onSubmit = (text: string) => this.submit(im, state, text);
-    // Esc interrupts the run this view shows, then goes back to `main`.
+    // Esc interrupts the run this view shows, as it does in the main session; it never leaves.
     ed.onEscape = () => this.interrupt(state);
     ed.onCtrlD = () => im.handleCtrlD();
     ed.onExtensionShortcut = (data: string) => {
@@ -851,7 +865,7 @@ export class NativeTranscriptView {
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
     ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
     for (const action of BLOCKED_ACTIONS) {
-      ed.onAction(action, () => this.notice(im, state, action + " acts on the host session; Esc to leave " + state.id));
+      ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false)));
     }
     // The reset runs before our shutdown handler on reload and after it on new/resume; without this
     // wrapper a child draft becomes the host draft on every reload.
@@ -902,19 +916,19 @@ export class NativeTranscriptView {
   }
 
   /**
-   * Esc in a child view: interrupt the run it shows and return to `main`.
+   * Esc in a child view: interrupt the run it shows, and nothing else — the view stays open, so the
+   * user can read how the run ended. Leaving is navigation only (`TO_MAIN_KEYS`).
    *
    * Delivery needs nothing extra. `abort()` stops the run, and its settle reaches the manager's
    * completion callback (index.ts), which runs `sendIndividualNudge` for any other end — the parent
    * gets the same steer turn, with the status note naming the stop. Esc on a record that already
-   * settled (`abort()` is false) is not a no-op either: it still leaves the view.
+   * settled (`abort()` is false) is a no-op, as Esc on an idle main session is.
    */
   private interrupt(state: ViewState): void {
     const record = this.options.manager.getRecord(state.id);
     if (record && this.options.manager.abort(state.id)) {
       this.options.getContext()?.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
     }
-    this.close("escape");
   }
 
   private submit(im: InteractiveModeView, state: ViewState, text: string): void {
@@ -923,7 +937,7 @@ export class NativeTranscriptView {
     if (!trimmed) return;
     if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
       const what = trimmed.startsWith("!") ? "Bash mode" : "Slash commands";
-      this.notice(im, state, what + " act on the host session; Esc to leave " + state.id);
+      this.notice(im, state, mainSessionNotice(what, true));
       return;
     }
     state.editor?.addToHistory?.(trimmed);

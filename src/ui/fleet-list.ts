@@ -9,8 +9,9 @@
  * the view, so landing on an agent row opens that agent's live transcript in place and `main`
  * gives the host transcript back (Enter re-affirms the same choice, and opens the conversation
  * overlay when the native view is unavailable). Esc stays the child editor's — it interrupts the
- * shown run and returns to `main` — and, with no view open, returns to the prompt. A viewer stays
- * open when its agent finishes; finished agents linger briefly in the list.
+ * shown run and never leaves the view; only the cursor on `main` does — and, with no view open,
+ * returns to the prompt. A viewer stays open when its agent finishes; finished agents linger
+ * briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
@@ -39,7 +40,7 @@ import {
   type Theme,
 } from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
-import { noTranscriptMessage } from "./native-view.js";
+import { noTranscriptMessage, TO_MAIN_KEYS } from "./native-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -450,8 +451,8 @@ export class FleetList {
       return { consume: true };
     }
     if (matchesKey(data, "escape")) {
-      // The child view's Esc is the child editor's: it interrupts the shown run and returns to
-      // `main`, so the list must not swallow it.
+      // The child view's Esc is the child editor's: it interrupts the shown run (and stays), so the
+      // list must not swallow it.
       if (viewing) return undefined;
       this.deactivate();
       return { consume: true };
@@ -540,8 +541,8 @@ export class FleetList {
   }
 
   /**
-   * Put the cursor back on `main` because the view closed itself — Esc interrupted the run, or pi
-   * tore the view down for a reload. The list must never point at an agent nobody is showing.
+   * Put the cursor back on `main` because the view closed itself — an open that failed, or pi tore
+   * the view down for a reload or a session change. The list must never point at an agent nobody is showing.
    */
   returnToMain(): void {
     this.viewingAgentId = undefined;
@@ -623,9 +624,10 @@ export class FleetList {
     // (e.g. on terminal resize) never loses the selection marker.
     const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
-    // A child view's Esc interrupts its run (the list no longer swallows it), so the hint says so.
+    // A child view's Esc interrupts its run and stays (the list no longer swallows it); leaving is
+    // the cursor on `main`, with the same keys the view's notices name.
     const hint = this.nativeView?.isOpen() === true
-      ? "↑↓ select · → nested · esc interrupts"
+      ? `↑↓ select · → nested · ${TO_MAIN_KEYS} to main · esc interrupts`
       : this.active
         ? "↑↓ select · → nested · enter view · esc back"
         : "esc to interrupt · ← for agents · ↓ to manage";

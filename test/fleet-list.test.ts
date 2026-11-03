@@ -9,6 +9,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import type { AgentRecord } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-display.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed } from "../src/ui/fleet-list.js";
+import { TO_MAIN_KEYS } from "../src/ui/native-view.js";
 import { paintedScreen } from "./helpers/painted-screen.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
@@ -1155,7 +1156,7 @@ describe("FleetList owns navigation (#178)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true }); // onto the agent row
     expect(view.opened).toEqual(["a1"]);
     expect(h.render().find(l => l.includes("one"))).toContain("⏺");
-    expect(h.render()[0]).toContain("esc interrupts");
+    expect(h.render()[0]).toContain(`${TO_MAIN_KEYS} to main · esc interrupts`);
 
     expect(h.press(UP)).toEqual({ consume: true }); // back onto `main`
     expect(view.closes).toEqual(["switch"]);
@@ -1228,7 +1229,7 @@ describe("FleetList owns navigation (#178)", () => {
     const view = fakeNativeView();
     h.fleet.setNativeView(view);
     h.press(DOWN); h.press(DOWN); h.press(DOWN); // a2
-    view.closeSelf(); // Esc in the child, or pi's own teardown behind the list's back
+    view.closeSelf(); // a failed open, or pi's own teardown behind the list's back
     h.fleet.returnToMain();
     expect(h.render().find(l => l.includes("main"))).toContain("⏺");
     expect(h.render().find(l => l.includes("two"))).toContain("◯");
@@ -1379,7 +1380,8 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     h.render();
     expect(h.press(DOWN)).toBeUndefined();
     expect(h.render().find(l => l.includes("one"))).toContain("⏺");
-    expect(h.render().find(l => l.includes("main"))).toContain("◯");
+    // The row, not the hint: an open view's hint names `main` as the way out.
+    expect(h.render().find(l => l.trimEnd().endsWith(" main"))).toContain("◯");
     expect(view.isOpen()).toBe(true);
   });
 

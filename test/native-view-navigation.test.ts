@@ -23,7 +23,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { captureInteractiveMode } from "../src/ui/native-view.js";
+import { captureInteractiveMode, TO_MAIN_KEYS } from "../src/ui/native-view.js";
 import { agentIdOf, MANAGER_KEY, makePi } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
@@ -32,6 +32,7 @@ setQuietMs(20);
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
+const LEFT = "\x1b[D";
 const ESC = "\x1b";
 
 const flush = async () => {
@@ -364,7 +365,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(h.transcript()).toContain("hang: CHILD hang");
       expect(h.transcript()).not.toContain("HOST TEXT");
       expect(row(h, "nav one")).toContain("⏺");
-      expect(h.painted()[0]).toContain("esc interrupts");
+      expect(h.painted()[0]).toContain(`${TO_MAIN_KEYS} to main · esc interrupts`);
 
       h.press(UP); // back onto `main`
       expect(h.transcript()).toContain("HOST TEXT");
@@ -399,20 +400,26 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
     }
   });
 
-  it("Esc on a settled agent leaves the view and puts the cursor back on `main`", async () => {
+  it("Esc on a settled agent stays in its view; ← then ↑ is the way back to `main`", async () => {
     mockRuns();
     const h = await harness();
     try {
       const id = await h.spawn("finished job", "settled");
-      // The run has to be over before Esc means "leave" rather than "stop".
+      // The run has to be over, so Esc has nothing to stop.
       await vi.waitFor(() => expect(record(id).status).toBe("completed"));
       h.press(DOWN); h.press(DOWN); // open the settled record's view
       expect(h.transcript()).not.toContain("HOST TEXT");
 
       expect(h.type(ESC)).toBeUndefined(); // the fleet passes it: the child editor's Esc, abort() is false
+      // A no-op, as Esc on an idle main session: the transcript stays up to be read.
+      expect(h.transcript()).not.toContain("HOST TEXT");
+      expect(row(h, "finished job")).toContain("⏺");
+      expect(h.notifications).toEqual([]); // nothing to stop, so nothing to say
+
+      // The keys the hint names are the way out.
+      h.press(LEFT); h.press(UP);
       expect(h.transcript()).toContain("HOST TEXT");
       expect(row(h, "main")).toContain("⏺");
-      expect(h.notifications).toEqual([]); // nothing to stop, so nothing to say
     } finally {
       await h.shutdown();
     }
@@ -429,10 +436,11 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
 
       expect(h.type(ESC)).toBeUndefined(); // routed past the fleet, into the child editor
 
-      // The list returns to the host transcript, and the stop is announced to the human.
-      expect(h.transcript()).toContain("HOST TEXT");
-      expect(row(h, "main")).toContain("⏺");
+      // The stop is announced to the human, and the view stays on the run it stopped.
       expect(h.notifications).toEqual(['Stopped "esc one".']);
+      expect(h.transcript()).toContain("CHILD hang");
+      expect(h.transcript()).not.toContain("HOST TEXT");
+      expect(row(h, "esc one")).toContain("⏺");
 
       // The parent is told exactly as it is for any other end: the same custom message, the same
       // steer delivery, with the status note naming the stop.

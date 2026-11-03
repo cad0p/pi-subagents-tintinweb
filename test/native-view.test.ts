@@ -425,7 +425,7 @@ describe("native transcript view", () => {
     expect(h.im.session).toBe(h.hostSession);
     expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
 
-    h.view.close("escape");
+    h.view.close("restore");
     expect(h.im.session).toBe(h.hostSession);
     expect(h.im.sessionManager).toBe(h.hostSession.sessionManager);
   });
@@ -536,7 +536,7 @@ describe("native transcript view", () => {
 
     h.openChild();
     expect(h.documentContainer.children).not.toContain(h.hostContainer);
-    h.view.close("escape");
+    h.view.close("restore");
 
     expect(h.im.chatContainer).toBe(h.hostContainer);
     expect(h.hostContainer.children.includes(h.im.streamingComponent)).toBe(true);
@@ -552,11 +552,11 @@ describe("native transcript view", () => {
     h.documentContainer.removeChild(child);
     h.documentContainer.addChild(new Text("SENTINEL"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(() => h.view.close("escape")).not.toThrow();
+    expect(() => h.view.close("restore")).not.toThrow();
     expect(h.documentContainer.children.filter(c => c === h.hostContainer)).toHaveLength(1);
     expect(h.documentContainer.children.at(-1)).toBe(h.hostContainer);
     expect(warn).toHaveBeenCalled();
-    expect(() => h.view.close("escape")).not.toThrow();
+    expect(() => h.view.close("restore")).not.toThrow();
     expect(h.documentContainer.children.filter(c => c === h.hostContainer)).toHaveLength(1);
     warn.mockRestore();
   });
@@ -648,7 +648,9 @@ describe("native transcript view", () => {
     expect(h.im.editor.history).toContain("CHILD TEXT");
 
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the host session");
+    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; select main (← then ↑) to use it");
+    h.im.editor.onSubmit?.("/model");
+    expect(h.documentContainer.render(120).join("\n")).toContain("Slash commands act on the main session; select main (← then ↑) to use them");
     expect((h.im.defaultEditor as any).actionHandlers.get("app.session.new")).not.toHaveBeenCalled();
     // An action pi may add later is not inherited either: the map starts empty.
     expect(h.im.editor.actionHandlers.has("app.future.action")).toBe(false);
@@ -657,7 +659,7 @@ describe("native transcript view", () => {
     expect(h.im.editor.onExtensionShortcut?.("\x12")).toBe(true);
     expect(h.renderSpy.mock.calls.length).toBeGreaterThan(before);
 
-    h.view.close("escape");
+    h.view.close("restore");
     expect(h.hostDraft.getText()).toBe("half typed");
     expect(h.im.editor).toBe(h.im.defaultEditor);
   });
@@ -764,7 +766,7 @@ describe("native transcript view", () => {
     });
     expect(h.im.ui.requestRender).toHaveBeenCalled();
 
-    h.view.close("escape");
+    h.view.close("restore");
     expect(child.listenerCount()).toBe(0);
     vi.mocked(h.im.ui.requestRender).mockClear();
     child.emit({ type: "entry_appended", entry: { type: "model_change", provider: "openai", modelId: "next-model" } });
@@ -857,34 +859,39 @@ describe("native transcript view", () => {
     expect(h.documentContainer.render(200).join("\n")).toContain("SUMMARISED BRANCH");
   });
 
-  it("Esc interrupts the run it shows, says so, and leaves the view", () => {
+  it("Esc aborts a running run, says so, and stays in the view", () => {
     const h = harness();
     h.openChild();
+    const editor = h.im.editor;
     h.im.editor.onEscape?.();
     expect(h.manager.abort).toHaveBeenCalledWith("child-1");
     expect(h.ctx.ui.notify).toHaveBeenCalledWith('Stopped "one".', "info");
-    expect(h.view.isOpen()).toBe(false);
-    expect(h.im.editor).toBe(h.im.defaultEditor);
-    // The host transcript is back in pi's slot, not left detached behind a closed view.
-    expect(h.documentContainer.children).toEqual([h.hostContainer, expect.anything()]);
+    // Esc as in the main session: it interrupts, it never navigates away.
+    expect(h.view.isOpen()).toBe(true);
+    expect(h.onClosed).not.toHaveBeenCalled();
+    expect(h.im.editor).toBe(editor);
+    expect(h.documentContainer.children).not.toContain(h.hostContainer);
   });
 
-  it("Esc on a record that already settled still leaves the view, without a notice", () => {
+  it("Esc on a record that already settled is a no-op: the view stays open to read", () => {
     const h = harness({ abortResult: false });
     h.openChild();
     h.record.status = "completed";
+    const editor = h.im.editor;
     h.im.editor.onEscape?.();
-    // Never a no-op: the stop is refused (there is nothing to stop), and the view still closes.
-    expect(h.manager.abort).toHaveBeenCalledWith("child-1");
+    // There is nothing to stop, so nothing is said and nothing moves.
     expect(h.ctx.ui.notify).not.toHaveBeenCalled();
-    expect(h.view.isOpen()).toBe(false);
+    expect(h.view.isOpen()).toBe(true);
+    expect(h.onClosed).not.toHaveBeenCalled();
+    expect(h.im.editor).toBe(editor);
+    expect(h.documentContainer.render(120).join("\n")).toContain("CHILD TEXT");
   });
 
   it("calls the host methods it saved on the instance, never detached", () => {
     const h = harness();
     // pi's methods read `this` — showStatus its chat container, resetExtensionUI its editor — so a
     // saved reference called detached throws instead of doing its job. Esc depends on this: the
-    // stop's notice goes through showStatus before the view closes.
+    // stop's notice goes through showStatus.
     const seen: string[] = [];
     for (const name of ["showError", "showWarning", "showStatus", "showExtensionError"] as const) {
       (h.im as any)[name] = function (this: any, ...args: unknown[]) { this.seen.push(`${name}:${String(args[0])}`); };
@@ -935,7 +942,7 @@ describe("native transcript view", () => {
     // open() closes the record it was showing to take the next one: that is the caller's own doing.
     expect(h.view.open("child-1")).toBe("opened");
     expect(h.onClosed).not.toHaveBeenCalled();
-    h.view.close("escape");
+    h.view.close("restore");
     expect(h.onClosed).toHaveBeenCalledTimes(1);
   });
 
@@ -943,7 +950,7 @@ describe("native transcript view", () => {
     const h = harness();
     h.openChild();
     h.setFooter.mockImplementationOnce(() => { throw new Error("footer boom"); });
-    expect(() => h.view.close("escape")).toThrow("footer boom");
+    expect(() => h.view.close("restore")).toThrow("footer boom");
     expect(h.onClosed).toHaveBeenCalledTimes(1);
   });
 
@@ -978,7 +985,7 @@ describe("native transcript view", () => {
     await Promise.resolve();
     expect(h.im.dialogs.length).toBe(1);
     expect(resolved).toBe("pending");
-    h.view.close("escape");
+    h.view.close("restore");
     await Promise.resolve();
     expect(resolved).toBeUndefined();
   });
@@ -1182,7 +1189,7 @@ describe("native transcript view", () => {
     h.openChild();
     // pi's own dialog stack or footer install failing mid-restore must not leave the view "open".
     h.setFooter.mockImplementationOnce(() => { throw new Error("footer boom"); });
-    expect(() => h.view.close("escape")).toThrow("footer boom");
+    expect(() => h.view.close("restore")).toThrow("footer boom");
     expect(h.view.isOpen()).toBe(false);
     // The state survives the throw, so shownId() must not read it: FleetView pins what a refusal
     // leaves painted, and pinning a closed view's id would keep a row nothing paints alive.
