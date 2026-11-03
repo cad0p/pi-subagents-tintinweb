@@ -1579,9 +1579,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   guardInitVoid("shutdown-notice-renderer", () => {
-    // Registered at factory time so a reopened session draws the notice with its first paint, before
-    // any turn: a `nextTurn` message would wait for a user message that may never come. Defensive in
-    // the same way as the init-error renderer: a stored entry outlives the code that wrote it.
+    // Draws the dim notice an older release stored as this entry; this release's marker draws nothing, its notice
+    // went out as a visible message. Registered at factory time so a reopened session draws a stored one with its
+    // first paint. Defensive in the same way as the init-error renderer: a stored entry outlives the code that wrote it.
     const renderer: EntryRenderer = (entry, _options, theme) => {
       try {
         const data = entry && typeof entry === "object" && "data" in entry ? entry.data : entry;
