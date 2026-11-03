@@ -31,7 +31,7 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
+import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, ownEntries, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -308,7 +308,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
     : "";
   const errorPreview = headerPreview(errorText);
   if (errorPreview) header += ` — ${errorPreview}`;
-  header += getStatusNote(record.status, record.limitReason, record.capMinutes, record.timeLimit);
+  header += getStatusNote(record);
   if (stats.length > 0) header += ` · ${stats.join(" · ")}`;
 
   const metadata = [`Agent: ${sanitizeHeaderText(String(record.id))}`];
@@ -438,7 +438,7 @@ export default function (pi: ExtensionAPI) {
     records: Map<string, AgentRecord>;
     /** Records recovered after a crash, with the decision that sets whether the batch takes a turn. */
     crash: Map<string, CrashRecoveryDecision>;
-    /** Runs the quit stopped while queued: no record and no transcript, so the batch names them for a new Agent call. */
+    /** Runs the quit stopped before their spawn entry: no record and no transcript, so the batch names them for a new Agent call. */
     unstarted?: { stops: ShutdownStop[]; decision: CrashRecoveryDecision };
     timer?: ReturnType<typeof setTimeout>;
     parked: boolean;
@@ -545,7 +545,7 @@ export default function (pi: ExtensionAPI) {
 
   /**
    * The dim notice an older release's stored marker draws: the runs a shutdown stopped that cannot be resumed. This
-   * release writes no such notice; it names a run stopped before it started in its nudge batch instead.
+   * release writes no such notice; it names a run stopped before its spawn entry in its nudge batch instead.
    */
   function formatShutdownNotice(stops: readonly ShutdownStop[]): string {
     const one = stops.length === 1;
@@ -578,8 +578,9 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * The section for runs the quit stopped before they started. None has a transcript, and the ledger kept no prompt:
-   * the main agent starts each again from the Agent call in its own context, unless the policy holds it for the user.
+   * The section for runs the quit stopped before they wrote a spawn entry: queued, or still creating their session
+   * file. None has a transcript, and the ledger kept no prompt: the main agent starts each again from the Agent call
+   * in its own context, unless the policy holds it for the user.
    */
   function formatUnstartedNotice({ stops, decision }: NonNullable<NudgeBatch["unstarted"]>): string {
     const one = stops.length === 1;
@@ -589,7 +590,7 @@ export default function (pi: ExtensionAPI) {
     }).join(", ");
     const again = `with a new Agent call of the same subagent_type and prompt`;
     return [
-      `${stops.length} ${one ? "subagent" : "subagents"} never started: pi shut down while ${one ? "it was" : "they were"} queued: ${names}`,
+      `${stops.length} ${one ? "subagent was" : "subagents were"} stopped when pi shut down, before ${one ? "its transcript was" : "their transcripts were"} saved: ${names}`,
       `${one ? "It has" : "They have"} no transcript, so SendMessage cannot resume ${one ? "it" : "them"}.`,
       decision.triggerTurn
         ? `If the work is still needed, start ${one ? "it" : "each"} again now ${again}, without asking the user.`
@@ -606,8 +607,8 @@ export default function (pi: ExtensionAPI) {
     const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
     const { unstarted } = batch;
     if (records.length === 0 && !unstarted) return;
-    // A crash-recovered record carries its own notice, and so do the runs that never started. The batch takes a turn
-    // if it carries a normal completion, or if every recovered record and the never-started runs allow one.
+    // A crash-recovered record carries its own notice, and so do the runs with no transcript. The batch takes a turn
+    // if it carries a normal completion, or if every recovered record and the runs with no transcript allow one.
     const interrupted = records.filter((record) => batch.crash.has(record.id));
     const completed = records.filter((record) => !batch.crash.has(record.id));
     const triggerTurn = completed.length > 0 || (interrupted.every((record) => batch.crash.get(record.id)?.triggerTurn) && (unstarted?.decision.triggerTurn ?? true));
@@ -618,11 +619,14 @@ export default function (pi: ExtensionAPI) {
     ];
 
     try {
+      // A held batch takes no turn but must still be drawn and saved: with no `deliverAs`, pi appends it to the
+      // session at once when idle, or at the end of the current turn. `nextTurn` would keep it in memory until a
+      // user message, and a quit before one would lose it while the settles and the marker below say it went out.
       pi.sendMessage({
         customType: "subagent-notification",
         content: sections.join("\n\n"),
         display: true,
-      }, triggerTurn ? { deliverAs: "steer", triggerTurn: true } : { deliverAs: "nextTurn", triggerTurn: false });
+      }, triggerTurn ? { deliverAs: "steer", triggerTurn: true } : { triggerTurn: false });
     } catch (err) {
       // Nudge release paths swallow throws; surface the drop with the agent ids.
       console.warn(`[pi-subagents] failed to send completion notification for ${records.map((record) => record.id).join(", ")}: ${err instanceof Error ? err.message : String(err)}`);
@@ -631,8 +635,8 @@ export default function (pi: ExtensionAPI) {
       // pi-subagents background-work provider must not list the records forever.
       for (const record of records) record.resultDelivered = true;
       for (const record of interrupted) manager.ledgerSettle(record);
-      // The exactly-once record for the never-started runs: `shutdownStops` skips the ids it names. `visible` tells the
-      // entry renderer this message already drew the notice.
+      // The exactly-once record for the runs with no transcript: `shutdownStops` skips the ids it names. `visible` tells the
+      // entry renderer this message already drew the notice; an idle pi appended it during the send, before this entry.
       if (unstarted) pi.appendEntry(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: unstarted.stops.map((stop) => stop.id), visible: true });
     }
   }
@@ -1331,10 +1335,11 @@ export default function (pi: ExtensionAPI) {
       now: Date.now(),
     };
     const spawnerSessionId = sessionKey(ctx.sessionManager);
-    const entries = ctx.sessionManager.getEntries();
+    // A fork's copied ledger is its source session's: only the source recovers those runs.
+    const entries = ownEntries(ctx.sessionManager.getHeader(), ctx.sessionManager.getEntries());
     const crashed = replayLedger(entries, options);
     for (const record of crashed) record.spawnerSessionId = spawnerSessionId;
-    // A run the quit stopped before it started has no transcript, so replayLedger cannot recover it: the batch names it.
+    // A run the quit stopped before its spawn entry has no transcript, so replayLedger cannot recover it: the batch names it.
     const stops = shutdownStops(entries);
     const adopted = manager.adoptInterrupted(crashed, pi);
     if (adopted.length === 0 && stops.length === 0) return;

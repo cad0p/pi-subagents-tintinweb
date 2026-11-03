@@ -6,7 +6,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { type SessionEntry, type SessionHeader, SessionManager } from "@earendil-works/pi-coding-agent";
 import { type OwnerHost, type OwnerStamp, ownerAlive } from "./owner-identity.js";
 import type { AgentRecord, ThinkingLevel } from "./types.js";
 
@@ -101,7 +101,7 @@ interface SettleLedgerEntry {
   shutdown?: boolean;
 }
 
-/** A run a shutdown stopped before it ever started (queued at the quit): it has no transcript to resume from. */
+/** A run a shutdown stopped before its spawn entry (queued, or still creating its session file): no transcript to resume from. */
 export interface ShutdownStop {
   id: string;
   type?: string;
@@ -178,8 +178,21 @@ function readNoticeIds(data: unknown): string[] {
 }
 
 /**
- * The runs a shutdown stopped before they ever started, that no notice has named yet. A run that started has a
- * spawn entry and a transcript, and `replayLedger` recovers it; one stopped while queued has neither, so this scan
+ * The entries a session wrote itself, without those a fork copied from its source. `/fork` and `pi --fork` copy the
+ * source's entries with their timestamps under a new header that names the source as `parentSession`, so a copied
+ * entry is no newer than that header. The runs a copied ledger entry names belong to the source session, which
+ * recovers them on its own reopen: the fork must not recover them too, or two parents resume one child transcript.
+ */
+export function ownEntries(header: SessionHeader | null, entries: readonly SessionEntry[]): readonly SessionEntry[] {
+  if (!header?.parentSession) return entries;
+  const forkedAt = Date.parse(header.timestamp);
+  if (Number.isNaN(forkedAt)) return entries;
+  return entries.filter((entry) => !(Date.parse(entry.timestamp) <= forkedAt));
+}
+
+/**
+ * The runs a shutdown stopped before their spawn entry, that no notice has named yet. A run with a spawn entry has
+ * a transcript, and `replayLedger` recovers it; one stopped while queued or still starting has neither, so this scan
  * is the only record that the id is unaddressable. A later notice has already told the model.
  */
 export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] {
@@ -240,7 +253,7 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
       const run = open.get(settle.id);
       open.delete(settle.id);
       const recoveredStop = stopped.delete(settle.id) && settle.status === "interrupted";
-      // A run with no spawn entry never started, so it has no transcript: `shutdownStops` names it instead.
+      // A run with no spawn entry has no transcript: `shutdownStops` names it instead.
       if (settle.shutdown === true && run) {
         open.set(settle.id, { ...run, shutdown: true });
         stopped.add(settle.id);

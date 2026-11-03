@@ -124,7 +124,7 @@ describe("shutdown-stop notice rendering", () => {
     await vi.waitFor(() => expect(pi.sendMessage).toHaveBeenCalledTimes(1));
     expect(pi.sendMessage.mock.calls[0][1]).toEqual({ deliverAs: "steer", triggerTurn: true });
     const text = visibleText(pi, session, renderer);
-    expect(text).toContain("1 subagent never started: pi shut down while it was queued: child-1 (general-purpose: review auth.ts)");
+    expect(text).toContain("1 subagent was stopped when pi shut down, before its transcript was saved: child-1 (general-purpose: review auth.ts)");
     // One copy: the marker it wrote draws nothing beside the message.
     expect(noticeEntries(session)).toHaveLength(1);
     expect(countNotices(text)).toBe(1);
