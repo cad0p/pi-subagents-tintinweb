@@ -466,8 +466,9 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
 
       expect(h.type(ESC)).toBeUndefined(); // routed past the fleet, into the child editor
 
-      // The stop is announced to the human, and the view stays on the run it stopped.
-      expect(h.notifications).toEqual(['Stopped "esc one".']);
+      // No message of ours: pi renders the abort in the child transcript. The view stays on the run
+      // it stopped, and the stop itself is proved by the parent's notification below.
+      expect(h.notifications).toEqual([]);
       expect(h.transcript()).toContain("CHILD hang");
       expect(h.transcript()).not.toContain("HOST TEXT");
       expect(row(h, "esc one")).toContain("⏺");

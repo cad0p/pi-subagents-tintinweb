@@ -682,8 +682,8 @@ export class NativeTranscriptView {
     const band = (text: string): void => this.notice(im, state, text);
     // Every method saved here is called on the instance it was saved from, never detached: pi's
     // showStatus reads `this.chatContainer` (and its siblings `this.editor`), so a bare
-    // `state.saved.showStatus(...)` throws before the notice is drawn — on the Esc path that is the
-    // "Stopped" notice, and the throw escapes into pi's own input handler.
+    // `state.saved.showStatus(...)` throws before the notice is drawn, and on a key path the throw
+    // escapes into pi's own input handler.
     state.wrappers.showError = (message: string) => {
       state.saved.showError.call(im, message);
       band(`Error: ${message}`);
@@ -920,16 +920,15 @@ export class NativeTranscriptView {
    * Esc in a child view: interrupt the run it shows, and nothing else — the view stays open, so the
    * user can read how the run ended. Leaving is navigation only (`TO_MAIN_KEYS`).
    *
-   * Delivery needs nothing extra. `abort()` stops the run, and its settle reaches the manager's
-   * completion callback (index.ts), which runs `sendIndividualNudge` for any other end — the parent
-   * gets the same steer turn, with the status note naming the stop. Esc on a record that already
-   * settled (`abort()` is false) is a no-op, as Esc on an idle main session is.
+   * Nothing is announced here: pi renders the abort in the transcript this view shows, as it does in
+   * the main session — an aborted assistant message reads "Operation aborted" and an aborted tool
+   * call carries the tool's own error ("Command aborted" for bash). Delivery needs nothing extra
+   * either: the settle reaches the manager's completion callback (index.ts), which runs
+   * `sendIndividualNudge` as for any other end. Esc on a record that already settled is a no-op,
+   * as Esc on an idle main session is.
    */
   private interrupt(state: ViewState): void {
-    const record = this.options.manager.getRecord(state.id);
-    if (record && this.options.manager.abort(state.id)) {
-      this.options.getContext()?.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
-    }
+    this.options.manager.abort(state.id);
   }
 
   private submit(im: InteractiveModeView, state: ViewState, text: string): void {

@@ -859,13 +859,14 @@ describe("native transcript view", () => {
     expect(h.documentContainer.render(200).join("\n")).toContain("SUMMARISED BRANCH");
   });
 
-  it("Esc aborts a running run, says so, and stays in the view", () => {
+  it("Esc aborts a running run, adds no message of its own, and stays in the view", () => {
     const h = harness();
     h.openChild();
     const editor = h.im.editor;
     h.im.editor.onEscape?.();
     expect(h.manager.abort).toHaveBeenCalledWith("child-1");
-    expect(h.ctx.ui.notify).toHaveBeenCalledWith('Stopped "one".', "info");
+    // pi renders the abort in the child transcript itself ("Operation aborted", "Command aborted").
+    expect(h.ctx.ui.notify).not.toHaveBeenCalled();
     // Esc as in the main session: it interrupts, it never navigates away.
     expect(h.view.isOpen()).toBe(true);
     expect(h.onClosed).not.toHaveBeenCalled();
