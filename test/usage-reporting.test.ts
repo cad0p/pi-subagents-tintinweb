@@ -25,7 +25,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
-import { runAgent, type UsageSource } from "../src/agent-runner.js";
+import { runAgent, type UsageSource, type UsageSpend } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
@@ -356,8 +356,14 @@ describe("reporting subagent usage back to the parent session", () => {
     it("labels each source and omits the model a spend does not name (#218)", async () => {
       // A ledger buckets by source and model. A compaction's usage names no model (pi's own breakdown puts summaries
       // in a model-less bucket) and a warm request carries no thinking level, so a name there would be a guess.
+      //
+      // The record is given a model of its own on purpose: it is what a fallback to `record.invocation` would report,
+      // and it must not appear on either event — neither where the spend names a different model (cacheWarm) nor
+      // where it names none (compaction).
       const { pi, tools } = boot({});
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        const record = options.agentId === undefined ? undefined : managerHandle().getRecord(options.agentId);
+        if (record) record.invocation = { modelId: "other/model", thinking: "high" };
         options.onUsage?.({ usage: { input: 0, output: 0, cacheWrite: 0, cost: 0.03 }, source: "compaction" });
         options.onUsage?.({ usage: { input: 0, output: 0, cacheWrite: 1200, cost: 0.004 }, source: "cacheWarm", modelId: "anthropic/claude-x" });
         return { responseText: "done", session: fakeSession(), aborted: false, steered: false };

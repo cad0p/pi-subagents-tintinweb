@@ -886,6 +886,19 @@ describe("agent-runner usage callback wiring", () => {
     expect(seen).toEqual([]);
   });
 
+  it("reports nothing, and does not throw, for a compaction that failed without result (#218)", async () => {
+    // pi emits this shape for a manual compaction that failed for a reason other than an abort (1.5.0 agent-session.js
+    // :2354, overflow :2467): `aborted: false` with no result. Reading `event.result` without the gate throws inside
+    // pi's own `_emit`, so a thrown listener is the failure this pins — not just a missing report.
+    const compactions: unknown[] = [];
+    const seen = await spendsFrom([{ type: "compaction_end", aborted: false, reason: "manual", result: undefined }], {
+      onCompaction: (info: unknown) => compactions.push(info),
+    });
+
+    expect(seen).toEqual([]);
+    expect(compactions).toEqual([]);
+  });
+
   it("reports a cache-warm usage entry with the model that spent it (#218)", async () => {
     // The cache warmer is on by default and appends a usage entry once a run outlives the prompt-cache TTL; the entry
     // is the only place its model is named, and it is not a message, so no other branch can see it.

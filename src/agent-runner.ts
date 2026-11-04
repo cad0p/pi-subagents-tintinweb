@@ -519,8 +519,9 @@ export interface RunOptions {
    * Called once per persisted object that spent anything: an assistant message,
    * a toolResult message carrying `usage`, a compaction, a cache-warm `usage`
    * entry. `source` names which. Lets callers maintain a lifetime accumulator
-   * that survives compaction (which replaces session.state.messages and resets
-   * stats-derived sums).
+   * without re-deriving it from the session: a sum over `session.messages`
+   * resets at compaction (pi replaces that array), so the accumulator is fed
+   * here, per persisted object, and never recomputed.
    *
    * `cost` is pi's own `usage.cost.total` for that object — priced from the
    * model's rates, so it is 0 (not missing) for a model pi has no pricing for.

@@ -1892,6 +1892,10 @@ describe("subagents across a real /reload (faux provider)", () => {
 
       expect(reported).toHaveLength(1);
       expect(reported[0]).toMatchObject({ id: "legacy-run", usage: { cost: { total: 0.01 } } });
+      // Absent, not present-and-undefined: the whole key set is pinned, so an emitted `source: undefined` fails here
+      // as surely as a wrong value would. A ledger that reads "no source key" means unknown; a key holding undefined
+      // is the same statement only by accident of the reader.
+      expect(Object.keys(reported[0]).sort()).toEqual(["depth", "description", "id", "type", "usage"]);
       expect(reported[0]).not.toHaveProperty("source");
       expect(reported[0]).not.toHaveProperty("model");
       expect(reported[0]).not.toHaveProperty("thinking");
