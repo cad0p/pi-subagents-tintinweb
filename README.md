@@ -532,7 +532,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:usage` | Every usage source of every agent, nested included: assistant messages, tool-result usage (codemode, `ctx.executeTool()`), compaction summaries, prompt-cache warming. Not gated by `reportUsage` | `id`, `type`, `description`, `depth`, `usage` (a pi `Usage`), `source` (`"assistant"` / `"toolResult"` / `"compaction"` / `"cacheWarm"`), `model`, `thinking`, `requestedThinking`, `parentAgentId` |
-| `subagents:disposed` | Root session shut down; no further `subagents:usage` can arrive | `reason` |
+| `subagents:disposed` | Root session shut down; no further `subagents:usage` comes from that session. On `reason: "reload"` (and `resume`, `new`, `fork`) the process lives on: a run still draining moves to the next activation and keeps emitting on the same bus | `reason` |
 | `subagents:debug` | Cap diagnostics, only with `PI_SUBAGENTS_DEBUG` set | `{ kind: "headsUp" \| "interrupt" \| "hardStop" \| "settle", … }` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
