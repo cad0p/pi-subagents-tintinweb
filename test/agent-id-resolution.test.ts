@@ -213,7 +213,8 @@ describe("nested SendMessage", () => {
     const result = await tool.execute("tc", { to: A_ID.slice(0, 8), message: "go on" }, undefined, undefined, nestedCtx() as never);
 
     expect(result.isError).toBe(false);
-    expect(manager.deliver).toHaveBeenCalledWith(A_ID, "go on", expect.anything());
+    // No usage callback: the manager reads its own records' sessions and folds each delta itself.
+    expect(manager.deliver).toHaveBeenCalledWith(A_ID, "go on");
   });
 });
 
