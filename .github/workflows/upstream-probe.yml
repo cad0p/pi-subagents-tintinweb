@@ -63,12 +63,38 @@ jobs:
             # the graph (vitest.config.ts); minimum-release-age=0 skips pnpm's quarantine so a release
             # from an hour ago — the one this probe exists to test — is installable.
             pnpm add --config.minimum-release-age=0 @earendil-works/pi-coding-agent@${{ steps.pi.outputs.version }} @earendil-works/pi-ai@${{ steps.pi.outputs.version }} @earendil-works/pi-tui@${{ steps.pi.outputs.version }}
-            # Count physical copies reachable through the root/nested package links. The raw .pnpm
-            # virtual store can retain unreferenced package directories after `pnpm add`; those are
-            # not active copies. Prune only that raw store while following links from installed packages.
-            # readlink -f collapses symlink aliases; this still catches duplicate physical copies in the graph.
-            copies=$(find -L node_modules -path 'node_modules/.pnpm' -prune -o -maxdepth 8 -type f -path '*/@earendil-works/pi-ai/package.json' -exec readlink -f {} + 2>/dev/null | sort -u | wc -l)
-            if [ "$copies" != 1 ]; then echo "expected one physical pi-ai copy, found $copies" >&2; exit 1; fi
+            # One pi-ai per peer combination: two versions, or the same version resolved twice, both
+            # split the graph. Count the distinct paths pnpm actually resolved for the package. A walk
+            # over node_modules cannot answer this: every dependency is a sibling under .pnpm, so the
+            # walk sees only the root link (always 1), while the raw store also keeps directories the
+            # graph no longer references. A count that fails to parse or resolves nothing is an error.
+            if ! copies=$(pnpm why --json @earendil-works/pi-ai | node -e '
+              let raw = "";
+              process.stdin.on("data", (chunk) => (raw += chunk));
+              process.stdin.on("end", () => {
+                let entries;
+                try {
+                  entries = JSON.parse(raw);
+                } catch (error) {
+                  console.error("pnpm why --json did not return JSON: " + error.message);
+                  process.exit(1);
+                }
+                if (!Array.isArray(entries) || entries.length === 0) {
+                  console.error("pnpm why --json resolved no @earendil-works/pi-ai");
+                  process.exit(1);
+                }
+                const paths = entries.map((entry) => entry.path);
+                if (!paths.every((path) => typeof path === "string" && path.length > 0)) {
+                  console.error("pnpm why --json returned an entry without a path");
+                  process.exit(1);
+                }
+                console.log(new Set(paths).size);
+              });
+            '); then
+              echo "could not count the resolved @earendil-works/pi-ai copies" >&2
+              exit 1
+            fi
+            if [ "$copies" != 1 ]; then echo "expected one resolved pi-ai copy, found $copies" >&2; exit 1; fi
           } 2>&1 | tee .probe/install.log
       # shell: bash is bash -eo pipefail on GitHub, but the pipefail is stated here because the tee is
       # the point: without it a failing pnpm run would be masked by tee's exit status.
