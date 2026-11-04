@@ -23,7 +23,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { captureInteractiveMode } from "../src/ui/native-view.js";
+import { captureInteractiveMode, TO_MAIN_KEYS } from "../src/ui/native-view.js";
 import { agentIdOf, MANAGER_KEY, makePi } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
@@ -32,6 +32,7 @@ setQuietMs(20);
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
+const LEFT = "\x1b[D";
 const ESC = "\x1b";
 
 const flush = async () => {
@@ -219,7 +220,7 @@ async function harness(): Promise<Harness> {
     isShuttingDown: false,
     // pi's four notice methods read `this` (showStatus draws into this.chatContainer), so the saved
     // copies must be called on the instance: a detached call throws, which on the Esc path would
-    // abort before the view closes. `hostStatuses` is the human-facing log the tests assert on.
+    // abort before the stop notice is shown. `hostStatuses` is the human-facing log the tests assert on.
     hostStatuses: notifications,
     showError(this: any, message: string) { this.hostStatuses.push(message); },
     showWarning(this: any, message: string) { this.hostStatuses.push(message); },
@@ -324,6 +325,11 @@ function record(id: string): any {
   return (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
 }
 
+/** The `main` row; the open view's hint also names `main`, so match the row's ending. */
+function mainRow(h: Harness): string {
+  return h.painted().find((line) => line.trimEnd().endsWith(" main")) ?? "";
+}
+
 /** The row carrying `text` in the painted list. */
 function row(h: Harness, text: string): string {
   return h.painted().find((line) => line.includes(text)) ?? "";
@@ -364,7 +370,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(h.transcript()).toContain("hang: CHILD hang");
       expect(h.transcript()).not.toContain("HOST TEXT");
       expect(row(h, "nav one")).toContain("⏺");
-      expect(h.painted()[0]).toContain("esc interrupts");
+      expect(h.painted()[0]).toContain(`${TO_MAIN_KEYS} back to main · esc interrupts`);
 
       h.press(UP); // back onto `main`
       expect(h.transcript()).toContain("HOST TEXT");
@@ -399,20 +405,51 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
     }
   });
 
-  it("Esc on a settled agent leaves the view and puts the cursor back on `main`", async () => {
+  it("Esc on a settled agent stays in its view; ← is the way back to `main`", async () => {
     mockRuns();
     const h = await harness();
     try {
       const id = await h.spawn("finished job", "settled");
-      // The run has to be over before Esc means "leave" rather than "stop".
+      // The run has to be over, so Esc has nothing to stop.
       await vi.waitFor(() => expect(record(id).status).toBe("completed"));
       h.press(DOWN); h.press(DOWN); // open the settled record's view
       expect(h.transcript()).not.toContain("HOST TEXT");
 
       expect(h.type(ESC)).toBeUndefined(); // the fleet passes it: the child editor's Esc, abort() is false
-      expect(h.transcript()).toContain("HOST TEXT");
-      expect(row(h, "main")).toContain("⏺");
+      // A no-op, as Esc on an idle main session: the transcript stays up to be read.
+      expect(h.transcript()).not.toContain("HOST TEXT");
+      expect(row(h, "finished job")).toContain("⏺");
       expect(h.notifications).toEqual([]); // nothing to stop, so nothing to say
+
+      // The key the hint names is the way out.
+      h.press(LEFT);
+      expect(h.transcript()).toContain("HOST TEXT");
+      expect(mainRow(h)).toContain("⏺");
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("← from the second agent's view lands on `main`, not the agent above it", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("first job", "one");
+      await flush();
+      await h.spawn("second job", "two");
+      await flush();
+      h.press(DOWN); h.press(DOWN); h.press(DOWN); // second job
+      expect(h.transcript()).toContain("two: CHILD two");
+
+      expect(h.press(LEFT)).toEqual({ consume: true });
+      expect(h.transcript()).toContain("HOST TEXT");
+      expect(h.transcript()).not.toContain("CHILD one");
+      expect(mainRow(h)).toContain("⏺");
+      expect(row(h, "first job")).toContain("◯");
+
+      expect(h.press(LEFT)).toEqual({ consume: true }); // on `main`: nowhere further to go
+      expect(h.transcript()).toContain("HOST TEXT");
+      expect(mainRow(h)).toContain("⏺");
     } finally {
       await h.shutdown();
     }
@@ -429,10 +466,12 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
 
       expect(h.type(ESC)).toBeUndefined(); // routed past the fleet, into the child editor
 
-      // The list returns to the host transcript, and the stop is announced to the human.
-      expect(h.transcript()).toContain("HOST TEXT");
-      expect(row(h, "main")).toContain("⏺");
-      expect(h.notifications).toEqual(['Stopped "esc one".']);
+      // No message of ours: pi renders the abort in the child transcript. The view stays on the run
+      // it stopped, and the stop itself is proved by the parent's notification below.
+      expect(h.notifications).toEqual([]);
+      expect(h.transcript()).toContain("CHILD hang");
+      expect(h.transcript()).not.toContain("HOST TEXT");
+      expect(row(h, "esc one")).toContain("⏺");
 
       // The parent is told exactly as it is for any other end: the same custom message, the same
       // steer delivery, with the status note naming the stop.
