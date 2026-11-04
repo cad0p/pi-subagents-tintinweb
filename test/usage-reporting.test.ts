@@ -53,7 +53,7 @@ function fakeSession(dispose: () => void = vi.fn(), stats: FakeStats = { input: 
     abort: vi.fn(),
     steer: vi.fn(),
     agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
-    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+    sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
   } as unknown as AgentSession & { stats: FakeStats };
 }
 

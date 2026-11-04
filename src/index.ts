@@ -650,10 +650,10 @@ export default function (pi: ExtensionAPI) {
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
     const durationMs = record.completedAt ? record.completedAt - record.startedAt : Date.now() - record.startedAt;
-    // All three fields are lifetime-accumulated (Σ over every assistant message_end),
+    // All three fields come from pi's session totals plus descendant folds,
     // so they survive compaction together — input + output ≤ total always.
-    // tokens is omitted when nothing was ever produced (e.g. agent errored before
-    // any message_end fired), preserving prior payload shape.
+    // Tokens are omitted when no usage was recorded (e.g. the agent errored
+    // before its session recorded any spend), preserving the payload shape.
     const u = record.lifetimeUsage;
     const total = getLifetimeTotal(u);
     const tokens = total > 0

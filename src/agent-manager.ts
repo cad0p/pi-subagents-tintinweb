@@ -1584,6 +1584,7 @@ export class AgentManager {
     record.outputCleanup = undefined;
     // The settle flush: the last read of the run's own session, so the completion report and the settled record
     // carry the run's tail (an assistant message's read lagged one object, and nothing follows it).
+    // Child aborts start above, but their final deltas may arrive after this report; each still reaches the pool once.
     try { this.readRecordUsage(record); } catch { /* keep the completion tail failure-safe */ }
     const session = record.session;
     if (session) {
