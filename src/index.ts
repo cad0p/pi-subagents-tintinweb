@@ -19,7 +19,7 @@ import { Type } from "@sinclair/typebox";
 import { ambiguousAgentIdText } from "./agent-id.js";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentAmbiguousResponse, agentNotFoundResponse, agentReportResponse, consumeResult, ownedResolution } from "./agent-result-tool.js";
-import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
+import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, type UsageSpend } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
@@ -101,8 +101,8 @@ function createActivityTracker(agentId: () => string | undefined, maxTurns?: num
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: LifetimeUsage) => {
-      addUsage(state.lifetimeUsage, usage);
+    onUsage: (spend: UsageSpend) => {
+      addUsage(state.lifetimeUsage, spend.usage);
     },
   };
 
@@ -755,12 +755,12 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
-  }, (record, usage) => {
-    // Every assistant message from every agent — nested included, exactly once.
+  }, (record, spend) => {
+    // Every spend event of every agent — nested included, exactly once.
     // Parked here until a tool result can carry it back to the parent session;
     // see `PendingUsagePool`. Skipped entirely when the feature is off, so no
     // pool grows in a session that will never drain it.
-    if (reportUsage) pendingUsage.add(usage);
+    if (reportUsage) pendingUsage.add(spend.usage);
     // The same message, live, for anyone keeping their own ledger — a footer
     // that breaks spend down by agent type and thinking level, say. This is the
     // one place every agent's spend passes through, which is why it is emitted
@@ -774,7 +774,7 @@ export default function (pi: ExtensionAPI) {
     // at spawn: the record is authoritative only once the session exists and pi
     // has clamped the level to the model (see `onSessionCreated` in
     // agent-manager.ts).
-    const reported = toReportedUsage(usage);
+    const reported = toReportedUsage(spend.usage);
     if (!reported) return;
     // A key whose value is unknown is omitted, never `undefined`: `model` and
     // `thinking` until the session has reported them, `parentAgentId` on a
@@ -1288,7 +1288,7 @@ export default function (pi: ExtensionAPI) {
             }
           }
         } else if (event.kind === "usage") {
-          manager.replayUsage(fromDto(event.dto), event.usage);
+          manager.replayUsage(fromDto(event.dto), { usage: event.usage });
         }
         retireDrained();
       })
@@ -1389,7 +1389,7 @@ export default function (pi: ExtensionAPI) {
    * exactly as it does for a message that arrives while draining.
    */
   function replayStoppedUsage(dto: AgentDto, usage: LifetimeUsage): void {
-    manager.replayUsage(fromDto(dto), usage);
+    manager.replayUsage(fromDto(dto), { usage });
   }
 
   /** Drops a draining pool once its last record has left it: a settled parent waits for its unwinding child to hand over. */

@@ -40,7 +40,7 @@ import { preloadSkills } from "./skill-loader.js";
 import { toSingleLine } from "./text-safety.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 import { createChildUIProxy, onChildDialogFlag } from "./ui/child-ui.js";
-import type { LifetimeUsage } from "./usage.js";
+import { type LifetimeUsage, toLifetimeUsage } from "./usage.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -429,6 +429,24 @@ export interface ToolActivity {
   toolName: string;
 }
 
+/**
+ * The four usage sources pi counts in a session (`core/usage-totals.js`): an
+ * assistant message's `usage`, a `toolResult` message with `usage`, a
+ * compaction or branch_summary entry with `usage`, and a `usage` entry.
+ * Counting each persisted object once, from the one event that announces it, is
+ * what makes "exactly once" checkable — see `attachSessionLifecycle`.
+ */
+export type UsageSource = "assistant" | "toolResult" | "compaction" | "cacheWarm";
+
+/** One spend event of a child session: pi's usage for one persisted object and its optional provenance. */
+export interface UsageSpend {
+  usage: LifetimeUsage;
+  /** Absent only on a pre-#218 reload hand-over, which carried no provenance: unknown, never inferred. */
+  source?: UsageSource;
+  /** The model that spent it, where the usage names one — today only a cache-warm entry does. */
+  modelId?: string;
+}
+
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
@@ -498,16 +516,18 @@ export interface RunOptions {
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
-   * Called once per assistant message_end with that message's usage delta.
-   * Lets callers maintain a lifetime accumulator that survives compaction
-   * (which replaces session.state.messages and resets stats-derived sums).
+   * Called once per persisted object that spent anything: an assistant message,
+   * a toolResult message carrying `usage`, a compaction, a cache-warm `usage`
+   * entry. `source` names which. Lets callers maintain a lifetime accumulator
+   * that survives compaction (which replaces session.state.messages and resets
+   * stats-derived sums).
    *
-   * `cost` is pi's own `usage.cost.total` for that message — priced from the
+   * `cost` is pi's own `usage.cost.total` for that object — priced from the
    * model's rates, so it is 0 (not missing) for a model pi has no pricing for.
    * We never price anything ourselves; every dollar figure this extension shows
    * or reports traces back to this field.
    */
-  onAssistantUsage?: (usage: LifetimeUsage) => void;
+  onUsage?: (spend: UsageSpend) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -646,7 +666,7 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
 }
 
 /** Event hooks of one prompt. The lifecycle forwards each session event to the current prompt's hooks. */
-export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction">;
+export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onUsage" | "onCompaction">;
 
 /** Turns counted across every run of one lifecycle. The owner creates it and resets it on resume. */
 export interface TurnBudget {
@@ -760,15 +780,7 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       lastAssistant = event.message;
-      const u = event.message.usage;
-      if (u)
-        hooks?.onAssistantUsage?.({
-          input: u.input ?? 0,
-          output: u.output ?? 0,
-          cacheWrite: u.cacheWrite ?? 0,
-          cacheRead: u.cacheRead ?? 0,
-          cost: u.cost?.total ?? 0,
-        });
+      if (event.message.usage) hooks?.onUsage?.({ usage: toLifetimeUsage(event.message.usage), source: "assistant" });
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       hooks?.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -1540,7 +1552,7 @@ export async function resumeAgent(
     onToolActivity?: (activity: ToolActivity) => void;
     onTextDelta?: (delta: string, fullText: string) => void;
     onTurnEnd?: (turnCount: number) => void;
-    onAssistantUsage?: (usage: LifetimeUsage) => void;
+    onUsage?: (spend: UsageSpend) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
     /** The resumed run gets its own max_turns budget: a finished record starts over, as a fresh spawn does. */

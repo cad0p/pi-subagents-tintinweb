@@ -522,7 +522,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     manager.abort(id);
   });
 
-  it("onAssistantUsage from runAgent accumulates into record.lifetimeUsage", async () => {
+  it("onUsage from runAgent accumulates into record.lifetimeUsage", async () => {
     manager = new AgentManager();
 
     // Capture the options passed to runAgent so we can drive callbacks
@@ -530,8 +530,8 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       captured = opts;
       // Two assistant messages with usage
-      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
-      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
+      opts.onUsage?.({ usage: { input: 100, output: 50, cacheWrite: 10 }, source: "assistant" });
+      opts.onUsage?.({ usage: { input: 200, output: 80, cacheWrite: 20 }, source: "assistant" });
       return { responseText: "done", session: mockSession(), aborted: false, steered: false };
     });
 
@@ -586,14 +586,14 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
     await manager.getRecord(id)!.promise;
 
-    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onAssistantUsage)
+    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onUsage)
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
     expect(manager.getRecord(id)!.compactionCount).toBe(0);
 
     // Now resume — drive callbacks via the mocked resumeAgent
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
-      opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts.onUsage?.({ usage: { input: 70, output: 30, cacheWrite: 5 }, source: "assistant" });
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
       return { text: "second" };
     });
@@ -2497,7 +2497,7 @@ describe("AgentManager — nested children", () => {
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent", parentAgentId: grand, depth: 2 });
     await manager.getRecord(parent)!.promise;
     vi.mocked(resumeAgent).mockClear().mockImplementation(async (_session, _prompt, opts) => {
-      opts?.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts?.onUsage?.({ usage: { input: 70, output: 30, cacheWrite: 5 }, source: "assistant" });
       return { text: "resumed" };
     });
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());

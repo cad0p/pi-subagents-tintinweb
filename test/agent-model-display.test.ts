@@ -222,7 +222,7 @@ describe("the read-back reaching the surfaces", () => {
   async function spawnAndReport(tools: Map<string, unknown>, level: string, cost = 0.01): Promise<AgentRecord> {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
       options.onSessionCreated?.(reportingSession(CHILD_MODEL, level));
-      options.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 0, cost });
+      options.onUsage?.({ usage: { input: 100, output: 50, cacheWrite: 0, cost }, source: "assistant" });
       return { responseText: "done", session: reportingSession(CHILD_MODEL, level), aborted: false, steered: false };
     });
     const agent = tools.get("Agent") as {

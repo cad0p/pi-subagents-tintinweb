@@ -641,7 +641,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
   });
 });
 
-// ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
+// ─── message_end → onUsage wiring (issue #38) ──────────────────────────
 // Both runAgent and resumeAgent dispatch usage to the caller via this
 // callback. The callback feeds the AgentRecord lifetime accumulator, which
 // is the source of truth for total tokens (survives compaction).
@@ -665,7 +665,7 @@ describe("agent-runner usage callback wiring", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (s) => seen.push(s.usage),
     });
 
     // cacheRead and cost are forwarded too, and default to 0 rather than absent:
@@ -695,7 +695,7 @@ describe("agent-runner usage callback wiring", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (s) => seen.push(s.usage),
     });
 
     // Only the total is carried: the per-kind split is pi's, and nothing here
@@ -715,7 +715,7 @@ describe("agent-runner usage callback wiring", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (s) => seen.push(s.usage),
     });
 
     expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }]);
@@ -731,7 +731,7 @@ describe("agent-runner usage callback wiring", () => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
-    await runAgent(ctx, "Explore", "go", { pi, onAssistantUsage: cb });
+    await runAgent(ctx, "Explore", "go", { pi, onUsage: cb });
 
     expect(cb).not.toHaveBeenCalled();
   });
@@ -746,7 +746,7 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     await resumeAgent(session as any, "continue", {
-      onAssistantUsage: (u) => seen.push(u),
+      onUsage: (s) => seen.push(s.usage),
     });
 
     expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5, cacheRead: 0, cost: 0 }]);

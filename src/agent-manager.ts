@@ -38,6 +38,7 @@ import {
   type SessionLifecycle,
   type ToolActivity,
   teardownChildSession,
+  type UsageSpend,
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
@@ -142,15 +143,15 @@ export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 /**
- * Fired once per assistant `message_end`, for EVERY agent this manager owns —
- * top-level and nested alike, spawns and resumes. The one place where each
+ * Fired once per persisted object that spent anything in a session, for EVERY
+ * agent this manager owns — top-level and nested alike, spawns and resumes. The one place where each
  * message is seen exactly once: `AgentRecord.lifetimeUsage` is deliberately
  * double-booked into ancestors (see `nested-tools.ts`) so a hidden child's spend
  * shows up on the record a human can see, which makes those records useless as
  * a basis for anything that must not count a message twice — parent-session
  * accounting above all.
  */
-export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
+export type OnAgentUsage = (record: AgentRecord, spend: UsageSpend) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /** Default max concurrent background agents. */
@@ -321,8 +322,8 @@ export interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
-  /** Called once per assistant message_end with that message's usage delta. */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called once per persisted object that spent anything (see `UsageSpend.source`). */
+  onUsage?: (spend: UsageSpend) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
   /** Nesting depth: a top-level subagent is 1. */
@@ -354,7 +355,7 @@ export type CapEvent =
 /** The five activity callbacks a resumed run forwards to its caller. */
 export type ResumeCallbacks = Pick<
   SpawnOptions,
-  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onUsage" | "onCompaction"
 >;
 
 /**
@@ -733,10 +734,10 @@ export class AgentManager {
         options.onTurnEnd?.(turnCount);
       },
       onTextDelta: options.onTextDelta,
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        this.onUsage?.(record, usage);
-        options.onAssistantUsage?.(usage);
+      onUsage: (spend) => {
+        addUsage(record.lifetimeUsage, spend.usage);
+        this.onUsage?.(record, spend);
+        options.onUsage?.(spend);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -1333,8 +1334,8 @@ export class AgentManager {
   /** Resumes a parent that is no longer live with its nested results as one message; each child is delivered once it lands. */
   private resumeNested(parentId: string, entries: { child: AgentRecord; content: string }[]): void {
     const content = entries.map((entry) => entry.content).join("\n\n");
-    const onAssistantUsage = (usage: { input: number; output: number; cacheWrite: number }) => this.foldUsageIntoAncestors(parentId, usage);
-    void this.deliver(parentId, content, { onAssistantUsage }).then((outcome) => {
+    const onUsage = (spend: UsageSpend) => this.foldUsageIntoAncestors(parentId, spend);
+    void this.deliver(parentId, content, { onUsage }).then((outcome) => {
       if (outcome) {
         for (const entry of entries) entry.child.resultDelivered = true;
         return;
@@ -1346,11 +1347,11 @@ export class AgentManager {
   }
 
   /** Usage a resumed parent reports belongs to every ancestor, as a nested child's turns do (nested-tools foldUsageIntoAncestors). */
-  private foldUsageIntoAncestors(id: string, usage: { input: number; output: number; cacheWrite: number }): void {
+  private foldUsageIntoAncestors(id: string, spend: UsageSpend): void {
     for (let ancestorId = this.getRecord(id)?.parentAgentId; ancestorId !== undefined; ) {
       const ancestor = this.getRecord(ancestorId);
       if (!ancestor) break;
-      addUsage(ancestor.lifetimeUsage, usage);
+      addUsage(ancestor.lifetimeUsage, spend.usage);
       ancestorId = ancestor.parentAgentId;
     }
   }
@@ -1828,10 +1829,10 @@ export class AgentManager {
         record.turnCount = turnCount;
         callbacks?.onTurnEnd?.(turnCount);
       },
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        this.onUsage?.(record, usage);
-        callbacks?.onAssistantUsage?.(usage);
+      onUsage: (spend) => {
+        addUsage(record.lifetimeUsage, spend.usage);
+        this.onUsage?.(record, spend);
+        callbacks?.onUsage?.(spend);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -2319,15 +2320,15 @@ export class AgentManager {
     this.onStart = undefined;
     this.onCompact = undefined;
     this.onSteered = undefined;
-    this.onUsage = (record, usage) => handover.emit({ kind: "usage", dto: toDto(record), usage });
+    this.onUsage = (record, spend) => handover.emit({ kind: "usage", dto: toDto(record), usage: spend.usage });
     // The waiters' runs ask the live root again: their wait ends here with "reroute".
     for (const entry of gated) this.endGate(entry, "reroute");
     return handover;
   }
 
   /** Feeds a usage report that a draining run emitted during the reload into this manager's usage hook. */
-  replayUsage(record: AgentRecord, usage: LifetimeUsage): void {
-    this.onUsage?.(record, usage);
+  replayUsage(record: AgentRecord, spend: UsageSpend): void {
+    this.onUsage?.(record, spend);
   }
 
   /**

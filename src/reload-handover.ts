@@ -11,6 +11,7 @@
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
+import type { UsageSpend } from "./agent-runner.js";
 import { teardownChildSession } from "./agent-runner.js";
 import type { AgentRecord, DeliverOutcome, SubagentType } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
@@ -70,7 +71,7 @@ export interface HandoverItem {
 /** Spawn options that are data. Callbacks and the abort signal belong to the activation that spawns. */
 export type SpawnData = Omit<
   SpawnOptions,
-  "signal" | "onToolActivity" | "onTextDelta" | "onSessionCreated" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+  "signal" | "onToolActivity" | "onTextDelta" | "onSessionCreated" | "onTurnEnd" | "onUsage" | "onCompaction"
 >;
 
 /** A queued top-level spawn, re-spawned by the new activation under the same id. */
@@ -81,9 +82,12 @@ export interface QueuedSpec {
   options: SpawnData;
 }
 
+/** Provenance a `usage` event carries. Absent as a whole on a hand-over published before #218: unknown, never inferred. */
+export type UsageProvenance = Pick<UsageSpend, "source" | "modelId">;
+
 export type HandoverEvent =
   | { kind: "settled"; items: HandoverItem[] }
-  | { kind: "usage"; dto: AgentDto; usage: LifetimeUsage }
+  | ({ kind: "usage"; dto: AgentDto; usage: LifetimeUsage } & UsageProvenance)
   | { kind: "slotFreed" };
 
 /**
@@ -235,7 +239,7 @@ export class ReloadHandover {
 
 /** Spawn options without the callbacks and signal, which belong to the activation that spawns. */
 export function toSpawnData(options: SpawnOptions): SpawnData {
-  const { signal: _signal, onToolActivity: _tool, onTextDelta: _text, onSessionCreated: _session, onTurnEnd: _turn, onAssistantUsage: _usage, onCompaction: _compaction, ...data } = options;
+  const { signal: _signal, onToolActivity: _tool, onTextDelta: _text, onSessionCreated: _session, onTurnEnd: _turn, onUsage: _usage, onCompaction: _compaction, ...data } = options;
   return data;
 }
 

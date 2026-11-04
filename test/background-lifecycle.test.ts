@@ -1533,7 +1533,7 @@ describe("background lifecycle — model-visible surfaces", () => {
     // the `(42%)` context annotation while still showing the token count.
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation((_session, _prompt, opts: any) => {
-      opts.onAssistantUsage({ input: 1000, output: 0, cacheWrite: 0 });
+      opts.onUsage({ usage: { input: 1000, output: 0, cacheWrite: 0 }, source: "assistant" });
       return new Promise((r) => { resolveResume = r; });
     });
     await tools.get("SendMessage").execute(

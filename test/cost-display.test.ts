@@ -219,7 +219,7 @@ describe("get_subagent_result", () => {
   /** Spawn a background agent that spends `cost`, then read its report back. */
   async function reportAfterSpending(tools: Map<string, unknown>, cost: number): Promise<string> {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 1000, output: 200, cacheWrite: 0, cost });
+      options.onUsage?.({ usage: { input: 1000, output: 200, cacheWrite: 0, cost }, source: "assistant" });
       return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
     });
     const agent = tools.get("Agent") as {

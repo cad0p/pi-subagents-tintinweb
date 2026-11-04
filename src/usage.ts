@@ -47,6 +47,17 @@ export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
   if (delta.cost) into.cost = (into.cost ?? 0) + delta.cost;
 }
 
+/** One pi `Usage` as the accumulator shape this extension adds up, normalizing every absent field to 0. */
+export function toLifetimeUsage(u: Usage): LifetimeUsage {
+  return {
+    input: u.input ?? 0,
+    output: u.output ?? 0,
+    cacheWrite: u.cacheWrite ?? 0,
+    cacheRead: u.cacheRead ?? 0,
+    cost: u.cost?.total ?? 0,
+  };
+}
+
 /**
  * Render an accumulator as a pi `Usage`, or undefined when nothing was spent —
  * callers attach nothing rather than a zero, so a consumer can tell "spent

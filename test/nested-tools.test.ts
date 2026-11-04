@@ -351,7 +351,7 @@ describe("nested Agent tool", () => {
     records.set("parent-1", middle);
 
     await run(0, { subagent_type: "scout", description: "d", prompt: "p" });
-    spawns[0].options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1 });
+    spawns[0].options.onUsage?.({ usage: { input: 7, output: 3, cacheWrite: 1 }, source: "assistant" });
 
     expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
     expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
@@ -362,7 +362,7 @@ describe("nested Agent tool", () => {
     vi.mocked(manager.deliver).mockResolvedValueOnce("resumed");
     const resumed = await run(2, { to: "child-1", message: "more" });
     expect(textOf(resumed)).toContain("had finished; resumed it");
-    expect(manager.deliver).toHaveBeenCalledWith("child-1", "more", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    expect(manager.deliver).toHaveBeenCalledWith("child-1", "more", expect.objectContaining({ onUsage: expect.any(Function) }));
 
     records.set("foreign", { id: "foreign", status: "completed", parentAgentId: "other" } as AgentRecord);
     const denied = await run(2, { to: "foreign", message: "more" });
@@ -423,7 +423,7 @@ describe("nested result / steer / checkpoint tools", () => {
     vi.mocked(manager.deliver).mockResolvedValueOnce("delivered").mockResolvedValueOnce("queued");
 
     expect(textOf(await run(2, { to: "ready", message: "focus" }))).toContain("Message sent to agent ready.");
-    expect(manager.deliver).toHaveBeenLastCalledWith("ready", "focus", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    expect(manager.deliver).toHaveBeenLastCalledWith("ready", "focus", expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(textOf(await run(2, { to: "pending", message: "focus" }))).toContain("queued");
   });
 

@@ -88,7 +88,7 @@ describe("reporting subagent usage back to the parent session", () => {
   /** One run that spends `usage` synchronously, i.e. before the tool returns. */
   function runSpending(usage: LifetimeUsage) {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.(usage);
+      options.onUsage?.({ usage, source: "assistant" });
       return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
     });
   }
@@ -98,7 +98,7 @@ describe("reporting subagent usage back to the parent session", () => {
   function runSpendingLater(usage: LifetimeUsage) {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
       await flush();
-      options.onAssistantUsage?.(usage);
+      options.onUsage?.({ usage, source: "assistant" });
       return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
     });
   }
@@ -267,14 +267,14 @@ describe("reporting subagent usage back to the parent session", () => {
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
         const { manager, parentAgentId, depth } = options.nestedRuntime;
-        options.onAssistantUsage?.(perMessage);
+        options.onUsage?.({ usage: perMessage, source: "assistant" });
         if (depth < 3) {
           // The ancestor walk, verbatim from nested-tools.ts.
-          const foldUsageIntoAncestors = (usage: LifetimeUsage): void => {
+          const foldUsageIntoAncestors = (spend: UsageSpend): void => {
             for (let id: string | undefined = parentAgentId; id !== undefined; ) {
               const ancestor = manager.getRecord(id);
               if (!ancestor) break;
-              addUsage(ancestor.lifetimeUsage, usage);
+              addUsage(ancestor.lifetimeUsage, spend.usage);
               id = ancestor.parentAgentId;
             }
           };
@@ -284,7 +284,7 @@ describe("reporting subagent usage back to the parent session", () => {
             parentAgentId,
             maxSubagentDepth: 3,
             configCwd: cwd,
-            onAssistantUsage: foldUsageIntoAncestors,
+            onUsage: foldUsageIntoAncestors,
           });
           await manager.getRecord(childId)?.promise;
         }
@@ -364,7 +364,7 @@ describe("reporting subagent usage back to the parent session", () => {
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
         const { manager, parentAgentId } = options.nestedRuntime;
-        options.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+        options.onUsage?.({ usage: { input: 100, output: 50, cacheWrite: 0, cost: 0.01 }, source: "assistant" });
         if (!nested) {
           nested = true;
           const childId = manager.spawn(pi, spawnCtx(cwd), "general-purpose", "sub", {
@@ -373,9 +373,9 @@ describe("reporting subagent usage back to the parent session", () => {
             parentAgentId,
             maxSubagentDepth: 2,
             configCwd: cwd,
-            onAssistantUsage: (u: LifetimeUsage) => {
+            onUsage: (spend: UsageSpend) => {
               const parent = manager.getRecord(parentAgentId);
-              if (parent) addUsage(parent.lifetimeUsage, u);
+              if (parent) addUsage(parent.lifetimeUsage, spend.usage);
             },
           });
           await manager.getRecord(childId)?.promise;
@@ -403,7 +403,7 @@ describe("reporting subagent usage back to the parent session", () => {
         // session during shutdown, and a message_end landing then still reaches
         // the usage hook.
         options.onSessionCreated?.(fakeSession(() => {
-          options.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+          options.onUsage?.({ usage: { input: 10, output: 5, cacheWrite: 0, cost: 0.001 }, source: "assistant" });
         }));
         return new Promise(() => {});
       });
