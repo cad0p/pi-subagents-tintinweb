@@ -24,7 +24,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { setQuietMs } from "../src/agent-manager.js";
-import { runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension, { formatTaskNotification } from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
@@ -36,9 +36,21 @@ setQuietMs(20);
 
 const COST = 0.0123;
 
+/** What a session's cumulative totals are, as `getSessionStats()` reports them. */
+type SessionSpend = { input: number; output: number; cacheWrite?: number; cacheRead?: number; cost?: number };
+
 /** A child session stand-in — only the members the manager touches. */
-function fakeSession(): AgentSession {
-  return { dispose: vi.fn(), agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
+function fakeSession(spend: SessionSpend = { input: 0, output: 0 }): AgentSession {
+  return {
+    getSessionStats: () => ({ tokens: { input: spend.input, output: spend.output, cacheWrite: spend.cacheWrite ?? 0, cacheRead: spend.cacheRead ?? 0 }, cost: spend.cost ?? 0 }),
+    dispose: vi.fn(),
+    subscribe: () => () => {},
+    isStreaming: false,
+    abort: vi.fn(),
+    steer: vi.fn(),
+    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
+    sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  } as unknown as AgentSession;
 }
 
 /** Deterministic record: fixed timestamps → 5.0s duration, fixed usage. */
@@ -219,8 +231,13 @@ describe("get_subagent_result", () => {
   /** Spawn a background agent that spends `cost`, then read its report back. */
   async function reportAfterSpending(tools: Map<string, unknown>, cost: number): Promise<string> {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 1000, output: 200, cacheWrite: 0, cost });
-      return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+      // A session whose totals carry the spend, then a read signal: the manager reads the session.
+      const spend: SessionSpend = { input: 0, output: 0 };
+      const session = fakeSession(spend);
+      options.onSessionCreated?.(session, attachSessionLifecycle(session)); // seeds the baseline at zero
+      Object.assign(spend, { input: 1000, output: 200, cost });
+      options.onUsage?.();
+      return { responseText: "done", session, aborted: false, steered: false };
     });
     const agent = tools.get("Agent") as {
       execute(id: string, params: Record<string, unknown>, s?: unknown, u?: unknown, c?: unknown): Promise<ToolResult>;

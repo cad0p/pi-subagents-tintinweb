@@ -33,7 +33,6 @@ import { resolveModel } from "./model-resolver.js";
 import { modelScopeWarning } from "./model-scope.js";
 import { createOutputFilePath, getOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, ThinkingLevel } from "./types.js";
-import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
 
 /**
@@ -65,7 +64,6 @@ export interface NestedSpawnOptions {
   rootSessionId?: string;
   /** Resolved from this branch's registry; the run must not re-resolve it globally. */
   agentConfig?: AgentConfig;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   onSessionCreated?: (session: AgentSession) => void;
 }
 
@@ -125,20 +123,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
   const availableIn = (registry: Map<string, AgentConfig>): string[] => {
     const allowed = allowedTypesIn(registry);
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
-  };
-
-  // Usage a nested child reports belongs to every ancestor: nested records
-  // are hidden from every reporting surface, so their spend would otherwise
-  // be unattributable. The whole chain is walked — a spawn callback only
-  // fires for that child's OWN turns, so stopping at one level would hide a
-  // great-grandchild from the only record anyone can see.
-  const foldUsageIntoAncestors = (usage: { input: number; output: number; cacheWrite: number }): void => {
-    for (let id: string | undefined = context.parentAgentId; id !== undefined; ) {
-      const ancestor = context.manager.getRecord(id);
-      if (!ancestor) break;
-      addUsage(ancestor.lifetimeUsage, usage);
-      id = ancestor.parentAgentId;
-    }
   };
 
   const agentTool = defineTool({
@@ -256,7 +240,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
         rootSessionId,
-        onAssistantUsage: foldUsageIntoAncestors,
         // Fires inside runAgent once the child session exists. The record's
         // outputFile is attached synchronously after spawn returns, so this
         // reads it lazily rather than closing over a value that doesn't exist yet.
@@ -350,9 +333,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       if (!record) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.to}".`, true);
       }
-      const outcome = await context.manager.deliver(record.id, params.message, {
-        onAssistantUsage: foldUsageIntoAncestors,
-      });
+      const outcome = await context.manager.deliver(record.id, params.message);
       return textResult(deliveryText(record.id, outcome), outcome === false);
     },
   });
