@@ -211,6 +211,32 @@ interface GateEntry {
 type SlotEntry = { kind: "spawn"; id: string; args: SpawnArgs } | GateEntry;
 
 /**
+ * Write a session's resolved model and thinking level back to its record, so every surface reads
+ * one place instead of re-deriving "session, else the request". Extracted because the native view
+ * calls it when the child's session reports a switch (`onSessionEvent`, on `model_change` or
+ * `thinking_level_changed`): a model change made inside a child view has to reach the record, or the
+ * FleetView row, the usage ledger and the settled footer keep naming the old model.
+ */
+export function adoptSessionModel(record: AgentRecord, session: AgentSession): void {
+  if (!session.model) return;
+  record.invocation ??= {};
+  // Read the kept request first: a caller's level survives being clamped
+  // AND, one line later, being replaced by the effective one.
+  const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
+  Object.assign(record.invocation, describeModel(session.model));
+  // Guarded: a session that reports no level keeps the request rather
+  // than losing it. Overwriting unconditionally would turn a stubbed or
+  // older session into a blank `thinking:` tag, which is worse than the
+  // stale-but-true value it replaced.
+  if (session.thinkingLevel) {
+    record.invocation.thinking = session.thinkingLevel;
+    if (requested && requested !== session.thinkingLevel) {
+      record.invocation.requestedThinking = requested;
+    }
+  }
+}
+
+/**
  * Bind a live session to its record: identity, the persistent lifecycle and the model and
  * thinking write-back. Spawn and reopen both call this, so a reopened child is recorded the
  * same way as a fresh one.
@@ -220,29 +246,7 @@ function bindSession(record: AgentRecord, session: AgentSession, lifecycle: Sess
   record.lifecycle = lifecycle;
   record.sessionId = session.sessionId;
   record.sessionFile = session.sessionManager.getSessionFile();
-  // The model and thinking level are only knowable once pi has resolved
-  // its defaults and clamped the level to what the model supports. Writing
-  // them back here makes the record authoritative, so every surface reads
-  // one place instead of each re-deriving "session, else the request" for
-  // itself. An agent started outside the Agent tool (RPC, scheduler) has
-  // no invocation yet and gains one here.
-  if (session.model) {
-    record.invocation ??= {};
-    // Read the kept request first: a caller's level survives being clamped
-    // AND, one line later, being replaced by the effective one.
-    const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
-    Object.assign(record.invocation, describeModel(session.model));
-    // Guarded: a session that reports no level keeps the request rather
-    // than losing it. Overwriting unconditionally would turn a stubbed or
-    // older session into a blank `thinking:` tag, which is worse than the
-    // stale-but-true value it replaced.
-    if (session.thinkingLevel) {
-      record.invocation.thinking = session.thinkingLevel;
-      if (requested && requested !== session.thinkingLevel) {
-        record.invocation.requestedThinking = requested;
-      }
-    }
-  }
+  adoptSessionModel(record, session);
   // Flush any steers that arrived before the session was ready
   if (record.pendingSteers?.length) {
     for (const msg of record.pendingSteers) {
@@ -353,14 +357,19 @@ export type ResumeCallbacks = Pick<
   "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
 >;
 
-/** The prefix a resumed interrupted run carries; names the worktree's fate when it is gone (its run then uses the parent cwd). */
-function crashNote(record: AgentRecord, text: string): string {
+/**
+ * The prefix a resumed interrupted run carries: what cut it short (a crash, or pi shutting down) and when. Names the
+ * worktree's fate when it is gone (its run then uses the parent cwd).
+ */
+function interruptionNote(record: AgentRecord, text: string): string {
+  const event = record.stoppedAtShutdown ? "stop" : "crash";
   const when =
     record.crashedAt === undefined
-      ? `The crash time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
-      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the crash came after it.`;
+      ? `The ${event} time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
+      : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the ${event} came after it.`;
   const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
-  return `You were interrupted by a crash. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
+  const cause = record.stoppedAtShutdown ? "stopped when pi shut down" : "interrupted by a crash";
+  return `You were ${cause}. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
 }
 
 export class AgentManager {
@@ -1974,7 +1983,7 @@ export class AgentManager {
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     const interrupted = current.status === "interrupted";
-    const prompt = interrupted ? crashNote(current, text) : text;
+    const prompt = interrupted ? interruptionNote(current, text) : text;
     if (!this.resume(id, prompt, callbacks)) return false;
     return interrupted ? "resumedAfterCrash" : "resumed";
   }

@@ -10,7 +10,7 @@ export function deliveryText(id: string, outcome: DeliverOutcome): string {
     case "resumed":
       return `Agent ${id} had finished; resumed it with the message (fresh max_turns budget).`;
     case "resumedAfterCrash":
-      return `Agent ${id} was interrupted by a crash; resumed it from its transcript with a crash note and the message (fresh max_turns budget).`;
+      return `Agent ${id} was interrupted; resumed it from its transcript with a note on what interrupted it and the message (fresh max_turns budget).`;
     case "held":
       return `Message held for agent ${id}; it is delivered when the agent's current hand-over or teardown ends.`;
     case false:

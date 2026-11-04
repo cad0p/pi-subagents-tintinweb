@@ -4,7 +4,7 @@
  * The view is built from three substitutions on the live `InteractiveMode` instance:
  * the transcript container (a child `Container` spliced into `documentContainer` where the host
  * chat container sat), the editor (`setEditorComponent` with pi's `CustomEditor`), and the footer
- * (`ctx.ui.setFooter`). Esc puts the host container back at its saved index; it is re-attached,
+ * (`ctx.ui.setFooter`). A close puts the host container back at its saved index; it is re-attached,
  * never rebuilt, so a host turn that was streaming keeps its components.
  *
  * PR 1 is a snapshot: the transcript is read when the view opens, on the refresh key, on a queued
@@ -14,6 +14,7 @@
 
 import {
   type AgentSession,
+  type AgentSessionEvent,
   type AppKeybinding,
   CustomEditor,
   copyToClipboard,
@@ -29,7 +30,7 @@ import {
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
-import type { AgentManager } from "../agent-manager.js";
+import { type AgentManager, adoptSessionModel } from "../agent-manager.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import {
@@ -47,7 +48,14 @@ import {
 const PROBE_KEY = Symbol.for("pi-subagents:native-view-probe");
 
 /**
- * pi's 13 app-action handlers that are not kept. Each one acts on the host session or replaces it;
+ * How often a rebuild that a text selection is holding back is retried. A rebuild clears the child
+ * container and pi's alt-screen render drops the selection with it, so it waits for the selection
+ * to end; nothing reports that end, so the retry polls.
+ */
+const DEFERRED_REBUILD_MS = 100;
+
+/**
+ * pi's 13 app-action handlers that are not kept. Each one acts on the main session or replaces it;
  * a notice is the only honest thing to print. `app.interrupt` and `app.exit` are not in this map
  * (they are the onEscape/onCtrlD fallbacks in CustomEditor.handleInput), so they cannot print one.
  */
@@ -66,6 +74,18 @@ const BLOCKED_ACTIONS: readonly AppKeybinding[] = [
   "app.session.fork",
   "app.session.resume",
 ];
+
+/**
+ * The key that leaves a child view: ← goes back one level in FleetView, and repeated it reaches
+ * `main` from any depth. FleetView's hint and the view's notices both read this, so the two cannot
+ * name different keys.
+ */
+export const TO_MAIN_KEYS = "←";
+
+/** The notice for something the child view refuses because only the main session can do it. */
+function mainSessionNotice(what: string, plural: boolean): string {
+  return `${what} ${plural ? "act" : "acts"} on the main session; press ${TO_MAIN_KEYS} to go back to main`;
+}
 
 export interface EditorLike {
   getText(): string;
@@ -158,6 +178,13 @@ function restoreAccessor(im: InteractiveModeView, name: ShadowedAccessor): void 
   delete (im as unknown as Record<string, unknown>)[name];
 }
 
+/** pi's own test for an expandable component: anything with a `setExpanded`. */
+function expandableOf(component: Component): (Component & { setExpanded(expanded: boolean): void }) | undefined {
+  const candidate = component as Component & { setExpanded?: unknown };
+  if (typeof candidate.setExpanded !== "function") return undefined;
+  return candidate as Component & { setExpanded(expanded: boolean): void };
+}
+
 /** The five symbols the capture probe needs before it trusts the instance. */
 export function probeInteractiveMode(im: unknown): im is InteractiveModeView {
   if (!im || typeof im !== "object") return false;
@@ -202,8 +229,11 @@ export function capturedInteractiveMode(): InteractiveModeView | undefined {
   return capturedMode;
 }
 
-/** What a close is for. Only Esc does the whole job; reload and quit have pi-owned halves. */
-export type CloseReason = "escape" | "switch" | "reload" | "session" | "quit";
+/**
+ * What a close is for. `restore` (an open that failed) and `session` do the whole job; reload and
+ * quit have pi-owned halves; `switch` is FleetView or `open()` moving to another record.
+ */
+export type CloseReason = "restore" | "switch" | "reload" | "session" | "quit";
 
 interface SavedWrappers {
   showError: InteractiveModeView["showError"];
@@ -239,15 +269,28 @@ interface ViewState {
   wrappers: SavedWrappers;
   unsubChange: () => void;
   unsubDialogFlag: () => void;
+  /**
+   * The shown session's own event Subscription, because an in-place model switch emits nothing on
+   * the child-UI or record buses. One at a time, dropped on close.
+   */
+  unsubSession: () => void;
+  watchedSession?: AgentSession;
   noticeText?: string;
+  /** The band that carries `noticeText`: created once, then updated in place, never rebuilt. */
+  noticeBand?: NoticeBandComponent;
+  /** A rebuild that arrived while a text selection was active; flushed once the selection ends. */
+  rebuildDeferred: boolean;
+  flushTimer?: ReturnType<typeof setTimeout>;
   editor?: CustomEditor;
   childProvider?: CombinedAutocompleteProvider;
-  shownSessionId?: string;
+  /** Which footer pi holds, and the session it reads: identity decides, never the reused session id. */
+  footerKind?: "child" | "record";
+  footerSession?: AgentSession;
   childPendingTools: Map<string, ToolExecutionComponent>;
   childToolOutputExpanded: boolean;
   dialogRequest?: ChildDialogRequest;
   dialogComponent?: Component;
-  footer?: ChildFooter;
+  footer?: ChildFooter | RecordFooter;
 }
 
 export interface NativeViewOptions {
@@ -259,7 +302,7 @@ export interface NativeViewOptions {
   /**
    * Called once this view is no longer open, whatever ended it — except a `switch`, which is only
    * `open()` closing the record it was replacing. FleetView owns the cursor, so this is how it
-   * learns that the row it points at is no longer the transcript on screen (Esc, or pi's reload).
+   * learns that the row it points at is no longer the transcript on screen (a failed open, or pi's reload).
    */
   onClosed?: () => void;
 }
@@ -306,6 +349,15 @@ export class ChildFooter extends FooterComponent {
     private theme: Theme,
   ) {
     super(childSession, childFooterData(footerData));
+  }
+
+  /**
+   * Follow a rebind. The base keeps the session for its stats and model line; this class keeps it
+   * for its own lines and for `sessionIsStreaming`, so both must move together.
+   */
+  override setSession(session: AgentSession): void {
+    super.setSession(session);
+    this.childSession = session;
   }
 
   render(width: number): string[] {
@@ -442,6 +494,8 @@ export class NativeTranscriptView {
       },
       unsubChange: () => {},
       unsubDialogFlag: () => {},
+      unsubSession: () => {},
+      rebuildDeferred: false,
       childPendingTools: new Map(),
       childToolOutputExpanded: im.toolOutputExpanded,
     };
@@ -460,7 +514,7 @@ export class NativeTranscriptView {
       im.ui.requestRender(true);
     } catch (error) {
       try {
-        this.close("escape");
+        this.close("restore");
       } catch (restoreError) {
         // A restore that throws must not replace the error that caused it. isOpen() already reads
         // the deactivated state, and the next open finishes the same close — but say so, because a
@@ -470,16 +524,25 @@ export class NativeTranscriptView {
       throw error;
     }
 
-    state.unsubChange = onChildUIChange(id, () => this.repaint());
-    state.unsubDialogFlag = onChildDialogFlag(id, () => this.repaint());
+    // Neither of these is structural: a child UI change and a dialog flag move the footer and the
+    // dialog stack, never the transcript, so they update in place.
+    state.unsubChange = onChildUIChange(id, () => this.refresh());
+    state.unsubDialogFlag = onChildDialogFlag(id, () => this.refresh());
     return "opened";
   }
 
-  /** Re-read the record and repaint the snapshot. */
+  /** Re-read the record and repaint: the transcript too, unless a selection is holding it back. */
   repaint(): void {
     const im = this.options.getMode();
     const state = this.state;
     if (!im || !state || !this.canPaint(im, state)) return;
+    // A rebuild clears the child container, and pi's alt-screen render drops the text selection
+    // with it. The selection wins: the in-place half runs now, the rebuild once it is gone.
+    if (im.ui.hasActiveSelection?.() === true) {
+      this.refresh();
+      this.deferRebuild(state);
+      return;
+    }
     // Children have `hasUI`, so a child entry renderer that calls `ctx.ui.setStatus` reaches this
     // method from inside its own render. Re-entering would clear the container the outer render is
     // filling and restore the session shadow it is still reading, so a paint that arrives during a
@@ -489,6 +552,59 @@ export class NativeTranscriptView {
     // Exactly one pass for whatever asked during the first, never a loop: the retry holds the same
     // guard, so a request made during it waits for the next repaint.
     this.paintView(im, state);
+  }
+
+  /**
+   * The in-place half of a repaint: footer, parked dialog, one render request. Nothing here clears
+   * the child container, so nothing it does can reset an expansion or drop a selection.
+   */
+  private refresh(): void {
+    const im = this.options.getMode();
+    const state = this.state;
+    if (!im || !state || !this.canPaint(im, state)) return;
+    if (state.rendering) {
+      // A child entry renderer that calls `ctx.ui` reaches this from inside pi's render: rebinding
+      // the footer or pushing a dialog now would re-enter it. The outer paint runs one pass more.
+      state.repaintPending = true;
+      return;
+    }
+    const ctx = this.options.getContext();
+    if (ctx) {
+      this.syncSession(im, ctx, state);
+      this.pushDialog(im, ctx, state);
+    }
+    im.ui.requestRender();
+  }
+
+  /**
+   * Hold a rebuild back while a selection is active. Nothing reports the end of a selection, so a
+   * timer retries: the view is open in front of someone, and a stale frame that never repaints is
+   * worse than a cheap poll.
+   */
+  private deferRebuild(state: ViewState): void {
+    state.rebuildDeferred = true;
+    if (state.flushTimer !== undefined) return;
+    state.flushTimer = setTimeout(() => {
+      state.flushTimer = undefined;
+      if (!state.rebuildDeferred) return;
+      if (!state.active) {
+        state.rebuildDeferred = false;
+        return;
+      }
+      if (this.options.getMode()?.ui.hasActiveSelection?.() === true) {
+        this.deferRebuild(state);
+        return;
+      }
+      state.rebuildDeferred = false;
+      this.repaint();
+    }, DEFERRED_REBUILD_MS);
+  }
+
+  /** Drop a deferred rebuild: the view is closing, and pi owns the transcript again. */
+  private cancelDeferredRebuild(state: ViewState): void {
+    if (state.flushTimer !== undefined) clearTimeout(state.flushTimer);
+    state.flushTimer = undefined;
+    state.rebuildDeferred = false;
   }
 
   /** One full paint under the re-entrancy guard: transcript, then footer and parked dialog. */
@@ -510,6 +626,8 @@ export class NativeTranscriptView {
     } finally {
       state.rendering = false;
     }
+    // A paint is a render: pi must draw the new transcript, and the footer it carries.
+    im.ui.requestRender();
   }
 
   close(reason: CloseReason): void {
@@ -523,6 +641,8 @@ export class NativeTranscriptView {
     state.active = false;
     state.unsubChange();
     state.unsubDialogFlag();
+    state.unsubSession();
+    this.cancelDeferredRebuild(state);
     dropChildDialogs(state.id);
     this.restoreWrappers(im, state);
     // Before the restore, which can throw: the view is already closed, so its owner must be told
@@ -557,18 +677,13 @@ export class NativeTranscriptView {
   }
 
   private installNoticeWrappers(im: InteractiveModeView, state: ViewState): void {
-    const band = (text: string): void => {
-      state.noticeText = text;
-      // Re-render through the normal path so the band sits under the transcript it belongs to.
-      if (this.canPaint(im, state)) {
-        this.renderChild(im, state, { populateHistory: false });
-        im.ui.requestRender();
-      }
-    };
+    // A notice is one line under the transcript, never the transcript: it is updated in place so a
+    // status line (a `ctrl+o` toggle emits one) cannot rebuild — and so cannot reset — the child's.
+    const band = (text: string): void => this.notice(im, state, text);
     // Every method saved here is called on the instance it was saved from, never detached: pi's
     // showStatus reads `this.chatContainer` (and its siblings `this.editor`), so a bare
-    // `state.saved.showStatus(...)` throws before the notice is drawn — which on the Esc path is
-    // before close("escape"), leaving the host transcript behind and the parent unnotified.
+    // `state.saved.showStatus(...)` throws before the notice is drawn, and on a key path the throw
+    // escapes into pi's own input handler.
     state.wrappers.showError = (message: string) => {
       state.saved.showError.call(im, message);
       band(`Error: ${message}`);
@@ -655,10 +770,10 @@ export class NativeTranscriptView {
         im.renderSessionEntries(entries, { updateFooter: false, populateHistory: options.populateHistory });
       });
     }
-    if (state.noticeText) {
-      const ctx = this.options.getContext();
-      if (ctx) state.childContainer.addChild(new NoticeBandComponent(state.noticeText, ctx.ui.theme));
-    }
+    // Re-attach the same band under the transcript it belongs to: a rebuild keeps the component,
+    // so nothing about a notice is recreated by a paint.
+    const band = this.noticeBand(state);
+    if (band) state.childContainer.addChild(band);
   }
 
   /**
@@ -701,6 +816,9 @@ export class NativeTranscriptView {
         shadowedSession = true;
       }
       fn();
+      // Carry back what a component set through pi's own field, before the restore: the next paint
+      // must start from what the child showed last, not from the host's value.
+      state.childToolOutputExpanded = im.toolOutputExpanded;
     } finally {
       // Delete the own properties before anything reads again: the getters must see the host
       // session, and a partial swap must not leave one behind either.
@@ -725,7 +843,7 @@ export class NativeTranscriptView {
     // pi's copied onChange writes im.isBashMode from the text; a child ! must not flip host state.
     ed.onChange = () => {};
     ed.onSubmit = (text: string) => this.submit(im, state, text);
-    // Esc interrupts the run this view shows, then goes back to `main`.
+    // Esc interrupts the run this view shows, as it does in the main session; it never leaves.
     ed.onEscape = () => this.interrupt(state);
     ed.onCtrlD = () => im.handleCtrlD();
     ed.onExtensionShortcut = (data: string) => {
@@ -742,19 +860,13 @@ export class NativeTranscriptView {
       ed.setAutocompleteProvider(provider);
     }
     // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
-    // replace or clear the host session. Only three act on something the view can honour.
+    // replace or clear the main session. Only three act on something the view can honour.
     ed.actionHandlers.clear();
-    ed.onAction("app.tools.expand", () => {
-      state.childToolOutputExpanded = !state.childToolOutputExpanded;
-      for (const child of state.childContainer.children) {
-        if (child instanceof ToolExecutionComponent) child.setExpanded(state.childToolOutputExpanded);
-      }
-      im.ui.requestRender();
-    });
+    ed.onAction("app.tools.expand", () => this.toggleExpansion(im, state));
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
     ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
     for (const action of BLOCKED_ACTIONS) {
-      ed.onAction(action, () => this.notice(im, state, action + " acts on the host session; Esc to leave " + state.id));
+      ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false)));
     }
     // The reset runs before our shutdown handler on reload and after it on new/resume; without this
     // wrapper a child draft becomes the host draft on every reload.
@@ -784,19 +896,39 @@ export class NativeTranscriptView {
   }
 
   /**
-   * Esc in a child view: interrupt the run it shows and return to `main`.
+   * `ctrl+o` in a child view: flip the child's expanded flag and apply it to every expandable the
+   * transcript holds — a branch summary, a compaction summary, a custom message and a tool call all
+   * carry the same flag, and pi's own toggle would set the host's instance, not this one's.
+   */
+  private toggleExpansion(im: InteractiveModeView, state: ViewState): void {
+    const childSession = this.options.manager.getRecord(state.id)?.session;
+    const sessionManager = childSession?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    if (sessionManager) {
+      this.withChildRuntime(im, state, childSession, sessionManager, () => {
+        // Inside the child runtime `im.toolOutputExpanded` is the child's flag, so flipping it keeps
+        // one source for the next paint; `withChildRuntime` hands it back before the restore.
+        im.toolOutputExpanded = !im.toolOutputExpanded;
+        for (const child of state.childContainer.children) {
+          expandableOf(child)?.setExpanded(im.toolOutputExpanded);
+        }
+      });
+    }
+    im.ui.requestRender();
+  }
+
+  /**
+   * Esc in a child view: interrupt the run it shows, and nothing else — the view stays open, so the
+   * user can read how the run ended. Leaving is navigation only (`TO_MAIN_KEYS`).
    *
-   * Delivery needs nothing extra. `abort()` stops the run, and its settle reaches the manager's
-   * completion callback (index.ts), which runs `sendIndividualNudge` for any other end — the parent
-   * gets the same steer turn, with the status note naming the stop. Esc on a record that already
-   * settled (`abort()` is false) is not a no-op either: it still leaves the view.
+   * Nothing is announced here: pi renders the abort in the transcript this view shows, as it does in
+   * the main session — an aborted assistant message reads "Operation aborted" and an aborted tool
+   * call carries the tool's own error ("Command aborted" for bash). Delivery needs nothing extra
+   * either: the settle reaches the manager's completion callback (index.ts), which runs
+   * `sendIndividualNudge` as for any other end. Esc on a record that already settled is a no-op,
+   * as Esc on an idle main session is.
    */
   private interrupt(state: ViewState): void {
-    const record = this.options.manager.getRecord(state.id);
-    if (record && this.options.manager.abort(state.id)) {
-      this.options.getContext()?.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
-    }
-    this.close("escape");
+    this.options.manager.abort(state.id);
   }
 
   private submit(im: InteractiveModeView, state: ViewState, text: string): void {
@@ -805,7 +937,7 @@ export class NativeTranscriptView {
     if (!trimmed) return;
     if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
       const what = trimmed.startsWith("!") ? "Bash mode" : "Slash commands";
-      this.notice(im, state, what + " act on the host session; Esc to leave " + state.id);
+      this.notice(im, state, mainSessionNotice(what, true));
       return;
     }
     state.editor?.addToHistory?.(trimmed);
@@ -842,39 +974,121 @@ export class NativeTranscriptView {
 
   private notice(im: InteractiveModeView, state: ViewState, text: string): void {
     state.noticeText = text;
-    if (this.canPaint(im, state)) this.renderChild(im, state, { populateHistory: false });
-    im.ui.requestRender();
+    const band = this.noticeBand(state);
+    // A render in flight owns the container: paintChild re-attaches the band it just updated.
+    if (band && !state.rendering && !state.childContainer.children.includes(band)) {
+      state.childContainer.addChild(band);
+    }
+    if (this.canPaint(im, state)) im.ui.requestRender();
   }
 
+  /** The band that carries `state.noticeText`, created once and then updated in place. */
+  private noticeBand(state: ViewState): NoticeBandComponent | undefined {
+    const text = state.noticeText;
+    const ctx = this.options.getContext();
+    if (!text || !ctx) return undefined;
+    const band = state.noticeBand ?? new NoticeBandComponent(text, ctx.ui.theme);
+    state.noticeBand = band;
+    band.text = text;
+    return band;
+  }
+
+  /**
+   * Point the footer and the session subscription at whatever the record holds now.
+   *
+   * The session id cannot decide this: a resume reuses it, and `afterRun` repaints once before
+   * `retireSession` clears the record, so the id matches while the footer still reads the session
+   * that is about to be retired — a stale model name and window. The session object is the
+   * identity. pi re-renders a FooterComponent from the session it holds on every frame, so the
+   * installed footer is rebound rather than reinstalled, and a record with no session falls back to
+   * its own numbers.
+   */
   private syncSession(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState): void {
     const record = this.options.manager.getRecord(state.id);
-    if (!record) return;
-    const session = record.session;
-    if (session && session.sessionId === state.shownSessionId) {
-      state.footer?.setAutoCompactEnabled(session.autoCompactionEnabled);
+    if (!record) {
+      // A removed record emits nothing of its own, so nothing else drops the watch: without this
+      // the view keeps a listener on the session it no longer shows.
+      this.watchSession(state, undefined);
       return;
     }
-    state.shownSessionId = session?.sessionId;
-    if (session) {
-      const live = session;
-      const getRecord = () => this.options.manager.getRecord(state.id);
-      const hostCwd = () => im.sessionManager.getCwd();
-      ctx.ui.setFooter((_tui, theme, footerData) => {
-        const footer = new ChildFooter(live, footerData, getRecord, hostCwd, theme);
-        // A constructed FooterComponent defaults to auto-compaction on; pi only calls this on
-        // its own footer, so the factory must set it or every child prints (auto).
-        footer.setAutoCompactEnabled(live.autoCompactionEnabled);
-        state.footer = footer;
-        state.footerInstalled = true;
-        return footer;
-      });
-      if (state.editor) state.editor.borderColor = ctx.ui.theme.getThinkingBorderColor(live.thinkingLevel);
-    } else {
-      const getRecord = () => this.options.manager.getRecord(state.id);
-      ctx.ui.setFooter((_tui, theme) => new RecordFooter(getRecord, theme));
-      state.footer = undefined;
-      state.footerInstalled = true;
+    const session = record.session;
+    if (!session) {
+      if (state.footerKind !== "record") this.installRecordFooter(ctx, state);
+      state.footerSession = undefined;
+      this.watchSession(state, undefined);
+      return;
     }
+    if (state.footer instanceof ChildFooter) {
+      state.footer.setSession(session);
+      // A constructed FooterComponent defaults to auto-compaction on; pi only calls this on its
+      // own footer, so the view sets it or every child prints (auto). Re-read: a child can toggle it.
+      state.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
+    } else if (state.footerKind !== "child" || state.footerSession !== session) {
+      // Nothing installed yet — pi builds the factory on its next footer render — or the record
+      // moved on from the footer's session: install for the one it holds now.
+      this.installChildFooter(im, ctx, state, session);
+    }
+    state.footerSession = session;
+    if (state.editor) state.editor.borderColor = ctx.ui.theme.getThinkingBorderColor(session.thinkingLevel);
+    this.watchSession(state, session);
+  }
+
+  /** The child's own footer lines, for the session the record holds now. */
+  private installChildFooter(im: InteractiveModeView, ctx: NativeViewContext, state: ViewState, live: AgentSession): void {
+    const getRecord = () => this.options.manager.getRecord(state.id);
+    const hostCwd = () => im.sessionManager.getCwd();
+    ctx.ui.setFooter((_tui, theme, footerData) => {
+      const footer = new ChildFooter(live, footerData, getRecord, hostCwd, theme);
+      footer.setAutoCompactEnabled(live.autoCompactionEnabled);
+      state.footer = footer;
+      return footer;
+    });
+    state.footerKind = "child";
+    state.footerInstalled = true;
+  }
+
+  /** The record's own numbers, never a footer bound to a session the record no longer holds. */
+  private installRecordFooter(ctx: NativeViewContext, state: ViewState): void {
+    const getRecord = () => this.options.manager.getRecord(state.id);
+    ctx.ui.setFooter((_tui, theme) => new RecordFooter(getRecord, theme));
+    state.footer = undefined;
+    state.footerKind = "record";
+    state.footerInstalled = true;
+  }
+
+  /**
+   * Follow the shown session. An in-place model switch emits neither a child-UI nor a record
+   * event, so the view watches the session itself; one subscription at a time, dropped when the
+   * session changes and on close.
+   */
+  private watchSession(state: ViewState, session: AgentSession | undefined): void {
+    if (session === state.watchedSession) return;
+    state.unsubSession();
+    state.unsubSession = () => {};
+    state.watchedSession = session;
+    if (session) state.unsubSession = session.subscribe((event) => this.onSessionEvent(state, event));
+  }
+
+  /**
+   * The one thing on the child's own bus no other event carries: a model (or thinking level)
+   * switched inside the run. The footer repaints itself from the session, but `record.invocation`
+   * is what RecordFooter and the FleetView row read, so it is refreshed from the live session here
+   * and pi is asked for a frame.
+   */
+  private onSessionEvent(state: ViewState, event: AgentSessionEvent): void {
+    const switched = event.type === "thinking_level_changed"
+      || (event.type === "entry_appended" && event.entry.type === "model_change");
+    if (!switched || this.state !== state || !state.active) return;
+    const record = this.options.manager.getRecord(state.id);
+    const session = record?.session;
+    const im = this.options.getMode();
+    if (!record || !session || !im) return;
+    // The spawn's own write-back, so a switch inside the run records the model and the effective
+    // level the same way a spawn does — the caller's request stays when pi clamped it.
+    adoptSessionModel(record, session);
+    const theme = this.options.getContext()?.ui.theme;
+    if (theme && state.editor) state.editor.borderColor = theme.getThinkingBorderColor(session.thinkingLevel);
+    im.ui.requestRender();
   }
 
   /** Clear only the footer this view installed: another extension's wins, as the wrappers do. */
