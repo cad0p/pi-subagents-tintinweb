@@ -70,7 +70,7 @@ export interface HandoverItem {
 /** Spawn options that are data. Callbacks and the abort signal belong to the activation that spawns. */
 export type SpawnData = Omit<
   SpawnOptions,
-  "signal" | "onToolActivity" | "onTextDelta" | "onSessionCreated" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+  "signal" | "onToolActivity" | "onTextDelta" | "onSessionCreated" | "onTurnEnd" | "onUsage" | "onCompaction"
 >;
 
 /** A queued top-level spawn, re-spawned by the new activation under the same id. */
@@ -235,7 +235,7 @@ export class ReloadHandover {
 
 /** Spawn options without the callbacks and signal, which belong to the activation that spawns. */
 export function toSpawnData(options: SpawnOptions): SpawnData {
-  const { signal: _signal, onToolActivity: _tool, onTextDelta: _text, onSessionCreated: _session, onTurnEnd: _turn, onAssistantUsage: _usage, onCompaction: _compaction, ...data } = options;
+  const { signal: _signal, onToolActivity: _tool, onTextDelta: _text, onSessionCreated: _session, onTurnEnd: _turn, onUsage: _usage, onCompaction: _compaction, ...data } = options;
   return data;
 }
 

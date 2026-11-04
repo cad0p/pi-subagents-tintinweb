@@ -101,8 +101,8 @@ function createActivityTracker(agentId: () => string | undefined, maxTurns?: num
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: LifetimeUsage) => {
-      addUsage(state.lifetimeUsage, usage);
+    onUsage: (delta: LifetimeUsage) => {
+      addUsage(state.lifetimeUsage, delta);
     },
   };
 
@@ -755,26 +755,27 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
-  }, (record, usage) => {
-    // Every assistant message from every agent — nested included, exactly once.
-    // Parked here until a tool result can carry it back to the parent session;
-    // see `PendingUsagePool`. Skipped entirely when the feature is off, so no
-    // pool grows in a session that will never drain it.
-    if (reportUsage) pendingUsage.add(usage);
-    // The same message, live, for anyone keeping their own ledger — a footer
-    // that breaks spend down by agent type and thinking level, say. This is the
-    // one place every agent's spend passes through, which is why it is emitted
-    // here and not from the lifecycle events: those fire for top-level agents
-    // only, once, at the end, so a nested child would never be counted and a
-    // running agent would read as free until it stopped. Deliberately ungated by
-    // `reportUsage` — that decides whether the parent session's own totals
-    // include this spend, not whether it happened.
+  }, (record, delta) => {
+    // Every agent's growth of its own session totals — nested included, exactly once. Parked here
+    // until a tool result can carry it back to the parent session; see `PendingUsagePool`. Skipped
+    // entirely when the feature is off, so no pool grows in a session that will never drain it.
+    if (reportUsage) pendingUsage.add(delta);
+    // The same delta, live, for anyone keeping their own ledger — a footer that breaks spend down by
+    // agent type and thinking level, say. This is the one place every agent's spend passes through,
+    // which is why it is emitted here and not from the lifecycle events: those fire for top-level
+    // agents only, once, at the end, so a nested child would never be counted and a running agent
+    // would read as free until it stopped. Deliberately ungated by `reportUsage` — that decides
+    // whether the parent session's own totals include this spend, not whether it happened.
     //
-    // `model` and `thinking` are read off the record per message, not captured
-    // at spawn: the record is authoritative only once the session exists and pi
-    // has clamped the level to the model (see `onSessionCreated` in
-    // agent-manager.ts).
-    const reported = toReportedUsage(usage);
+    // What a reading reports: everything pi counted in the subagent's session since the previous
+    // reading — an assistant message, a tool result's usage, a compaction summary, a cache warm. The
+    // bucket is deliberately not named, because pi persists a message after our `message_end`
+    // listener runs, so a delta can span two objects.
+    //
+    // `model` and `thinking` are the record's current invocation, read per reading rather than
+    // captured at spawn: the record is authoritative only once the session exists and pi has clamped
+    // the level to the model (see `onSessionCreated` in agent-manager.ts).
+    const reported = toReportedUsage(delta);
     if (!reported) return;
     // A key whose value is unknown is omitted, never `undefined`: `model` and
     // `thinking` until the session has reported them, `parentAgentId` on a

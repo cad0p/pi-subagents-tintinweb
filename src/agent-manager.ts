@@ -57,7 +57,7 @@ import {
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
 import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
-import { addUsage, type LifetimeUsage, type SessionLike } from "./usage.js";
+import { addUsage, isEmptyUsage, type LifetimeUsage, readSessionUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
 /** Quiet time the finish check needs, observed on two ticks, before it finishes an idle record. Tests shorten it. */
@@ -142,13 +142,16 @@ export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
 /**
- * Fired once per assistant `message_end`, for EVERY agent this manager owns —
- * top-level and nested alike, spawns and resumes. The one place where each
- * message is seen exactly once: `AgentRecord.lifetimeUsage` is deliberately
- * double-booked into ancestors (see `nested-tools.ts`) so a hidden child's spend
- * shows up on the record a human can see, which makes those records useless as
- * a basis for anything that must not count a message twice — parent-session
- * accounting above all.
+ * Fired once per read that found growth, for EVERY agent this manager owns —
+ * top-level and nested alike, spawns and resumes. `usage` is that read's delta:
+ * the growth of the record's own session totals since the previous read, so a
+ * source read twice in one turn contributes nothing the second time.
+ *
+ * The one place where each delta is seen exactly once. `AgentRecord.lifetimeUsage`
+ * is deliberately double-booked into ancestors (see `readRecordUsage`) so a hidden
+ * child's spend shows up on the record a human can see, which makes those records
+ * useless as a basis for anything that must not count a delta twice —
+ * parent-session accounting above all.
  */
 export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
@@ -321,8 +324,8 @@ export interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
-  /** Called once per assistant message_end with that message's usage delta. */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called when the run's session may have appended usage; the manager reads the session's totals. */
+  onUsage?: (delta: LifetimeUsage) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
   /** Nesting depth: a top-level subagent is 1. */
@@ -354,7 +357,7 @@ export type CapEvent =
 /** The five activity callbacks a resumed run forwards to its caller. */
 export type ResumeCallbacks = Pick<
   SpawnOptions,
-  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction"
+  "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onUsage" | "onCompaction"
 >;
 
 /**
@@ -733,10 +736,9 @@ export class AgentManager {
         options.onTurnEnd?.(turnCount);
       },
       onTextDelta: options.onTextDelta,
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        this.onUsage?.(record, usage);
-        options.onAssistantUsage?.(usage);
+      onUsage: () => {
+        const delta = this.readRecordUsage(record);
+        if (delta) options.onUsage?.(delta);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -760,6 +762,7 @@ export class AgentManager {
           return;
         }
         bindSession(record, session, lifecycle);
+        this.readRecordUsage(record);
         if (record.sessionFile) {
           this.writeLedger(id, "subagent-spawned", spawnedEntry(record, record.sessionFile, currentOwnerStamp()));
         }
@@ -1330,11 +1333,55 @@ export class AgentManager {
     return this.nestedInFlight.has(child);
   }
 
+  /**
+   * Reads a session's totals into its record: lifetime, the ancestors' display rows, and the
+   * parent's pool. One read, one delta, updated baseline — so two reads in a tick cannot
+   * double-report, and a read that arrives before pi's append is picked up by the next one.
+   *
+   * This is the only place a subagent's spend is read. `getSessionStats()` sums every usage
+   * bucket pi counts over the whole session file, so nothing here re-derives pi's buckets.
+   */
+  private readRecordUsage(record: AgentRecord): LifetimeUsage | undefined {
+    const session = record.session;
+    if (!session) return undefined;
+    let read: { stats: LifetimeUsage; delta: LifetimeUsage };
+    try {
+      // A disposed session reads nothing; the settle read in afterRun already flushed its tail.
+      read = readSessionUsage(session, record.usageBaseline);
+    } catch {
+      return undefined;
+    }
+    // An absent baseline seeds and never deltas (readSessionUsage returns a zero delta for it): the file's whole
+    // total becomes this record's own part, with the fold added on top because a descendant's spend sits in a
+    // different session file. Every object is a fresh copy: the fold below mutates lifetimes, so a lifetime shared
+    // with the baseline would inflate that baseline and swallow this record's own next delta.
+    if (record.usageBaseline === undefined) {
+      record.usageBaseline = { ...read.stats };
+      record.lifetimeUsage = { ...read.stats };
+      if (record.foldedUsage) addUsage(record.lifetimeUsage, record.foldedUsage);
+      return undefined;
+    }
+    record.usageBaseline = { ...read.stats };
+    if (isEmptyUsage(read.delta)) return undefined;
+    addUsage(record.lifetimeUsage, read.delta);
+    // The pool's sink, and the live subagents:usage event. Called once per record and before the fold: a record's
+    // own lifetime is double-booked into its ancestors, so deriving the pool from records would count it twice.
+    this.onUsage?.(record, read.delta);
+    for (let id = record.parentAgentId; id !== undefined; ) {
+      const ancestor = this.getRecord(id);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, read.delta);
+      ancestor.foldedUsage ??= { input: 0, output: 0, cacheWrite: 0 };
+      addUsage(ancestor.foldedUsage, read.delta);
+      id = ancestor.parentAgentId;
+    }
+    return read.delta;
+  }
+
   /** Resumes a parent that is no longer live with its nested results as one message; each child is delivered once it lands. */
   private resumeNested(parentId: string, entries: { child: AgentRecord; content: string }[]): void {
     const content = entries.map((entry) => entry.content).join("\n\n");
-    const onAssistantUsage = (usage: { input: number; output: number; cacheWrite: number }) => this.foldUsageIntoAncestors(parentId, usage);
-    void this.deliver(parentId, content, { onAssistantUsage }).then((outcome) => {
+    void this.deliver(parentId, content).then((outcome) => {
       if (outcome) {
         for (const entry of entries) entry.child.resultDelivered = true;
         return;
@@ -1343,16 +1390,6 @@ export class AgentManager {
       const ids = entries.map((entry) => entry.child.id).join(", ");
       console.warn(`[pi-subagents] ${parentId} refused nested result(s) ${ids}; they stay pullable`);
     });
-  }
-
-  /** Usage a resumed parent reports belongs to every ancestor, as a nested child's turns do (nested-tools foldUsageIntoAncestors). */
-  private foldUsageIntoAncestors(id: string, usage: { input: number; output: number; cacheWrite: number }): void {
-    for (let ancestorId = this.getRecord(id)?.parentAgentId; ancestorId !== undefined; ) {
-      const ancestor = this.getRecord(ancestorId);
-      if (!ancestor) break;
-      addUsage(ancestor.lifetimeUsage, usage);
-      ancestorId = ancestor.parentAgentId;
-    }
   }
 
   /**
@@ -1545,6 +1582,9 @@ export class AgentManager {
     try { this.abortOwnedChildren(record); } catch { /* keep the completion tail failure-safe */ }
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
+    // The settle flush: the last read of the run's own session, so the completion report and the settled record
+    // carry the run's tail (an assistant message's read lagged one object, and nothing follows it).
+    try { this.readRecordUsage(record); } catch { /* keep the completion tail failure-safe */ }
     const session = record.session;
     if (session) {
       try {
@@ -1828,10 +1868,9 @@ export class AgentManager {
         record.turnCount = turnCount;
         callbacks?.onTurnEnd?.(turnCount);
       },
-      onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
-        this.onUsage?.(record, usage);
-        callbacks?.onAssistantUsage?.(usage);
+      onUsage: () => {
+        const delta = this.readRecordUsage(record);
+        if (delta) callbacks?.onUsage?.(delta);
       },
       onCompaction: (info) => {
         record.compactionCount++;
@@ -1888,6 +1927,7 @@ export class AgentManager {
                 return undefined;
               }
               bindSession(record, session, attachSessionLifecycle(session));
+              this.readRecordUsage(record);
               this.reportCrashedChildren(id, session.sessionManager);
               return session;
             });
