@@ -531,11 +531,16 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:failed` | Agent errored, stopped, or aborted | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
+| `subagents:usage` | Every usage source of every agent, nested included: assistant messages, tool-result usage (codemode, `ctx.executeTool()`), compaction summaries, prompt-cache warming. Not gated by `reportUsage` | `id`, `type`, `description`, `depth`, `usage` (a pi `Usage`), `source` (`"assistant"` / `"toolResult"` / `"compaction"` / `"cacheWarm"`), `model`, `thinking`, `requestedThinking`, `parentAgentId` |
+| `subagents:disposed` | Root session shut down; no further `subagents:usage` can arrive | `reason` |
+| `subagents:debug` | Cap diagnostics, only with `PI_SUBAGENTS_DEBUG` set | `{ kind: "headsUp" \| "interrupt" \| "hardStop" \| "settle", … }` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
 | `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | — |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
+
+`subagents:usage`'s optional keys are omitted, never `undefined`: `source` is absent only on an event handed over by an activation older than #218 (provenance unknown, never inferred), `model` is absent where the spend names none (a summary or a tool result; a cache warm names its own entry's `provider/model`, an assistant message the record's invocation), and `thinking`/`requestedThinking` belong to an assistant message alone. `parentAgentId` is absent on a top-level agent.
 
 `tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it. Use `contextUsage.percent` (surfaced as `(NN%)` in FleetView) for current context size.
 
