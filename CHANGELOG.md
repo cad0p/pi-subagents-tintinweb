@@ -54,6 +54,7 @@ All notable changes to this project will be documented in this file.
 - *(native-view)* Restore #187, reverted by the #193 squash (closes #203) ([#204](https://github.com/cad0p/pi-subagents-tintinweb/pull/204))
 - *(recovery)* Resume a run pi stopped at shutdown like a crashed one (closes #207) ([#208](https://github.com/cad0p/pi-subagents-tintinweb/pull/208))
 - *(native-view)* Esc only interrupts the shown run; leave with the arrows (closes #211) ([#212](https://github.com/cad0p/pi-subagents-tintinweb/pull/212))
+- *(usage)* A subagent's spend is its pi session's spend (closes #218) ([#222](https://github.com/cad0p/pi-subagents-tintinweb/pull/222))
 
 ### 🚜 Refactor
 
