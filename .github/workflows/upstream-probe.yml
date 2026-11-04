@@ -63,10 +63,11 @@ jobs:
             # the graph (vitest.config.ts); minimum-release-age=0 skips pnpm's quarantine so a release
             # from an hour ago — the one this probe exists to test — is installable.
             pnpm add --config.minimum-release-age=0 @earendil-works/pi-coding-agent@${{ steps.pi.outputs.version }} @earendil-works/pi-ai@${{ steps.pi.outputs.version }} @earendil-works/pi-tui@${{ steps.pi.outputs.version }}
-            # Physical copies, not version count: the invariant in vitest.config.ts is "one pi-ai per
-            # peer combination", and two same-version copies would still read "Found 1 version" in pnpm why.
-            # -L follows the pnpm symlinks, readlink -f collapses them, so this counts distinct directories.
-            copies=$(find -L node_modules -maxdepth 8 -type f -path '*/@earendil-works/pi-ai/package.json' -exec readlink -f {} + 2>/dev/null | sort -u | wc -l)
+            # Count physical copies reachable through the root/nested package links. The raw .pnpm
+            # virtual store can retain unreferenced package directories after `pnpm add`; those are
+            # not active copies. Prune only that raw store while following links from installed packages.
+            # readlink -f collapses symlink aliases; this still catches duplicate physical copies in the graph.
+            copies=$(find -L node_modules -path 'node_modules/.pnpm' -prune -o -maxdepth 8 -type f -path '*/@earendil-works/pi-ai/package.json' -exec readlink -f {} + 2>/dev/null | sort -u | wc -l)
             if [ "$copies" != 1 ]; then echo "expected one physical pi-ai copy, found $copies" >&2; exit 1; fi
           } 2>&1 | tee .probe/install.log
       # shell: bash is bash -eo pipefail on GitHub, but the pipefail is stated here because the tee is
