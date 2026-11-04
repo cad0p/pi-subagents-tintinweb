@@ -406,8 +406,8 @@ export default function (pi: ExtensionAPI) {
   let programStatusUi: ExtensionContext | undefined;
   /**
    * Subagent spend the parent session has not been told about yet. Fed from the
-   * manager's per-message hook (the one place each message is seen exactly once)
-   * and drained onto the next tool result this extension returns.
+   * manager's usage hook (the one place each read's growth is seen once) and
+   * drained onto the next tool result this extension returns.
    */
   const pendingUsage = new PendingUsagePool();
   // Handovers from an older activation that a reload left draining; their runs still count against maxConcurrent.
