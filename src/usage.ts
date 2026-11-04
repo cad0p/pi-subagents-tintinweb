@@ -3,7 +3,7 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
 /**
- * Lifetime usage components: one session's cumulative spend. a record's value is read from
+ * Lifetime usage components: one session's cumulative spend. A record's value is read from
  * upstream `getSessionStats()`, which sums every usage bucket pi counts over the whole session
  * file, so compaction cannot shrink it. cacheRead is excluded from `getLifetimeTotal` because
  * each turn's cacheRead is the cumulative cached prefix re-read on that one

@@ -1346,7 +1346,8 @@ export class AgentManager {
     if (!session) return undefined;
     let read: { stats: LifetimeUsage; delta: LifetimeUsage };
     try {
-      // A disposed session reads nothing; the settle read in afterRun already flushed its tail.
+      // A retired record has no session (`retireSession` clears it), so the guard above returns for it; the settle
+      // read in afterRun already flushed its tail. This catch only keeps a throwing read from failing the caller.
       read = readSessionUsage(session, record.usageBaseline);
     } catch {
       return undefined;
