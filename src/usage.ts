@@ -3,9 +3,18 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
 /**
- * Lifetime usage components, accumulated via `message_end` events. Survives
- * compaction (which replaces session.state.messages and would reset any
- * stats-derived sum). cacheRead is excluded from `getLifetimeTotal` because
+ * Lifetime usage components, accumulated from the spend events of a session
+ * (`UsageSpend.source`: assistant messages, toolResult messages carrying
+ * `usage`, compaction summaries, cache-warm usage entries).
+ *
+ * Not what makes a total survive compaction: pi's session entries are
+ * append-only and `getSessionStats()` sums all of them, so its totals are
+ * cumulative across compaction too. What this accumulator adds is attribution —
+ * which source and which model each delta came from, read at the moment pi
+ * finalizes the object it persists — without re-reading the session file, and
+ * for a record that outlives its session.
+ *
+ * cacheRead is excluded from `getLifetimeTotal` because
  * each turn's cacheRead is the cumulative cached prefix re-read on that one
  * call — summing across turns counts the prefix N times. See issue #38.
  *
@@ -139,13 +148,14 @@ export type SessionStatsLike = {
 export type SessionLike = { getSessionStats(): SessionStatsLike };
 
 /**
- * Session-scoped token count: input + output + cacheWrite as reported by
- * upstream `getSessionStats().tokens` for the *current* session window.
+ * Token count: input + output + cacheWrite as reported by upstream
+ * `getSessionStats().tokens`.
  *
- * RESETS at compaction — upstream replaces `session.state.messages` and the
- * stats are derived from that array. For a lifetime total that survives
- * compaction, use `getLifetimeTotal(lifetimeUsage)` instead, which reads
- * from an independent accumulator fed by `message_end` events.
+ * It is cumulative, not a window: upstream derives the stats from the session's
+ * entries, which are append-only, so a compaction adds its own entry rather than
+ * replacing the ones before it. `getLifetimeTotal(lifetimeUsage)` is the same
+ * quantity from this extension's own accumulator, available for a run whose
+ * session does not exist yet (or no longer does).
  *
  * Avoids upstream's `tokens.total` field, which sums per-turn `cacheRead`
  * and so counts the cumulative cached prefix N times across N turns

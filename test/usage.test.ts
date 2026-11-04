@@ -138,36 +138,52 @@ describe("usage", () => {
       expect(getLifetimeTotal({ input: 100, output: 200, cacheWrite: 50 })).toBe(350);
     });
 
-    // getSessionTokens reads upstream session stats (resets at compaction);
-    // getLifetimeTotal reads our independent accumulator (survives compaction).
-    // They agree pre-compaction, diverge after — both legitimate signals.
-    it("agrees with getSessionTokens pre-compaction, diverges after", () => {
-      let sessionStatsTokens = { input: 100, output: 200, cacheWrite: 50 };
+    // getSessionTokens reads upstream session stats; getLifetimeTotal reads this extension's accumulator. Pi's
+    // session entries are append-only and getSessionStats() sums every one of them, so the stats are cumulative across
+    // compaction too (they do not reset — #218 corrected a doc that claimed they did). The fixture models that: entries
+    // are appended, never replaced, and the stats are re-derived from the list on every read.
+    it("agrees with getSessionTokens over the same append-only entries, compaction included", () => {
+      type Entry = { input: number; output: number; cacheWrite: number };
+      const entries: Entry[] = [];
       const session = {
-        getSessionStats: () => ({ tokens: sessionStatsTokens }),
+        getSessionStats: () => ({
+          tokens: entries.reduce(
+            (sum, entry) => ({
+              input: sum.input + entry.input,
+              output: sum.output + entry.output,
+              cacheWrite: sum.cacheWrite + entry.cacheWrite,
+            }),
+            { input: 0, output: 0, cacheWrite: 0 },
+          ),
+        }),
       };
-      const lifetime = { input: 100, output: 200, cacheWrite: 50 };
+      const lifetime = { input: 0, output: 0, cacheWrite: 0 };
+      const add = (entry: Entry) => {
+        entries.push(entry);
+        addUsage(lifetime, entry);
+      };
 
+      add({ input: 100, output: 200, cacheWrite: 50 });
       expect(getSessionTokens(session)).toBe(350);
       expect(getLifetimeTotal(lifetime)).toBe(350);
 
-      // Compaction: upstream replaces session.state.messages, so stats reset.
-      // Our accumulator is independent — it keeps growing.
-      sessionStatsTokens = { input: 0, output: 0, cacheWrite: 0 };
+      // A compaction appends its summary's own usage; it drops messages from the context, never entries from the file.
+      add({ input: 300, output: 40, cacheWrite: 0 });
 
-      expect(getSessionTokens(session)).toBe(0);            // reset
-      expect(getLifetimeTotal(lifetime)).toBe(350);          // preserved
+      expect(getSessionTokens(session)).toBe(690); // cumulative, not a fresh window
+      expect(getLifetimeTotal(lifetime)).toBe(690); // and the two agree
 
-      // Subsequent message_end events feed both: session re-fills, accumulator continues
-      sessionStatsTokens = { input: 80, output: 150, cacheWrite: 30 };
-      lifetime.input += 80; lifetime.output += 150; lifetime.cacheWrite += 30;
+      // Later messages keep feeding the same list and the same accumulator.
+      add({ input: 80, output: 150, cacheWrite: 30 });
 
-      expect(getSessionTokens(session)).toBe(260);           // post-compaction window
-      expect(getLifetimeTotal(lifetime)).toBe(610);          // 350 + 260, monotone
+      expect(getSessionTokens(session)).toBe(950);
+      expect(getLifetimeTotal(lifetime)).toBe(950);
+      expect(entries).toHaveLength(3); // nothing was replaced
     });
 
-    // The accumulator survives compaction because it lives on AgentActivity /
-    // AgentRecord, not on session.state.messages (which compaction replaces).
+    // Each delta is added once, at the event that finalizes it, so the total is monotone across a compaction that
+    // adds spend of its own. What the accumulator adds over session stats is per-event attribution (UsageSpend.source),
+    // not survival: pi's stats are cumulative too.
     it("stays monotone across simulated compaction when fed via addUsage-style accumulation", () => {
       const usage = { input: 0, output: 0, cacheWrite: 0 };
       const onUsage = (u: { input: number; output: number; cacheWrite: number }) => {
@@ -180,8 +196,7 @@ describe("usage", () => {
       for (let i = 0; i < 5; i++) onUsage({ input: 1000, output: 200, cacheWrite: 50 });
       expect(getLifetimeTotal(usage)).toBe(5 * 1250);
 
-      // Compaction would replace session.state.messages, dropping any sum
-      // re-derived from it. Our accumulator is independent — no reset.
+      // A compaction adds its summary's usage and nothing is re-derived, so nothing is dropped or counted twice.
       const beforeCompaction = getLifetimeTotal(usage);
 
       // 3 more turns post-"compaction"
