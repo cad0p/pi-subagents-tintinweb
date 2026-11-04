@@ -25,19 +25,50 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { addUsage, type LifetimeUsage } from "../src/usage.js";
+import type { LifetimeUsage } from "../src/usage.js";
 import { childCtx, MANAGER_KEY, makePi, makeRootAndChild, spawnCtx, textOf } from "./helpers/subagents-harness.js";
 
 /** A tool result as this extension returns it: pi's `usage` rides alongside. */
 type ToolResult = { content: { type: string; text: string }[]; details?: unknown; usage?: Usage };
 
-/** A child session stand-in — only the members the manager touches. */
-function fakeSession(dispose: () => void = vi.fn()): AgentSession {
-  return { dispose, sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } } as unknown as AgentSession;
+/** A session's cumulative totals, as `getSessionStats()` reports them. */
+type FakeStats = { input: number; output: number; cacheWrite: number; cacheRead: number; cost: number };
+
+/** A child session stand-in — only the members the manager touches. `stats` is what the
+ *  manager reads: it starts at zero and a test accrues spend into it. */
+function fakeSession(dispose: () => void = vi.fn(), stats: FakeStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }): AgentSession & { stats: FakeStats } {
+  return {
+    stats,
+    getSessionStats: () => ({
+      tokens: { input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite },
+      cost: stats.cost,
+    }),
+    dispose,
+    subscribe: () => () => {},
+    isStreaming: false,
+    abort: vi.fn(),
+    steer: vi.fn(),
+    agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
+    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+  } as unknown as AgentSession & { stats: FakeStats };
+}
+
+/** Accrue spend into a session's totals, the way pi appends it to the file. */
+function accrue(session: AgentSession & { stats: FakeStats }, usage: LifetimeUsage): void {
+  session.stats.input += usage.input;
+  session.stats.output += usage.output;
+  session.stats.cacheWrite += usage.cacheWrite;
+  session.stats.cacheRead += usage.cacheRead ?? 0;
+  session.stats.cost += usage.cost ?? 0;
+}
+
+/** Host a session the way the runner does: bind it, then hand the run its hooks. */
+function host(options: { onSessionCreated?: (s: AgentSession, l: ReturnType<typeof attachSessionLifecycle>) => void }, session: AgentSession) {
+  options.onSessionCreated?.(session, attachSessionLifecycle(session));
 }
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -85,11 +116,15 @@ describe("reporting subagent usage back to the parent session", () => {
     return { pi, tools, lifecycle };
   }
 
-  /** One run that spends `usage` synchronously, i.e. before the tool returns. */
+  /** One run that spends `usage` synchronously, i.e. before the tool returns. The session
+   *  binds at zero and then grows, which is what makes the growth a delta rather than a seed. */
   function runSpending(usage: LifetimeUsage) {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.(usage);
-      return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+      const session = fakeSession();
+      host(options, session);
+      accrue(session, usage);
+      options.onUsage?.();
+      return { responseText: "done", session, aborted: false, steered: false };
     });
   }
 
@@ -97,17 +132,23 @@ describe("reporting subagent usage back to the parent session", () => {
    *  background agent actually has, and the reason the pool exists. */
   function runSpendingLater(usage: LifetimeUsage) {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+      const session = fakeSession();
+      host(options, session);
       await flush();
-      options.onAssistantUsage?.(usage);
-      return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+      accrue(session, usage);
+      options.onUsage?.();
+      return { responseText: "done", session, aborted: false, steered: false };
     });
   }
 
   /** Nothing spent — the agent errored before any message_end fired. */
   function runSpendingNothing() {
-    vi.mocked(runAgent).mockImplementation(async () => ({
-      responseText: "done", session: fakeSession(), aborted: false, steered: false,
-    }));
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+      const session = fakeSession();
+      host(options, session);
+      options.onUsage?.(); // a read of unchanged totals reports nothing
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
   }
 
   async function spawn(tools: Map<string, unknown>): Promise<ToolResult> {
@@ -253,9 +294,9 @@ describe("reporting subagent usage back to the parent session", () => {
 
     it("counts a nested chain's spend once, not once per ancestor record", async () => {
       // Catches the one implementation that looks natural and is wrong: deriving
-      // the report from the records. Nested spend is deliberately double-booked
-      // into every ancestor (nested-tools.ts folds it up the chain) so a hidden
-      // child stays visible somewhere, which makes summing records over-count.
+      // the report from the records. Each node's delta is folded into every
+      // ancestor's lifetime so a hidden child stays visible somewhere, which
+      // makes summing records over-count.
       //
       // The chain is parent -> child -> grandchild, one message each. The true
       // total is 450 tokens / $0.03. Summing every record gives 900 (the parent
@@ -267,28 +308,21 @@ describe("reporting subagent usage back to the parent session", () => {
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
         const { manager, parentAgentId, depth } = options.nestedRuntime;
-        options.onAssistantUsage?.(perMessage);
+        const session = fakeSession();
+        host(options, session);
+        accrue(session, perMessage);
+        options.onUsage?.();
         if (depth < 3) {
-          // The ancestor walk, verbatim from nested-tools.ts.
-          const foldUsageIntoAncestors = (usage: LifetimeUsage): void => {
-            for (let id: string | undefined = parentAgentId; id !== undefined; ) {
-              const ancestor = manager.getRecord(id);
-              if (!ancestor) break;
-              addUsage(ancestor.lifetimeUsage, usage);
-              id = ancestor.parentAgentId;
-            }
-          };
           const childId = manager.spawn(pi, spawnCtx(cwd), "general-purpose", "sub", {
             description: `depth ${depth + 1}`,
             depth: depth + 1,
             parentAgentId,
             maxSubagentDepth: 3,
             configCwd: cwd,
-            onAssistantUsage: foldUsageIntoAncestors,
           });
           await manager.getRecord(childId)?.promise;
         }
-        return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+        return { responseText: "done", session, aborted: false, steered: false };
       });
 
       const result = await spawn(tools);
@@ -355,16 +389,19 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(usageEvents(pi)).toHaveLength(0);
     });
 
-    it("reports a nested child's message once, as the child's own", async () => {
-      // The lifecycle events never fire for a nested child, and its spend is
+    it("reports a nested child's growth once, as the child's own", async () => {
+      // The lifecycle events never fire for a nested child, and its delta is
       // double-booked into the ancestor records. A ledger summing this event
-      // must see each message exactly once, under the agent that spent it.
+      // must see each delta exactly once, under the agent that spent it.
       const { pi, tools } = boot({});
       let nested = false;
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
         const { manager, parentAgentId } = options.nestedRuntime;
-        options.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+        const session = fakeSession();
+        host(options, session);
+        accrue(session, { input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+        options.onUsage?.();
         if (!nested) {
           nested = true;
           const childId = manager.spawn(pi, spawnCtx(cwd), "general-purpose", "sub", {
@@ -373,14 +410,10 @@ describe("reporting subagent usage back to the parent session", () => {
             parentAgentId,
             maxSubagentDepth: 2,
             configCwd: cwd,
-            onAssistantUsage: (u: LifetimeUsage) => {
-              const parent = manager.getRecord(parentAgentId);
-              if (parent) addUsage(parent.lifetimeUsage, u);
-            },
           });
           await manager.getRecord(childId)?.promise;
         }
-        return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+        return { responseText: "done", session, aborted: false, steered: false };
       });
 
       await spawn(tools);
@@ -399,13 +432,18 @@ describe("reporting subagent usage back to the parent session", () => {
       // must come after the child sessions shut down, not before them.
       const { pi, tools, lifecycle } = boot({});
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-        // The last message, reported from dispose(): the manager disposes the
-        // session during shutdown, and a message_end landing then still reaches
-        // the usage hook.
-        options.onSessionCreated?.(fakeSession(() => {
-          options.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
-        }));
-        return new Promise(() => {});
+        // The run is cut short by the shutdown, and pi appends the aborted turn's
+        // usage as the abort lands — so the last growth arrives with the abort and
+        // has to be reported before the manager announces disposal.
+        const session = fakeSession();
+        host(options, session);
+        return new Promise((_resolve, reject) => {
+          options.signal?.addEventListener("abort", () => {
+            accrue(session, { input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+            options.onUsage?.();
+            reject(new Error("aborted"));
+          }, { once: true });
+        });
       });
 
       await spawn(tools);
