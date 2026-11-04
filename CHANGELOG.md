@@ -53,6 +53,7 @@ All notable changes to this project will be documented in this file.
 - *(agent-runner)* Stop naming child sessions, leaving /name to the user (closes #195) ([#197](https://github.com/cad0p/pi-subagents-tintinweb/pull/197))
 - *(native-view)* Restore #187, reverted by the #193 squash (closes #203) ([#204](https://github.com/cad0p/pi-subagents-tintinweb/pull/204))
 - *(recovery)* Resume a run pi stopped at shutdown like a crashed one (closes #207) ([#208](https://github.com/cad0p/pi-subagents-tintinweb/pull/208))
+- *(native-view)* Esc only interrupts the shown run; leave with the arrows (closes #211) ([#212](https://github.com/cad0p/pi-subagents-tintinweb/pull/212))
 
 ### 🚜 Refactor
 
