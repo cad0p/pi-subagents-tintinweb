@@ -3,9 +3,9 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
 /**
- * Lifetime usage components, accumulated via `message_end` events. Survives
- * compaction (which replaces session.state.messages and would reset any
- * stats-derived sum). cacheRead is excluded from `getLifetimeTotal` because
+ * Lifetime usage components: one session's cumulative spend. a record's value is read from
+ * upstream `getSessionStats()`, which sums every usage bucket pi counts over the whole session
+ * file, so compaction cannot shrink it. cacheRead is excluded from `getLifetimeTotal` because
  * each turn's cacheRead is the cumulative cached prefix re-read on that one
  * call — summing across turns counts the prefix N times. See issue #38.
  *
@@ -84,12 +84,14 @@ export function toReportedUsage(u: LifetimeUsage): Usage | undefined {
  * the parent's `getSessionStats()`. Pi does aggregate `toolResult.usage` into
  * those stats, though — so the way back into the parent's footer and `/cost` is
  * to hang the spend on a tool result. Background agents finish between tool
- * calls with nothing to hang it on, hence a pool: every assistant message lands
- * here as it happens, and the next tool result this extension returns carries
- * whatever has accumulated.
+ * calls with nothing to hang it on, hence a pool: each session read's growth is
+ * added here as it happens, and the next tool result this extension returns
+ * carries whatever has accumulated.
  *
- * Drain empties it, so each message is reported exactly once no matter how many
- * results are returned or how many agents were running.
+ * Drain empties it, so each delta is reported exactly once no matter how many
+ * results are returned or how many agents were running. A delta is the growth of
+ * a session's own totals since the previous read, so a source that read it twice
+ * in one turn contributes nothing the second time.
  */
 export class PendingUsagePool {
   private pending: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
@@ -120,21 +122,61 @@ export class PendingUsagePool {
   }
 }
 
-/** Minimal shape we read from upstream `getSessionStats()`. */
+/**
+ * Minimal shape we read from upstream `getSessionStats()`. pi always reports `cacheRead` and
+ * `cost`; both are optional here because a stats-only fixture omits them, and an absent value
+ * reads as 0.
+ */
 export type SessionStatsLike = {
-  tokens: { input: number; output: number; cacheWrite: number };
+  tokens: { input: number; output: number; cacheRead?: number; cacheWrite: number };
+  cost?: number;
   contextUsage?: { percent: number | null; contextWindow?: number | null };
 };
 export type SessionLike = { getSessionStats(): SessionStatsLike };
 
+/** A session's whole-file totals as a lifetime accumulator. The cost is pi's own `usage.cost.total` sum, never ours. */
+function statsToLifetime(stats: SessionStatsLike): LifetimeUsage {
+  const { tokens, cost = 0 } = stats;
+  return { input: tokens.input, output: tokens.output, cacheWrite: tokens.cacheWrite, cacheRead: tokens.cacheRead ?? 0, cost };
+}
+
+/**
+ * One session's cumulative spend, plus the growth since a baseline.
+ *
+ * An absent baseline is a seed, not a zero: `delta` is all zero, so no caller can book history it
+ * did not watch accrue. Otherwise every field's delta is clamped at 0 — a session file is
+ * append-only, so a shrinking total is a bug, and the clamp keeps that bug from ever subtracting
+ * from a record or from the parent's pool.
+ */
+export function readSessionUsage(session: SessionLike, baseline?: LifetimeUsage): { stats: LifetimeUsage; delta: LifetimeUsage } {
+  const stats = statsToLifetime(session.getSessionStats());
+  if (!baseline) return { stats, delta: { input: 0, output: 0, cacheWrite: 0 } };
+  const growth = (now: number, before = 0) => Math.max(0, now - before);
+  return {
+    stats,
+    delta: {
+      input: growth(stats.input, baseline.input),
+      output: growth(stats.output, baseline.output),
+      cacheWrite: growth(stats.cacheWrite, baseline.cacheWrite),
+      cacheRead: growth(stats.cacheRead ?? 0, baseline.cacheRead),
+      cost: growth(stats.cost ?? 0, baseline.cost),
+    },
+  };
+}
+
+/** Whether a value carries no spend at all (absent fields count as 0). */
+export function isEmptyUsage(u: LifetimeUsage): boolean {
+  return u.input === 0 && u.output === 0 && u.cacheWrite === 0 && !u.cacheRead && !u.cost;
+}
+
 /**
  * Session-scoped token count: input + output + cacheWrite as reported by
- * upstream `getSessionStats().tokens` for the *current* session window.
+ * upstream `getSessionStats().tokens`, which sums every entry of the session
+ * file — compaction entries included — so this is the session's whole
+ * lifetime, not the current context window.
  *
- * RESETS at compaction — upstream replaces `session.state.messages` and the
- * stats are derived from that array. For a lifetime total that survives
- * compaction, use `getLifetimeTotal(lifetimeUsage)` instead, which reads
- * from an independent accumulator fed by `message_end` events.
+ * A record's spend is the same number (`readSessionUsage`); this reader stays
+ * for surfaces that hold only a session.
  *
  * Avoids upstream's `tokens.total` field, which sums per-turn `cacheRead`
  * and so counts the cumulative cached prefix N times across N turns

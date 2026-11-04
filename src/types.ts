@@ -218,11 +218,26 @@ export interface AgentRecord {
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
   /**
-   * Lifetime usage breakdown, accumulated via `message_end` events. Survives
-   * compaction. Total = input + output + cacheWrite (cacheRead deliberately
-   * excluded — see issue #38). Initialized to zeros at spawn.
+   * Lifetime usage breakdown: this session's own cumulative spend (read from pi's
+   * `getSessionStats()`) plus what descendants folded in. Total = input + output +
+   * cacheWrite (cacheRead deliberately excluded — see issue #38). Initialized to
+   * zeros at spawn.
    */
   lifetimeUsage: LifetimeUsage;
+  /**
+   * This session's own cumulative usage at the last read, as pi reports it — the baseline the
+   * parent's pool is measured against. Absent on a record whose session is not known to this
+   * activation (ledger recovery, a hand-over from an older release): the next read seeds it and
+   * reports nothing retroactively.
+   */
+  usageBaseline?: LifetimeUsage;
+  /**
+   * The part of `lifetimeUsage` that came from descendants' folded deltas, kept apart so a seed
+   * from this session's own file adds the file's totals on top instead of replacing or
+   * double-counting them. A descendant's spend is in another session file, so it is never part of
+   * `usageBaseline`.
+   */
+  foldedUsage?: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /** Run-local agentic turn count, stamped via the `onTurnEnd` callback.
