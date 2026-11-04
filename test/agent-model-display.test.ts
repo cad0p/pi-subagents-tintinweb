@@ -58,11 +58,16 @@ const CHILD_MODEL = { provider: "anthropic", id: "claude-haiku-4-5", name: "Clau
  * deliberately omitted in the "session reports none" case, which is what an
  * older or stubbed session looks like.
  */
+/** What `getSessionStats()` reports: a session's cumulative totals, moved by a test to simulate spend. */
+type SessionSpend = { input: number; output: number; cacheWrite?: number; cacheRead?: number; cost?: number };
+
 function reportingSession(
   model: { provider: string; id: string; name: string } | undefined,
   thinkingLevel: string | undefined,
+  spend: SessionSpend = { input: 0, output: 0 },
 ): AgentSession {
   return {
+    getSessionStats: () => ({ tokens: { input: spend.input, output: spend.output, cacheWrite: spend.cacheWrite ?? 0, cacheRead: spend.cacheRead ?? 0 }, cost: spend.cost ?? 0 }),
     sessionId: "child-session-id",
     dispose: vi.fn(),
     isStreaming: false,
@@ -221,9 +226,14 @@ describe("the read-back reaching the surfaces", () => {
    *  child session report its own — the record must end up with the child's. */
   async function spawnAndReport(tools: Map<string, unknown>, level: string, cost = 0.01): Promise<AgentRecord> {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onSessionCreated?.(reportingSession(CHILD_MODEL, level));
-      options.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 0, cost });
-      return { responseText: "done", session: reportingSession(CHILD_MODEL, level), aborted: false, steered: false };
+      // The session's own totals move, then the run says usage may have been appended: the
+      // manager reads the session, so a payload would prove nothing.
+      const spend: SessionSpend = { input: 0, output: 0 };
+      const child = reportingSession(CHILD_MODEL, level, spend);
+      options.onSessionCreated?.(child); // seeds at zero
+      Object.assign(spend, { input: 100, output: 50, cost });
+      options.onUsage?.();
+      return { responseText: "done", session: child, aborted: false, steered: false };
     });
     const agent = tools.get("Agent") as {
       execute(id: string, params: Record<string, unknown>, s?: unknown, u?: unknown, c?: unknown): Promise<unknown>;

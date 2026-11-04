@@ -15,6 +15,7 @@ import {
   fromDto,
   HANDOVER_KEY,
   type HandoverEvent,
+  type HandoverItem,
   publishHandovers,
   ReloadHandover,
   slotHoldersOf,
@@ -25,7 +26,7 @@ import {
   toSpawnData,
 } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
-import type { LifetimeUsage } from "../src/usage.js";
+import { addUsage, type LifetimeUsage } from "../src/usage.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -47,8 +48,11 @@ type RunResult = Awaited<ReturnType<typeof runAgent>>;
 const mockPi = {} as unknown as ExtensionAPI;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as unknown as ExtensionContext;
 
-const fakeSession = () =>
-  ({ dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
+/** A session's cumulative totals, as `getSessionStats()` reports them; tests move them to simulate spend. */
+type FakeStats = { input: number; output: number; cacheWrite: number; cacheRead: number; cost: number };
+
+const fakeSession = (stats: FakeStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }) =>
+  ({ getSessionStats: () => ({ tokens: { input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite }, cost: stats.cost }), dispose: vi.fn(), subscribe: () => () => {}, sessionId: "child", agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] } }) as unknown as AgentSession;
 
 const finishedRun = (text: string, session = fakeSession()): RunResult =>
   ({ responseText: text, session, aborted: false, steered: false }) as unknown as RunResult;
@@ -306,6 +310,26 @@ describe("DTO and spawn data", () => {
     const rebuilt = fromDto(dto);
     expect(rebuilt.session).toBeUndefined();
     expect(rebuilt.abortController).not.toBe(record.abortController);
+  });
+
+  it("carries the usage baseline and the fold, and adopts `undefined` for a hand-over that has neither", () => {
+    // The baseline is what makes a reload exactly-once: a publisher older than
+    // this change sends none, and the successor must read that as "unknown",
+    // never as a zero it can book history against.
+    const record = {
+      id: "a1", status: "completed",
+      usageBaseline: { input: 10, output: 5, cacheWrite: 1, cacheRead: 2, cost: 0.5 },
+      foldedUsage: { input: 7, output: 3, cacheWrite: 0 },
+      lifetimeUsage: { input: 17, output: 8, cacheWrite: 1, cacheRead: 2, cost: 0.5 },
+    } as unknown as AgentRecord;
+
+    const rebuilt = fromDto(toDto(record));
+    expect(rebuilt.usageBaseline).toEqual(record.usageBaseline);
+    expect(rebuilt.foldedUsage).toEqual(record.foldedUsage);
+
+    const legacy = fromDto({ id: "a2", status: "completed" } as unknown as AgentDto);
+    expect(legacy.usageBaseline).toBeUndefined();
+    expect(legacy.foldedUsage).toBeUndefined();
   });
 
   it("drops the callbacks and the abort signal from spawn options", () => {
@@ -761,5 +785,68 @@ describe("AgentManager hand-over", () => {
     vi.mocked(resumeAgent).mockResolvedValueOnce(finishedRun("again"));
     next.resume(idle, "again");
     await vi.waitFor(() => expect(reannounced).toHaveBeenCalledTimes(1));
+  });
+
+  it("pools a draining run's spend exactly once across the hand-over: read, replay, settle, bind", async () => {
+    // The whole reload chain in one test, because no single link makes it
+    // exactly-once: the old activation's reads (each one advancing its baseline),
+    // the `usage` events its draining run emits, the settle read's baseline
+    // travelling in the settled DTO, and the successor's later bind seeing a zero
+    // delta. Drop any one and the pool total stops matching the file.
+    const oldPool: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+    const newPool: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+    const first = track(new AgentManager(undefined, undefined, undefined, undefined, (_r, u) => addUsage(oldPool, u)));
+    const stats: FakeStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    let hook!: () => void;
+    let finish!: () => void;
+    vi.mocked(runAgent).mockImplementationOnce(async (_ctx, _type, _prompt, opts) => {
+      const session = fakeSession(stats);
+      opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
+      opts.onSessionCreated?.(session, attachSessionLifecycle(session));
+      hook = () => opts.onUsage?.();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return finishedRun("drained", session);
+    });
+    const id = first.spawn(mockPi, mockCtx, "general-purpose", "busy", { description: "busy" });
+
+    // (1) A read before the reload: its delta is the old activation's, and the record's baseline moves past it.
+    Object.assign(stats, { input: 100, output: 50 });
+    hook();
+    expect(oldPool).toMatchObject({ input: 100, output: 50 });
+
+    const handover = first.beginDrain([], { ...oldPool });
+    const second = track(new AgentManager(undefined, undefined, undefined, undefined, (_r, u) => addUsage(newPool, u)));
+    const settled: HandoverItem[] = [];
+    handover.attach((event) => {
+      if (event.kind === "usage") second.replayUsage(fromDto(event.dto), event.usage);
+      else if (event.kind === "settled") settled.push(...event.items);
+    });
+    const carried = takeUnreportedOf(handover);
+    if (carried) addUsage(newPool, carried);
+
+    // (2) The draining run reads again and its delta replays to the adopter.
+    Object.assign(stats, { input: 200, output: 100 });
+    hook();
+    // The carried 100/50 plus this replay's 100/50.
+    expect(newPool).toMatchObject({ input: 200, output: 100 });
+
+    // (3) Its tail lands in the settle read, and that baseline is what the settled DTO carries.
+    Object.assign(stats, { input: 300, output: 150 });
+    finish();
+    await vi.waitFor(() => expect(settled).toHaveLength(1));
+    const [item] = settled;
+    expect(item.dto.usageBaseline).toMatchObject({ input: 300, output: 150 });
+
+    // (4) Adoption binds nothing; the successor's own bind is what must see zero.
+    second.adopt(item, false);
+    vi.mocked(createChildSession).mockResolvedValueOnce(fakeSession(stats));
+    await second.restoreSession(id);
+
+    // The file holds 300/150, the pool holds exactly that, and the record's own lifetime is it too.
+    const pooled = { input: newPool.input, output: newPool.output };
+    expect(pooled).toEqual({ input: 300, output: 150 });
+    expect(second.getRecord(id)!.lifetimeUsage).toMatchObject({ input: 300, output: 150 });
   });
 });

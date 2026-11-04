@@ -6,8 +6,10 @@ import {
   getLifetimeTotal,
   getSessionContextPercent,
   getSessionTokens,
+  isEmptyUsage,
   type LifetimeUsage,
   PendingUsagePool,
+  readSessionUsage,
   toReportedUsage,
 } from "../src/usage.js";
 
@@ -138,37 +140,32 @@ describe("usage", () => {
       expect(getLifetimeTotal({ input: 100, output: 200, cacheWrite: 50 })).toBe(350);
     });
 
-    // getSessionTokens reads upstream session stats (resets at compaction);
-    // getLifetimeTotal reads our independent accumulator (survives compaction).
-    // They agree pre-compaction, diverge after — both legitimate signals.
-    it("agrees with getSessionTokens pre-compaction, diverges after", () => {
+    // pi's stats sum the whole session file — compaction entries included — so a
+    // compaction can only add to the total. The old fixture here pinned the
+    // opposite premise ("resets at compaction"), which pi 1.4/1.5 do not do.
+    it("reads upstream stats that grow across a compaction rather than resetting", () => {
       let sessionStatsTokens = { input: 100, output: 200, cacheWrite: 50 };
       const session = {
         getSessionStats: () => ({ tokens: sessionStatsTokens }),
       };
-      const lifetime = { input: 100, output: 200, cacheWrite: 50 };
 
       expect(getSessionTokens(session)).toBe(350);
-      expect(getLifetimeTotal(lifetime)).toBe(350);
 
-      // Compaction: upstream replaces session.state.messages, so stats reset.
-      // Our accumulator is independent — it keeps growing.
-      sessionStatsTokens = { input: 0, output: 0, cacheWrite: 0 };
+      // A compaction that summarizes 350 tokens into 80: pi appends the summary's
+      // usage and keeps the entries it replaced, so the total grows.
+      sessionStatsTokens = { input: 180, output: 300, cacheWrite: 70 };
 
-      expect(getSessionTokens(session)).toBe(0);            // reset
-      expect(getLifetimeTotal(lifetime)).toBe(350);          // preserved
+      expect(getSessionTokens(session)).toBe(550);
 
-      // Subsequent message_end events feed both: session re-fills, accumulator continues
-      sessionStatsTokens = { input: 80, output: 150, cacheWrite: 30 };
-      lifetime.input += 80; lifetime.output += 150; lifetime.cacheWrite += 30;
+      // A later turn adds to the same total.
+      sessionStatsTokens = { input: 260, output: 450, cacheWrite: 100 };
 
-      expect(getSessionTokens(session)).toBe(260);           // post-compaction window
-      expect(getLifetimeTotal(lifetime)).toBe(610);          // 350 + 260, monotone
+      expect(getSessionTokens(session)).toBe(810);
     });
 
-    // The accumulator survives compaction because it lives on AgentActivity /
-    // AgentRecord, not on session.state.messages (which compaction replaces).
-    it("stays monotone across simulated compaction when fed via addUsage-style accumulation", () => {
+    // The record's accumulator is fed by deltas of that same total, so it stays
+    // monotone whatever the session does, compaction included.
+    it("stays monotone when fed via addUsage-style accumulation of stats deltas", () => {
       const usage = { input: 0, output: 0, cacheWrite: 0 };
       const onUsage = (u: { input: number; output: number; cacheWrite: number }) => {
         usage.input += u.input;
@@ -180,17 +177,67 @@ describe("usage", () => {
       for (let i = 0; i < 5; i++) onUsage({ input: 1000, output: 200, cacheWrite: 50 });
       expect(getLifetimeTotal(usage)).toBe(5 * 1250);
 
-      // Compaction would replace session.state.messages, dropping any sum
-      // re-derived from it. Our accumulator is independent — no reset.
+      // A compaction adds its own usage entry to the total: the delta is added,
+      // never a re-derived figure that could drop what came before.
       const beforeCompaction = getLifetimeTotal(usage);
+      onUsage({ input: 80, output: 30, cacheWrite: 0 });
 
       // 3 more turns post-"compaction"
       for (let i = 0; i < 3; i++) onUsage({ input: 800, output: 150, cacheWrite: 30 });
-      expect(getLifetimeTotal(usage)).toBe(beforeCompaction + 3 * 980);
+      expect(getLifetimeTotal(usage)).toBe(beforeCompaction + 110 + 3 * 980);
       expect(getLifetimeTotal(usage)).toBeGreaterThan(beforeCompaction); // monotone
 
       // input + output + cacheWrite = total — by construction, no drift
       expect(usage.input + usage.output + usage.cacheWrite).toBe(getLifetimeTotal(usage));
+    });
+  });
+
+  // ---- readSessionUsage / isEmptyUsage ----
+
+  describe("readSessionUsage", () => {
+    const sessionWith = (stats: { input: number; output: number; cacheWrite: number; cacheRead?: number; cost?: number }) => ({
+      getSessionStats: () => ({ tokens: stats, cost: stats.cost }),
+    });
+
+    it("subtracts every field from a baseline and reports nothing on a second read", () => {
+      // Every field is load-bearing: a dropped one silently repeats its growth
+      // on the next read, or loses it entirely (cost included — that is money).
+      const session = sessionWith({ input: 180, output: 90, cacheWrite: 10, cacheRead: 30, cost: 0.05 });
+      const baseline: LifetimeUsage = { input: 100, output: 50, cacheWrite: 0, cacheRead: 20, cost: 0.02 };
+
+      const first = readSessionUsage(session, baseline);
+      expect(first.stats).toEqual({ input: 180, output: 90, cacheWrite: 10, cacheRead: 30, cost: 0.05 });
+      expect(first.delta).toMatchObject({ input: 80, output: 40, cacheWrite: 10, cacheRead: 10 });
+      expect(first.delta.cost).toBeCloseTo(0.03, 10);
+
+      // The baseline the caller stores is what the next read measures against.
+      const second = readSessionUsage(session, first.stats);
+      expect(isEmptyUsage(second.delta)).toBe(true);
+    });
+
+    it("treats an absent baseline as a seed: the stats, and a delta of zero", () => {
+      // The seed is what keeps a rebuilt record (ledger recovery, an older
+      // release's hand-over) from booking the file's whole history as new spend.
+      const session = sessionWith({ input: 180, output: 90, cacheWrite: 10, cacheRead: 30, cost: 0.05 });
+
+      const read = readSessionUsage(session);
+      expect(read.stats).toEqual({ input: 180, output: 90, cacheWrite: 10, cacheRead: 30, cost: 0.05 });
+      expect(read.delta).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+      expect(isEmptyUsage(read.delta)).toBe(true);
+    });
+
+    it("clamps a total below its baseline at zero instead of reporting a negative delta", () => {
+      // A session file is append-only, so this cannot happen. The clamp is why a
+      // bug cannot subtract from a record or from the parent's pool.
+      const session = sessionWith({ input: 10, output: 5, cacheWrite: 0, cacheRead: 1, cost: 0.001 });
+      const baseline: LifetimeUsage = { input: 100, output: 50, cacheWrite: 5, cacheRead: 20, cost: 0.02 };
+
+      expect(readSessionUsage(session, baseline).delta).toEqual({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    });
+
+    it("reads a missing cacheRead or cost as 0", () => {
+      const session = { getSessionStats: () => ({ tokens: { input: 10, output: 5, cacheWrite: 2 } }) };
+      expect(readSessionUsage(session).stats).toEqual({ input: 10, output: 5, cacheWrite: 2, cacheRead: 0, cost: 0 });
     });
   });
 

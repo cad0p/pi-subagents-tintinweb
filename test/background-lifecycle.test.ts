@@ -32,6 +32,9 @@ setQuietMs(20);
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 const mockSession = () => ({
+  // What the manager reads for a record's spend: a fresh child starts at zero, and
+  // a test moves the totals to simulate what pi appended.
+  getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }, cost: 0 }),
   dispose: vi.fn(),
   prompt: vi.fn(async () => {}),
   sessionId: "child-session-id",
@@ -1533,7 +1536,9 @@ describe("background lifecycle — model-visible surfaces", () => {
     // the `(42%)` context annotation while still showing the token count.
     let resolveResume!: (v: any) => void;
     vi.mocked(resumeAgent).mockImplementation((_session, _prompt, opts: any) => {
-      opts.onAssistantUsage({ input: 1000, output: 0, cacheWrite: 0 });
+      // The run signals that usage may have been appended; the manager reads the
+      // bound session (1000 tokens above) and forwards that growth to the widget.
+      opts.onUsage();
       return new Promise((r) => { resolveResume = r; });
     });
     await tools.get("SendMessage").execute(

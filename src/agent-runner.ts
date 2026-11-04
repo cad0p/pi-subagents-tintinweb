@@ -40,7 +40,6 @@ import { preloadSkills } from "./skill-loader.js";
 import { toSingleLine } from "./text-safety.js";
 import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 import { createChildUIProxy, onChildDialogFlag } from "./ui/child-ui.js";
-import type { LifetimeUsage } from "./usage.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -498,16 +497,12 @@ export interface RunOptions {
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
-   * Called once per assistant message_end with that message's usage delta.
-   * Lets callers maintain a lifetime accumulator that survives compaction
-   * (which replaces session.state.messages and resets stats-derived sums).
-   *
-   * `cost` is pi's own `usage.cost.total` for that message — priced from the
-   * model's rates, so it is 0 (not missing) for a model pi has no pricing for.
-   * We never price anything ourselves; every dollar figure this extension shows
-   * or reports traces back to this field.
+   * Called when the session may have appended usage: a read signal, no payload. The owner reads
+   * the session's own cumulative totals (`getSessionStats()`), which is what pi counts for every
+   * bucket of the session file. Assistant and toolResult messages are persisted after this fires,
+   * so their read accounts the previous object; the owner's settle read flushes the last one.
    */
-  onAssistantUsage?: (usage: LifetimeUsage) => void;
+  onUsage?: () => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -646,7 +641,7 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
 }
 
 /** Event hooks of one prompt. The lifecycle forwards each session event to the current prompt's hooks. */
-export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onAssistantUsage" | "onCompaction">;
+export type SessionHooks = Pick<RunOptions, "onToolActivity" | "onTextDelta" | "onTurnEnd" | "onUsage" | "onCompaction">;
 
 /** Turns counted across every run of one lifecycle. The owner creates it and resets it on resume. */
 export interface TurnBudget {
@@ -758,17 +753,15 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
     if (event.type === "tool_execution_end") {
       hooks?.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
-    if (event.type === "message_end" && event.message.role === "assistant") {
-      lastAssistant = event.message;
-      const u = event.message.usage;
-      if (u)
-        hooks?.onAssistantUsage?.({
-          input: u.input ?? 0,
-          output: u.output ?? 0,
-          cacheWrite: u.cacheWrite ?? 0,
-          cacheRead: u.cacheRead ?? 0,
-          cost: u.cost?.total ?? 0,
-        });
+    if (event.type === "message_end" && event.message.role === "assistant") lastAssistant = event.message;
+    // A read after every event that can have appended usage, deliberately not gated on the entry
+    // type: an entry kind this release does not know still triggers a read, which is what makes a
+    // future pi bucket free. pi persists an assistant or toolResult message AFTER this listener
+    // runs, so that read accounts the object announced by the previous one and the owner's settle
+    // read flushes the last; compaction_end and entry_appended are emitted after their append, so
+    // their read already includes it.
+    if ((event.type === "message_end" && (event.message.role === "assistant" || event.message.role === "toolResult")) || event.type === "compaction_end" || event.type === "entry_appended") {
+      hooks?.onUsage?.();
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       hooks?.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -1540,7 +1533,7 @@ export async function resumeAgent(
     onToolActivity?: (activity: ToolActivity) => void;
     onTextDelta?: (delta: string, fullText: string) => void;
     onTurnEnd?: (turnCount: number) => void;
-    onAssistantUsage?: (usage: LifetimeUsage) => void;
+    onUsage?: () => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
     /** The resumed run gets its own max_turns budget: a finished record starts over, as a fresh spawn does. */

@@ -339,30 +339,14 @@ describe("nested Agent tool", () => {
     expect(textOf(quiet)).not.toContain("out-of-scope model");
   });
 
-  it("folds a child's usage into every ancestor", async () => {
-    const top = { id: "top", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } } as AgentRecord;
-    const middle = {
-      id: "parent-1",
-      status: "running",
-      parentAgentId: "top",
-      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
-    } as AgentRecord;
-    records.set("top", top);
-    records.set("parent-1", middle);
-
-    await run(0, { subagent_type: "scout", description: "d", prompt: "p" });
-    spawns[0].options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1 });
-
-    expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
-    expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
-  });
-
   it("delivers to an owned finished child as a resume and rejects a foreign one", async () => {
     records.set("child-1", { id: "child-1", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
     vi.mocked(manager.deliver).mockResolvedValueOnce("resumed");
     const resumed = await run(2, { to: "child-1", message: "more" });
     expect(textOf(resumed)).toContain("had finished; resumed it");
-    expect(manager.deliver).toHaveBeenCalledWith("child-1", "more", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    // No usage callback: the manager reads its own records' sessions and folds each delta into the
+    // ancestors itself, so a nested tool has nothing to hand over.
+    expect(manager.deliver).toHaveBeenCalledWith("child-1", "more");
 
     records.set("foreign", { id: "foreign", status: "completed", parentAgentId: "other" } as AgentRecord);
     const denied = await run(2, { to: "foreign", message: "more" });
@@ -423,7 +407,7 @@ describe("nested result / steer / checkpoint tools", () => {
     vi.mocked(manager.deliver).mockResolvedValueOnce("delivered").mockResolvedValueOnce("queued");
 
     expect(textOf(await run(2, { to: "ready", message: "focus" }))).toContain("Message sent to agent ready.");
-    expect(manager.deliver).toHaveBeenLastCalledWith("ready", "focus", expect.objectContaining({ onAssistantUsage: expect.any(Function) }));
+    expect(manager.deliver).toHaveBeenLastCalledWith("ready", "focus");
     expect(textOf(await run(2, { to: "pending", message: "focus" }))).toContain("queued");
   });
 

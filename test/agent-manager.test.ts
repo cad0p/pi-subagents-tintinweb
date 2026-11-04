@@ -44,9 +44,21 @@ setQuietMs(20);
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
 
+/** A session's cumulative totals, as the manager reads them. Move the fields to simulate spend. */
+type MockStats = { input: number; output: number; cacheWrite: number; cacheRead: number; cost: number };
+
 /** Fake child session. `sessionManager.getSessionFile` is what the manager
- *  captures as the record's session file (undefined: nothing to retain). */
-const mockSession = () => ({
+ *  captures as the record's session file (undefined: nothing to retain), and
+ *  `stats` is what `getSessionStats()` reports: a fresh session starts at zero,
+ *  and a test moves it to simulate what pi appended. */
+const mockSession = (initial: Partial<MockStats> = {}) => {
+  const stats: MockStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, ...initial };
+  return ({
+  stats,
+  getSessionStats: () => ({
+    tokens: { input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite },
+    cost: stats.cost,
+  }),
   dispose: vi.fn(),
   subscribe: () => () => {},
   sessionId: "child-session-id",
@@ -55,12 +67,18 @@ const mockSession = () => ({
   sendCustomMessage: () => Promise.resolve(),
   sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
+};
 
 /** Host a child the way the runner does: settings first, then the session with its lifecycle. */
 const hostChild = (opts: RunOptions, session: any) => {
   opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
   opts.onSessionCreated?.(session, attachSessionLifecycle(session));
 };
+
+/** A usage delta's full shape, for comparing a record's lifetime. */
+const lifetime = (input: number, output: number, cacheWrite: number, cacheRead = 0, cost = 0) => ({
+  input, output, cacheWrite, cacheRead, cost,
+});
 
 /** Reopen a settled record's child from its session file, as the Agent tool does before a resume. */
 const reopen = async (manager: AgentManager, id: string, child: any = mockSession()) => {
@@ -522,17 +540,21 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     manager.abort(id);
   });
 
-  it("onAssistantUsage from runAgent accumulates into record.lifetimeUsage", async () => {
+  it("spawn: the run's session totals land in record.lifetimeUsage, not a sum of payloads", async () => {
     manager = new AgentManager();
 
-    // Capture the options passed to runAgent so we can drive callbacks
-    let captured: any;
+    // Each signal makes the manager read the session, so a total that grew by
+    // 100/50/10 and then by another 80/40/20 must read 180/90/30 — not the sum
+    // of two payloads, and not doubly counted for the read that saw no growth.
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
-      captured = opts;
-      // Two assistant messages with usage
-      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
-      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
-      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+      const child = mockSession();
+      hostChild(opts, child);
+      Object.assign(child.stats, { input: 100, output: 50, cacheWrite: 10 });
+      opts.onUsage?.();
+      opts.onUsage?.(); // unchanged totals: the baseline swallows it
+      Object.assign(child.stats, { input: 180, output: 90, cacheWrite: 30 });
+      opts.onUsage?.();
+      return { responseText: "done", session: child, aborted: false, steered: false };
     });
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
@@ -540,10 +562,8 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
     await manager.getRecord(id)!.promise;
 
-    expect(captured).toBeDefined();
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
-      input: 300, output: 130, cacheWrite: 30,
-    });
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual(lifetime(180, 90, 30));
+    expect(manager.getRecord(id)!.usageBaseline).toEqual(lifetime(180, 90, 30));
   });
 
   it("onCompaction from runAgent increments record.compactionCount", async () => {
@@ -578,32 +598,186 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     manager = new AgentManager();
 
     // First, spawn with a session that resume can latch onto
-    const session = { ...mockSession() };
-    resolvedRun(session);
+    const spawnSession = mockSession();
+    resolvedRun(spawnSession);
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
     });
     await manager.getRecord(id)!.promise;
 
-    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onAssistantUsage)
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    // Pre-resume: the mock session reported no spend, so the accumulate stayed at zero.
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual(lifetime(0, 0, 0));
     expect(manager.getRecord(id)!.compactionCount).toBe(0);
 
-    // Now resume — drive callbacks via the mocked resumeAgent
+    // Now resume. The reopen binds the same session, whose totals now carry the resumed turns.
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
-    vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
-      opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+    const resumeSession = mockSession({ input: 70, output: 30, cacheWrite: 5 });
+    vi.mocked(resumeMock).mockImplementation(async (_bound: any, _prompt: string, opts: any) => {
+      opts.onUsage?.();
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
       return { text: "second" };
     });
 
-    await reopen(manager, id);
+    await reopen(manager, id, resumeSession);
     const rec = manager.resume(id, "more");
     await rec!.promise;
 
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual(lifetime(70, 30, 5));
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
+  });
+
+  it("reports only growth: a read of unchanged totals pushes nothing, one growth pushes one delta", async () => {
+    // Catches the two ways a read-based reporter over-reports: no baseline update
+    // (the same delta repeats on every read) and a missing empty-delta return.
+    const pushed: LifetimeUsage[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const child = mockSession();
+      hostChild(opts, child); // the seed: baseline = zeros, nothing pushed
+      Object.assign(child.stats, { input: 100, output: 50, cacheWrite: 10 });
+      opts.onUsage?.();
+      opts.onUsage?.(); // unchanged totals
+      Object.assign(child.stats, { input: 180, output: 90, cacheWrite: 30 });
+      opts.onUsage?.();
+      return { responseText: "done", session: child, aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    expect(pushed).toHaveLength(2);
+    expect(pushed[0]).toMatchObject({ input: 100, output: 50, cacheWrite: 10 });
+    expect(pushed[1]).toMatchObject({ input: 80, output: 40, cacheWrite: 20 });
+  });
+
+  it("a reopened record whose baseline is behind its file pushes the gap at bind, and nothing after", async () => {
+    // The renew case: the file grew while no activation was reading it (a run
+    // draining across a reload, a settled record reopened for its next run).
+    const pushed: LifetimeUsage[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    resolvedRun(mockSession());
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(pushed).toHaveLength(0);
+    expect(record.usageBaseline).toEqual(lifetime(0, 0, 0));
+
+    await reopen(manager, id, mockSession({ input: 40, output: 10, cacheWrite: 5 }));
+
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]).toMatchObject({ input: 40, output: 10, cacheWrite: 5 });
+
+    // The run that follows reads the same totals again: no second report.
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "resumed" } as never);
+    const resumed = manager.resume(id, "more");
+    await resumed!.promise;
+    expect(pushed).toHaveLength(1);
+    expect(record.lifetimeUsage).toEqual(lifetime(40, 10, 5));
+  });
+
+  it("a record with no baseline seeds from its file on bind and pushes nothing retroactively", async () => {
+    // Ledger recovery, or a hand-over from a release that carried no baseline:
+    // the file's totals were reported by the run that produced them, so booking
+    // them again would bill the parent twice for work it already paid for.
+    const pushed: LifetimeUsage[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    resolvedRun(mockSession());
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    // The state a ledger rebuild produces: zeros, no baseline, the session file kept.
+    record.usageBaseline = undefined;
+    record.foldedUsage = undefined;
+    record.lifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+
+    expect(record.usageBaseline).toBeUndefined();
+    expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+
+    await reopen(manager, id, mockSession({ input: 70, output: 30, cacheWrite: 5 }));
+
+    expect(pushed).toEqual([]);
+    expect(record.lifetimeUsage).toEqual(lifetime(70, 30, 5));
+    expect(record.usageBaseline).toEqual(lifetime(70, 30, 5));
+  });
+
+  /** Spawn a run that hosts `session` and stays live, so its record keeps a readable session. */
+  function liveRun(session: any, extra: { parentAgentId?: string; depth?: number } = {}) {
+    let hooks: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
+      hostChild(opts, session);
+      hooks = opts.onUsage;
+      return new Promise(() => {}) as never;
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "d", ...extra });
+    return { id, hook: () => hooks?.() };
+  }
+
+  it("nested: a grandchild's delta folds into every ancestor once, while the pool sees it once", async () => {
+    // Catches the four ways a roll-up goes wrong: no fold (ancestors read short),
+    // the pool derived from records (the double-booked spend is reported twice),
+    // a shared baseline object (the fold inflates it, so the ancestor's own next
+    // delta clamps to 0), and a session total that wrongly includes descendants.
+    const pushed: { id: string; usage: LifetimeUsage }[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage) => pushed.push({ id: record.id, usage }));
+
+    const topSession = mockSession();
+    const childSession = mockSession();
+    const grandSession = mockSession();
+    const top = liveRun(topSession);
+    const child = liveRun(childSession, { parentAgentId: top.id, depth: 2 });
+    const grand = liveRun(grandSession, { parentAgentId: child.id, depth: 3 });
+
+    Object.assign(grandSession.stats, { input: 100, output: 50 });
+    grand.hook();
+
+    // The pool sees the grandchild's growth once, under the grandchild.
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]).toMatchObject({ id: grand.id, usage: { input: 100, output: 50 } });
+    // Both ancestors' rows show it; the child's own session is untouched.
+    expect(manager.getRecord(child.id)!.lifetimeUsage).toMatchObject({ input: 100, output: 50 });
+    expect(manager.getRecord(top.id)!.lifetimeUsage).toMatchObject({ input: 100, output: 50 });
+    expect(childSession.stats.input).toBe(0);
+
+    // The ancestor's own session then grows: its next read pushes exactly that growth.
+    Object.assign(childSession.stats, { input: 40, output: 10, cacheWrite: 5 });
+    child.hook();
+
+    expect(pushed).toHaveLength(2);
+    expect(pushed[1]).toMatchObject({ id: child.id, usage: { input: 40, output: 10, cacheWrite: 5 } });
+    expect(manager.getRecord(child.id)!.lifetimeUsage).toMatchObject({ input: 140, output: 60, cacheWrite: 5 });
+    expect(manager.getRecord(top.id)!.lifetimeUsage).toMatchObject({ input: 140, output: 60, cacheWrite: 5 });
+  });
+
+  it("a fold that lands before the ancestor ever binds is added on top of its own file, not lost", async () => {
+    // A ledger-rebuilt ancestor can receive a descendant's fold before it binds
+    // its own session. Seeding its file's totals then has to keep the fold: the
+    // file knows nothing about a descendant, which lives in another session file.
+    const pushed: { id: string; usage: LifetimeUsage }[] = [];
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage) => pushed.push({ id: record.id, usage }));
+    resolvedRun(mockSession());
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "ancestor", { description: "ancestor" });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    // Rebuilt from the ledger: zeros, no baseline, the session file kept.
+    record.usageBaseline = undefined;
+    record.foldedUsage = undefined;
+    record.lifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+
+    // A descendant's spend arrives first.
+    const childSession = mockSession();
+    const child = liveRun(childSession, { parentAgentId: id, depth: 2 });
+    Object.assign(childSession.stats, { input: 10, output: 5 });
+    child.hook();
+    expect(record.lifetimeUsage).toMatchObject({ input: 10, output: 5 });
+
+    // Then the ancestor binds its own file, which holds its own 70/30/5.
+    await reopen(manager, id, mockSession({ input: 70, output: 30, cacheWrite: 5 }));
+
+    expect(record.lifetimeUsage).toEqual(lifetime(80, 35, 5));
+    // One delta for one spend: the grandchild's, counted once.
+    expect(pushed.map((p) => p.id)).toEqual([child.id]);
   });
 });
 
@@ -2127,7 +2301,12 @@ describe("AgentManager — session file retention", () => {
         listeners.add(listener);
         return () => listeners.delete(listener);
       },
-      prompt: async () => emit(assistantUsage(3)),
+      // pi persists the message after our listener runs, so the read that follows the message_end
+      // accounts what the file already holds; moving the totals first models the same effect.
+      prompt: async () => {
+        Object.assign(session.stats, { input: 1, output: 3 });
+        emit(assistantUsage(3));
+      },
       abort: async () => {},
     };
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
@@ -2496,15 +2675,22 @@ describe("AgentManager — nested children", () => {
     resolvedRun();
     const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent", parentAgentId: grand, depth: 2 });
     await manager.getRecord(parent)!.promise;
+    // The resumed parent's reopen binds a session whose totals already hold its turns; the
+    // manager's read folds their growth into every ancestor, as a live nested run's does.
+    const resumed = mockSession({ input: 70, output: 30, cacheWrite: 5 });
     vi.mocked(resumeAgent).mockClear().mockImplementation(async (_session, _prompt, opts) => {
-      opts?.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts?.onUsage?.();
       return { text: "resumed" };
     });
-    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    vi.mocked(createChildSession).mockResolvedValueOnce(resumed);
     const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
     manager.deliverNested(late, "late result");
     await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
-    expect(manager.getRecord(grand)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+    // The grandparent never bound a session here, so its lifetime is the fold alone: the three token
+    // fields it accumulates, with no seeded cacheRead/cost keys of its own.
+    expect(manager.getRecord(grand)!.lifetimeUsage).toMatchObject({ input: 70, output: 30, cacheWrite: 5 });
+    // The parent's own record holds its own spend, not the fold it pushed upward.
+    expect(manager.getRecord(parent)!.lifetimeUsage).toEqual(lifetime(70, 30, 5));
   });
 });
 
@@ -2600,7 +2786,7 @@ describe("AgentManager — PR119 r1 findings", () => {
     const child = nestedChild(id);
     manager.deliverNested(child, "child result");
     await flush();
-    expect(deliver).toHaveBeenCalledWith(id, "child result", expect.anything());
+    expect(deliver).toHaveBeenCalledWith(id, "child result");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("refused nested result(s) c1"));
     expect(child.resultDelivered).toBe(false);
     expect(manager.resultReachedParent(child)).toBe(false);
