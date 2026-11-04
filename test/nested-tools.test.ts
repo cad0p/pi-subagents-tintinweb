@@ -357,6 +357,17 @@ describe("nested Agent tool", () => {
     expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
   });
 
+  it("returns no usage on a nested delegate's result (guard: no double count)", async () => {
+    // The ancestor fold already books a nested child's spend on the ancestor records. A usage attached to the nested
+    // tool result would ride into the parent session and be counted a second time (#218).
+    records.set("child-1", { id: "child-1", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
+    const spawned = await run(0, { subagent_type: "scout", description: "d", prompt: "p" });
+    const fetched = await run(1, { agent_id: "child-1" });
+
+    expect(spawned).not.toHaveProperty("usage");
+    expect(fetched).not.toHaveProperty("usage");
+  });
+
   it("delivers to an owned finished child as a resume and rejects a foreign one", async () => {
     records.set("child-1", { id: "child-1", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
     vi.mocked(manager.deliver).mockResolvedValueOnce("resumed");

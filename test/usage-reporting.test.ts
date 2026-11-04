@@ -25,7 +25,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { runAgent, type UsageSource } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
@@ -86,9 +86,9 @@ describe("reporting subagent usage back to the parent session", () => {
   }
 
   /** One run that spends `usage` synchronously, i.e. before the tool returns. */
-  function runSpending(usage: LifetimeUsage) {
+  function runSpending(usage: LifetimeUsage, source: UsageSource = "assistant") {
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
-      options.onUsage?.({ usage, source: "assistant" });
+      options.onUsage?.({ usage, source });
       return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
     });
   }
@@ -239,6 +239,18 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(result.usage?.totalTokens).toBe(160);
     });
 
+    it("carries a compaction's spend on the next tool result (#218)", async () => {
+      // The pool is what the parent session and /cost read. A source the pool never sees is money the subagent spent
+      // and the parent's totals do not show — the whole of what #218 reports.
+      const { tools } = boot({ reportUsage: true });
+      runSpending({ input: 800, output: 60, cacheWrite: 0, cost: 0.03 }, "compaction");
+
+      const result = await spawn(tools);
+
+      expect(result.usage?.cost.total).toBe(0.03);
+      expect(result.usage?.totalTokens).toBe(860);
+    });
+
     it("reports an unpriced model's tokens with a zero cost rather than dropping them", async () => {
       // A model pi has no rates for still spent tokens. Dropping the object
       // would lose the token count from the session's totals.
@@ -257,17 +269,21 @@ describe("reporting subagent usage back to the parent session", () => {
       // into every ancestor (nested-tools.ts folds it up the chain) so a hidden
       // child stays visible somewhere, which makes summing records over-count.
       //
-      // The chain is parent -> child -> grandchild, one message each. The true
-      // total is 450 tokens / $0.03. Summing every record gives 900 (the parent
-      // holds its own message plus both descendants', the child its own plus the
-      // grandchild's, the grandchild its own), so a record-derived report would
-      // say 900 and is caught here.
+      // The chain is parent -> child -> grandchild, one assistant message and one
+      // compaction each. The true total is 3 x 200 tokens / 3 x $0.014. Summing
+      // every record gives 6 x that (the parent holds its own spend plus both
+      // descendants', the child its own plus the grandchild's, the grandchild its
+      // own), so a record-derived report would double it and is caught here.
       const { pi, tools } = boot({ reportUsage: true });
+      // Each node also compacts once: the second source, folded into ancestors exactly like the first.
       const perMessage: LifetimeUsage = { input: 100, output: 50, cacheWrite: 0, cost: 0.01 };
+      const perCompaction: LifetimeUsage = { input: 40, output: 10, cacheWrite: 0, cost: 0.004 };
+      const perNode = { tokens: 200, cost: 0.014 };
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
         const { manager, parentAgentId, depth } = options.nestedRuntime;
         options.onUsage?.({ usage: perMessage, source: "assistant" });
+        options.onUsage?.({ usage: perCompaction, source: "compaction" });
         if (depth < 3) {
           // The ancestor walk, verbatim from nested-tools.ts.
           const foldUsageIntoAncestors = (spend: UsageSpend): void => {
@@ -293,13 +309,13 @@ describe("reporting subagent usage back to the parent session", () => {
 
       const result = await spawn(tools);
 
-      expect(result.usage?.totalTokens).toBe(450);
-      expect(result.usage?.cost.total).toBeCloseTo(0.03, 10);
+      expect(result.usage?.totalTokens).toBe(3 * perNode.tokens);
+      expect(result.usage?.cost.total).toBeCloseTo(3 * perNode.cost, 10);
 
       const records = managerHandle().listAgents();
       const recordTotal = records.reduce((sum, r) => sum + r.lifetimeUsage.input + r.lifetimeUsage.output, 0);
       expect(records).toHaveLength(3);
-      expect(recordTotal).toBe(900);   // the double-booking the report must ignore
+      expect(recordTotal).toBe(6 * perNode.tokens);   // the double-booking the report must ignore
     });
   });
 
@@ -331,8 +347,30 @@ describe("reporting subagent usage back to the parent session", () => {
         },
       });
       expect(typeof events[0].id).toBe("string");
+      // The source is this release's addition; an assistant message still carries the record's invocation.
+      expect(events[0].source).toBe("assistant");
       // A top-level agent has no owner: the key is absent, not `undefined`.
       expect(events[0]).not.toHaveProperty("parentAgentId");
+    });
+
+    it("labels each source and omits the model a spend does not name (#218)", async () => {
+      // A ledger buckets by source and model. A compaction's usage names no model (pi's own breakdown puts summaries
+      // in a model-less bucket) and a warm request carries no thinking level, so a name there would be a guess.
+      const { pi, tools } = boot({});
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        options.onUsage?.({ usage: { input: 0, output: 0, cacheWrite: 0, cost: 0.03 }, source: "compaction" });
+        options.onUsage?.({ usage: { input: 0, output: 0, cacheWrite: 1200, cost: 0.004 }, source: "cacheWarm", modelId: "anthropic/claude-x" });
+        return { responseText: "done", session: fakeSession(), aborted: false, steered: false };
+      });
+
+      await spawn(tools);
+
+      const events = usageEvents(pi);
+      expect(events.map((event) => event.source)).toEqual(["compaction", "cacheWarm"]);
+      expect(events[0]).not.toHaveProperty("model");
+      expect(events[0]).not.toHaveProperty("thinking");
+      expect(events[1]).toMatchObject({ model: "anthropic/claude-x" });
+      expect(events[1]).not.toHaveProperty("thinking");
     });
 
     it("is emitted regardless of reportUsage", async () => {
@@ -344,6 +382,17 @@ describe("reporting subagent usage back to the parent session", () => {
       await spawn(tools);
 
       expect(usageEvents(pi).map((e) => (e.usage as Usage).cost.total)).toEqual([0.01]);
+    });
+
+    it("still emits a compaction's spend with reportUsage off, and pools nothing (#218)", async () => {
+      // reportUsage decides the parent session's totals, never whether the spend happened: a ledger asked for it.
+      const { pi, tools } = boot({ reportUsage: false });
+      runSpending({ input: 800, output: 60, cacheWrite: 0, cost: 0.03 }, "compaction");
+
+      const result = await spawn(tools);
+
+      expect(result).not.toHaveProperty("usage");
+      expect(usageEvents(pi).map((event) => [event.source, (event.usage as Usage).cost.total])).toEqual([["compaction", 0.03]]);
     });
 
     it("is not emitted for a message that spent nothing", async () => {

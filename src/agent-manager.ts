@@ -2320,7 +2320,7 @@ export class AgentManager {
     this.onStart = undefined;
     this.onCompact = undefined;
     this.onSteered = undefined;
-    this.onUsage = (record, spend) => handover.emit({ kind: "usage", dto: toDto(record), usage: spend.usage });
+    this.onUsage = (record, spend) => handover.emit({ kind: "usage", dto: toDto(record), ...spend });
     // The waiters' runs ask the live root again: their wait ends here with "reroute".
     for (const entry of gated) this.endGate(entry, "reroute");
     return handover;

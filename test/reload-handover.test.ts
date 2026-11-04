@@ -23,6 +23,7 @@ import {
   takeUnreportedOf,
   toDto,
   toSpawnData,
+  type UsageProvenance,
 } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
 import type { LifetimeUsage } from "../src/usage.js";
@@ -200,6 +201,41 @@ describe("ReloadHandover buffering", () => {
     handover.emit({ kind: "usage", dto: dtoOf("late"), usage });
 
     expect(replayed).toEqual([["late", usage]]);
+  });
+
+  it("passes each replayed event's provenance to the sink, and none when it names none (#218)", () => {
+    // A ledger on the other side buckets by source and model, so the hand-over has to carry them; an event with
+    // neither (a pre-#218 event, or one derived from it) hands over `undefined` rather than a guess.
+    const usage: LifetimeUsage = { input: 800, output: 60, cacheWrite: 0, cost: 0.03 };
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    handover.emit({ kind: "usage", dto: dtoOf("compacted"), usage, source: "compaction" });
+    handover.emit({ kind: "usage", dto: dtoOf("warmed"), usage, source: "cacheWarm", modelId: "anthropic/claude-x" });
+    handover.emit({ kind: "usage", dto: dtoOf("legacy"), usage });
+
+    const replayed: Array<[string, LifetimeUsage, UsageProvenance | undefined]> = [];
+    handover.stop((dto, delta, provenance) => replayed.push([dto.id, delta, provenance]));
+    // The sink takes what `emit` is given after the stop too, provenance included.
+    handover.emit({ kind: "usage", dto: dtoOf("late"), usage, source: "toolResult" });
+
+    expect(replayed).toEqual([
+      ["compacted", usage, { source: "compaction", modelId: undefined }],
+      ["warmed", usage, { source: "cacheWarm", modelId: "anthropic/claude-x" }],
+      ["legacy", usage, undefined],
+      ["late", usage, { source: "toolResult", modelId: undefined }],
+    ]);
+  });
+
+  it("keeps a legacy sink's usage intact when it takes no provenance (guard: no undefined addUsage)", () => {
+    // A pre-#218 activation's sink is `(dto, usage) => …`; it still receives the real accumulator, never undefined.
+    // This is the guard against passing a bare LifetimeUsage where a UsageSpend was expected.
+    const usage: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const handover = new ReloadHandover([], [], [], undefined, stubPool);
+    handover.emit({ kind: "usage", dto: dtoOf("legacy"), usage });
+
+    const replayed: Array<[string, LifetimeUsage]> = [];
+    handover.stop((dto, delta) => replayed.push([dto.id, delta]));
+
+    expect(replayed).toEqual([["legacy", usage]]);
   });
 
   it("drops usage as it always did when a reader that knows no sink stops it", () => {

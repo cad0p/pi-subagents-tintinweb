@@ -139,6 +139,12 @@ function emptyPool(): DrainingPool {
   return { runningCount: () => 0, abortAll: vi.fn(() => 0), dispose: vi.fn(), ownAgents: () => [] };
 }
 
+/** A draining pool that still owns one record: its hand-over stays attached instead of being retired at adoption. */
+function poolOwning(record: AgentDto): DrainingPool {
+  const owned = [record] as unknown as AgentRecord[];
+  return { runningCount: () => 1, abortAll: vi.fn(() => 0), dispose: vi.fn(), ownAgents: () => owned };
+}
+
 /** The `usage` pi recorded on the last tool result of `toolName` in a session's transcript. */
 function toolResultUsage(target: AgentSession, toolName: string) {
   const results = target.messages.filter((message) => message.role === "toolResult" && message.toolName === toolName);
@@ -1833,6 +1839,65 @@ describe("subagents across a real /reload (faux provider)", () => {
     // With reportUsage on, the next tool result of this activation carries it, as a live message's spend does.
     await started.prompt("spawn-now");
     expect(toolResultUsage(started, "Agent")?.totalTokens).toBe(10);
+  }, 20_000);
+
+
+  it("keeps a usage event's source and model through the stop replay (#218)", async () => {
+    // The record's invocation is not a fallback: a compaction's usage names no model, and a cache-warm entry names the
+    // model the warmer spent on, which need not be the record's current one.
+    const dto: AgentDto = { ...handoverItem("sourced-run"), invocation: { modelId: "other/model", thinking: "high" } };
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool());
+    publishHandovers("replaced-session", [handover]);
+
+    const started = await startSession();
+    other = started;
+
+    const reported: Array<Record<string, unknown>> = [];
+    const off = publishedRoot().pi.events.on("subagents:usage", (event) => reported.push(event as Record<string, unknown>));
+    handover.emit({ kind: "usage", dto, usage: { input: 800, output: 60, cacheWrite: 0, cost: 0.03 }, source: "compaction" });
+    handover.emit({ kind: "usage", dto, usage: { input: 0, output: 0, cacheWrite: 1200, cost: 0.004 }, source: "cacheWarm", modelId: "anthropic/claude-x" });
+    off();
+
+    expect(reported.map((event) => event.source)).toEqual(["compaction", "cacheWarm"]);
+    expect(reported[0]).toMatchObject({ id: "sourced-run", usage: { cost: { total: 0.03 } } });
+    expect(reported[0]).not.toHaveProperty("model");
+    expect(reported[0]).not.toHaveProperty("thinking");
+    expect(reported[1]).toMatchObject({ id: "sourced-run", model: "anthropic/claude-x" });
+    expect(reported[1]).not.toHaveProperty("thinking");
+    // Both reached the pool as well: the next tool result of this activation carries them, once.
+    await started.prompt("spawn-now");
+    expect(toolResultUsage(started, "Agent")?.cost.total).toBeCloseTo(0.034, 10);
+  }, 20_000);
+
+  it("adopts a pre-#218 usage event without inventing a source or model (guard: cross-version)", async () => {
+    // An older release published `{ kind: "usage", dto, usage }` and nothing else. The spend is preserved; the
+    // provenance is unknown, and the record's invocation is never used to guess it.
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto: AgentDto = { ...handoverItem("legacy-run"), invocation: { modelId: "other/model", thinking: "high" } };
+    const handover = new ReloadHandover([], [], [], undefined, poolOwning({ ...dto, status: "running" }));
+    // A running subagent, so this activation really publishes a hand-over to append this one to.
+    await root.prompt("spawn-now");
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+      // The hand-over is now this activation's, attached to its own bus; the event arrives the way one of an older
+      // release's draining runs would.
+      const reported: Array<Record<string, unknown>> = [];
+      const off = publishedRoot().pi.events.on("subagents:usage", (event) => reported.push(event as Record<string, unknown>));
+      handover.emit({ kind: "usage", dto, usage: { input: 7, output: 3, cacheWrite: 0, cost: 0.01 } });
+      // The replay is queued behind the adoption, as every hand-over event is.
+      await vi.waitFor(() => expect(reported).toHaveLength(1), { timeout: 10_000 });
+      off();
+
+      expect(reported).toHaveLength(1);
+      expect(reported[0]).toMatchObject({ id: "legacy-run", usage: { cost: { total: 0.01 } } });
+      expect(reported[0]).not.toHaveProperty("source");
+      expect(reported[0]).not.toHaveProperty("model");
+      expect(reported[0]).not.toHaveProperty("thinking");
+    } finally {
+      undo();
+    }
   }, 20_000);
 
   it("still emits a stopped hand-over's late usage with reportUsage off", async () => {

@@ -90,6 +90,11 @@ export type HandoverEvent =
   | ({ kind: "usage"; dto: AgentDto; usage: LifetimeUsage } & UsageProvenance)
   | { kind: "slotFreed" };
 
+/** The provenance an event carries, or undefined when it names none — an older release's event, or one derived from it. */
+function provenanceOf(event: UsageProvenance): UsageProvenance | undefined {
+  return event.source === undefined && event.modelId === undefined ? undefined : { source: event.source, modelId: event.modelId };
+}
+
 /**
  * The draining part of the old manager, as far as the hand-over needs it. Permanent, as the members named in
  * HANDOVER_KEY: a reader feature-detects these, it never gates on the hand-over's version.
@@ -125,7 +130,7 @@ export class ReloadHandover {
   private unreported?: LifetimeUsage;
   private stopped = false;
   /** Set by `stop`: the one consumer left for a `usage` event no activation will adopt. */
-  private replay?: (dto: AgentDto, usage: LifetimeUsage) => void;
+  private replay?: (dto: AgentDto, usage: LifetimeUsage, provenance?: UsageProvenance) => void;
 
   constructor(
     items: HandoverItem[],
@@ -197,7 +202,7 @@ export class ReloadHandover {
   emit(event: HandoverEvent): void {
     if (this.stopped) {
       if (event.kind === "settled") disposeItems(event.items);
-      else if (event.kind === "usage") this.replay?.(event.dto, event.usage);
+      else if (event.kind === "usage") this.replay?.(event.dto, event.usage, provenanceOf(event));
     } else if (this.listener) this.listener(event);
     else this.pending.push(event);
   }
@@ -222,15 +227,18 @@ export class ReloadHandover {
    * has left — pass the consumer a live `usage` event goes through. The parameter is optional because it is not part
    * of the contract: a hand-over published by an older release carries that release's `stop`, which ignores it and
    * drops the events (see HANDOVER_KEY). Nothing on this side recovers that delta for it.
+   *
+   * The sink takes the event's provenance after the usage, and `undefined` for an event that names none: the spend is
+   * handed over either way, and an absent source is unknown, never the assistant it probably was (see `UsageProvenance`).
    */
-  stop(replay?: (dto: AgentDto, usage: LifetimeUsage) => void): void {
+  stop(replay?: (dto: AgentDto, usage: LifetimeUsage, provenance?: UsageProvenance) => void): void {
     this.detach();
     this.stopped = true;
     this.replay = replay;
     const held = [...this.items];
     for (const event of this.pending.splice(0)) {
       if (event.kind === "settled") held.push(...event.items);
-      else if (event.kind === "usage") replay?.(event.dto, event.usage);
+      else if (event.kind === "usage") replay?.(event.dto, event.usage, provenanceOf(event));
     }
     this.items = [];
     disposeItems(held);

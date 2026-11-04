@@ -38,7 +38,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers, takeUnreportedOf, type UsageProvenance } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -776,20 +776,29 @@ export default function (pi: ExtensionAPI) {
     // agent-manager.ts).
     const reported = toReportedUsage(spend.usage);
     if (!reported) return;
-    // A key whose value is unknown is omitted, never `undefined`: `model` and
-    // `thinking` until the session has reported them, `parentAgentId` on a
-    // top-level agent.
-    const invocation = record.invocation;
+    // A key whose value is unknown is omitted, never `undefined`: `source` on
+    // an event an older activation handed over, `model` and `thinking` where
+    // the spend names none, `parentAgentId` on a top-level agent.
+    //
+    // Only an assistant message has an invocation to attribute it to. A
+    // cache-warm entry names the model that actually spent (the warmer replays
+    // the session's own request) and carries no thinking level; a compaction or
+    // toolResult usage names no model at all. A ledger buckets by source and
+    // model, so nothing beats a guessed name.
+    const source = spend.source;
+    const assistant = source === "assistant" ? record.invocation : undefined;
+    const model = source === "cacheWarm" ? spend.modelId : assistant?.modelId;
     pi.events.emit("subagents:usage", {
       id: record.id,
       type: record.type,
       description: record.description,
-      ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
-      ...(invocation?.thinking !== undefined ? { thinking: invocation.thinking } : {}),
+      ...(source !== undefined ? { source } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(assistant?.thinking !== undefined ? { thinking: assistant.thinking } : {}),
       // Set only when the caller did not get the level it asked for (pi clamped
       // it to the model), so a ledger can show `low (asked minimal)` instead of
       // silently relabelling.
-      ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
+      ...(assistant?.requestedThinking !== undefined ? { requestedThinking: assistant.requestedThinking } : {}),
       depth: record.depth ?? 1,
       ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
       usage: reported,
@@ -1288,7 +1297,8 @@ export default function (pi: ExtensionAPI) {
             }
           }
         } else if (event.kind === "usage") {
-          manager.replayUsage(fromDto(event.dto), { usage: event.usage });
+          // Wrapped explicitly: the provenance may be absent (an older release's event) but the spend is not.
+          manager.replayUsage(fromDto(event.dto), { usage: event.usage, source: event.source, modelId: event.modelId });
         }
         retireDrained();
       })
@@ -1388,8 +1398,8 @@ export default function (pi: ExtensionAPI) {
    * through (`onHandoverEvent`), so `reportUsage` gates the parent's totals and the `subagents:usage` ledger event
    * exactly as it does for a message that arrives while draining.
    */
-  function replayStoppedUsage(dto: AgentDto, usage: LifetimeUsage): void {
-    manager.replayUsage(fromDto(dto), { usage });
+  function replayStoppedUsage(dto: AgentDto, usage: LifetimeUsage, provenance?: UsageProvenance): void {
+    manager.replayUsage(fromDto(dto), { usage, ...provenance });
   }
 
   /** Drops a draining pool once its last record has left it: a settled parent waits for its unwinding child to hand over. */

@@ -546,6 +546,44 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
   });
 
+  it("accumulates toolResult and compaction spend, not only assistant turns (#218)", async () => {
+    // The record feeds the fleet row and the completion report. Counting only assistant messages left a subagent
+    // that compacted — the long runs, which spend the most — showing a fraction of what it cost.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onUsage?.({ usage: { input: 100, output: 50, cacheWrite: 10 }, source: "assistant" });
+      opts.onUsage?.({ usage: { input: 20, output: 2, cacheWrite: 0, cost: 0.002 }, source: "toolResult" });
+      opts.onUsage?.({ usage: { input: 800, output: 60, cacheWrite: 0, cost: 0.03 }, source: "compaction" });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    const lifetime = manager.getRecord(id)!.lifetimeUsage;
+    expect(lifetime).toEqual({ input: 920, output: 112, cacheWrite: 10, cost: expect.closeTo(0.032, 10) });
+  });
+
+  it("accumulates toolResult and compaction spend through resumeAgent too (#218)", async () => {
+    // A resumed run has its own hooks (agent-manager.ts resumeAgent call); the same sources have to reach the record
+    // there, or a long run that compacts after a resume keeps under-reporting.
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onUsage?.({ usage: { input: 20, output: 2, cacheWrite: 0 }, source: "toolResult" });
+      opts.onUsage?.({ usage: { input: 800, output: 60, cacheWrite: 0 }, source: "compaction" });
+      return { text: "second" };
+    });
+
+    await reopen(manager, id);
+    await manager.resume(id, "more")!.promise;
+
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 820, output: 62, cacheWrite: 0 });
+  });
+
   it("onCompaction from runAgent increments record.compactionCount", async () => {
     manager = new AgentManager();
     const compactSeen: any[] = [];
@@ -2505,6 +2543,28 @@ describe("AgentManager — nested children", () => {
     manager.deliverNested(late, "late result");
     await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
     expect(manager.getRecord(grand)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+  });
+
+  it("folds a nested child's compaction spend into an ancestor exactly once (#218)", async () => {
+    // The ancestor fold is the only place a hidden child's spend stays visible. A source it does not receive, or a
+    // double-booked one, silently misstates the record a human can see.
+    manager = new AgentManager();
+    hangingRun();
+    const grand = manager.spawn(mockPi, mockCtx, "general-purpose", "g", { description: "grand" });
+    resolvedRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent", parentAgentId: grand, depth: 2 });
+    await manager.getRecord(parent)!.promise;
+    vi.mocked(resumeAgent).mockClear().mockImplementation(async (_session, _prompt, opts) => {
+      opts?.onUsage?.({ usage: { input: 800, output: 60, cacheWrite: 0 }, source: "compaction" });
+      return { text: "resumed" };
+    });
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
+    const late = { id: "late", parentAgentId: parent, status: "completed", resultDelivered: false } as unknown as AgentRecord;
+    manager.deliverNested(late, "late result");
+    await vi.waitFor(() => expect(late.resultDelivered).toBe(true));
+
+    expect(manager.getRecord(parent)!.lifetimeUsage).toEqual({ input: 800, output: 60, cacheWrite: 0 });
+    expect(manager.getRecord(grand)!.lifetimeUsage).toEqual({ input: 800, output: 60, cacheWrite: 0 });
   });
 });
 
