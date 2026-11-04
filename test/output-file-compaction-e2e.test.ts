@@ -18,7 +18,9 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { attachSessionLifecycle } from "../src/agent-runner.js";
 import { streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { addUsage, getLifetimeCost, getLifetimeTotal, type LifetimeUsage } from "../src/usage.js";
 import { createFauxModelRuntime } from "./helpers/faux-runtime.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
@@ -142,3 +144,83 @@ describe("output-file streaming across a real compaction (#145)", () => {
     expect(entries.length).toBe(writtenBeforeCompact + 2); // + final question + its answer
   }, 30_000);
 });
+
+describe("usage accounting against a real session (#218)", () => {
+  let tmp: string;
+  let prevAgentDir: string | undefined;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "issue-218-"));
+    prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = tmp; // hermetic: no dev-env extensions/themes
+  });
+
+  afterEach(() => {
+    if (prevAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("accumulates every usage pi counts, once, across a real compaction", async () => {
+    // The only test that pins "exactly once" against pi's own accounting instead of our mocks: the hook's total is
+    // compared with getSessionStats(), which sums the four buckets over the session's entries. A missed compaction
+    // usage under-counts; reading one twice over-counts. Both go red here.
+    const cwd = tmp;
+    const faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    const responder = (context: { messages: Array<{ role: string; content: unknown }> }) => {
+      const last = context.messages[context.messages.length - 1];
+      const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? "");
+      // Compaction asks first (its instruction embeds the transcript); markers are pi's own prompt texts.
+      if (text.includes("conversation to summarize") || text.includes("PREFIX of a turn")) {
+        return fauxAssistantMessage([fauxText("summary of everything so far")]);
+      }
+      return fauxAssistantMessage([fauxText(`answer ${"filler ".repeat(200)}`)]);
+    };
+    faux.setResponses(Array.from({ length: 16 }, () => responder));
+
+    const agentDir = getAgentDir();
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      systemPromptOverride: () => "You are a test agent.",
+      appendSystemPromptOverride: () => [],
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+    });
+    await loader.reload();
+
+    const { session } = await createAgentSession({
+      cwd,
+      agentDir,
+      model: faux.getModel(),
+      modelRuntime: await createFauxModelRuntime(faux, join(tmp, "auth.json")),
+      resourceLoader: loader,
+      sessionManager: SessionManager.inMemory(cwd),
+      settingsManager: SettingsManager.inMemory({
+        compaction: { enabled: false, keepRecentTokens: 500 },
+        retry: { enabled: false },
+      }),
+    });
+
+    const spent: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    const lifecycle = attachSessionLifecycle(session);
+    const run = (text: string) => lifecycle.prompt(text, { hooks: { onUsage: (spend) => addUsage(spent, spend.usage) } });
+    try {
+      for (let i = 0; i < 3; i++) await run(`question ${i}`);
+      const compacted = await session.compact();
+      expect(compacted?.summary).toContain("summary"); // sanity: the real compaction ran
+      await run("final question");
+
+      // pi's own totals over the entries, exactly as getUsageCostBreakdown sums them.
+      const stats = session.getSessionStats();
+      expect(getLifetimeTotal(spent)).toBe(stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite);
+      expect(getLifetimeCost(spent)).toBe(stats.cost);
+      // Sanity: the entry whose usage the equality above has to include is really there.
+      expect(session.sessionManager.getEntries().some((entry) => entry.type === "compaction" && entry.usage !== undefined)).toBe(true);
+    } finally {
+      lifecycle.detach();
+    }
+  }, 30_000);
+});
+

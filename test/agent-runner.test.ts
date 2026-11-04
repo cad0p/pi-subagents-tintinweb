@@ -170,6 +170,7 @@ import {
   type SessionLifecycle,
   SUBAGENT_TOOL_NAMES,
   teardownChildSession,
+  type UsageSpend,
 } from "../src/agent-runner.js";
 import { retargetToolsSection } from "../src/prompts.js";
 import type { AgentConfig } from "../src/types.js";
@@ -809,7 +810,167 @@ describe("agent-runner usage callback wiring", () => {
 
     expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
   });
+
+  function emit(listeners: Array<(e: any) => void>, event: any) {
+    for (const l of listeners) l(event);
+  }
+
+  /** Run one agent whose prompt emits `events`, and return every spend the lifecycle reported. */
+  async function spendsFrom(events: any[], options: Record<string, unknown> = {}) {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const seen: UsageSpend[] = [];
+    session.prompt = vi.fn(async () => {
+      for (const event of events) emit(listeners, event);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+    await runAgent(ctx, "Explore", "go", { pi, onUsage: (s) => seen.push(s), ...options });
+    return seen;
+  }
+
+  it("reports a toolResult message's usage as its own source (#218)", async () => {
+    // A toolResult carrying usage — codemode's model calls, ctx.executeTool() nests — is spend pi counts in the
+    // session and the parent never saw. An implementation that only watches assistant messages misses it.
+    const seen = await spendsFrom([
+      {
+        type: "message_end",
+        message: { role: "toolResult", toolName: "Agent", usage: { input: 30, output: 4, cacheWrite: 0, cacheRead: 2, cost: { total: 0.002 } } },
+      },
+    ]);
+
+    expect(seen).toEqual([{ usage: { input: 30, output: 4, cacheWrite: 0, cacheRead: 2, cost: 0.002 }, source: "toolResult" }]);
+  });
+
+  it("reports nothing for a toolResult without usage (guard: no zero-add)", async () => {
+    // Every pi built-in tool returns no usage; reporting a zero for them would add empty rows to every ledger.
+    const seen = await spendsFrom([{ type: "message_end", message: { role: "toolResult", toolName: "read" } }]);
+
+    expect(seen).toEqual([]);
+  });
+
+  it("reports a compaction's summary usage alongside onCompaction (#218)", async () => {
+    // The summary's own LLM call is invisible to the record, the fleet row and the pool unless compaction_end is
+    // read for usage too. Fails today: onCompaction only, no spend.
+    const compactions: unknown[] = [];
+    const seen = await spendsFrom(
+      [
+        {
+          type: "compaction_end",
+          aborted: false,
+          reason: "threshold",
+          result: { tokensBefore: 900, usage: { input: 800, output: 60, cacheWrite: 0, cacheRead: 0, cost: { total: 0.03 } } },
+        },
+      ],
+      { onCompaction: (info: unknown) => compactions.push(info) },
+    );
+
+    expect(seen).toEqual([{ usage: { input: 800, output: 60, cacheWrite: 0, cacheRead: 0, cost: 0.03 }, source: "compaction" }]);
+    expect(compactions).toEqual([{ reason: "threshold", tokensBefore: 900 }]);
+  });
+
+  it("reports nothing for an aborted compaction (guard: the shape pi emits)", async () => {
+    // pi emits `result: undefined` for a compaction that failed or was aborted; it persisted nothing, so it spent
+    // nothing as far as the session file says.
+    const seen = await spendsFrom([{ type: "compaction_end", aborted: true, reason: "manual", result: undefined }]);
+
+    expect(seen).toEqual([]);
+  });
+
+  it("reports nothing for an aborted compaction that carries usage (guard: pins the !aborted gate)", async () => {
+    // pi never emits this shape. The guard is the gate itself: a refactor that reads result.usage without checking
+    // `aborted` would report a summary the session file does not hold.
+    const seen = await spendsFrom([
+      { type: "compaction_end", aborted: true, reason: "manual", result: { tokensBefore: 1, usage: { input: 5, output: 5, cacheWrite: 0 } } },
+    ]);
+
+    expect(seen).toEqual([]);
+  });
+
+  it("reports a cache-warm usage entry with the model that spent it (#218)", async () => {
+    // The cache warmer is on by default and appends a usage entry once a run outlives the prompt-cache TTL; the entry
+    // is the only place its model is named, and it is not a message, so no other branch can see it.
+    const seen = await spendsFrom([
+      {
+        type: "entry_appended",
+        entry: { type: "usage", kind: "cache_warm", provider: "anthropic", model: "claude-x", usage: { input: 0, output: 0, cacheWrite: 1200, cacheRead: 0, cost: { total: 0.004 } } },
+      },
+    ]);
+
+    expect(seen).toEqual([
+      { usage: { input: 0, output: 0, cacheWrite: 1200, cacheRead: 0, cost: 0.004 }, source: "cacheWarm", modelId: "anthropic/claude-x" },
+    ]);
+  });
+
+  it("reports a compaction entry appended as a boundary draft (#218)", async () => {
+    // An extension-supplied compaction entry is persisted through _applyBoundaryDrafts, which emits entry_appended
+    // and never compaction_end. Reading only compaction_end under-reports exactly this path.
+    const seen = await spendsFrom([
+      {
+        type: "entry_appended",
+        entry: { type: "compaction", usage: { input: 40, output: 9, cacheWrite: 0, cacheRead: 0, cost: { total: 0.001 } } },
+      },
+    ]);
+
+    expect(seen).toEqual([{ usage: { input: 40, output: 9, cacheWrite: 0, cacheRead: 0, cost: 0.001 }, source: "compaction" }]);
+  });
+
+  it("reports one spend per source for a run that touches all four (#218)", async () => {
+    // Pins dispatch: one callback per persisted object, none omitted and none emitted twice for the same one.
+    const seen = await spendsFrom([
+      { type: "message_end", message: { role: "assistant", usage: { input: 1, output: 1, cacheWrite: 0 } } },
+      { type: "message_end", message: { role: "toolResult", usage: { input: 2, output: 2, cacheWrite: 0 } } },
+      { type: "compaction_end", aborted: false, reason: "threshold", result: { tokensBefore: 10, usage: { input: 3, output: 3, cacheWrite: 0 } } },
+      { type: "entry_appended", entry: { type: "usage", kind: "cache_warm", provider: "p", model: "m", usage: { input: 4, output: 4, cacheWrite: 0 } } },
+    ]);
+
+    expect(seen.map((s) => s.source)).toEqual(["assistant", "toolResult", "compaction", "cacheWarm"]);
+    expect(seen.map((s) => s.usage.input)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("reports an errored attempt and its retry, as pi persists both (guard: no stopReason filter)", async () => {
+    // pi appends the errored message and the retried one, and counts both. A `stopReason !== "error"` filter would
+    // silently undercount every retried provider call.
+    const seen = await spendsFrom([
+      { type: "message_end", message: { role: "assistant", stopReason: "error", usage: { input: 10, output: 0, cacheWrite: 5 } } },
+      { type: "message_end", message: { role: "assistant", stopReason: "stop", usage: { input: 10, output: 7, cacheWrite: 0 } } },
+    ]);
+
+    expect(seen.map((s) => s.usage.cost)).toEqual([0, 0]);
+    expect(seen.map((s) => s.usage.input)).toEqual([10, 10]);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("ignores entries that are not a cache-warm usage or a compaction (guard: the type/kind filter)", async () => {
+    // entry_appended also fires for custom, custom_message and context_edit entries, and UsageEntry.kind is an
+    // arbitrary category string. Only a cache-warm usage entry is spend from warming; a future kind must not be
+    // labelled cacheWarm, and an entry that merely carries usage-like data is not spend at all.
+    const seen = await spendsFrom([
+      { type: "entry_appended", entry: { type: "custom", customType: "x", data: { usage: { input: 99, output: 99, cacheWrite: 0 } } } },
+      { type: "entry_appended", entry: { type: "context_edit", content: { usage: { input: 99, output: 99, cacheWrite: 0 } } } },
+      { type: "entry_appended", entry: { type: "usage", kind: "something_else", provider: "p", model: "m", usage: { input: 99, output: 99, cacheWrite: 0 } } },
+      { type: "entry_appended", entry: { type: "compaction", summary: "no usage recorded" } },
+    ]);
+
+    expect(seen).toEqual([]);
+  });
+
+  it("reports nothing for a resumed session's existing history (pins: no replay on attach)", async () => {
+    // A resume opens a session whose entries already hold spend. Seeding the accumulator from session.messages on
+    // attach would re-report all of it to the parent as new spend.
+    const { session, listeners } = createSession("RESUMED");
+    session.messages.push({ role: "assistant", content: [{ type: "text", text: "old" }], usage: { input: 900, output: 100, cacheWrite: 0 } });
+    const seen: UsageSpend[] = [];
+    session.prompt = vi.fn(async () => {
+      emit(listeners, { type: "message_end", message: { role: "assistant", usage: { input: 5, output: 1, cacheWrite: 0 } } });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
+    });
+
+    await resumeAgent(session as any, "continue", { onUsage: (s) => seen.push(s) });
+
+    expect(seen.map((s) => s.usage.input)).toEqual([5]);
+  });
 });
+
 
 // ─── master tool allowlist (issue #47) ──────────────────────────────────
 // Tool gating happens at `createAgentSession` time via the `tools:`

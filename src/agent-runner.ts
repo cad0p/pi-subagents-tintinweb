@@ -782,8 +782,25 @@ export function attachSessionLifecycle(session: AgentSession): SessionLifecycle 
       lastAssistant = event.message;
       if (event.message.usage) hooks?.onUsage?.({ usage: toLifetimeUsage(event.message.usage), source: "assistant" });
     }
+    // A toolResult message carries usage when its AgentToolResult had one: codemode's model calls, ctx.executeTool()
+    // nests (which ride the calling tool's result), any extension tool that returns one.
+    if (event.type === "message_end" && event.message.role === "toolResult" && event.message.usage) {
+      hooks?.onUsage?.({ usage: toLifetimeUsage(event.message.usage), source: "toolResult" });
+    }
+    // Manual and automatic compaction store the summary's usage and announce it here; an aborted or failed one
+    // stores nothing and has no result. They emit no entry_appended, so this is its only channel.
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       hooks?.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+      if (event.result.usage) hooks?.onUsage?.({ usage: toLifetimeUsage(event.result.usage), source: "compaction" });
+    }
+    // Entries an extension appends at a run boundary. A compaction draft appended this way emits no compaction_end
+    // (the other channel), a cache-warm usage entry is not a message, and a branch_summary entry cannot occur in a
+    // child at all: pi emits no event for it and branching is command-only, so it is deliberately not handled.
+    if (event.type === "entry_appended") {
+      const entry = event.entry;
+      if (entry.type === "usage" && entry.kind === "cache_warm")
+        hooks?.onUsage?.({ usage: toLifetimeUsage(entry.usage), source: "cacheWarm", modelId: `${entry.provider}/${entry.model}` });
+      else if (entry.type === "compaction" && entry.usage) hooks?.onUsage?.({ usage: toLifetimeUsage(entry.usage), source: "compaction" });
     }
   });
 
