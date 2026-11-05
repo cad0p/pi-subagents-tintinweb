@@ -1,6 +1,7 @@
 /** usage.ts — Token usage: shapes, accumulator operators, session-stats readers. */
 
 import type { Usage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
  * Lifetime usage components: one session's cumulative spend. A record's value is read from
@@ -77,6 +78,102 @@ export function toReportedUsage(u: LifetimeUsage): Usage | undefined {
   };
 }
 
+/** Nothing spent: the identity of the accumulators below. */
+function zeroUsage(): LifetimeUsage {
+  return { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+}
+
+/** Field-wise maximum: an accounted total is a frontier, so a shrinking source never lowers it. */
+export function maxUsage(a: LifetimeUsage, b: LifetimeUsage): LifetimeUsage {
+  return {
+    input: Math.max(a.input, b.input),
+    output: Math.max(a.output, b.output),
+    cacheWrite: Math.max(a.cacheWrite, b.cacheWrite),
+    cacheRead: Math.max(a.cacheRead ?? 0, b.cacheRead ?? 0),
+    cost: Math.max(a.cost ?? 0, b.cost ?? 0),
+  };
+}
+
+/** How far "now" is past "before", field by field, clamped at 0: a session file is append-only. */
+function excessUsage(now: LifetimeUsage, before: LifetimeUsage): LifetimeUsage {
+  const growth = (a: number | undefined, b: number | undefined) => Math.max(0, (a ?? 0) - (b ?? 0));
+  return {
+    input: growth(now.input, before.input),
+    output: growth(now.output, before.output),
+    cacheWrite: growth(now.cacheWrite, before.cacheWrite),
+    cacheRead: growth(now.cacheRead, before.cacheRead),
+    cost: growth(now.cost, before.cost),
+  };
+}
+
+/**
+ * Sum of two pi Usages, field by field, keeping the optional splits when either side reports
+ * them. A tool result can already carry usage (a tool that ran other tools through
+ * ctx.executeTool), and that spend belongs in the parent's totals beside ours.
+ */
+export function combineUsage(first: Usage, second: Usage): Usage {
+  return {
+    input: first.input + second.input,
+    output: first.output + second.output,
+    cacheRead: first.cacheRead + second.cacheRead,
+    cacheWrite: first.cacheWrite + second.cacheWrite,
+    ...(first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined
+      ? { cacheWrite1h: (first.cacheWrite1h ?? 0) + (second.cacheWrite1h ?? 0) }
+      : {}),
+    ...(first.reasoning !== undefined || second.reasoning !== undefined
+      ? { reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0) }
+      : {}),
+    totalTokens: first.totalTokens + second.totalTokens,
+    cost: {
+      input: first.cost.input + second.cost.input,
+      output: first.cost.output + second.cost.output,
+      cacheRead: first.cost.cacheRead + second.cost.cacheRead,
+      cacheWrite: first.cost.cacheWrite + second.cost.cacheWrite,
+      total: first.cost.total + second.cost.total,
+      // A sum is provider-reported only when every part is.
+      totalFromProvider: first.cost.totalFromProvider === true && second.cost.totalFromProvider === true,
+    },
+  };
+}
+
+/**
+ * One agent's accounting frontier, as it rides on a tool result: the child session's own
+ * total through which every earlier read is either drained into a persisted result or
+ * deliberately excluded. The version lets a later shape be ignored rather than misread.
+ */
+export type UsageMarker = { v: 1; agents: Record<string, LifetimeUsage> };
+
+/** What a drain hands the tool result it rides on: the spend to add, and the frontier that claims it. */
+export type DrainedUsage = { usage?: Usage; marker?: UsageMarker };
+
+/** A usage accumulator read from an entry or a message, or undefined when it is malformed. Absent splits read as 0. */
+export function readLifetimeUsage(value: unknown): LifetimeUsage | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { input, output, cacheWrite, cacheRead, cost } = value as Record<string, unknown>;
+  const fields = [input, output, cacheWrite, cacheRead ?? 0, cost ?? 0];
+  if (!fields.every((n) => typeof n === "number" && Number.isFinite(n))) return undefined;
+  return { input: input as number, output: output as number, cacheWrite: cacheWrite as number, cacheRead: cacheRead as number, cost: cost as number };
+}
+
+/**
+ * The latest marker per agent from a session's entries. The marker rides on a tool result rather than
+ * in a custom entry, so the usage it accounts for and the claim are one persisted object; a marker
+ * written before a compaction is still read, because compaction appends and never shrinks the file.
+ */
+export function readUsageMarkers(entries: readonly SessionEntry[]): Map<string, LifetimeUsage> {
+  const markers = new Map<string, LifetimeUsage>();
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    const marker = (entry.message as { subagentUsage?: Partial<UsageMarker> }).subagentUsage;
+    if (!marker || marker.v !== 1 || typeof marker.agents !== "object" || marker.agents === null) continue;
+    for (const [id, total] of Object.entries(marker.agents)) {
+      const parsed = readLifetimeUsage(total);
+      if (parsed) markers.set(id, parsed);
+    }
+  }
+  return markers;
+}
+
 /**
  * Subagent spend that the parent session has not been told about yet.
  *
@@ -94,32 +191,111 @@ export function toReportedUsage(u: LifetimeUsage): Usage | undefined {
  * in one turn contributes nothing the second time.
  */
 export class PendingUsagePool {
-  private pending: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
-  private dirty = false;
+  private pending: LifetimeUsage = zeroUsage();
+  /** Per agent, the child session's own total every earlier read is accounted for through. */
+  private frontier = new Map<string, LifetimeUsage>();
+  /** Per agent, the total a persisted marker or a booked claim already covers. */
+  private written = new Map<string, LifetimeUsage>();
 
+  /** Add an opaque delta: a hand-over from a release that reports one sum, not a per-agent frontier. */
   add(delta: LifetimeUsage): void {
     addUsage(this.pending, delta);
-    this.dirty = true;
   }
 
   /**
-   * Take everything accumulated so far as a pi `Usage`, resetting the pool.
-   * Returns undefined when nothing is pending, so callers can leave the tool
-   * result untouched rather than attaching a zero.
+   * Account for one absolute read: `totals` is that agent's own session total, never a
+   * delta. Adds the growth past the frontier to the pool and raises the frontier by it, so
+   * the same totals twice add nothing and a shrinking total (a bug) subtracts nothing.
    */
-  drain(): Usage | undefined {
+  report(id: string, totals: LifetimeUsage): LifetimeUsage {
+    const before = this.frontier.get(id);
+    const frontier = before ? maxUsage(before, totals) : { ...totals };
+    this.frontier.set(id, frontier);
+    const growth = excessUsage(frontier, before ?? zeroUsage());
+    if (!isEmptyUsage(growth)) addUsage(this.pending, growth);
+    return growth;
+  }
+
+  /** Raise the frontier to `totals` and pool nothing: what was read before it was never watched. */
+  seed(id: string, totals: LifetimeUsage): void {
+    const before = this.frontier.get(id);
+    this.frontier.set(id, before ? maxUsage(before, totals) : { ...totals });
+  }
+
+  /**
+   * Seed the frontier and the written claim for every id a startup found already accounted
+   * for: the markers in the file, and the totals of booked claims. Never a claim still to be
+   * booked, or the drain that books it would skip its marker.
+   */
+  seedMarkers(markers: ReadonlyMap<string, LifetimeUsage>, booked: ReadonlyMap<string, LifetimeUsage>): void {
+    for (const source of [markers, booked]) {
+      for (const [id, total] of source) {
+        const frontier = maxUsage(this.frontier.get(id) ?? zeroUsage(), total);
+        this.frontier.set(id, frontier);
+        this.written.set(id, maxUsage(this.written.get(id) ?? zeroUsage(), frontier));
+      }
+    }
+  }
+
+  /** Every accounted agent's frontier: a reload hands this over instead of one opaque sum. */
+  frontierSnapshot(): Map<string, LifetimeUsage> {
+    return new Map(this.frontier);
+  }
+
+  /**
+   * Take the pool as the message that reports it: the accumulated spend as a pi Usage, and a
+   * marker for every agent whose frontier moved past what a persisted marker claims. Both are
+   * undefined when there is nothing to say, so a caller leaves the message untouched. The
+   * marker is never derived from the pool: it is the frontier, and an exclusion moves it with
+   * no spend at all.
+   */
+  drain(): DrainedUsage {
     const taken = this.takeLifetime();
-    return taken && toReportedUsage(taken);
+    const agents: Record<string, LifetimeUsage> = {};
+    for (const [id, frontier] of this.frontier) {
+      const written = this.written.get(id) ?? zeroUsage();
+      if (isEmptyUsage(excessUsage(frontier, written))) continue;
+      agents[id] = { ...frontier };
+      this.written.set(id, frontier);
+    }
+    return {
+      usage: taken && toReportedUsage(taken),
+      marker: Object.keys(agents).length > 0 ? { v: 1, agents } : undefined,
+    };
   }
 
   /** Take the raw accumulated delta, resetting the pool. Lets a reloading activation hand it to its successor. */
   takeLifetime(): LifetimeUsage | undefined {
-    if (!this.dirty) return undefined;
+    if (isEmptyUsage(this.pending)) return undefined;
     const taken = this.pending;
-    this.pending = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
-    this.dirty = false;
+    this.pending = zeroUsage();
     return taken;
   }
+}
+
+/** One pi Usage as a lifetime accumulator, so a file walk and a live read compare like for like. */
+function usageToLifetime(usage: Usage): LifetimeUsage {
+  return { input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead, cost: usage.cost.total };
+}
+
+/**
+ * A session file's whole-file totals, mirroring pi's own getSessionStats() bucket for bucket:
+ * usage entries, a compaction or branch summary's usage, and the usage of a toolResult or an
+ * assistant message. A session with no live AgentSession has no stats reader, and pi exports
+ * none, so this is the one place that re-derives pi's sum. A pi release that adds a bucket
+ * fails the test that compares this with a real session rather than silently under-recovering.
+ */
+export function sessionFileUsage(entries: readonly SessionEntry[]): LifetimeUsage {
+  const totals = zeroUsage();
+  for (const entry of entries) {
+    if (entry.type === "usage") addUsage(totals, usageToLifetime(entry.usage));
+    else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) addUsage(totals, usageToLifetime(entry.usage));
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role === "toolResult" && message.usage) addUsage(totals, usageToLifetime(message.usage));
+    else if (message.role === "assistant") addUsage(totals, usageToLifetime(message.usage));
+  }
+  return totals;
 }
 
 /**

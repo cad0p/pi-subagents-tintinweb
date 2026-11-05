@@ -13,7 +13,8 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type CrashRecoveryDecision, crashRecoveryDecision, sessionKey } from "@cad0p/pi-background-work";
-import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
+import { defineTool, type EntryRenderer, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme, InteractiveMode, keyText, type MessageEndEvent, type MessageEndEventResult, type SessionStartEvent, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { ambiguousAgentIdText } from "./agent-id.js";
@@ -31,14 +32,14 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, ownEntries, type ReplayOptions, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops } from "./ledger.js";
+import { type AccountedTotal, isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, ownEntries, type ReplayOptions, readAccounted, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, type SpawnedLedgerEntry, shutdownStops, spawnsOf } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { type AgentDto, failedSpecDto, fromDto, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, frontierOf, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeRetainedOf, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -50,7 +51,7 @@ import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservin
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
+import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, maxUsage, PendingUsagePool, readUsageMarkers, sessionFileUsage, toReportedUsage, type UsageMarker } from "./usage.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
 // ---- Shared helpers ----
@@ -370,6 +371,9 @@ export default function (pi: ExtensionAPI) {
   function isReportUsageEnabled(): boolean { return reportUsage; }
   function setReportUsage(b: boolean): void {
     reportUsage = b;
+    // The manager needs it too: a settled run removed while reporting is off claims its total as
+    // accounted, so a later start with reporting on does not book a window the user opted out of.
+    manager?.setUsageReporting(b);
     // Whatever accumulated while it was on is stale the moment it goes off:
     // draining it later would bill the parent for a window the user opted out
     // of, in one lump, on some unrelated later tool call.
@@ -503,7 +507,43 @@ export default function (pi: ExtensionAPI) {
   // started; this also covers the error/abort path where the loop returns
   // without draining the steering queue again.
   pi.on("turn_start", () => { mainTurnActive = true; });
-  pi.on("message_end", () => { releaseParkedNudges(); });
+  pi.on("message_end", (event) => {
+    releaseParkedNudges();
+    return drainSpend(event);
+  });
+
+  /**
+   * The pool's one consumer: every tool result the parent session finalizes carries the subagent
+   * spend waiting for it, and a marker claiming the child totals that spend covers. Push, not
+   * pull: a tool result exists for calls this extension never sees — a built-in tool, another
+   * extension's — and a background agent's spend has no result of its own at all.
+   *
+   * Handlers run before pi appends the message, so the usage and the marker land in the same
+   * session entry. Both are needed: the usage without the marker re-adds the spend on the next
+   * startup's recovery, the marker without the usage loses it.
+   *
+   * A user or steering message emits message_end too, and pi's totals ignore its usage: draining
+   * there would lose the spend and write a marker claiming it was booked. The role guard is
+   * load-bearing, and the parked-nudge release above stays ungated for the same reason it always
+   * was: it must run for every message.
+   */
+  function drainSpend(event: MessageEndEvent): MessageEndEventResult | undefined {
+    // Only the root activation owns the pool, and only a tool result is counted by pi.
+    if (!isRoot || event.message.role !== "toolResult") return undefined;
+    const drained = pendingUsage.drain();
+    // While reporting is off the sink seeds instead of reporting, so nothing is pooled. A marker
+    // still has to ride out for the exclusions it claims; it carries no usage by definition.
+    const usage = reportUsage ? drained.usage : undefined;
+    if (!usage && !drained.marker) return undefined;
+    const message = event.message as typeof event.message & { usage?: Usage; subagentUsage?: UsageMarker };
+    return {
+      message: {
+        ...message,
+        ...(usage ? { usage: message.usage ? combineUsage(message.usage, usage) : usage } : {}),
+        ...(drained.marker ? { subagentUsage: drained.marker } : {}),
+      },
+    };
+  }
   pi.on("tool_execution_end", () => { releaseParkedNudges(); });
   pi.on("turn_end", () => {
     mainTurnActive = false;
@@ -755,11 +795,18 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
-  }, (record, delta) => {
+  }, (record, delta, source) => {
     // Every agent's growth of its own session totals — nested included, exactly once. Parked here
-    // until a tool result can carry it back to the parent session; see `PendingUsagePool`. Skipped
-    // entirely when the feature is off, so no pool grows in a session that will never drain it.
-    if (reportUsage) pendingUsage.add(delta);
+    // until a tool result can carry it back to the parent session; see `PendingUsagePool`.
+    //
+    // The sink takes the record's absolute baseline, not the delta: the pool's own frontier is what
+    // makes two reads of the same totals idempotent and what lets a marker claim an exclusion. A
+    // seed read (a first bind, nothing before it was watched) and every read while reporting is off
+    // raise the frontier without pooling anything; only growth with reporting on is spend to book.
+    if (record.usageBaseline) {
+      if (source === "seed" || !reportUsage) pendingUsage.seed(record.id, record.usageBaseline);
+      else pendingUsage.report(record.id, record.usageBaseline);
+    }
     // The same delta, live, for anyone keeping their own ledger — a footer that breaks spend down by
     // agent type and thinking level, say. This is the one place every agent's spend passes through,
     // which is why it is emitted here and not from the lifecycle events: those fire for top-level
@@ -905,33 +952,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Wrap a tool so its results carry back whatever subagent spend the parent
-   * session has not been told about yet (see `PendingUsagePool`).
-   *
-   * Pi copies `AgentToolResult.usage` onto the persisted tool-result message and
-   * folds it into `getSessionStats()`, which is what the footer, the statusline
-   * and `/cost` read — so this is the whole of "report usage to the parent".
-   *
-   * No tool-call-id guard: `ToolDefinition.execute` takes a `string` here, and
-   * every caller of a registered tool in this fork is pi itself, which always
-   * has one. There is no in-process clone that invokes a tool from a discarded
-   * fork of the conversation, so a result this extension produces always becomes
-   * a real message and its usage is always counted.
-   */
-  function withUsageReporting(tool: ToolDefinition): ToolDefinition {
-    const execute = tool.execute;
-    return {
-      ...tool,
-      execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-        const result = await execute(toolCallId, params, signal, onUpdate, ctx);
-        if (!reportUsage) return result;
-        const usage = pendingUsage.drain();
-        return usage ? { ...result, usage } : result;
-      },
-    };
-  }
-
-  /**
    * Register a parent-facing tool — never in a subagent session.
    *
    * A subagent session re-activates this extension in the same process, and its
@@ -943,11 +963,13 @@ export default function (pi: ExtensionAPI) {
    * construction-time guarantee. Every other child has these names stripped from
    * its allowlist (EXCLUDED_TOOL_NAMES), so nothing changes for them.
    *
-   * Every parent-facing tool is registered through here, so this is also the one
-   * place that attaches pending subagent spend to a tool result.
+   * Subagent spend does not ride here: it rides on the `message_end` handler in
+   * `drainSpend`, so it reaches a result of any tool, not only these three. Draining at
+   * `execute` return would also drain before the result message exists, leaving a marker
+   * with no message to ride on.
    */
   const registerParentTool = (tool: ToolDefinition): void => {
-    if (isRoot) pi.registerTool(withUsageReporting(tool));
+    if (isRoot) pi.registerTool(tool);
   };
 
   // --- Cross-extension RPC via pi.events ---
@@ -979,6 +1001,86 @@ export default function (pi: ExtensionAPI) {
       // Scheduling is non-essential — log and move on so the rest of the
       // extension keeps working if e.g. .pi/ is unwritable.
       console.warn("[pi-subagents] Failed to start scheduler:", err);
+    }
+  }
+
+  // ---- Usage accounting (issue #215) ----
+  /** The totals the startup walk found, reused by the booking half once crashed runs have been adopted. */
+  let recoveredUsageTotals = new Map<string, LifetimeUsage>();
+
+  /**
+   * Every surviving child's own cumulative total, from its session file, plus the totals of records
+   * that have none left. An accounted entry supplies a total without opening a file, but never replaces
+   * one: a claim only covers the file as it stood, and spend after it is exactly the gap to book.
+   */
+  function walkUsageTotals(spawns: Map<string, SpawnedLedgerEntry>, accounted: Map<string, AccountedTotal>): Map<string, LifetimeUsage> {
+    const totals = new Map<string, LifetimeUsage>();
+    const queue = [...spawns.values()];
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const spawn = queue.shift();
+      if (!spawn || visited.has(spawn.id)) continue;
+      visited.add(spawn.id);
+      let total = accounted.get(spawn.id)?.total;
+      const child = openChildSession(spawn.sessionFile);
+      if (child) {
+        const fileTotal = sessionFileUsage(child.getEntries());
+        total = total ? maxUsage(total, fileTotal) : fileTotal;
+        queue.push(...spawnsOf(child.getEntries()).values());
+      }
+      if (total) totals.set(spawn.id, total);
+    }
+    // An id known only from its accounted entry (a removed nested record whose file and intermediate
+    // parents are gone) is still recovered from that entry.
+    for (const [id, claim] of accounted) if (!totals.has(id)) totals.set(id, claim.total);
+    return totals;
+  }
+
+  /**
+   * Recovery steps 0-3: read what the file already accounts for, walk the surviving children, and stamp
+   * the file as this build's — with a booked seed per spawn when it is a pre-marker file.
+   *
+   * Runs on every root session_start, before the hand-over is adopted, so a successor's `written` is
+   * never empty and its first drain writes exactly the difference.
+   */
+  function seedUsageAccounting(reason: SessionStartEvent["reason"], ctx: ExtensionContext): void {
+    const entries = ownEntries(ctx.sessionManager.getHeader(), ctx.sessionManager.getEntries());
+    const accounted = readAccounted(entries);
+    const spawns = spawnsOf(entries);
+    // A file with spawns and no stamp predates markers: reading its missing markers as zero would book
+    // every surviving child's whole lifetime at once, on this start and every start after it.
+    const legacy = spawns.size > 0 && accounted.size === 0;
+    const booked = new Map<string, LifetimeUsage>();
+    for (const [id, claim] of accounted) if (claim.booked) booked.set(id, claim.total);
+    // Never a claim still to be booked: seeding `written` from it would make the drain that books it
+    // skip its marker, and the next start would book the same gap from the same entry.
+    pendingUsage.seedMarkers(readUsageMarkers(entries), booked);
+    // On reload only the legacy branch consumes the walk, so a stamped file opens no child session.
+    recoveredUsageTotals = legacy || reason === "startup" || reason === "resume" ? walkUsageTotals(spawns, accounted) : new Map();
+    const seeds: Record<string, AccountedTotal> = {};
+    if (legacy) {
+      for (const [id, total] of recoveredUsageTotals) {
+        seeds[id] = { total, booked: true };
+        pendingUsage.seed(id, total);
+      }
+    }
+    // Every root start, every reason. A fork copies its source's stamp and `ownEntries` drops it, so a
+    // fork that wrote none would look legacy on its next start and re-book the lifetimes it copied.
+    manager.stampUsageAccounting(seeds);
+  }
+
+  /**
+   * Recovery steps 4-7: book what the file says the parent was never told. Only on startup and resume —
+   * a reload's live runs drain in the activation that handed them over — and never as a bare marker: a
+   * claim without the usage it covers would lose the gap for good.
+   */
+  function bookRecoveredUsage(): void {
+    for (const [id, total] of recoveredUsageTotals) {
+      // While reporting is off this raises the frontier and books nothing (owner pick C): a start that
+      // turns reporting back on books only growth from there.
+      if (reportUsage) pendingUsage.report(id, total);
+      else pendingUsage.seed(id, total);
+      manager.applyRecoveredUsage(id, total);
     }
   }
 
@@ -1062,6 +1164,12 @@ export default function (pi: ExtensionAPI) {
         registerSubagentProvider(event.reason, getSource);
         registerSubagentDisplayProvider(event.reason, getSource);
       });
+      // The root activation's writer for accounted entries, re-pointed here at every start (reload included):
+      // a nested record's ledger writer is rebound to an intermediate parent's file, which a removal unlinks.
+      manager.setAccountedWriter({ appendEntry: (customType, data) => pi.appendEntry(customType, data) });
+      // Steps 0-3 before any adoption: the successor's `written` must be what the file claims before its
+      // pool is recomputed from the hand-over's frontier.
+      guardInitVoid("usage-accounting", () => { seedUsageAccounting(event.reason, ctx); });
       try {
         await guardInitAsync("handover-adoption", () => adoptHandovers(ctx));
       } finally {
@@ -1069,6 +1177,9 @@ export default function (pi: ExtensionAPI) {
       }
       guardInitVoid("stranded", () => { stopStranded(ctx.sessionManager.getSessionId()); });
       if (event.reason === "startup" || event.reason === "resume") recoverCrashed(ctx);
+      // After recoverCrashed: the booking sets the row of a run it just adopted, and it is not inside that
+      // function's early return, which a settled-and-removed run never reaches.
+      if (event.reason === "startup" || event.reason === "resume") guardInitVoid("usage-recovery", bookRecoveredUsage);
     }
   }
 
@@ -1113,7 +1224,9 @@ export default function (pi: ExtensionAPI) {
         for (const h of held) h.detach();
         // Nested results still waiting in a batch ride the hand-over as targeted nudges, so the new activation delivers them.
         const handoverNudges = [...nudged, ...manager.takeNestedPending()];
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, pendingUsage.takeLifetime(), new Map(agentActivity))]);
+        // The frontier map, not one opaque sum: the successor recomputes pending per id and can claim each
+        // adopted agent's total with a marker on its first drain.
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, undefined, new Map(agentActivity), pendingUsage.frontierSnapshot())]);
         held = [];
       }
     } else {
@@ -1179,6 +1292,9 @@ export default function (pi: ExtensionAPI) {
     for (const h of held) {
       const unreported = takeUnreportedOf(h);
       if (unreported) pendingUsage.add(unreported);
+      // This release publishes a per-agent frontier instead of one opaque sum (owner pick 4 A keeps the
+      // fallback above for an older publisher): pool the difference from what the file already claims.
+      for (const [id, total] of frontierOf(h)) pendingUsage.report(id, total);
     }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
@@ -1399,6 +1515,8 @@ export default function (pi: ExtensionAPI) {
       if (h.draining.ownAgents().length > 0) continue;
       h.detach();
       h.draining.dispose();
+      // The removal entries a draining manager could not write: entry first, unlink second, at a live writer.
+      manager.retireRetained(takeRetainedOf(h));
     }
     held = held.filter((h) => h.draining.ownAgents().length > 0);
     manager.setDrainingPools(held.map((h) => h.draining));

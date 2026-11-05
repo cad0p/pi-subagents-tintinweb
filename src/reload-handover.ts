@@ -12,6 +12,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SpawnOptions } from "./agent-manager.js";
 import { teardownChildSession } from "./agent-runner.js";
+import type { RetainedSettled } from "./ledger.js";
 import type { AgentRecord, DeliverOutcome, SubagentType } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -119,6 +120,10 @@ export class ReloadHandover {
   private queued: QueuedSpec[];
   private nudged: NudgeEntry[];
   private unreported?: LifetimeUsage;
+  /** Per-agent accounting frontier: the successor pools `frontier - written` and marks each adopted id once. */
+  readonly frontier: ReadonlyMap<string, LifetimeUsage>;
+  /** Settled child files the draining manager kept; the successor writes their removal entry and unlinks them. */
+  private retained: RetainedSettled[] = [];
   private stopped = false;
   /** Set by `stop`: the one consumer left for a `usage` event no activation will adopt. */
   private replay?: (dto: AgentDto, usage: LifetimeUsage) => void;
@@ -133,11 +138,25 @@ export class ReloadHandover {
     readonly activity: ReadonlyMap<string, AgentActivity> = new Map(),
     /** The pool slots the draining runs hold. The old manager shares this set, so its releases reach it until adoption. */
     readonly slotHolders: Set<string> = new Set(),
+    frontier: ReadonlyMap<string, LifetimeUsage> = new Map(),
   ) {
     this.items = items;
     this.queued = queued;
     this.nudged = nudged;
     this.unreported = unreported;
+    this.frontier = frontier;
+  }
+
+  /** Records files a draining manager kept instead of unlinking. Called once, from its dispose. */
+  retain(files: readonly RetainedSettled[]): void {
+    this.retained.push(...files);
+  }
+
+  /** Hands out the retained files; each is returned once. */
+  takeRetained(): RetainedSettled[] {
+    const taken = this.retained;
+    this.retained = [];
+    return taken;
   }
 
   /**
@@ -336,6 +355,22 @@ export function slotHoldersOf(handover: ReloadHandover): Iterable<string> {
 export function takeUnreportedOf(handover: ReloadHandover): LifetimeUsage | undefined {
   const take = (handover as { takeUnreported?: () => LifetimeUsage | undefined }).takeUnreported;
   return typeof take === "function" ? take.call(handover) : undefined;
+}
+
+/**
+ * The per-agent frontier a hand-over published, or an empty map for one from a release that reported a
+ * single unreported sum instead. Read through this accessor, never directly: absence is a version, not
+ * a reason to reject the hand-over.
+ */
+export function frontierOf(handover: ReloadHandover): ReadonlyMap<string, LifetimeUsage> {
+  const frontier = (handover as { frontier?: unknown }).frontier;
+  return frontier instanceof Map ? (frontier as ReadonlyMap<string, LifetimeUsage>) : new Map();
+}
+
+/** The settled files a draining manager kept, for a successor that knows how to retire them. */
+export function takeRetainedOf(handover: ReloadHandover): RetainedSettled[] {
+  const take = (handover as { takeRetained?: () => RetainedSettled[] }).takeRetained;
+  return typeof take === "function" ? take.call(handover) : [];
 }
 
 /** The pending nudges as entries: releases before nested delivery handed plain ids over. */
