@@ -780,6 +780,22 @@ describe("instruction rendering", () => {
       const theme = makeTheme();
       const text = renderResultText(tools.get("Agent"), { content: [{ type: "text", text: "raw child text" }], details: undefined }, theme);
       expect(text).toBe("raw child text");
+      // Not an error result, so the refusal colour stays off it.
+      expect(theme.calls.some(([color]) => color === "error")).toBe(false);
+    });
+
+    it("paints a refusal with the error colour from context.isError", () => {
+      const { tools } = registerTools();
+      const refusalText = 'Unknown or disabled agent type: "retired".';
+      const theme = makeTheme();
+      const text = renderResultText(
+        tools.get("Agent"),
+        { content: [{ type: "text", text: refusalText }], details: undefined, isError: true },
+        theme,
+        { isError: true },
+      );
+      expect(text).toBe(refusalText);
+      expect(theme.calls).toContainEqual(["error", refusalText]);
     });
   });
 

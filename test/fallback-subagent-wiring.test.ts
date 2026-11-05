@@ -119,6 +119,9 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
 
     expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
     expect(textOf(result)).toContain("scout");
+    // A refusal is a failed tool result: pi paints the row and records the
+    // transcript entry from the returned `isError`, not from a throw (#142).
+    expect(result.isError).toBe(true);
     // The whole point: nothing ran.
     expect(runAgent).not.toHaveBeenCalled();
   });
@@ -136,6 +139,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     );
 
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
+    // A fallback spawn is not a refusal, so it must not carry the failed flag.
+    expect(result.isError).toBeFalsy();
     // Not merely "something ran" — a fallback that routed anywhere else would pass that.
     expect(runAgent).toHaveBeenCalledWith(
       expect.anything(), "general-purpose", "do it", expect.anything(),
@@ -176,6 +181,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
 
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
     expect(textOf(result)).toContain("started in background");
+    expect(result.isError).toBeFalsy();
   });
 
   it("refuses a disabled type, which used to dispatch with a mixed identity", async () => {
@@ -193,6 +199,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     );
 
     expect(textOf(result)).toContain("Unknown or disabled agent type");
+    expect(result.isError).toBe(true);
     expect(runAgent).not.toHaveBeenCalled();
   });
 
@@ -224,6 +231,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       expect(textOf(result)).toContain("general-purpose is disabled");
       expect(textOf(result)).toContain("Enabled agent types you can use instead:");
       expect(textOf(result)).toContain("scout");
+      // The visual-proof clause: a refusal must reach pi as a failed tool call.
+      expect(result.isError).toBe(true);
       // No child is built from the disabled file's prompt/model, hybrid or otherwise.
       expect(runAgent).not.toHaveBeenCalled();
     });
@@ -239,6 +248,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       );
 
       expect(textOf(result)).toContain("general-purpose is disabled");
+      expect(result.isError).toBe(true);
       expect(runAgent).not.toHaveBeenCalled();
     });
 
@@ -267,6 +277,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       undefined, undefined, ctx(),
     );
     expect(textOf(result)).toContain("Scheduled");
+    expect(result.isError).toBeFalsy();
 
     const storeDir = join(cwd, ".pi", "subagent-schedules");
     const jobs = readdirSync(storeDir).flatMap((f) =>

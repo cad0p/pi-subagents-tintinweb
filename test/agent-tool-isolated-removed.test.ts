@@ -97,6 +97,11 @@ describe("Agent tool: removed isolated parameter", () => {
       );
 
       expect((result.content[0] as { text: string }).text).toBe(ISOLATED_REMOVED);
+      // Refused, not spawned: a failed tool result, so the row is not painted as
+      // a success. No details either — a truthy `details` would render the row
+      // through the error/aborted branch instead of the refusal text.
+      expect(result.isError).toBe(true);
+      expect(result.details).toBeUndefined();
     }
   });
 });

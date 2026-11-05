@@ -62,6 +62,16 @@ function textResult<D>(msg: string, details?: D) {
   return { content: [{ type: "text" as const, text: msg }], details };
 }
 
+/**
+ * A refused call: nothing was spawned or scheduled, so the result must be a
+ * failed one. pi reads `isError` off the returned result (pi-agent-core
+ * `agent-loop.js`, `isError: result.isError === true`), and it drives the
+ * error row background, the transcript's `isError`, and the provider marker.
+ */
+function refusal(msg: string) {
+  return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
+}
+
 /** Folds one tool event into an agent's activity state. Shared by the spawn callbacks and the live sink of a reloaded child. */
 function applyToolActivity(state: AgentActivity, activity: { type: "start" | "end"; toolName: string }): void {
   if (activity.type === "start") {
@@ -1926,7 +1936,10 @@ Terse command-style prompts produce shallow, generic work.
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
         const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(typeof text === "string" ? stripControlChars(text) : "", 0, 0);
+        const body = typeof text === "string" ? stripControlChars(text) : "";
+        // A refusal carries no details: paint it with the error colour so the row
+        // matches the failed tool result pi records for it.
+        return new Text(context.isError ? theme.fg("error", body) : body, 0, 0);
       }
 
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
@@ -1972,7 +1985,7 @@ Terse command-style prompts produce shallow, generic work.
       // properties and RPC forwards them verbatim — refuse the removed flag here
       // rather than silently spawning an agent that is not hermetic.
       const isolatedError = isolatedParamError(params);
-      if (isolatedError) return textResult(isolatedError, true);
+      if (isolatedError) return refusal(isolatedError);
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
@@ -1984,7 +1997,7 @@ Terse command-style prompts produce shallow, generic work.
       // the caller is still unaware. `fallbackSubagent` decides whether an
       // unresolvable type falls back or fails closed.
       const dispatch = resolveSpawnType(rawType);
-      if (!dispatch.ok) return textResult(dispatch.message);
+      if (!dispatch.ok) return refusal(dispatch.message);
       const subagentType = dispatch.ok ? dispatch.type : rawType;
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
@@ -2070,13 +2083,13 @@ Terse command-style prompts produce shallow, generic work.
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
-          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+          return refusal("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
         }
         if (params.inherit_context) {
-          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+          return refusal("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
         }
         if (!scheduler.isActive()) {
-          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+          return refusal("Scheduler is not active in this session yet. Try again after the session has fully started.");
         }
         try {
           const job = scheduler.addJob({
@@ -2099,7 +2112,7 @@ Terse command-style prompts produce shallow, generic work.
             `Manage via /agents → Scheduled jobs.`,
           );
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
+          return refusal(err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -2160,7 +2173,7 @@ Terse command-style prompts produce shallow, generic work.
             ...bgCallbacks,
           });
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
+          return refusal(err instanceof Error ? err.message : String(err));
         }
         warnOnOutOfScopeModel();
 
