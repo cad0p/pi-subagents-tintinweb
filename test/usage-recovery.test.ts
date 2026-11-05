@@ -113,6 +113,44 @@ describe("usage recovery", () => {
       expect(walked.get("nested")?.input).toBe(5);
     });
 
+    it("seeds a three-level legacy tree even when each child is found through its parent's file", () => {
+      // Nested spawn entries live in their parent's session file. The walk must recurse, keep each
+      // node's own total, and legacySeeds must stamp all three so a quit before the next tool result
+      // cannot make the next startup book their lifetimes.
+      const aFile = join(dir, "a.jsonl");
+      const bFile = join(dir, "b.jsonl");
+      const cFile = join(dir, "c.jsonl");
+      for (const file of [aFile, bFile, cFile]) writeFileSync(file, "");
+      const entries = new Map<string, SessionEntry[]>([
+        [aFile, [assistant({ input: 30, output: 3 }), spawn("b", bFile, "a")]],
+        [bFile, [assistant({ input: 20, output: 2 }), spawn("c", cFile, "b")]],
+        [cFile, [assistant({ input: 10, output: 1 })]],
+      ]);
+
+      const walked = walkUsageTotals(spawnsOf([spawn("a", aFile)]), new Map(), (file) => entries.get(file));
+      const seeds = legacySeeds(walked);
+
+      expect([...walked.keys()]).toEqual(["a", "b", "c"]);
+      expect(Object.fromEntries(Object.entries(seeds).map(([id, value]) => [id, value.booked]))).toEqual({ a: true, b: true, c: true });
+      expect(walked.get("c")).toEqual(totals(10, 1));
+    });
+
+    it("recovers nested totals from root claims when intermediate session files are gone", () => {
+      // The root's accounted entries are the only surviving names for removed nested records when
+      // the persist_session:false intermediate files have been unlinked.
+      const walked = walkUsageTotals(
+        spawnsOf([spawn("a", join(dir, "deleted-a.jsonl"))]),
+        new Map([
+          ["b", { total: totals(20, 2), booked: false }],
+          ["c", { total: totals(10, 1), booked: false }],
+        ]),
+        () => undefined,
+      );
+
+      expect(walked.get("b")).toEqual(totals(20, 2));
+      expect(walked.get("c")).toEqual(totals(10, 1));
+    });
+
     it("skips a child whose file is gone and has no claim", () => {
       // Documented limit: nothing to read, nothing to book. The row must not invent a total.
       const walked = walkUsageTotals(spawnsOf([spawn("a", join(dir, "missing.jsonl"))]), new Map(), () => undefined);

@@ -10,8 +10,9 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import type { Usage } from "@earendil-works/pi-ai";
-import { type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { initTheme, type SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -39,9 +40,9 @@ function custom(customType: string, data: unknown): SessionEntry {
   return { type: "custom", id: `e-${Math.random()}`, parentId: null, timestamp: new Date().toISOString(), customType, data } as SessionEntry;
 }
 
-function spawnEntry(id: string, sessionFile: string): SessionEntry {
+function spawnEntry(id: string, sessionFile: string, parentId?: string): SessionEntry {
   const data: SpawnedLedgerEntry = {
-    v: LEDGER_VERSION, id, type: "general-purpose", description: id, sessionFile,
+    v: LEDGER_VERSION, id, type: "general-purpose", description: id, sessionFile, parentId,
     persistSession: true, spawnedAt: 1, ownerPid: 1,
   };
   return custom("subagent-spawned", data);
@@ -91,9 +92,9 @@ describe("durable usage accounting", () => {
   function boot(settings: Record<string, unknown> = {}) {
     mkdirSync(join(cwd, ".pi"), { recursive: true });
     writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify(settings));
-    const { pi, tools, lifecycle } = makePi();
+    const { pi, tools, lifecycle, commands } = makePi();
     subagentsExtension(pi);
-    return { pi, tools, lifecycle };
+    return { pi, tools, lifecycle, commands };
   }
 
   /** A real child session file holding `spent`: the shape recovery opens. */
@@ -106,14 +107,14 @@ describe("durable usage accounting", () => {
     return file;
   }
 
-  function parentCtx(entries: SessionEntry[]) {
+  function parentCtx(entries: SessionEntry[], header: unknown = null) {
     return {
       ...spawnCtx(cwd),
       hasUI: false,
       mode: "print",
       sessionManager: {
         getSessionId: () => "parent-session",
-        getHeader: () => null,
+        getHeader: () => header,
         getEntries: () => entries,
         appendCustomEntry: vi.fn(),
         getSessionFile: () => join(cwd, "parent.jsonl"),
@@ -123,8 +124,35 @@ describe("durable usage accounting", () => {
 
   type Lifecycle = Map<string, (event: unknown, ctx: unknown) => unknown>;
 
-  async function start(lifecycle: Lifecycle, entries: SessionEntry[], reason = "startup") {
-    await lifecycle.get("session_start")?.({ type: "session_start", reason }, parentCtx(entries));
+  async function start(lifecycle: Lifecycle, entries: SessionEntry[], reason = "startup", header?: unknown) {
+    await lifecycle.get("session_start")?.({ type: "session_start", reason }, parentCtx(entries, header));
+  }
+
+  /** Toggle reportUsage through the real /agents → Settings UI and its applyValue callback. */
+  async function toggleReportUsage(commands: Map<string, unknown>): Promise<void> {
+    initTheme("dark");
+    type Panel = { render(width: number): string[]; handleInput(data: string): void };
+    const slot: { panel?: Panel; close?: () => void } = {};
+    const command = commands.get("agents") as { handler(args: string, ctx: unknown): Promise<void> };
+    const ui = {
+      select: vi.fn().mockResolvedValueOnce("Settings"),
+      notify: vi.fn(),
+      custom: (factory: (...args: unknown[]) => Panel) => new Promise<undefined>((done) => {
+        slot.close = () => done(undefined);
+        slot.panel = factory(undefined, undefined, undefined, done);
+      }),
+    };
+    const run = command.handler("", { ui, cwd, sessionManager: { getSessionId: () => "parent-session" } });
+    for (let i = 0; !slot.panel && i < 20; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    const panel = slot.panel;
+    if (!panel) throw new Error("the reportUsage settings panel did not open");
+    const selected = () => panel.render(120).map(stripVTControlCharacters)
+      .some((line) => line.includes("Report usage to session") && !line.startsWith(" "));
+    for (let i = 0; i < 60 && !selected(); i++) panel.handleInput("\x1b[B");
+    if (!selected()) throw new Error("the reportUsage setting was not selected");
+    panel.handleInput("\r");
+    slot.close?.();
+    await run;
   }
 
   /** The message pi would persist for a tool result, through the registered handler. */
@@ -171,6 +199,37 @@ describe("durable usage accounting", () => {
       expect(accountedWrites(pi).at(-1)?.agents).toEqual({});
     });
 
+    it("writes its own stamp for a fork without recovering copied spawns", async () => {
+      // A fork inherits its source's entries, but ownEntries drops entries no newer than its header.
+      // It must stamp its own file so the copied ledger never looks legacy on the next start.
+      const { pi, lifecycle } = boot({ reportUsage: true });
+      const copied = spawnEntry("source-agent", childFile(usage(100, 50)));
+      const header = {
+        type: "session",
+        id: "fork-id",
+        timestamp: "2099-01-01T00:00:00.000Z",
+        parentSession: join(cwd, "source.jsonl"),
+      };
+
+      await start(lifecycle, [copied], "fork", header);
+
+      expect(accountedWrites(pi).at(-1)?.agents).toEqual({});
+      expect(settledMessage(lifecycle)).not.toHaveProperty("usage");
+    });
+
+    it("logs a failed format stamp and still runs session_start recovery", async () => {
+      // A synchronous append failure here must not turn startup into an extension init failure.
+      // The stamp may be lost (at most one later over-book), but recovery and tool use continue.
+      const { pi, lifecycle } = boot({ reportUsage: true });
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      pi.appendEntry.mockImplementation(() => { throw new Error("disk full"); });
+
+      await expect(start(lifecycle, [])).resolves.toBeUndefined();
+
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("accounted entry write failed"));
+      expect(lifecycle.has("message_end")).toBe(true);
+    });
+
     it("books a removal entry that has no file left", async () => {
       // The clean-quit path: the file is gone and the accounted entry is the only source of the spend.
       const { lifecycle } = boot({ reportUsage: true });
@@ -206,6 +265,67 @@ describe("durable usage accounting", () => {
       await start(lifecycle, [accountedEntry({})]);
 
       expect(settledMessage(lifecycle)).not.toHaveProperty("usage");
+    });
+  });
+
+  describe("reportUsage setting", () => {
+    it("seeds recovered spend while off before a live toggle back on", async () => {
+      // This distinguishes seed from report: after recovery while off, turn reporting on before any
+      // result is drained. A wrongly pooled off-window source would then appear on that result.
+      const { lifecycle, commands } = boot({ reportUsage: false });
+      await start(lifecycle, [accountedEntry({ a: { total: lifetime(usage(100)), booked: false } })]);
+
+      await toggleReportUsage(commands);
+      const message = settledMessage(lifecycle);
+
+      expect(message).not.toHaveProperty("usage");
+      expect(message.subagentUsage?.agents.a?.input).toBe(100);
+    });
+
+    it("on → off → spend → on → spend books only post-on growth through the Settings UI", async () => {
+      // Exercise the real /agents → Settings → reportUsage applyValue path, not only PendingUsagePool:
+      // the off usage signal seeds the baseline in memory, and the on signal reports its growth.
+      const { lifecycle, commands, tools } = boot({ reportUsage: true });
+      const stats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+      let onUsage: (() => void) | undefined;
+      let finishRun: () => void = () => {};
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        const session = {
+          getSessionStats: () => ({ tokens: { ...stats, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite }, cost: stats.cost }),
+          dispose: vi.fn(), subscribe: () => () => {}, isStreaming: false,
+          abort: vi.fn(), steer: vi.fn(),
+          agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+          clearQueue: () => ({ steering: [], followUp: [] }),
+          sessionManager: { getSessionId: () => "child", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+        };
+        options.onSessionCreated?.(session as never, attachSessionLifecycle(session as never));
+        onUsage = options.onUsage;
+        await new Promise<void>((resolve) => { finishRun = resolve; });
+        return { responseText: "done", session: session as never, aborted: false, steered: false };
+      });
+      const agent = tools.get("Agent") as { execute(id: string, params: Record<string, unknown>, s?: unknown, u?: unknown, c?: unknown): Promise<unknown> };
+      let id: string | undefined;
+      try {
+        await agent.execute("tc-1", { prompt: "go", description: "spend", subagent_type: "general-purpose" }, undefined, undefined, spawnCtx(cwd));
+        await vi.waitFor(() => expect(onUsage).toBeTypeOf("function"));
+        id = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY].listAgents()[0]?.id;
+
+        await toggleReportUsage(commands);
+        Object.assign(stats, { input: 100, output: 50 });
+        onUsage?.();
+
+        await toggleReportUsage(commands);
+        Object.assign(stats, { input: 130, output: 70 });
+        onUsage?.();
+
+        const message = settledMessage(lifecycle);
+        expect(message.usage?.input).toBe(30);
+        expect(message.usage?.output).toBe(20);
+        expect(message.subagentUsage?.agents[id ?? ""]?.input).toBe(130);
+      } finally {
+        finishRun();
+        if (id) await (globalThis as Record<symbol, { getRecord(id: string): AgentRecord | undefined }>)[MANAGER_KEY].getRecord(id)?.promise;
+      }
     });
   });
 
@@ -262,8 +382,9 @@ describe("durable usage accounting", () => {
       sm.appendMessage(message as never);
       const reopened = SessionManager.open(sm.getSessionFile()!, undefined, cwd);
       const stored = reopened.getEntries().find((entry) => entry.type === "message" && (entry.message as { toolCallId?: string }).toolCallId === "read-1");
+      if (!stored) throw new Error("message with the marker was not persisted");
 
-      expect((stored?.message as { subagentUsage?: Marker }).subagentUsage).toEqual(message.subagentUsage);
+      expect((stored.message as { subagentUsage?: Marker }).subagentUsage).toEqual(message.subagentUsage);
     });
 
     it("writes the accounted entry before unlinking the file, and still unlinks", async () => {
@@ -287,10 +408,12 @@ describe("durable usage accounting", () => {
       await start(lifecycle, []);
       const file = settleWithFile(usage(100, 50));
       await spawnRun(tools);
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
       pi.appendEntry.mockImplementation(() => { throw new Error("disk full"); });
 
-      await lifecycle.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, parentCtx([]));
+      await expect(lifecycle.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, parentCtx([]))).resolves.toBeUndefined();
 
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("accounted entry write failed"));
       expect(existsSync(file)).toBe(true);
     });
 

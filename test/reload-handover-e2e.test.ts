@@ -292,6 +292,13 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
       }),
     ]);
   }
+  if (last?.role === "user" && text.includes("parallel-now")) {
+    return fauxAssistantMessage([
+      fauxToolCall("bash", { command: "true" }),
+      fauxToolCall("bash", { command: "true" }),
+      fauxToolCall("bash", { command: "true" }),
+    ]);
+  }
   if (last?.role === "user" && text.includes("bash-now")) {
     return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
   }
@@ -456,6 +463,32 @@ describe("subagents across a real /reload (faux provider)", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it("drains a real parallel tool batch onto only its first persisted result", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((record) => record.id === id)?.status).toBe("completed"), { timeout: 10_000 });
+    const record = publishedRoot().manager.getRecord(id);
+    if (!record?.usageBaseline) throw new Error("the settled child did not record its session total");
+
+    // One assistant response produces three concurrent built-in tool calls. pi awaits the batch and
+    // emits the finalized toolResult messages sequentially, so the handler drains only the first.
+    await root.prompt("parallel-now");
+    const batch = root.messages.filter((message) => message.role === "toolResult" && message.toolName === "bash").slice(-3);
+    expect(batch).toHaveLength(3);
+    const first = batch[0] as typeof batch[number] & { subagentUsage?: { v: number; agents: Record<string, { input: number; output: number; cacheWrite: number }> } };
+    expect(first.usage).toBeDefined();
+    expect(first.subagentUsage?.v).toBe(1);
+    expect(first.subagentUsage?.agents[id]).toMatchObject({
+      input: record.usageBaseline.input,
+      output: record.usageBaseline.output,
+      cacheWrite: record.usageBaseline.cacheWrite,
+    });
+    expect(batch.slice(1).every((message) => !message.usage && !("subagentUsage" in message))).toBe(true);
+  }, 30_000);
+
   it("keeps a running subagent running across /reload and delivers its result in the reloaded session", async () => {
     const root = session;
     if (!root) throw new Error("no session");
@@ -573,7 +606,8 @@ describe("subagents across a real /reload (faux provider)", () => {
     const dto = handoverItem("older-idle");
     const delta = { input: 7, output: 3, cacheWrite: 0 };
     const handover = new ReloadHandover([{ dto }], [], [], delta, emptyPool());
-    // The accessor is this release's addition: an older release has no such member, and only `take` carries the delta.
+    // Both members postdate this publisher: it has no frontier, and its aggregate is only in `take`.
+    Reflect.deleteProperty(handover, "frontier");
     Object.defineProperty(handover, "takeUnreported", { value: undefined, configurable: true });
     const undo = publishExtra([handover]);
     try {

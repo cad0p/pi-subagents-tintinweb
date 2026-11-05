@@ -4,10 +4,14 @@
  * the old manager moves (idle subtrees, queued specs, draining runs) when it
  * shuts down for a reload. The manager's runner is mocked; sessions are fakes.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { IMPL_KEY, publishImpl } from "../src/impl-route.js";
+import type { RetainedSettled } from "../src/ledger.js";
 import type { NestedAgentManager } from "../src/nested-tools.js";
 import {
   type AgentDto,
@@ -22,6 +26,7 @@ import {
   slotHoldersOf,
   takeHandovers,
   takeNudgeEntries,
+  takeRetainedOf,
   takeUnreportedOf,
   toDto,
   toSpawnData,
@@ -388,6 +393,55 @@ describe("AgentManager hand-over", () => {
     // A downgraded successor only knows take().unreported; the new frontier is additive, not a replacement.
     expect(handover.take().unreported).toEqual(aggregate);
     expect(frontierOf(handover)).toEqual(frontier);
+  });
+
+  it("hands a retained settled file to the successor, which journals before unlinking", async () => {
+    const old = track(new AgentManager());
+    const dir = mkdtempSync(join(tmpdir(), "pi-retained-handover-"));
+    const file = join(dir, "settled-child.jsonl");
+    writeFileSync(file, "child session");
+    hostedRunOnce("settled parent");
+    const parentId = old.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    await vi.waitFor(() => expect(old.getRecord(parentId)?.settled).toBe(true));
+
+    const finishChild = controlledRun("live nested child");
+    const childId = old.spawn(mockPi, mockCtx, "general-purpose", "child", { description: "child", parentAgentId: parentId });
+    const parent = old.getRecord(parentId);
+    if (!parent) throw new Error("parent record missing");
+    parent.sessionFile = file;
+    parent.usageBaseline = { input: 20, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    parent.resultDelivered = true;
+
+    const handover = old.beginDrain([], undefined);
+    // The nested run keeps the subtree with the draining manager, so removing the settled parent retains its file.
+    old.clearCompleted();
+    expect(existsSync(file)).toBe(true);
+    expect(old.getRecord(parentId)).toBeUndefined();
+    expect(old.getRecord(childId)).toBeDefined();
+
+    await old.dispose();
+    const retained = takeRetainedOf(handover);
+    expect(retained).toEqual<RetainedSettled[]>([{
+      id: parentId,
+      sessionFile: file,
+      total: { input: 20, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0 },
+    }]);
+
+    const order: Array<{ existed: boolean; customType: string; data: unknown }> = [];
+    const successor = track(new AgentManager());
+    successor.setAccountedWriter({
+      appendEntry: (customType, data) => order.push({ existed: existsSync(file), customType, data }),
+    });
+    successor.retireRetained(retained);
+
+    expect(order).toHaveLength(1);
+    expect(order[0].existed).toBe(true);
+    expect(order[0].customType).toBe("subagents:usage-accounted");
+    expect((order[0].data as { agents: Record<string, { total: LifetimeUsage; booked: boolean }> }).agents[parentId])
+      .toMatchObject({ total: { input: 20, output: 5 }, booked: false });
+    expect(existsSync(file)).toBe(false);
+    finishChild();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("moves an idle record and keeps the record that is still running", async () => {
