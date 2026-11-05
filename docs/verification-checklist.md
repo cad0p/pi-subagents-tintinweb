@@ -12,6 +12,32 @@ Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
 dependencies there, and run every gate and live check from it.
 
+## Baseline: pi's main session
+
+A subagent is a pi session, so pi's own behaviour on a main session is the
+reference. This applies before filing an issue, before accepting a review
+finding, and before writing a proof sentence about what a session shows or how
+it reacts to a key, a command or an abort:
+
+- Reproduce the same action on a plain main session (no subagent) on the same
+  pi version, and record what pi does: what is drawn, what is persisted, and
+  what the footer and status show.
+- If the subagent behaves the way the main session does, it is not a defect.
+  The maintainer closes the issue, or dismisses the finding with the reason
+  recorded in the PR body, quoting the main-session behaviour. For example,
+  Esc on a session with nothing in flight draws nothing on a main session
+  either (#216). This never clears a failing Visual proof step: a step that
+  fails is handled as Visual proof says, and the baseline can only show that
+  its sentence needs a design change.
+- A difference from the main session is a defect only when the extension
+  causes it. A deliberate difference must be stated in the README, with its
+  reason.
+- The baseline run is not the Visual proof's before capture, which is taken on
+  `main` or a released version of this extension.
+- Cite the pi source (`file:line` under
+  `node_modules/@earendil-works/pi-coding-agent/dist/`, with the pi version) or a
+  capture of the main-session run under Evidence.
+
 ## Automated gates
 
 Run all four from the repository root; all must pass (mirrors `CONTRIBUTING.md`'s
@@ -194,6 +220,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   verification notes, and earlier verdicts. Frame it as a completeness
   question: which inputs, callers, settings, or runtime versions would break
   the guarantees while the gates stay green?
+- Tell the reviewer to check each finding about what a session shows or how
+  it behaves against pi's main session (see Baseline above). A finding that
+  only reproduces pi's own main-session behaviour is not a finding.
 - For any change to what a pi session shows or how it behaves over time,
   the brief also includes each step's expected outcome quoted verbatim from
   the issue, the before capture with its SHA, and the raw after-capture and
@@ -291,6 +320,8 @@ In the PR body, record:
   fixed it and the time of the first run, the before capture's SHA or version, the head SHA of every after
   run, the quoted line per clause, the quoted instruction for each
   model-action clause, and any changed code path a cleared failure names;
+- for each baseline comparison, the pi version and the cited source or the
+  main-session capture;
 - every review round: the head it reviewed, the agent type, the verdict, and
   whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
