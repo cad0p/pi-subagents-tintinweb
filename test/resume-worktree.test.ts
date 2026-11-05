@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -106,12 +106,8 @@ describe("resume recreates a settled worktree agent's worktree (#227)", () => {
   let sessionDir: string;
   /** Edits the resumed run's worktree before it settles. */
   let secondRun: (cwd: string) => void;
-  let copiesBefore: Set<string>;
 
   beforeEach(() => {
-    // Copies a run creates live under the tmpdir, outside the repo: a test that deletes the repo can leave one
-    // behind, and a later settle cannot reach it. Snapshot them so every test removes what it created.
-    copiesBefore = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("pi-agent-")));
     repo = initRepo();
     sessionDir = mkdtempSync(join(tmpdir(), "pi-resume-sessions-"));
     fileBacked = false;
@@ -153,11 +149,17 @@ describe("resume recreates a settled worktree agent's worktree (#227)", () => {
   afterEach(async () => {
     await manager?.dispose();
     try { git(repo, "worktree", "prune"); } catch { /* repo gone */ }
+    // Copies a run creates live under the tmpdir, outside the repo: a test that deletes the repo leaves them behind,
+    // and no settle can reach them. Remove only the copies of this test's repo, never a concurrent run's worktree.
+    const ownGitDirs = [repo, realpathSync(repo)].map((path) => `gitdir: ${join(path, ".git", "worktrees")}`);
+    for (const name of readdirSync(tmpdir()).filter((name) => name.startsWith("pi-agent-"))) {
+      const copy = join(tmpdir(), name);
+      let pointer = "";
+      try { pointer = readFileSync(join(copy, ".git"), "utf-8"); } catch { continue; }
+      if (ownGitDirs.some((prefix) => pointer.startsWith(prefix))) rmSync(copy, { recursive: true, force: true });
+    }
     rmSync(repo, { recursive: true, force: true });
     rmSync(sessionDir, { recursive: true, force: true });
-    for (const name of readdirSync(tmpdir()).filter((name) => name.startsWith("pi-agent-") && !copiesBefore.has(name))) {
-      rmSync(join(tmpdir(), name), { recursive: true, force: true });
-    }
   });
 
   /** Spawns a worktree agent, waits for its settle, and returns its record. */
