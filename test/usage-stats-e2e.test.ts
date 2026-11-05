@@ -12,7 +12,7 @@
  * Tokens, not cost: the faux backend estimates usage and prices it at zero, so a
  * cost equality would be vacuous (#218).
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type RunOptions, runAgent } from "../src/agent-runner.js";
 import type { AgentRecord } from "../src/types.js";
-import { getLifetimeTotal } from "../src/usage.js";
+import { getLifetimeTotal, sessionFileUsage } from "../src/usage.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -82,13 +82,14 @@ describe("a subagent's spend is its pi session's spend (#218)", () => {
       appendSystemPromptOverride: () => [], noPromptTemplates: true, noThemes: true, noContextFiles: true,
     });
     await loader.reload();
+    const sessionManager = SessionManager.create(tmp, join(tmp, "sessions"));
     const { session } = await createAgentSession({
       cwd: tmp,
       agentDir: getAgentDir(),
       model: faux.getModel(),
       modelRuntime: await createFauxModelRuntime(faux, join(tmp, "auth.json")),
       resourceLoader: loader,
-      sessionManager: SessionManager.inMemory(tmp),
+      sessionManager,
       settingsManager: SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 500 }, retry: { enabled: false } }),
     });
 
@@ -134,6 +135,20 @@ describe("a subagent's spend is its pi session's spend (#218)", () => {
     expect(getLifetimeTotal(owned.lifetimeUsage)).toBe(finalStats);
     // The snapshot is an independent stats read, and it agrees.
     expect(owned.sessionSnapshot?.getSessionStats().tokens.input).toBe(session.getSessionStats().tokens.input);
+
+    // The recovery reader sees the on-disk SessionManager entries, not a live session or a mock.
+    const sessionFile = session.sessionManager.getSessionFile();
+    if (!sessionFile) throw new Error("real session did not have a file");
+    expect(existsSync(sessionFile)).toBe(true);
+    const reopened = SessionManager.open(sessionFile, undefined, tmp);
+    const stats = session.getSessionStats();
+    expect(sessionFileUsage(reopened.getEntries())).toEqual({
+      input: stats.tokens.input,
+      output: stats.tokens.output,
+      cacheWrite: stats.tokens.cacheWrite,
+      cacheRead: stats.tokens.cacheRead,
+      cost: stats.cost,
+    });
     // A read happened during the run, not only at settle, and each one left the record
     // equal to the session's own total at that instant.
     expect(checkpoints.length).toBeGreaterThan(0);

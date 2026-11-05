@@ -9,6 +9,7 @@ import { existsSync, statSync } from "node:fs";
 import { type SessionEntry, type SessionHeader, SessionManager } from "@earendil-works/pi-coding-agent";
 import { type OwnerHost, type OwnerStamp, ownerAlive } from "./owner-identity.js";
 import type { AgentRecord, ThinkingLevel } from "./types.js";
+import { type LifetimeUsage, readLifetimeUsage } from "./usage.js";
 
 export const LEDGER_VERSION = 1;
 
@@ -37,6 +38,37 @@ export interface SpawnedLedgerEntry {
   ownerPid: number;
   bootId?: string;
   ownerStartTime?: string;
+}
+
+/**
+ * The parent's claim about a child's spend, and the file's format stamp. It never carries usage,
+ * so pi's `getSessionStats()` ignores it: it records a child session's own total, not a second
+ * accounting channel. `booked: true` means the parent claims that total as accounted (an upgrade
+ * seed, a read while reporting was off, or an already-accounted total at removal); `booked: false`
+ * means recovery still has to book it.
+ */
+export const ACCOUNTED_ENTRY = "subagents:usage-accounted";
+
+/** One accounted total: the child's own cumulative session total, and whether the parent claims it. */
+export interface AccountedTotal {
+  total: LifetimeUsage;
+  booked: boolean;
+}
+
+/** The accounted entry's payload: latest entry per id wins. */
+export interface AccountedEntry {
+  v: number;
+  agents: Record<string, AccountedTotal>;
+}
+
+/**
+ * A settled child file a draining manager kept instead of unlinking: a closed activation's `pi`
+ * must not be written to, so the successor writes the removal entry and then unlinks it.
+ */
+export interface RetainedSettled {
+  id: string;
+  sessionFile: string;
+  total?: LifetimeUsage;
 }
 
 /** Written at every resume of a child, by the process that resumed it. */
@@ -177,6 +209,49 @@ function readNoticeIds(data: unknown): string[] {
   return notice.ids.filter((id): id is string => typeof id === "string");
 }
 
+/** What a session's accounted entries say: the latest claim per id, and whether the file carries a stamp at all. */
+export interface AccountedRead {
+  claims: Map<string, AccountedTotal>;
+  /** Some entry of this type was written by this build, whatever it claimed. An empty stamp counts. */
+  stamped: boolean;
+}
+
+/**
+ * The accounted entries a session wrote, latest per id. A malformed entry, or one from a later
+ * version, is ignored. The stamp and the claims are reported separately: an entry with no agents
+ * claims nothing, but it still marks the file as this build's, which is what keeps the legacy rule
+ * from reading every missing marker as spend to book.
+ */
+export function readAccounted(entries: readonly SessionEntry[]): AccountedRead {
+  const claims = new Map<string, AccountedTotal>();
+  let stamped = false;
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== ACCOUNTED_ENTRY) continue;
+    if (isNewerLedgerEntry(entry.data)) continue;
+    const agents = (entry.data as { agents?: unknown } | undefined)?.agents;
+    if (typeof agents !== "object" || agents === null) continue;
+    stamped = true;
+    for (const [id, claim] of Object.entries(agents as Record<string, unknown>)) {
+      if (typeof claim !== "object" || claim === null) continue;
+      const { total, booked } = claim as { total?: unknown; booked?: unknown };
+      const parsed = readLifetimeUsage(total);
+      if (parsed) claims.set(id, { total: parsed, booked: booked === true });
+    }
+  }
+  return { claims, stamped };
+}
+
+/** Every spawn a session's ledger names, latest entry per id: settled runs included, which a replay drops. */
+export function spawnsOf(entries: readonly SessionEntry[]): Map<string, SpawnedLedgerEntry> {
+  const spawns = new Map<string, SpawnedLedgerEntry>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== "subagent-spawned") continue;
+    const spawned = readEntry<SpawnedLedgerEntry>(entry.data);
+    if (spawned) spawns.set(spawned.id, spawned);
+  }
+  return spawns;
+}
+
 /**
  * The entries a session wrote itself, without those a fork copied from its source. `/fork` and `pi --fork` copy the
  * source's entries with their timestamps under a new header that names the source as `parentSession`, so a copied
@@ -228,7 +303,7 @@ export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] 
  * deliberate quit is not a crash, so it ends the streak instead.
  */
 export function replayLedger(entries: readonly SessionEntry[], options: ReplayOptions): AgentRecord[] {
-  const spawns = new Map<string, SpawnedLedgerEntry>();
+  const spawns = spawnsOf(entries);
   const open = new Map<string, { spawned: SpawnedLedgerEntry; owner: OwnerStamp; shutdown?: boolean }>();
   const streak = new Map<string, number>();
   /** Runs whose last settle is a shutdown stop: the interrupted settle that delivers their recovery is not a crash. */
@@ -238,7 +313,6 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
     if (entry.customType === "subagent-spawned") {
       const spawned = readEntry<SpawnedLedgerEntry>(entry.data);
       if (!spawned) continue;
-      spawns.set(spawned.id, spawned);
       open.set(spawned.id, { spawned, owner: ownerOf(spawned) });
     } else if (entry.customType === "subagent-resumed") {
       const resumed = readEntry<ResumedLedgerEntry>(entry.data);

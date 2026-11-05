@@ -292,6 +292,13 @@ function respond(context: { messages: Array<{ role: string; content: unknown }> 
       }),
     ]);
   }
+  if (last?.role === "user" && text.includes("parallel-now")) {
+    return fauxAssistantMessage([
+      fauxToolCall("bash", { command: "true" }),
+      fauxToolCall("bash", { command: "true" }),
+      fauxToolCall("bash", { command: "true" }),
+    ]);
+  }
   if (last?.role === "user" && text.includes("bash-now")) {
     return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })]);
   }
@@ -456,6 +463,32 @@ describe("subagents across a real /reload (faux provider)", () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  it("drains a real parallel tool batch onto only its first persisted result", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    await root.prompt("spawn-now");
+    const id = liveRegistry().listAgents()[0]?.id ?? "";
+    release();
+    await vi.waitFor(() => expect(liveRegistry().listAgents().find((record) => record.id === id)?.status).toBe("completed"), { timeout: 10_000 });
+    const record = publishedRoot().manager.getRecord(id);
+    if (!record?.usageBaseline) throw new Error("the settled child did not record its session total");
+
+    // One assistant response produces three concurrent built-in tool calls. pi awaits the batch and
+    // emits the finalized toolResult messages sequentially, so the handler drains only the first.
+    await root.prompt("parallel-now");
+    const batch = root.messages.filter((message) => message.role === "toolResult" && message.toolName === "bash").slice(-3);
+    expect(batch).toHaveLength(3);
+    const first = batch[0] as typeof batch[number] & { subagentUsage?: { v: number; agents: Record<string, { input: number; output: number; cacheWrite: number }> } };
+    expect(first.usage).toBeDefined();
+    expect(first.subagentUsage?.v).toBe(1);
+    expect(first.subagentUsage?.agents[id]).toMatchObject({
+      input: record.usageBaseline.input,
+      output: record.usageBaseline.output,
+      cacheWrite: record.usageBaseline.cacheWrite,
+    });
+    expect(batch.slice(1).every((message) => !message.usage && !("subagentUsage" in message))).toBe(true);
+  }, 30_000);
+
   it("keeps a running subagent running across /reload and delivers its result in the reloaded session", async () => {
     const root = session;
     if (!root) throw new Error("no session");
@@ -548,13 +581,77 @@ describe("subagents across a real /reload (faux provider)", () => {
     }
   }, 20_000);
 
+  it("a new successor ignores the aggregate when the frontier map already represents that spend", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("frontier-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    const handover = new ReloadHandover([{ dto }], [], [], totals, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]));
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    // The current successor reads the frontier, not both it and the aggregate; its first tool result
+    // must account for ten tokens, not the twenty a double-add would put into the parent's session.
+    await root.prompt("spawn-now");
+    expect(toolResultUsage(root, "Agent")?.totalTokens).toBe(10);
+  }, 20_000);
+
+  it("books nothing for a frontier that only a seed moved", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("seeded-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    // A resumed child with prior history: its first bind seeded the frontier, no read grew the pool, and no
+    // drain followed before the reload. So the aggregate is absent and the written claim is still empty.
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]), new Map());
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    // That total is the child's own history, not spend this parent was ever told about. Pooling the frontier
+    // would put ten tokens on this result and a marker beside them claiming history nobody watched accrue.
+    await root.prompt("spawn-now");
+    expect(toolResultUsage(root, "Agent")).toBeUndefined();
+  }, 20_000);
+
+  it("writes no marker for a hand-over whose claim already covers its frontier", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("drained-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    // Drained before the reload: the frontier and the claim a persisted marker covers are the same total, so
+    // there is nothing left to say. Dropping the written seed would emit a marker at that total on the
+    // successor's first result — a duplicate of a claim the file already carries, with no spend beside it.
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]), new Map([[dto.id, totals]]));
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    await root.prompt("spawn-now");
+    const results = root.messages.filter((message) => message.role === "toolResult" && message.toolName === "Agent");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.usage).toBeUndefined();
+    expect(results[0] && "subagentUsage" in results[0]).toBe(false);
+  }, 20_000);
+
   it("adopts a hand-over from a release without takeUnreported, and folds in the spend its take still carries", async () => {
     const root = session;
     if (!root) throw new Error("no session");
     const dto = handoverItem("older-idle");
     const delta = { input: 7, output: 3, cacheWrite: 0 };
     const handover = new ReloadHandover([{ dto }], [], [], delta, emptyPool());
-    // The accessor is this release's addition: an older release has no such member, and only `take` carries the delta.
+    // Both members postdate this publisher: it has no frontier, and its aggregate is only in `take`.
+    Reflect.deleteProperty(handover, "frontier");
     Object.defineProperty(handover, "takeUnreported", { value: undefined, configurable: true });
     const undo = publishExtra([handover]);
     try {

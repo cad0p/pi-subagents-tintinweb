@@ -41,7 +41,7 @@ import {
 } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { routedReleaseSlot, type SlotOutcome } from "./impl-route.js";
-import { type LedgerWriter, openChildSession, resumedEntry, spawnedEntry } from "./ledger.js";
+import { ACCOUNTED_ENTRY, type AccountedTotal, LEDGER_VERSION, type LedgerWriter, openChildSession, type RetainedSettled, resumedEntry, spawnedEntry } from "./ledger.js";
 import { describeModel } from "./model-resolver.js";
 import { currentOwnerStamp } from "./owner-identity.js";
 import {
@@ -153,7 +153,7 @@ export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void
  * useless as a basis for anything that must not count a delta twice —
  * parent-session accounting above all.
  */
-export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
+export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage, source: "seed" | "growth") => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /** Default max concurrent background agents. */
@@ -453,6 +453,18 @@ export class AgentManager {
   private brokenProviders = new Set<string>();
   /** Set once this activation shuts down for a reload: its draining runs settle into it. */
   private handover?: ReloadHandover;
+  /**
+   * Where accounted entries go: the root activation's writer. Never a record's ledger writer, which a
+   * nested child's is rebound to an intermediate parent's session file, a file removeRecord unlinks.
+   */
+  private accountedWriter?: LedgerWriter;
+  /** Whether the parent's totals are being told. A removal while off claims its total as accounted. */
+  private usageReporting = true;
+  /**
+   * Settled files this draining manager kept instead of unlinking them. Its `pi` is the closed
+   * activation's, so the removal entry is the successor's, written just before it unlinks.
+   */
+  private retainedSettled = new Map<string, RetainedSettled>();
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -1360,6 +1372,9 @@ export class AgentManager {
       record.usageBaseline = { ...read.stats };
       record.lifetimeUsage = { ...read.stats };
       if (record.foldedUsage) addUsage(record.lifetimeUsage, record.foldedUsage);
+      // Nothing before this read was watched, so the pool may only raise its frontier to this
+      // total: a marker written later must claim it, or a recovery would re-book the file's history.
+      this.onUsage?.(record, { input: 0, output: 0, cacheWrite: 0 }, "seed");
       return undefined;
     }
     record.usageBaseline = { ...read.stats };
@@ -1367,7 +1382,7 @@ export class AgentManager {
     addUsage(record.lifetimeUsage, read.delta);
     // The pool's sink, and the live subagents:usage event. Called once per record and before the fold: a record's
     // own lifetime is double-booked into its ancestors, so deriving the pool from records would count it twice.
-    this.onUsage?.(record, read.delta);
+    this.onUsage?.(record, read.delta, "growth");
     for (let id = record.parentAgentId; id !== undefined; ) {
       const ancestor = this.getRecord(id);
       if (!ancestor) break;
@@ -1552,6 +1567,72 @@ export class AgentManager {
       this.ledgerWriters.get(id)?.appendEntry(customType, data);
     } catch (err) {
       console.warn(`[pi-subagents] ledger write ${customType} for ${id} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** The extension's reportUsage setting: a removal while off claims its total instead of asking recovery to book it. */
+  setUsageReporting(enabled: boolean): void {
+    this.usageReporting = enabled;
+  }
+
+  /** The root activation's writer for accounted entries, re-pointed at every root session_start (reload included). */
+  setAccountedWriter(writer: LedgerWriter | undefined): void {
+    this.accountedWriter = writer;
+  }
+
+  /**
+   * Writes one accounted entry through the root writer. Returns whether it landed: a failed append is
+   * logged and continues, because these run on hot paths — a child's usage signal, a session start —
+   * where a throw would cost a run. A missing claim costs at most one over-book at the next recovery.
+   */
+  private writeAccounted(agents: Record<string, AccountedTotal>): boolean {
+    if (!this.accountedWriter) return false;
+    try {
+      this.accountedWriter.appendEntry(ACCOUNTED_ENTRY, { v: LEDGER_VERSION, agents });
+      return true;
+    } catch (err) {
+      console.warn(`[pi-subagents] accounted entry write failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Stamps this session's file as written by a build that claims its children's spend, and carries the
+   * legacy seeds when a pre-#215 file needs them. Written on every root session_start, empty when there
+   * is nothing to claim: a fork copies its source's stamp and `ownEntries` drops it, so a fork with no
+   * stamp of its own would look legacy on its next start and re-book every surviving child's lifetime.
+   */
+  stampUsageAccounting(seeds: Record<string, AccountedTotal> = {}): boolean {
+    return this.writeAccounted(seeds);
+  }
+
+  /**
+   * Sets a recovered record's spend from its child session file, so its row shows the total and its
+   * ancestors fold it once. The parent's own totals are fixed by the pool, not here: a record that has
+   * already left the manager has no row left to fix.
+   */
+  applyRecoveredUsage(id: string, total: LifetimeUsage): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    const before = record.usageBaseline;
+    const growth = (now: number, was: number | undefined) => Math.max(0, now - (was ?? 0));
+    const delta = {
+      input: growth(total.input, before?.input),
+      output: growth(total.output, before?.output),
+      cacheWrite: growth(total.cacheWrite, before?.cacheWrite),
+      cacheRead: growth(total.cacheRead ?? 0, before?.cacheRead),
+      cost: growth(total.cost ?? 0, before?.cost),
+    };
+    record.usageBaseline = { ...total };
+    record.lifetimeUsage = { ...total };
+    if (record.foldedUsage) addUsage(record.lifetimeUsage, record.foldedUsage);
+    for (let ancestorId = record.parentAgentId; ancestorId !== undefined; ) {
+      const ancestor = this.getRecord(ancestorId);
+      if (!ancestor) break;
+      addUsage(ancestor.lifetimeUsage, delta);
+      ancestor.foldedUsage ??= { input: 0, output: 0, cacheWrite: 0 };
+      addUsage(ancestor.foldedUsage, delta);
+      ancestorId = ancestor.parentAgentId;
     }
   }
 
@@ -2208,10 +2289,38 @@ export class AgentManager {
     }
     // Only a settled record reaches the unlink, and its session was torn down at settle, so no handle is open.
     if (record.settled === false || record.persistSession || !sessionFile) return retired;
+    // A draining manager has no current writer — its pi belongs to a closed activation — so it keeps the
+    // file and hands the path to its successor, which writes the same removal entry and then unlinks.
+    if (this.handover) {
+      this.retainedSettled.set(id, { id, sessionFile, total: record.usageBaseline });
+      return retired;
+    }
+    // The file is the only source of a settled run's spend once it is gone, so the entry is a
+    // precondition of the unlink: a failed append, or a parent with no conversation to flush it to,
+    // leaves the file in place. Recovery reads it, and a record already out of memory costs nothing.
+    if (record.usageBaseline && !this.journalRemoval(id, record.usageBaseline)) return retired;
     try {
       rmSync(sessionFile, { force: true });
     } catch { /* retention is best-effort — never fail a turn over it */ }
     return retired;
+  }
+
+  /** Claims a settled run's total before its file goes: booked when reporting is off, a total to book otherwise. */
+  private journalRemoval(id: string, total: LifetimeUsage): boolean {
+    return this.writeAccounted({ [id]: { total: { ...total }, booked: !this.usageReporting } });
+  }
+
+  /**
+   * Ends the retention a draining manager's `dispose` handed over: the removal path of the removal
+   * path, at the successor's writer. Entry first, unlink second, and a failed append keeps the file.
+   */
+  retireRetained(items: readonly RetainedSettled[]): void {
+    for (const item of items) {
+      if (item.total && !this.journalRemoval(item.id, item.total)) continue;
+      try {
+        rmSync(item.sessionFile, { force: true });
+      } catch { /* retention is best-effort — never fail a turn over it */ }
+    }
   }
 
   private cleanup() {
@@ -2336,7 +2445,7 @@ export class AgentManager {
    * may briefly exceed maxConcurrent until it settles. A subtree with a live run stays
    * here and reports through the handover when it settles. Nothing is aborted or disposed.
    */
-  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map()): ReloadHandover {
+  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map(), frontier: ReadonlyMap<string, LifetimeUsage> = new Map(), written: ReadonlyMap<string, LifetimeUsage> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
     const gated: GateEntry[] = [];
     const nested: { id: string; record: AgentRecord; args: SpawnArgs }[] = [];
@@ -2356,7 +2465,9 @@ export class AgentManager {
     }
     this.slotFifo = [];
     for (const { id, record, args } of nested) this.startQueued(id, record, args);
-    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders);
+    // The per-agent frontier and written claim beside the aggregate, not one opaque sum: the successor seeds
+    // both and pools only the aggregate, so a frontier a seed moved is never reported as spend.
+    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders, frontier, written);
     this.handover = handover;
     this.onStart = undefined;
     this.onCompact = undefined;
@@ -2369,7 +2480,9 @@ export class AgentManager {
 
   /** Feeds a usage report that a draining run emitted during the reload into this manager's usage hook. */
   replayUsage(record: AgentRecord, usage: LifetimeUsage): void {
-    this.onUsage?.(record, usage);
+    // A hand-over's delta is growth: the DTO's baseline is the child's absolute total, and the
+    // sink pools the difference from this activation's frontier.
+    this.onUsage?.(record, usage, "growth");
   }
 
   /**
@@ -2459,6 +2572,10 @@ export class AgentManager {
     }
     // Resolves once every child session has shut down, so a caller can announce the shutdown after it.
     await Promise.all(retiring);
+    // A draining manager wrote no removal entry: its pi is the closed activation's. The files it kept go
+    // to the successor, which writes the entry through its own writer and only then unlinks.
+    if (this.handover) this.handover.retain([...this.retainedSettled.values()]);
+    this.retainedSettled.clear();
     if (!prune) return;
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }

@@ -4,15 +4,20 @@
  * the old manager moves (idle subtrees, queued specs, draining runs) when it
  * shuts down for a reload. The manager's runner is mocked; sessions are fakes.
  */
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { IMPL_KEY, publishImpl } from "../src/impl-route.js";
+import type { RetainedSettled } from "../src/ledger.js";
 import type { NestedAgentManager } from "../src/nested-tools.js";
 import {
   type AgentDto,
   type DrainingPool,
   fromDto,
+  frontierOf,
   HANDOVER_KEY,
   type HandoverEvent,
   type HandoverItem,
@@ -21,9 +26,11 @@ import {
   slotHoldersOf,
   takeHandovers,
   takeNudgeEntries,
+  takeRetainedOf,
   takeUnreportedOf,
   toDto,
   toSpawnData,
+  writtenOf,
 } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
 import { addUsage, type LifetimeUsage } from "../src/usage.js";
@@ -139,6 +146,28 @@ describe("ReloadHandover buffering", () => {
     Object.defineProperty(older, "takeUnreported", { value: undefined, configurable: true });
     expect(takeUnreportedOf(older)).toBeUndefined();
     expect(older.take().unreported).toEqual(delta);
+  });
+
+  it("publishes the aggregate beside the frontier and its written claim, for a successor that seeds both", () => {
+    const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
+    const written = new Map<string, LifetimeUsage>();
+    const handover = new ReloadHandover([], [], [], aggregate, stubPool, new Map(), new Set(), frontier, written);
+
+    // An older reader does not know either member; its existing take() contract still sees the aggregate.
+    expect(handover.take().unreported).toEqual(aggregate);
+    expect(frontierOf(handover)).toEqual(frontier);
+    expect(writtenOf(handover)).toEqual(written);
+  });
+
+  it("recognizes an older publisher by the absence of its frontier member", () => {
+    const older = new ReloadHandover([], [], [], { input: 1, output: 0, cacheWrite: 0 }, stubPool);
+    Reflect.deleteProperty(older, "frontier");
+    Reflect.deleteProperty(older, "written");
+
+    expect(frontierOf(older)).toBeUndefined();
+    expect(writtenOf(older)).toBeUndefined();
+    expect(older.take().unreported).toEqual({ input: 1, output: 0, cacheWrite: 0 });
   });
 
   it("takes the unreported spend through the accessor, leaving it in take for a hand-over that has no accessor", () => {
@@ -358,6 +387,69 @@ describe("AgentManager hand-over", () => {
     for (const manager of managers.splice(0)) manager.dispose();
     Reflect.deleteProperty(globalThis, IMPL_KEY);
     vi.restoreAllMocks();
+  });
+
+  it("publishes the old aggregate alongside the frontier for an older successor", () => {
+    const manager = track(new AgentManager());
+    const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
+    const written = new Map([["agent", { input: 5, output: 0, cacheWrite: 0 }]]);
+    const handover = manager.beginDrain([], aggregate, new Map(), frontier, written);
+
+    // A downgraded successor only knows take().unreported; the new frontier is additive, not a replacement.
+    expect(handover.take().unreported).toEqual(aggregate);
+    expect(frontierOf(handover)).toEqual(frontier);
+    // The claim map rides beside it, so the successor seeds both instead of pooling the frontier difference.
+    expect(writtenOf(handover)).toEqual(written);
+  });
+
+  it("hands a retained settled file to the successor, which journals before unlinking", async () => {
+    const old = track(new AgentManager());
+    const dir = mkdtempSync(join(tmpdir(), "pi-retained-handover-"));
+    const file = join(dir, "settled-child.jsonl");
+    writeFileSync(file, "child session");
+    hostedRunOnce("settled parent");
+    const parentId = old.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent" });
+    await vi.waitFor(() => expect(old.getRecord(parentId)?.settled).toBe(true));
+
+    const finishChild = controlledRun("live nested child");
+    const childId = old.spawn(mockPi, mockCtx, "general-purpose", "child", { description: "child", parentAgentId: parentId });
+    const parent = old.getRecord(parentId);
+    if (!parent) throw new Error("parent record missing");
+    parent.sessionFile = file;
+    parent.usageBaseline = { input: 20, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    parent.resultDelivered = true;
+
+    const handover = old.beginDrain([], undefined);
+    // The nested run keeps the subtree with the draining manager, so removing the settled parent retains its file.
+    old.clearCompleted();
+    expect(existsSync(file)).toBe(true);
+    expect(old.getRecord(parentId)).toBeUndefined();
+    expect(old.getRecord(childId)).toBeDefined();
+
+    await old.dispose();
+    const retained = takeRetainedOf(handover);
+    expect(retained).toEqual<RetainedSettled[]>([{
+      id: parentId,
+      sessionFile: file,
+      total: { input: 20, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0 },
+    }]);
+
+    const order: Array<{ existed: boolean; customType: string; data: unknown }> = [];
+    const successor = track(new AgentManager());
+    successor.setAccountedWriter({
+      appendEntry: (customType, data) => order.push({ existed: existsSync(file), customType, data }),
+    });
+    successor.retireRetained(retained);
+
+    expect(order).toHaveLength(1);
+    expect(order[0].existed).toBe(true);
+    expect(order[0].customType).toBe("subagents:usage-accounted");
+    expect((order[0].data as { agents: Record<string, { total: LifetimeUsage; booked: boolean }> }).agents[parentId])
+      .toMatchObject({ total: { input: 20, output: 5 }, booked: false });
+    expect(existsSync(file)).toBe(false);
+    finishChild();
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("moves an idle record and keeps the record that is still running", async () => {
