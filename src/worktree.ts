@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 export interface WorktreeInfo {
   /** Absolute path to the worktree directory (the copied repo's root). */
@@ -91,11 +91,10 @@ export function createWorktree(cwd: string, agentId: string): WorktreeInfo | und
       .toString()
       .trim();
     subdir = relative(realpathSync(topLevel), realpathSync(cwd));
-    // Absolute on both sides: git prints a relative common dir when it is asked
-    // from inside a subdirectory, which would resolve against the wrong cwd later.
-    commonDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, stdio: "pipe", timeout: 5000 })
-      .toString()
-      .trim();
+    // Resolved here, not by `--path-format=absolute` (git >= 2.31): git prints a
+    // relative common dir when asked from inside a subdirectory, which would
+    // otherwise resolve against the wrong cwd later.
+    commonDir = resolve(cwd, execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd, stdio: "pipe", timeout: 5000 }).toString().trim());
   } catch {
     return undefined;
   }
@@ -151,34 +150,21 @@ function worktreeBranch(path: string): string | undefined {
  * Whether a directory at `worktree.path` is this agent's own worktree. An
  * existing path is never trusted on `existsSync` alone: a leftover directory,
  * or another repo's worktree, would run the resumed child outside its
- * isolation. It must share `anchor` (the repo's common dir) and be a copy git
- * registers for it. On success the checkout's HEAD becomes the no-change
- * baseline, so a reused copy whose run changes nothing is removed by the next
- * settle.
+ * isolation. It must share `anchor` (the repo's common dir); a copy whose
+ * registration git pruned no longer resolves one, so it is refused too.
+ *
+ * The recorded base commit is left alone: a crashed run may have committed in
+ * the leftover copy, and those commits are only kept (on a branch) if the next
+ * settle still sees them ahead of the base.
  */
 export function validateWorktree(worktree: WorktreeRecord, anchor: string): string | undefined {
   const notOurs = `${worktree.path} exists and is not this agent's worktree`;
   try {
-    const commonDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      cwd: worktree.path,
-      stdio: "pipe",
-      timeout: 5000,
-    })
-      .toString()
-      .trim();
-    if (realOrSelf(commonDir) !== realOrSelf(anchor)) return notOurs;
-    const listed = execFileSync("git", ["worktree", "list", "--porcelain"], {
-      cwd: anchor,
-      stdio: "pipe",
-      timeout: 5000,
-    }).toString();
-    const path = realOrSelf(worktree.path);
-    const registered = listed
-      .split("\n")
-      .some((line) => line.startsWith("worktree ") && realOrSelf(line.slice("worktree ".length)) === path);
-    if (!registered) return notOurs;
-    worktree.baseSha = headSha(worktree.path);
-    return undefined;
+    const commonDir = resolve(
+      worktree.path,
+      execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: worktree.path, stdio: "pipe", timeout: 5000 }).toString().trim(),
+    );
+    return realOrSelf(commonDir) === realOrSelf(anchor) ? undefined : notOurs;
   } catch {
     return notOurs;
   }
@@ -233,6 +219,10 @@ export function cleanupWorktree(
       stdio: "pipe",
       timeout: 10000,
     }).toString().trim();
+    // A clean copy can still be ahead of its base: the agent committed its own
+    // work (detached, or on a branch it checked out). Read HEAD before the
+    // preservation commit below moves it.
+    const moved = headSha(worktree.path) !== worktree.baseSha;
 
     if (status) {
       // Changes exist — stage, commit, and create a branch
@@ -245,8 +235,8 @@ export function cleanupWorktree(
         stdio: "pipe",
         timeout: 10000,
       });
-    } else if (kept === undefined && headSha(worktree.path) === worktree.baseSha) {
-      // Detached and unmoved: nothing to keep
+    } else if (kept === undefined && !moved) {
+      // Detached at its base: nothing to keep
       removeWorktree(cwd, worktree.path);
       return { hasChanges: false };
     }
@@ -256,7 +246,7 @@ export function cleanupWorktree(
       worktree.branch = kept;
       worktree.baseSha = headSha(worktree.path);
       removeWorktree(cwd, worktree.path);
-      return { hasChanges: Boolean(status), branch: kept, path: worktree.path };
+      return { hasChanges: Boolean(status) || moved, branch: kept, path: worktree.path };
     }
 
     // Create a branch pointing to the worktree's HEAD.

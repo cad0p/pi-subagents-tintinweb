@@ -2407,6 +2407,8 @@ export class AgentManager {
     const retired = this.retireSession(record);
     this.agents.delete(id);
     clearChildUI(id);
+    // A refusal names a target that no longer exists: it would live for the process lifetime otherwise.
+    this.refusals.delete(id);
     this.ledgerWriters.delete(id);
     this.stopLedgered.delete(id);
     this.clearCap(id);

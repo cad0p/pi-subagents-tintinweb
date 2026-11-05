@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
@@ -33,7 +33,7 @@ import {
   runAgent,
   teardownChildSession,
 } from "../src/agent-runner.js";
-import { recreateWorktree, validateWorktree } from "../src/worktree.js";
+import { createWorktree, recreateWorktree, validateWorktree } from "../src/worktree.js";
 
 setQuietMs(20);
 
@@ -241,19 +241,19 @@ describe("resume recreates a settled worktree agent's worktree (#227)", () => {
   });
 
   describe("an existing path is validated, never trusted", () => {
-    it("T5a: a valid leftover copy is reused, keeps its files, and its checkout becomes the baseline", async () => {
+    it("T5a: a valid leftover copy is reused, keeps its files, and the recorded base is left alone", async () => {
       const record = await settled();
       const path = (record.worktree as { path: string }).path;
+      const base = (record.worktree as { baseSha: string }).baseSha;
       advance(repo);
-      git(repo, "worktree", "add", "--detach", path, "HEAD");
+      git(repo, "worktree", "add", "--detach", path, base);
       writeFileSync(join(path, "keep.txt"), "kept");
-      const leftover = git(path, "rev-parse", "HEAD");
 
       expect(await manager.deliver(record.id, "again")).toBe("resumed");
 
       expect(vi.mocked(recreateWorktree)).not.toHaveBeenCalled();
       expect(opened[0].files).toContain("keep.txt");
-      expect((record.worktree as { baseSha: string }).baseSha).toBe(leftover);
+      expect((record.worktree as { baseSha: string }).baseSha).toBe(base);
       // A reused copy whose run changes nothing is removed by the next settle, not turned into a branch.
       rmSync(join(path, "keep.txt"));
       await record.promise;
@@ -284,6 +284,103 @@ describe("resume recreates a settled worktree agent's worktree (#227)", () => {
       }
       expect(opened).toHaveLength(0);
     });
+  });
+
+  it("T23: a removed record takes its refusal reason with it", async () => {
+    firstRun = (cwd) => writeFileSync(join(cwd, "note.txt"), "hi");
+    const record = await settled();
+    const branch = (record.worktreeResult as { branch: string }).branch;
+    git(repo, "branch", "-D", branch);
+    expect(await manager.deliver(record.id, "again")).toBe(false);
+    expect(manager.refusalOf(record.id)).toContain(branch);
+
+    manager.clearCompleted();
+
+    expect(manager.getRecord(record.id)).toBeUndefined();
+    expect(manager.refusalOf(record.id)).toBeUndefined();
+  });
+
+  it("T22: create and validate resolve the common dir without git's --path-format (2.31)", async () => {
+    const record = await settled();
+    const path = (record.worktree as { path: string }).path;
+    const base = (record.worktree as { baseSha: string }).baseSha;
+    const shim = mkdtempSync(join(tmpdir(), "pi-resume-git-"));
+    const realGit = (process.env.PATH ?? "").split(delimiter).map((dir) => join(dir, "git")).find((candidate) => existsSync(candidate));
+    expect(realGit).toBeDefined();
+    writeFileSync(join(shim, "git"), `#!/bin/sh
+case "$*" in
+  *--path-format*) echo "error: unknown option 'path-format'" >&2; exit 129;;
+esac
+exec "${realGit}" "$@"
+`);
+    chmodSync(join(shim, "git"), 0o755);
+    const previous = process.env.PATH;
+    process.env.PATH = `${shim}${delimiter}${previous}`;
+    const commonDir = realpathSync(join(repo, ".git"));
+    try {
+      expect(createWorktree(repo, "old-git")?.commonDir).toBe(commonDir);
+      git(repo, "worktree", "add", "--detach", path, base);
+      expect(validateWorktree({ path, branch: "b", baseSha: base, workPath: path }, commonDir)).toBeUndefined();
+      expect(validateWorktree({ path, branch: "b", baseSha: base, workPath: path }, repo)).toContain("is not this agent's worktree");
+    } finally {
+      process.env.PATH = previous;
+      rmSync(shim, { recursive: true, force: true });
+    }
+  });
+
+  it("T21a: a clean copy whose agent committed on its own branch reports changes and that branch", async () => {
+    firstRun = (cwd) => {
+      git(cwd, "checkout", "-q", "-b", "my-work");
+      writeFileSync(join(cwd, "own.txt"), "own work");
+      git(cwd, "add", "-A");
+      git(cwd, "commit", "-q", "-m", "own work");
+    };
+    const record = await settled();
+
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    expect(record.worktreeResult).toMatchObject({ hasChanges: true, branch: "my-work" });
+    expect(record.result).toContain("Changes saved to branch `my-work`");
+  });
+
+  it("T21b: a resumed run's own commits on the kept branch are new changes, not 'No new changes'", async () => {
+    firstRun = (cwd) => writeFileSync(join(cwd, "note.txt"), "hi");
+    const record = await settled();
+    const prior = record.worktreeResult as { branch: string };
+    secondRun = (cwd) => {
+      writeFileSync(join(cwd, "second.txt"), "more");
+      git(cwd, "add", "-A");
+      git(cwd, "commit", "-q", "-m", "second run's own commit");
+    };
+
+    expect(await manager.deliver(record.id, "again")).toBe("resumed");
+    await vi.waitFor(() => expect(record.status).toBe("completed"));
+
+    expect(record.worktreeResult).toMatchObject({ hasChanges: true, branch: prior.branch });
+    expect(record.result).toContain("Changes saved to branch");
+    expect(record.result).not.toContain("No new changes");
+    expect(git(repo, "show", `${prior.branch}:second.txt`)).toBe("more");
+  });
+
+  it("T20: a leftover copy the crashed run committed in keeps those commits on a branch, not deleted", async () => {
+    const record = await settled();
+    const path = (record.worktree as { path: string }).path;
+    const base = (record.worktree as { baseSha: string }).baseSha;
+    git(repo, "worktree", "add", "--detach", path, base);
+    writeFileSync(join(path, "crash.txt"), "the crashed run's work");
+    git(path, "add", "-A");
+    git(path, "commit", "-q", "-m", "crashed run's own commit");
+    const tip = git(path, "rev-parse", "HEAD");
+    expect(tip).not.toBe(base);
+
+    expect(await manager.deliver(record.id, "again")).toBe("resumed");
+    await vi.waitFor(() => expect(existsSync(path)).toBe(false));
+
+    const branch = (record.worktreeResult as { branch?: string }).branch as string;
+    expect(record.worktreeResult).toMatchObject({ hasChanges: true, branch });
+    expect(git(repo, "rev-parse", branch)).toBe(tip);
+    expect(git(repo, "show", `${branch}:crash.txt`)).toBe("the crashed run's work");
+    expect(record.result).toContain("Changes saved to branch");
+    expect(record.result).toContain(branch);
   });
 
   it("T6: a recreated branch with no new changes settles on the same branch, with no suffixed second one", async () => {
