@@ -164,7 +164,7 @@ Each completion is its own notification, delivered through pi's steering queue. 
 
 The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles.
 
-Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter. Disabling `general-purpose` also removes it as the implicit fallback: with `fallbackSubagent` unset, a call whose type is unknown, disabled or omitted is refused with an error naming the enabled types (see [Fallback agent](#settings)), rather than running a hybrid of the disabled file and the built-in tier.
+Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter. Disabling `general-purpose` also removes it as the implicit fallback: with `fallbackSubagent` unset, a call whose type is unknown, disabled or omitted is refused with an error naming the enabled types (see [Fallback agent](#persistent-settings)), rather than running a hybrid of the disabled file and the built-in tier.
 
 ## Custom Agents
 
