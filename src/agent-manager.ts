@@ -1741,7 +1741,6 @@ export class AgentManager {
     const parked = record.pendingInput;
     record.pendingInput = undefined;
     if (parked) this.flushParked(record.id, parked);
-    this.releaseResumedWorktree(record);
     this.handOverIdle();
   }
 

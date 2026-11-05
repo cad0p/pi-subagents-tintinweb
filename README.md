@@ -655,6 +655,8 @@ The agent gets a full, isolated copy of the repository. On completion:
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
 
+Resuming a settled worktree agent (`SendMessage`, or recovery after a crash) gives it its worktree back: when the settle removed the directory, it is recreated at the same path on the branch the settle kept, or detached at the base commit when nothing changed. The resumed run settles like any other (cleanup, branch note). If the branch was deleted or the repository is gone, the resume is refused with that reason instead of running the agent outside its isolation.
+
 The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. Initialize git and commit at least once, or omit `isolation`.
