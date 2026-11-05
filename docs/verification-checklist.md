@@ -12,6 +12,26 @@ Keep the main checkout on `main`. Do the branch work in an isolated git worktree
 in a sibling folder (`git worktree add ../<repo>-<slug> <branch>`), install its
 dependencies there, and run every gate and live check from it.
 
+## Baseline: pi's main session
+
+A subagent is a pi session, so pi's own behaviour on a main session is the
+reference. This applies before filing an issue, before accepting a review
+finding, and before writing a proof sentence about what a session shows or how
+it reacts to a key, a command or an abort:
+
+- Reproduce the same action on a plain main session (no subagent) on the same
+  pi version, and record what pi does: what is drawn, what is persisted, and
+  what the footer and status show.
+- If the subagent behaves the way the main session does, it is not a defect.
+  Close the issue or reject the finding, and quote the main-session behaviour
+  as the reason. For example, Esc on a session with nothing in flight draws
+  nothing on a main session either (#216).
+- A difference from the main session is a defect only when the extension
+  causes it. A deliberate difference must be listed in
+  `docs/fork-differences.md` or the README, with its reason.
+- Cite the pi source (`file:line` in `node_modules/@earendil-works/`) or a
+  capture of the main-session run under Evidence.
+
 ## Automated gates
 
 Run all four from the repository root; all must pass (mirrors `CONTRIBUTING.md`'s
@@ -194,6 +214,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   verification notes, and earlier verdicts. Frame it as a completeness
   question: which inputs, callers, settings, or runtime versions would break
   the guarantees while the gates stay green?
+- Tell the reviewer to check each finding about what a session shows or how
+  it behaves against pi's main session (see Baseline above). A finding that
+  only reproduces pi's own main-session behaviour is not a finding.
 - For any change to what a pi session shows or how it behaves over time,
   the brief also includes each step's expected outcome quoted verbatim from
   the issue, the before capture with its SHA, and the raw after-capture and
