@@ -1204,9 +1204,10 @@ export default function (pi: ExtensionAPI) {
         for (const h of held) h.detach();
         // Nested results still waiting in a batch ride the hand-over as targeted nudges, so the new activation delivers them.
         const handoverNudges = [...nudged, ...manager.takeNestedPending()];
-        // The frontier map, not one opaque sum: the successor recomputes pending per id and can claim each
-        // adopted agent's total with a marker on its first drain.
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, undefined, new Map(agentActivity), pendingUsage.frontierSnapshot())]);
+        // Keep both hand-over contracts: an older successor reads only the aggregate, while this release
+        // prefers the per-agent frontier and ignores the aggregate to avoid adding the same spend twice.
+        const unreported = pendingUsage.takeLifetime();
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, unreported, new Map(agentActivity), pendingUsage.frontierSnapshot())]);
         held = [];
       }
     } else {
@@ -1269,12 +1270,20 @@ export default function (pi: ExtensionAPI) {
     // survive that republish (see `takeUnreported`). Read through `takeUnreportedOf`, never directly: an older
     // hand-over has no such member, and a call on it throws here, before anything is adopted — and `takeHandovers`
     // has already emptied the store, so that hand-over would be adopted by nobody and stopped by nobody.
+    const frontiers = new Map<ReloadHandover, ReadonlyMap<string, LifetimeUsage> | undefined>();
     for (const h of held) {
-      const unreported = takeUnreportedOf(h);
-      if (unreported) pendingUsage.add(unreported);
-      // This release publishes a per-agent frontier instead of one opaque sum (owner pick 4 A keeps the
-      // fallback above for an older publisher): pool the difference from what the file already claims.
-      for (const [id, total] of frontierOf(h)) pendingUsage.report(id, total);
+      const frontier = frontierOf(h);
+      frontiers.set(h, frontier);
+      if (frontier) {
+        // The aggregate is published for older successors, but the map claims the same pending spend;
+        // adding both would duplicate it. Pool the per-agent difference from what the file already claims.
+        for (const [id, total] of frontier) pendingUsage.report(id, total);
+      } else {
+        // A pre-frontier publisher has only the aggregate. Prefer its separate accessor if available,
+        // then the old take() fallback below; never call a member an older hand-over does not have.
+        const unreported = takeUnreportedOf(h);
+        if (unreported) pendingUsage.add(unreported);
+      }
     }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
@@ -1301,10 +1310,9 @@ export default function (pi: ExtensionAPI) {
       // The queued specs are taken here, in the loop, and not with the unreported spend above: this is the activation
       // that spawns them, and a hand-over this loop has not reached must be republished with its queue intact.
       const taken = h.take();
-      // A hand-over from an older release has no `takeUnreported`: its delta is still in `take`, where it always was,
-      // and dropping it here would lose spend the old activation already emitted live. This release's own hand-over
-      // reported its delta in the hoist above, so its `take` carries none and nothing is counted twice.
-      if (taken.unreported) pendingUsage.add(taken.unreported);
+      // An older hand-over may not expose takeUnreported(), in which case this is its only spend field.
+      // New publishers also carry this aggregate, but a present frontier map already represented the same spend.
+      if (!frontiers.get(h) && taken.unreported) pendingUsage.add(taken.unreported);
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
       const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]
@@ -1472,11 +1480,17 @@ export default function (pi: ExtensionAPI) {
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
+      const frontier = frontierOf(h);
+      if (frontier) {
+        for (const [id, total] of frontier) pendingUsage.report(id, total);
+      } else {
+        const unreported = takeUnreportedOf(h);
+        if (unreported) pendingUsage.add(unreported);
+      }
       const taken = h.take();
-      // This release publishes a per-agent frontier and no aggregate: a hand-over nothing adopts still
-      // owns that spend, and this is the only reader it has left.
-      for (const [id, total] of frontierOf(h)) pendingUsage.report(id, total);
-      if (taken.unreported) pendingUsage.add(taken.unreported);
+      // The aggregate is present for older readers; only an older publisher lacking a frontier needs
+      // the fallback. A newer stranded pool has the same spend in its map.
+      if (!frontier && taken.unreported) pendingUsage.add(taken.unreported);
       h.stop(replayStoppedUsage);
       h.draining.abortAll();
       h.draining.dispose();

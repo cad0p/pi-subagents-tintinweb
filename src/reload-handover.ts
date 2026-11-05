@@ -22,11 +22,13 @@ import type { LifetimeUsage } from "./usage.js";
  * members, never drop one of these:
  * - the methods `take`, `takeNudged`, `idleItems`, `removeItem`, `keepItems`, `attach`, `detach` and `stop`;
  * - a `draining` object carrying `runningCount`, `abortAll`, `dispose` and `ownAgents` (its `deliver` is optional);
- * - an `activity` `Map` of the draining runs' live activity.
+ * - an `activity` `Map` of the draining runs' live activity;
+ * - the aggregate `unreported` in the existing `take()` result, kept alongside the new frontier for a downgraded reader.
  * A reader of any release takes a hand-over that carries them, whatever its version, and ignores members it does not
  * know; a hand-over that lacks them stays published for a reader that knows it. A field added after the first release
  * may be absent from an older hand-over: read it through an accessor that tolerates absence (`slotHoldersOf`,
- * `takeNudgeEntries`, `takeUnreportedOf`), never directly. Absence of an added field is never a reason to reject a
+ * `takeNudgeEntries`, `takeUnreportedOf`, `frontierOf`), never directly. A present frontier supersedes the aggregate
+ * for a new reader; it must not add both, because they describe the same pending spend. Absence of an added field is never a reason to reject a
  * hand-over. A direct call on one is not a late failure but an immediate one: it throws inside the adoption, and the
  * hand-over it threw on has already left the store, so nothing adopts it and nothing stops it — which is what an
  * unguarded `takeUnreported()` did, and why that accessor exists.
@@ -362,9 +364,9 @@ export function takeUnreportedOf(handover: ReloadHandover): LifetimeUsage | unde
  * single unreported sum instead. Read through this accessor, never directly: absence is a version, not
  * a reason to reject the hand-over.
  */
-export function frontierOf(handover: ReloadHandover): ReadonlyMap<string, LifetimeUsage> {
+export function frontierOf(handover: ReloadHandover): ReadonlyMap<string, LifetimeUsage> | undefined {
   const frontier = (handover as { frontier?: unknown }).frontier;
-  return frontier instanceof Map ? (frontier as ReadonlyMap<string, LifetimeUsage>) : new Map();
+  return frontier instanceof Map ? (frontier as ReadonlyMap<string, LifetimeUsage>) : undefined;
 }
 
 /** The settled files a draining manager kept, for a successor that knows how to retire them. */

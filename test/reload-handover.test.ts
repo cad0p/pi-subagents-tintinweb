@@ -13,6 +13,7 @@ import {
   type AgentDto,
   type DrainingPool,
   fromDto,
+  frontierOf,
   HANDOVER_KEY,
   type HandoverEvent,
   type HandoverItem,
@@ -139,6 +140,24 @@ describe("ReloadHandover buffering", () => {
     Object.defineProperty(older, "takeUnreported", { value: undefined, configurable: true });
     expect(takeUnreportedOf(older)).toBeUndefined();
     expect(older.take().unreported).toEqual(delta);
+  });
+
+  it("publishes the aggregate beside the frontier so an older successor still takes its spend", () => {
+    const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
+    const handover = new ReloadHandover([], [], [], aggregate, stubPool, new Map(), new Set(), frontier);
+
+    // An older reader does not know the frontier member; its existing take() contract still sees the aggregate.
+    expect(handover.take().unreported).toEqual(aggregate);
+    expect(frontierOf(handover)).toEqual(frontier);
+  });
+
+  it("recognizes an older publisher by the absence of its frontier member", () => {
+    const older = new ReloadHandover([], [], [], { input: 1, output: 0, cacheWrite: 0 }, stubPool);
+    Reflect.deleteProperty(older, "frontier");
+
+    expect(frontierOf(older)).toBeUndefined();
+    expect(older.take().unreported).toEqual({ input: 1, output: 0, cacheWrite: 0 });
   });
 
   it("takes the unreported spend through the accessor, leaving it in take for a hand-over that has no accessor", () => {
@@ -358,6 +377,17 @@ describe("AgentManager hand-over", () => {
     for (const manager of managers.splice(0)) manager.dispose();
     Reflect.deleteProperty(globalThis, IMPL_KEY);
     vi.restoreAllMocks();
+  });
+
+  it("publishes the old aggregate alongside the frontier for an older successor", () => {
+    const manager = track(new AgentManager());
+    const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
+    const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
+    const handover = manager.beginDrain([], aggregate, new Map(), frontier);
+
+    // A downgraded successor only knows take().unreported; the new frontier is additive, not a replacement.
+    expect(handover.take().unreported).toEqual(aggregate);
+    expect(frontierOf(handover)).toEqual(frontier);
   });
 
   it("moves an idle record and keeps the record that is still running", async () => {

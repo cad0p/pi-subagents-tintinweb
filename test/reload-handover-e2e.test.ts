@@ -548,6 +548,25 @@ describe("subagents across a real /reload (faux provider)", () => {
     }
   }, 20_000);
 
+  it("a new successor ignores the aggregate when the frontier map already represents that spend", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("frontier-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    const handover = new ReloadHandover([{ dto }], [], [], totals, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]));
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    // The current successor reads the frontier, not both it and the aggregate; its first tool result
+    // must account for ten tokens, not the twenty a double-add would put into the parent's session.
+    await root.prompt("spawn-now");
+    expect(toolResultUsage(root, "Agent")?.totalTokens).toBe(10);
+  }, 20_000);
+
   it("adopts a hand-over from a release without takeUnreported, and folds in the spend its take still carries", async () => {
     const root = session;
     if (!root) throw new Error("no session");
