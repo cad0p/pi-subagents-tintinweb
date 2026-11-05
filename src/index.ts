@@ -1493,6 +1493,8 @@ export default function (pi: ExtensionAPI) {
       h.stop(replayStoppedUsage);
       h.draining.abortAll();
       h.draining.dispose();
+      // No activation adopted this hand-over, so retire the files its draining manager kept as well.
+      manager.retireRetained(takeRetainedOf(h));
     }
   }
 

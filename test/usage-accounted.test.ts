@@ -24,6 +24,7 @@ import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { ACCOUNTED_ENTRY, LEDGER_VERSION, type SpawnedLedgerEntry } from "../src/ledger.js";
+import { HANDOVER_KEY, type DrainingPool, publishHandovers, ReloadHandover } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
 import type { LifetimeUsage } from "../src/usage.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
@@ -82,6 +83,7 @@ describe("durable usage accounting", () => {
     if (previousHome == null) delete process.env.HOME;
     else process.env.HOME = previousHome;
     delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    delete (globalThis as Record<symbol, unknown>)[HANDOVER_KEY];
     registerAgents(new Map());
     vi.mocked(runAgent).mockReset();
     vi.restoreAllMocks();
@@ -335,6 +337,40 @@ describe("durable usage accounting", () => {
       });
       // The resume wrote its own empty stamp again — not a legacy seed of the total it just booked.
       expect(accountedWrites(second.pi).at(-1)?.agents).toEqual({});
+    });
+  });
+
+  describe("stranded reload hand-overs", () => {
+    it("journals retained files before unlinking them", async () => {
+      // The replacement session's stranded sweep is the only retirement path for a hand-over nobody adopted.
+      // Omitting takeRetainedOf(h) leaks this persist_session:false child file and loses its removal journal.
+      const { pi, lifecycle } = boot({ reportUsage: true });
+      const file = join(cwd, "retained-settled-child.jsonl");
+      writeFileSync(file, "{}\n");
+      const observations: boolean[] = [];
+      pi.appendEntry.mockImplementation((customType: string, data: unknown) => {
+        if (customType !== ACCOUNTED_ENTRY) return;
+        const agents = (data as { agents?: Record<string, unknown> }).agents;
+        if (agents?.["stranded-child"]) observations.push(existsSync(file));
+      });
+      const draining: DrainingPool = {
+        runningCount: () => 0,
+        abortAll: () => 0,
+        dispose: vi.fn(),
+        ownAgents: () => [],
+      };
+      const handover = new ReloadHandover([], [], [], undefined, draining);
+      handover.retain([{
+        id: "stranded-child",
+        sessionFile: file,
+        total: { input: 100, output: 50, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      }]);
+      publishHandovers("departed-session", [handover]);
+
+      await start(lifecycle, []);
+
+      expect(observations).toEqual([true]);
+      expect(existsSync(file)).toBe(false);
     });
   });
 
