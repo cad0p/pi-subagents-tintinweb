@@ -1532,6 +1532,37 @@ describe("agents command terminal surfaces", () => {
     }
   });
 
+  it("refuses to generate an agent while general-purpose is disabled, instead of spawning the hybrid", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-disabled-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "agents", "general-purpose.md"), "---\ndescription: disabled\nenabled: false\n---\n\nbody\n", "utf-8");
+      // The generator spawns general-purpose directly, so nothing else refuses it:
+      // a spawn here would take the disabled file's prompt on the all-tools tier.
+      vi.mocked(runAgent).mockClear();
+      vi.mocked(runAgent).mockImplementation(() => Promise.reject(new Error("unexpected generator start")));
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a test agent").mockResolvedValueOnce("gen-disabled");
+
+      await commands.get("agents").handler("", c);
+
+      const refused = notifications.find(n => n.message.startsWith("Cannot generate agents:"));
+      expect(refused?.message).toContain("general-purpose is disabled");
+      expect(refused?.level).toBe("warning");
+      expect(notifications.some(n => n.message.startsWith("Created "))).toBe(false);
+      // No generator run: the refusal happens before the spawn, not after it fails.
+      expect(vi.mocked(runAgent).mock.calls.some(([, , , opts]) => isGeneratorRun(opts))).toBe(false);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("treats the generation run as a normal pooled spawn whose notification is not suppressed", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "pi-gen-ok-"));
     const previousCwd = process.cwd();

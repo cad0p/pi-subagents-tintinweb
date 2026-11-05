@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isFallbackResolvableIn } from "../src/agent-types.js";
 import {
   applyAndEmitLoaded,
   applySettings,
@@ -12,6 +13,7 @@ import {
   saveAndEmitChanged,
   saveSettings,
 } from "../src/settings.js";
+import type { AgentConfig } from "../src/types.js";
 
 /**
  * Tests for persistent settings. Uses two tmp directories:
@@ -730,13 +732,24 @@ describe("fallbackRow", () => {
     expect(row.unresolvable).toBe(false);
   });
 
-  it("does not call an unset fallback unresolvable even when the resolver rejects it", () => {
-    // The implicit target is a hardcoded permissive tier, not a configured agent:
-    // reporting it as broken made the Disable-defaults toast say 'Fallback agent
-    // "undefined" no longer resolves' and claim refusals that never happen.
-    const row = fallbackRow(undefined, ["custom"], NONE, never);
+  it("reports an unset fallback unresolvable when the resolver rejects general-purpose", () => {
+    // The implicit target is general-purpose: with nothing claiming the name it is
+    // the hardcoded permissive tier, but a registered-but-disabled one is refused,
+    // so the row must show the state every dispatch runs into.
+    const row = fallbackRow(undefined, ["custom"], NONE, (n) => n !== "general-purpose");
     expect(row.value).toBe("general-purpose");
-    expect(row.unresolvable).toBe(false);
+    expect(row.unresolvable).toBe(true);
+  });
+
+  it("flags an unset fallback while a registered general-purpose is disabled, and not while it is unregistered", () => {
+    // Unset means general-purpose: the row's verdict is the resolver's own, so it
+    // must show the refusal instead of a target every Agent call errors on — while
+    // a name nothing claims still resolves to the permissive hardcoded tier.
+    const disabled = new Map<string, AgentConfig>([
+      ["general-purpose", { name: "general-purpose", description: "", systemPrompt: "", builtinToolNames: [], extensions: true, skills: true, promptMode: "replace", enabled: false }],
+    ]);
+    expect(fallbackRow(undefined, [], NONE, (n) => isFallbackResolvableIn(disabled, n)).unresolvable).toBe(true);
+    expect(fallbackRow(undefined, [], NONE, (n) => isFallbackResolvableIn(new Map(), n)).unresolvable).toBe(false);
   });
 
   it("reports a configured fallback the resolver rejects", () => {

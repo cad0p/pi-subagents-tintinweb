@@ -21,7 +21,7 @@ import { ambiguousAgentIdText } from "./agent-id.js";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentAmbiguousResponse, agentNotFoundResponse, agentReportResponse, consumeResult, ownedResolution } from "./agent-result-tool.js";
 import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, implicitFallbackProblem, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
@@ -1411,8 +1411,16 @@ export default function (pi: ExtensionAPI) {
   async function recoveredSettings(record: AgentRecord): Promise<ChildSessionSettings> {
     const ctx = currentCtx;
     if (!ctx) throw new Error(`Cannot resume "${record.description}": no session is active.`);
-    if (!getAgentConfig(record.type)) {
+    const recordedConfig = getAgentConfig(record.type);
+    if (!recordedConfig) {
       throw new Error(`Agent type "${record.type}" is no longer defined; the interrupted run cannot resume.`);
+    }
+    // A disabled type still has a config, and rebuilding from it takes that
+    // file's prompt and model with `getConfig`'s built-in tier for tools and
+    // extensions — the hybrid refused on every spawn path. A resume is exempt
+    // from `subagent_type` resolution, not from its type being usable.
+    if (recordedConfig.enabled === false) {
+      throw new Error(`Agent type "${record.type}" is disabled; the interrupted run cannot resume.`);
     }
     const modelId = record.invocation?.modelId ?? "";
     const slash = modelId.indexOf("/");
@@ -2829,6 +2837,21 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string) {
+    // The generator is the extension's own spawn of general-purpose, outside
+    // `resolveSpawnType` (see below), so the fallback policy never sees it: with a
+    // registered-but-disabled general-purpose it would build exactly the hybrid
+    // #142 is about — that file's prompt and model on the all-tools tier. Refuse
+    // here rather than being the one route that still runs it.
+
+    const gpProblem = implicitFallbackProblem();
+    if (gpProblem !== undefined) {
+      ctx.ui.notify(
+        `Cannot generate agents: general-purpose is ${gpProblem}. ` +
+          `Keep exactly one enabled "general-purpose" agent and try again.`,
+        "warning",
+      );
+      return;
+    }
     const description = await ctx.ui.input("Describe what this agent should do");
     if (!description) return;
 
@@ -3307,13 +3330,14 @@ ${systemPrompt}
         // The setter re-registers the registry itself, so the next spawn already
         // sees the toggle; this applier only has to report what it orphaned.
         setDisableDefaultAgents(enabled);
+        const fallback = getFallbackSubagent() ?? IMPLICIT_FALLBACK;
         const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK, isFallbackResolvable)
           .unresolvable;
         notifyApplied(
           ctx,
           `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.` +
             (orphaned
-              ? ` Fallback agent "${getFallbackSubagent()}" no longer resolves — unknown agent types will be refused until it is changed.`
+              ? ` Fallback agent "${fallback}" no longer resolves — unknown agent types will be refused until it is changed.`
               : ""),
         );
       } else if (id === "outputTranscript") {

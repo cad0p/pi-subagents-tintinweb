@@ -245,6 +245,23 @@ export function resolveEnabledTypeIn(
   return key !== undefined && registry.get(key)?.enabled !== false ? key : undefined;
 }
 
+/**
+ * Why `general-purpose` cannot serve as the implicit fallback, if it cannot.
+ *
+ * `undefined` means it can: either nothing in the registry claims the name, so
+ * dispatch uses the hardcoded all-tools tier, or exactly one enabled key claims
+ * it. "disabled" and "ambiguous" are the two states `resolveSpawnTypeIn` refuses,
+ * the same rule a configured `fallbackSubagent` naming general-purpose follows.
+ * Also for callers that spawn the type directly instead of resolving it: the
+ * agent generator must refuse in both states, or it builds the hybrid of a
+ * disabled file's prompt with the built-in tier's tools.
+ */
+export function implicitFallbackProblem(registry: Map<string, AgentConfig> = agents): "disabled" | "ambiguous" | undefined {
+  const key = resolveUnambiguousKeyIn(registry, IMPLICIT_FALLBACK);
+  if (key !== undefined) return registry.get(key)?.enabled === false ? "disabled" : undefined;
+  return isNameClaimed(registry, IMPLICIT_FALLBACK) ? "ambiguous" : undefined;
+}
+
 /** Outcome of resolving a caller-supplied `subagent_type` into a spawnable type. */
 export type SpawnTypeResolution =
   /** Spawn this type. `fellBackFrom` is set when it isn't what the caller asked for. */
@@ -317,18 +334,19 @@ export function resolveSpawnTypeIn(
   }
 
   // Unset: the implicit fallback is general-purpose, held to the same rule as a
-  // configured one: a registered-but-disabled general-purpose is refused (#142).
-  // Dispatching it would build a hybrid child — the disabled file's prompt,
-  // model and memory on the built-in tier's tools and extensions. This also
-  // covers an explicit "general-purpose" request, which lands here once it
-  // fails the enabled check. An unregistered general-purpose still resolves to
-  // the hardcoded all-tools tier, as it does for a configured fallback.
-  const implicitKey = resolveUnambiguousKeyIn(registry, IMPLICIT_FALLBACK);
-  if (implicitKey !== undefined && registry.get(implicitKey)?.enabled === false) {
+  // configured one: a registered general-purpose that is disabled, or that two
+  // case-variants claim, is refused (#142). Dispatching it would build a hybrid
+  // child — the file's prompt, model and memory on the built-in tier's tools and
+  // extensions, and with two case-variants whichever key came first. This also
+  // covers an explicit "general-purpose" request, which lands here once it fails
+  // the enabled check. A name nothing claims still resolves to the hardcoded
+  // all-tools tier, as it does for a configured one.
+  const implicitProblem = implicitFallbackProblem(registry);
+  if (implicitProblem !== undefined) {
     return {
       ok: false,
       message:
-        `${reason} ${IMPLICIT_FALLBACK} is disabled, so it cannot serve as the fallback agent. ` +
+        `${reason} ${IMPLICIT_FALLBACK} is ${implicitProblem}, so it cannot serve as the fallback agent. ` +
         `Enabled agent types you can use instead: ${available()}.`,
     };
   }
