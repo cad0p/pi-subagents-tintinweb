@@ -32,7 +32,7 @@ import { deliveryText } from "./delivery-text.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
-import { type AccountedTotal, isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, ownEntries, type ReplayOptions, readAccounted, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, type SpawnedLedgerEntry, shutdownStops, spawnsOf } from "./ledger.js";
+import { type AccountedTotal, isNewerLedgerEntry, LEDGER_VERSION, lastActivityOf, openChildSession, ownEntries, type ReplayOptions, readAccounted, replayLedger, SHUTDOWN_NOTICE_ENTRY, type ShutdownStop, shutdownStops, spawnsOf } from "./ledger.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { isScopeModelsEnabled, modelScopeWarning, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -51,7 +51,8 @@ import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservin
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, maxUsage, PendingUsagePool, readUsageMarkers, sessionFileUsage, toReportedUsage, type UsageMarker } from "./usage.js";
+import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, readUsageMarkers, toReportedUsage, type UsageMarker } from "./usage.js";
+import { isLegacyUsageFile, legacySeeds, walkUsageTotals } from "./usage-recovery.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
 // ---- Shared helpers ----
@@ -1009,34 +1010,6 @@ export default function (pi: ExtensionAPI) {
   let recoveredUsageTotals = new Map<string, LifetimeUsage>();
 
   /**
-   * Every surviving child's own cumulative total, from its session file, plus the totals of records
-   * that have none left. An accounted entry supplies a total without opening a file, but never replaces
-   * one: a claim only covers the file as it stood, and spend after it is exactly the gap to book.
-   */
-  function walkUsageTotals(spawns: Map<string, SpawnedLedgerEntry>, accounted: Map<string, AccountedTotal>): Map<string, LifetimeUsage> {
-    const totals = new Map<string, LifetimeUsage>();
-    const queue = [...spawns.values()];
-    const visited = new Set<string>();
-    while (queue.length > 0) {
-      const spawn = queue.shift();
-      if (!spawn || visited.has(spawn.id)) continue;
-      visited.add(spawn.id);
-      let total = accounted.get(spawn.id)?.total;
-      const child = openChildSession(spawn.sessionFile);
-      if (child) {
-        const fileTotal = sessionFileUsage(child.getEntries());
-        total = total ? maxUsage(total, fileTotal) : fileTotal;
-        queue.push(...spawnsOf(child.getEntries()).values());
-      }
-      if (total) totals.set(spawn.id, total);
-    }
-    // An id known only from its accounted entry (a removed nested record whose file and intermediate
-    // parents are gone) is still recovered from that entry.
-    for (const [id, claim] of accounted) if (!totals.has(id)) totals.set(id, claim.total);
-    return totals;
-  }
-
-  /**
    * Recovery steps 0-3: read what the file already accounts for, walk the surviving children, and stamp
    * the file as this build's — with a booked seed per spawn when it is a pre-marker file.
    *
@@ -1049,7 +1022,7 @@ export default function (pi: ExtensionAPI) {
     const spawns = spawnsOf(entries);
     // A file with spawns and no stamp predates markers: reading its missing markers as zero would book
     // every surviving child's whole lifetime at once, on this start and every start after it.
-    const legacy = spawns.size > 0 && accounted.size === 0;
+    const legacy = isLegacyUsageFile(spawns, accounted);
     const booked = new Map<string, LifetimeUsage>();
     for (const [id, claim] of accounted) if (claim.booked) booked.set(id, claim.total);
     // Never a claim still to be booked: seeding `written` from it would make the drain that books it
@@ -1059,10 +1032,8 @@ export default function (pi: ExtensionAPI) {
     recoveredUsageTotals = legacy || reason === "startup" || reason === "resume" ? walkUsageTotals(spawns, accounted) : new Map();
     const seeds: Record<string, AccountedTotal> = {};
     if (legacy) {
-      for (const [id, total] of recoveredUsageTotals) {
-        seeds[id] = { total, booked: true };
-        pendingUsage.seed(id, total);
-      }
+      for (const [id, total] of recoveredUsageTotals) pendingUsage.seed(id, total);
+      Object.assign(seeds, legacySeeds(recoveredUsageTotals));
     }
     // Every root start, every reason. A fork copies its source's stamp and `ownEntries` drops it, so a
     // fork that wrote none would look legacy on its next start and re-book the lifetimes it copied.
