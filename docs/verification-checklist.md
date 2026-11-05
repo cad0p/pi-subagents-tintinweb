@@ -50,8 +50,8 @@ quickly. This applies to plans, review findings and proof sentences:
   code, usually what the code already does or what the agent was spawned
   with.
 - Add no guard, refusal, persisted flag or test only for this case. A finding
-  that asks for one is not a finding; the maintainer dismisses it with this
-  rule as the reason, recorded in the PR body.
+  that only asks for one is not a finding; the maintainer dismisses it with
+  this rule as the reason, recorded in the PR body.
 - It is still a defect when the stale configuration loses work (a branch, a
   session file, a result) or runs the agent outside the isolation it was
   spawned with.
@@ -349,7 +349,8 @@ In the PR body, record:
 - for each baseline comparison, the pi version and the cited source or the
   main-session capture;
 - for each finding dismissed under Configuration changed after spawn, the
-  finding and the maintainer's reason;
+  finding, the setting or file that changed and the agent that met it, and
+  the maintainer's reason;
 - every review round: the head it reviewed, the agent type, the verdict, and
   whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
