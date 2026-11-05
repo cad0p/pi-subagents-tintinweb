@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
-import { type AgentSession, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { type AgentSession, type ExtensionContext, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -2698,6 +2698,99 @@ describe("AgentManager — nested children", () => {
     expect(manager.getRecord(grand)!.lifetimeUsage).toMatchObject({ input: 70, output: 30, cacheWrite: 5 });
     // The parent's own record holds its own spend, not the fold it pushed upward.
     expect(manager.getRecord(parent)!.lifetimeUsage).toEqual(lifetime(70, 30, 5));
+  });
+});
+
+// A relative `session_dir` resolves from a branch's pre-worktree cwd: the
+// worktree is deleted at cleanup, so a file rooted inside it dies with it even
+// under `persist_session: true`. The base is branch metadata on the record,
+// inherited from the parent record at any depth — never a caller option (#87).
+describe("AgentManager — root cwd of a branch (#87)", () => {
+  let manager: AgentManager;
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "pi-subagents-rootcwd-"));
+  });
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(runAgent).mockReset();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** The nested runtime the spawn being asserted on was handed. */
+  const nestedRuntimeOfLastRun = () => vi.mocked(runAgent).mock.lastCall![3].nestedRuntime!;
+  /** A nested spawn's context: the child session's OWN cwd, forwarded unmodified. */
+  const childCtx = (cwd: string) => ({ cwd, sessionManager: { getSessionId: () => "child-session" } }) as unknown as ExtensionContext;
+
+  it("seeds a top-level spawn from its own cwd, not from the spawning session's", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"),
+    });
+    resolvedRun();
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: root,
+      isolation: "worktree",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(root);
+  });
+
+  it("inherits the root through a worktree child, at any depth", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValue({
+      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"),
+    });
+    resolvedRun();
+    manager = new AgentManager();
+
+    const a = manager.spawn(mockPi, mockCtx, "general-purpose", "a", {
+      description: "a", cwd: root, isolation: "worktree",
+    });
+    await manager.getRecord(a)!.promise;
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(root);
+
+    // B runs in A's worktree and C in B's, as real nested spawns do. C sits at
+    // depth 3 — past the product's default cap of 2, which the manager never
+    // enforces at spawn; the run side is what caps nesting.
+    const b = manager.spawn(mockPi, childCtx(join(root, "wt")), "general-purpose", "b", {
+      description: "b", parentAgentId: a, depth: 2, maxSubagentDepth: 3,
+    });
+    await manager.getRecord(b)!.promise;
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(root);
+
+    const c = manager.spawn(mockPi, childCtx(join(root, "wt", "nested")), "general-purpose", "c", {
+      description: "c", parentAgentId: b, depth: 3, maxSubagentDepth: 3,
+    });
+    await manager.getRecord(c)!.promise;
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(root);
+  });
+
+  it("seeds from the spawning session's cwd when no other base exists", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
+    await manager.getRecord(id)!.promise;
+
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(mockCtx.cwd);
+  });
+
+  it("falls back to its own base when the parent record is gone", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, childCtx(root), "general-purpose", "test", {
+      description: "test", parentAgentId: "missing", depth: 2,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(nestedRuntimeOfLastRun().rootCwd).toBe(root);
   });
 });
 

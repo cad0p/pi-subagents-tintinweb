@@ -291,6 +291,10 @@ export interface AgentRecord {
    *  spawns inherit it so their transcripts file under the same session
    *  directory as their ancestors' instead of the child session's own id. */
   rootSessionId?: string;
+  /** Directory this branch started in, before any worktree isolation: every nested
+   *  spawn inherits it, so a relative `session_dir` resolves outside every ancestor
+   *  worktree that cleanup will delete. Absent on a record spawned by an older release. */
+  rootCwd?: string;
   /** Effective max turns applied to the agent's run — caller-supplied value,
    *  then the agent-config value, then the settings default
    *  (`getDefaultMaxTurns()`), then normalized. Captured at spawn so

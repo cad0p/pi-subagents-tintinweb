@@ -528,6 +528,10 @@ export class AgentManager {
 
     const id = options.id ?? randomUUID().slice(0, 17);
     const abortController = new AbortController();
+    // The branch's cwd before any worktree exists — the same value `startAgent`
+    // calls `baseCwd`. Computed here (not there) because it is branch metadata a
+    // nested spawn reads off its parent's record, before that parent may start.
+    const ownBase = options.cwd ?? ctx.cwd;
     const record: AgentRecord = {
       id,
       type,
@@ -562,6 +566,11 @@ export class AgentManager {
       parentAgentId: options.parentAgentId,
       maxSubagentDepth: options.maxSubagentDepth,
       rootSessionId: options.rootSessionId,
+      // A nested spawn keeps its branch's root, at any depth, isolated or not: the
+      // runner resolves its relative `session_dir` there instead of in an ancestor
+      // worktree that cleanup deletes. Derived from the parent record — never from
+      // a caller option, which a cross-extension caller could point anywhere.
+      rootCwd: options.parentAgentId ? (this.getRecord(options.parentAgentId)?.rootCwd ?? ownBase) : ownBase,
     };
     this.agents.set(id, record);
     this.ledgerWriters.set(id, pi);
@@ -762,6 +771,7 @@ export class AgentManager {
         parentAgentId: id,
         depth: record.depth ?? 1,
         maxSubagentDepth: record.maxSubagentDepth,
+        rootCwd: record.rootCwd,
       },
       onChildSettings: (settings) => {
         record.childSettings = settings;

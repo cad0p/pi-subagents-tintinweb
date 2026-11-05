@@ -21,8 +21,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   return { ...actual, createAgentSession };
 });
 
-import { type RunOptions, runAgent } from "../src/agent-runner.js";
+import { createChildSession, type RunOptions, resolveChildSettings, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
+import { openChildSession } from "../src/ledger.js";
+import type { NestedAgentManager } from "../src/nested-tools.js";
 import type { AgentConfig } from "../src/types.js";
 
 const pi = {
@@ -140,6 +142,18 @@ describe("subagent session persistence (real SessionManager)", () => {
     return { sessionManager, fileExistedDuringRun };
   }
 
+  /** What the manager hands a nested spawn: the branch's root cwd is the project. */
+  const nestedRuntime = (rootCwd: string) => ({
+    // The agent registered below names no `allowed_subagents`, so the handle is never read.
+    manager: {} as unknown as NestedAgentManager,
+    parentAgentId: "parent-agent",
+    depth: 2,
+    // The product's default cap. This agent has no nested tools of its own, and
+    // its own session_dir base still applies — the issue's ordinary case.
+    maxSubagentDepth: 2,
+    rootCwd,
+  });
+
   /** The child's session file — the only non-parent file in the session dir. */
   function childFiles(): string[] {
     return readdirSync(sessionDir).filter((f) => join(sessionDir, f) !== parentSessionFile);
@@ -204,6 +218,98 @@ describe("subagent session persistence (real SessionManager)", () => {
     expect(dirname(file)).toBe(join(root, ".sessions"));
     rmSync(worktree, { recursive: true, force: true });
     expect(existsSync(file)).toBe(true);
+  });
+
+  it("roots a nested agent's relative session_dir at the root project, not its parent's worktree (#87)", async () => {
+    registerAgent({ sessionDir: ".sessions", persistSession: true });
+
+    const { sessionManager } = await run({ cwd: worktree, nestedRuntime: nestedRuntime(root) });
+
+    const file = sessionManager.getSessionFile()!;
+    expect(dirname(file)).toBe(join(root, ".sessions"));
+    // Only the directory base moves: the run still happens in the parent's
+    // worktree, and the file still nests under the spawner.
+    expect(headerOf(file).cwd).toBe(worktree);
+    expect(headerOf(file).parentSession).toBe(parentSessionFile);
+    rmSync(worktree, { recursive: true, force: true });
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("roots an isolated grandchild's file outside both worktrees", async () => {
+    registerAgent({ sessionDir: ".sessions", persistSession: true });
+    const nested = join(root, "nested-worktree");
+    mkdirSync(nested);
+
+    const { sessionManager } = await run({
+      cwd: nested,
+      // An isolated grandchild's own worktree hangs off its parent's: the #86
+      // fallback alone would still resolve inside the doomed parent copy.
+      worktree: { path: nested, parentCwd: worktree },
+      nestedRuntime: nestedRuntime(root),
+    });
+
+    const file = sessionManager.getSessionFile()!;
+    expect(dirname(file)).toBe(join(root, ".sessions"));
+    expect(headerOf(file).cwd).toBe(nested);
+    rmSync(nested, { recursive: true, force: true });
+    rmSync(worktree, { recursive: true, force: true });
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("leaves an absolute session_dir alone, whatever the roots are", async () => {
+    const absDir = join(root, "abs-sessions");
+    registerAgent({ sessionDir: absDir });
+
+    const { sessionManager } = await run({
+      cwd: worktree,
+      worktree: { path: worktree, parentCwd: join(root, "parent-project") },
+      nestedRuntime: nestedRuntime(join(root, "elsewhere")),
+    });
+
+    expect(dirname(sessionManager.getSessionFile()!)).toBe(absDir);
+  });
+
+  it("expands a ~/ session_dir before applying any base", async () => {
+    const home = join(root, "home");
+    mkdirSync(home);
+    vi.stubEnv("HOME", home);
+    registerAgent({ sessionDir: "~/nested-sessions" });
+
+    const { sessionManager } = await run({ cwd: worktree, nestedRuntime: nestedRuntime(root) });
+
+    expect(dirname(sessionManager.getSessionFile()!)).toBe(join(home, "nested-sessions"));
+  });
+
+  it("reopens a nested agent's retained file after its worktree is gone, and resumes into it", async () => {
+    // A guard, not a distinct mechanism: it catches the same base regression,
+    // and proves the file that survived cleanup is the one a resume reopens.
+    registerAgent({ sessionDir: ".sessions", persistSession: true });
+    const runOptions = { cwd: worktree, nestedRuntime: nestedRuntime(root) };
+    const { sessionManager } = await run(runOptions);
+    const file = sessionManager.getSessionFile()!;
+    // A marker no other file in the tree holds: the reopen must read this one.
+    sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "marked-before-cleanup" }],
+      timestamp: Date.now(),
+    });
+    rmSync(worktree, { recursive: true, force: true });
+
+    // `SessionManager.open` recreates a missing path silently, so assert the
+    // file really is there before reopening it.
+    expect(existsSync(file)).toBe(true);
+    const settings = await resolveChildSettings(ctx(), "persisted", { pi, ...runOptions });
+    const reopened = openChildSession(file, settings.effectiveCwd);
+    expect(reopened?.getSessionFile()).toBe(file);
+    expect(JSON.stringify(reopened!.getEntries())).toContain("marked-before-cleanup");
+
+    createAgentSession.mockImplementation(async (options: { sessionManager: SessionManager }) => ({
+      session: fakeSession(options.sessionManager, () => {}),
+    }));
+    const session = await createChildSession(settings, reopened!, { agentId: "nested" });
+    await resumeAgent(session, "resumed prompt");
+
+    expect(JSON.stringify(reopened!.getEntries().at(-1))).toContain("resumed prompt");
   });
 
   it("runs in memory when the host session has no file", async () => {

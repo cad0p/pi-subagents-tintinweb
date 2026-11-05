@@ -519,6 +519,9 @@ export interface RunOptions {
     depth: number;
     /** Branch cap inherited from the spawn, else the project setting. */
     maxSubagentDepth?: number;
+    /** The branch's cwd before any worktree isolation. A relative `session_dir`
+     *  resolves from it, never from an ancestor's worktree. */
+    rootCwd?: string;
   };
 }
 
@@ -1459,14 +1462,17 @@ export async function runAgent(
   const parentSessionDir = parentSession === undefined ? undefined : ctx.sessionManager.getSessionDir();
   const settings = await resolveChildSettings(ctx, type, options);
   const { effectiveCwd, agentConfig } = settings;
-  // A relative `session_dir` resolves from the agent's cwd before worktree
-  // isolation, never from the isolation worktree (deleted at cleanup).
-  // `worktree.parentCwd` is that cwd: agent-manager sets it to the same
-  // `baseCwd` it uses for the worktree copy. Without a worktree it is unset and
-  // `effectiveCwd` is already the agent's cwd.
+  // A relative `session_dir` resolves from the branch's cwd before any worktree
+  // isolation, never from a worktree that cleanup deletes. `nestedRuntime.rootCwd`
+  // is that root for a nested agent at any depth: its own `worktree.parentCwd`
+  // would be its parent's worktree. For a top-level isolated spawn
+  // `worktree.parentCwd` is that root — agent-manager sets it to the same
+  // `baseCwd` it uses for the worktree copy. Without either, `effectiveCwd` is
+  // already the agent's cwd. Read `options.nestedRuntime` and not its depth-filtered
+  // local: an agent at the cap has no nested tools, but its own base still applies.
   const configuredSessionDir = resolveConfiguredSessionDir(
     agentConfig?.sessionDir,
-    options.worktree?.parentCwd ?? effectiveCwd,
+    options.nestedRuntime?.rootCwd ?? options.worktree?.parentCwd ?? effectiveCwd,
   );
   // A subagent session is ALWAYS written to disk while it runs: a crashed or
   // killed run must leave a transcript pi's /resume can recover. Retention
