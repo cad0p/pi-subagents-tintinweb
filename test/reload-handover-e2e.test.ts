@@ -621,6 +621,29 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(toolResultUsage(root, "Agent")).toBeUndefined();
   }, 20_000);
 
+  it("writes no marker for a hand-over whose claim already covers its frontier", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("drained-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    // Drained before the reload: the frontier and the claim a persisted marker covers are the same total, so
+    // there is nothing left to say. Dropping the written seed would emit a marker at that total on the
+    // successor's first result — a duplicate of a claim the file already carries, with no spend beside it.
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]), new Map([[dto.id, totals]]));
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    await root.prompt("spawn-now");
+    const results = root.messages.filter((message) => message.role === "toolResult" && message.toolName === "Agent");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.usage).toBeUndefined();
+    expect(results[0] && "subagentUsage" in results[0]).toBe(false);
+  }, 20_000);
+
   it("adopts a hand-over from a release without takeUnreported, and folds in the spend its take still carries", async () => {
     const root = session;
     if (!root) throw new Error("no session");

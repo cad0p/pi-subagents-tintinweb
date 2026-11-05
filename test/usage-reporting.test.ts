@@ -346,6 +346,26 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(next.usage?.totalTokens).toBe(160);
     });
 
+    it("leaves a child activation's tool result untouched and keeps the spend for the root", async () => {
+      // A subagent session runs this factory too, and its handler is on the same event. Nothing about a
+      // child's tool result may change: pi would count whatever it carried in the child's own /session, and
+      // the root — which reads that session's total — would book it a second time. The root still books it.
+      // Each activation owns its pool (src/index.ts, factory scope), so this row pins the wiring between the
+      // two: it cannot go red on the isRoot guard alone, only on a child handler that drains a shared pool.
+      const { root, child } = makeRootAndChild();
+      runSpendingLater({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
+      await spawn(root.tools);
+      await flush();
+
+      const inChild = settled(child.lifecycle, { content: [{ type: "text", text: "child tool" }] });
+      expect(inChild).not.toHaveProperty("usage");
+      expect(inChild).not.toHaveProperty("subagentUsage");
+
+      const inRoot = settled(root.lifecycle, { content: [{ type: "text", text: "parent tool" }] });
+      expect(inRoot.usage?.totalTokens).toBe(160);
+      expect(inRoot.subagentUsage?.v).toBe(1);
+    });
+
     it("attaches no usage when the setting is off, and claims the frontier as an exclusion", async () => {
       // Catches a feature that is always on: it would change numbers the user already tracks. The
       // marker still rides out (it accounts for nothing), which is what keeps a recovery from booking
