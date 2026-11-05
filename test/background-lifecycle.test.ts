@@ -1221,6 +1221,28 @@ describe("background lifecycle — model-visible surfaces", () => {
     );
   });
 
+  it("T9: SendMessage names the manager's refusal reason when the reopen fails", async () => {
+    resolvedRun("first");
+    const { tools } = registerExtension();
+    const spawn = await tools.get("Agent").execute(
+      "tc-first",
+      { prompt: "first", description: "d", subagent_type: "Explore" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+    const id = agentIdOf(spawn);
+    const record = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+    await record.promise;
+    record.sessionFile = join(tmpDir, "gone.jsonl");
+
+    const resume = await tools.get("SendMessage").execute(
+      "tc-resume",
+      { to: id, message: "more" },
+      undefined, undefined, spawnCtx(tmpDir),
+    );
+
+    expect(textOf(resume)).toBe(`Nothing was delivered to agent ${id}: its session file ${join(tmpDir, "gone.jsonl")} is missing or unreadable.`);
+  });
+
   it("resumes a finished agent through SendMessage and runs the message to completion", async () => {
     resolvedRun("first");
     const { tools } = registerExtension();

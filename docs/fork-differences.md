@@ -36,6 +36,8 @@ Each of these is a guarantee. A port that breaks one is a regression, not a reba
 
 **Init failures are reported, not fatal.** Every step of this package's own initialization that can throw is guarded (`src/init-guard.ts`), and a guarded failure becomes a `subagents:init-error` chat entry plus a warning instead of escaping the factory. Pi discards every registration of a package whose factory throws — silently, with no retry — so a single unlucky throw used to cost all three tools ([#151](https://github.com/cad0p/pi-subagents-tintinweb/issues/151)); upstream has no guard and still has the silent drop. The one behavioural consequence for a ported feature: `strictAgentFiles` refuses the malformed file exactly as before, but reports it and loads the rest of the directory rather than aborting the whole load.
 
+**Resume recreates a removed worktree.** A settled `isolation: worktree` agent that is resumed runs in its own worktree, not in a directory the extension already removed. The resume recreates it at the recorded path on the branch the settle kept (or detached at the base commit), validates an existing one, and refuses with a named reason when the branch or repository is gone (`src/agent-manager.ts` `ensureResumeWorktree`, `src/worktree.ts` `recreateWorktree`). Crash recovery reads the same state from the settle ledger entry (`src/ledger.ts`).
+
 ## Deliberately not ported
 
 Each of these exists upstream and is not coming here without a new decision.

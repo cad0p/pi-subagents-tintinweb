@@ -34,6 +34,7 @@ describe("cross-extension RPC", () => {
       })),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
+      refusalOf: vi.fn(),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
@@ -300,6 +301,23 @@ describe("cross-extension RPC", () => {
       expect(reply).toHaveBeenCalledWith({
         success: false,
         error: expect.stringContaining("Nothing was delivered to agent"),
+      });
+    });
+  });
+
+  describe("steer RPC refusal reason", () => {
+    it("T9: replies the manager's refusal reason, not the cause list", async () => {
+      (manager.steer as ReturnType<typeof vi.fn>).mockResolvedValue(false);
+      (manager.refusalOf as ReturnType<typeof vi.fn>).mockReturnValue("branch pi-agent-x is gone");
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-sg9", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-sg9", agentId: "agent-42", message: "go on" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Nothing was delivered to agent agent-42: branch pi-agent-x is gone",
       });
     });
   });

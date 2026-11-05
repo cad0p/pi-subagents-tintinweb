@@ -123,6 +123,12 @@ export function lastActivityOf(sessionFile: string): number | undefined {
   return Number.isNaN(at) ? undefined : at;
 }
 
+/** The worktree state a settle wrote: the branch it kept (absent when nothing changed) and the checkout's HEAD. */
+export interface SettledWorktree {
+  branch?: string;
+  baseSha: string;
+}
+
 /** The `subagents:record` fields a replay reads. */
 interface SettleLedgerEntry {
   id: string;
@@ -131,6 +137,8 @@ interface SettleLedgerEntry {
   description?: string;
   /** A settle `abortAll` wrote at shutdown: the run was cut short by the quit, and is recovered like a crashed one. */
   shutdown?: boolean;
+  /** The run's worktree at its settle. Absent on a worktree record settled by a release that wrote no state. */
+  worktree?: SettledWorktree;
 }
 
 /** A run a shutdown stopped before its spawn entry (queued, or still creating its session file): no transcript to resume from. */
@@ -176,14 +184,21 @@ function ownerLive(owner: OwnerStamp, id: string, options: ReplayOptions): boole
   return owner.pid !== process.pid || options.isLiveHere(id);
 }
 
-/** The record a crashed or shutdown-stopped run becomes: settled as interrupted, its session file kept for a resume. */
-function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number, crashedAt: number | undefined, shutdown: boolean): AgentRecord {
+/**
+ * The record a crashed or shutdown-stopped run becomes: settled as interrupted, its session file kept for a
+ * resume. `worktree` is the state its latest settle wrote. No settle at all means a first run that never
+ * kept a branch; `"unknown"` is a settle an older release wrote with no state, which leaves `worktreeResult`
+ * unset so a resume refuses instead of guessing.
+ */
+function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now: number, crashedAt: number | undefined, shutdown: boolean, worktree: SettledWorktree | "unknown" | undefined): AgentRecord {
   return {
     id: spawned.id, type: spawned.type, description: spawned.description,
     status: "interrupted", toolUses: 0, lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, compactionCount: 0,
     startedAt: spawned.spawnedAt, completedAt: now, interruptedAt: now, crashedAt,
     sessionFile: spawned.sessionFile, persistSession: spawned.persistSession,
-    parentAgentId: spawned.parentId, cwd: spawned.cwd, worktree: spawned.worktree,
+    parentAgentId: spawned.parentId, cwd: spawned.cwd,
+    worktree: spawned.worktree && typeof worktree === "object" ? { ...spawned.worktree, baseSha: worktree.baseSha } : spawned.worktree,
+    worktreeResult: worktree === "unknown" ? undefined : { hasChanges: worktree?.branch !== undefined, branch: worktree?.branch },
     runCwd: spawned.runCwd, configCwd: spawned.configCwd,
     invocation: { modelId: spawned.model, requestedThinking: spawned.thinking },
     settled: true, crashCount, stoppedAtShutdown: shutdown || undefined,
@@ -305,6 +320,8 @@ export function shutdownStops(entries: readonly SessionEntry[]): ShutdownStop[] 
 export function replayLedger(entries: readonly SessionEntry[], options: ReplayOptions): AgentRecord[] {
   const spawns = spawnsOf(entries);
   const open = new Map<string, { spawned: SpawnedLedgerEntry; owner: OwnerStamp; shutdown?: boolean }>();
+  /** Each id's latest settle worktree state; kept across `open.delete` so a later resume entry does not drop it. */
+  const worktrees = new Map<string, SettledWorktree | "unknown">();
   const streak = new Map<string, number>();
   /** Runs whose last settle is a shutdown stop: the interrupted settle that delivers their recovery is not a crash. */
   const stopped = new Set<string>();
@@ -326,6 +343,7 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
       if (!settle) continue;
       const run = open.get(settle.id);
       open.delete(settle.id);
+      worktrees.set(settle.id, settle.worktree ?? "unknown");
       const recoveredStop = stopped.delete(settle.id) && settle.status === "interrupted";
       // A run with no spawn entry has no transcript: `shutdownStops` names it instead.
       if (settle.shutdown === true && run) {
@@ -343,7 +361,7 @@ export function replayLedger(entries: readonly SessionEntry[], options: ReplayOp
   const crashed: AgentRecord[] = [];
   for (const [id, run] of open) {
     if (!run.shutdown && ownerLive(run.owner, id, options)) continue;
-    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now, options.lastActivity(run.spawned.sessionFile), run.shutdown === true));
+    crashed.push(interruptedRecord(run.spawned, (streak.get(id) ?? 0) + 1, options.now, options.lastActivity(run.spawned.sessionFile), run.shutdown === true, worktrees.get(id)));
   }
   return crashed;
 }

@@ -33,6 +33,8 @@ export const PROTOCOL_VERSION = 2;
 export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
   abort(id: string): boolean;
+  /** Why the last delivery to a record was refused, when it was. */
+  refusalOf(id: string): string | undefined;
   /**
    * Resolve a caller-supplied id or prefix, for the ownership check stop,
    * consume and steer share. Narrowed to the fields that check and its
@@ -193,7 +195,7 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
       }
       const id = assertOwned(agentId);
       const outcome = await manager.steer(id, message);
-      if (outcome === false) throw new Error(deliveryText(id, outcome));
+      if (outcome === false) throw new Error(deliveryText(id, outcome, manager.refusalOf(id)));
     },
   );
 

@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession, FileEntry } from "@earendil-works/pi-coding-agent";
 import type { ChildSessionSettings, SessionLifecycle, TurnBudget } from "./agent-runner.js";
 import type { LifetimeUsage, SessionLike } from "./usage.js";
+import type { WorktreeRecord } from "./worktree.js";
 
 export type { ThinkingLevel };
 
@@ -210,7 +211,7 @@ export interface AgentRecord {
   /** Set when the owning parent settled and aborted this nested child. Input is refused: nobody can read the answer. */
   ownerAborted?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */
-  worktree?: { path: string; branch: string; baseSha: string; workPath: string };
+  worktree?: WorktreeRecord;
   /** Worktree cleanup result after agent completion. */
   worktreeResult?: { hasChanges: boolean; branch?: string };
   /** Path to the streaming output transcript file. */

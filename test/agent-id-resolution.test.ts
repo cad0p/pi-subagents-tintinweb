@@ -142,6 +142,7 @@ function nestedManager(records: AgentRecord[]): NestedAgentManager {
   return {
     spawn: () => "",
     deliver: vi.fn(async () => "delivered" as const),
+    refusalOf: () => undefined,
     getRecord: (id: string) => records.find((candidate) => candidate.id === id),
     resolveRecord: (idOrPrefix: string) => resolveAgentRecord(records, idOrPrefix),
     resultReachedParent: () => false,

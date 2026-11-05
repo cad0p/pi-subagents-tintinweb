@@ -1,7 +1,10 @@
 import type { DeliverOutcome } from "./types.js";
 
-/** The tool answer for a `deliver` outcome. `false` is refused: nothing reached the agent — it is still settling, was stopped with its parent, or has no session left to reopen. */
-export function deliveryText(id: string, outcome: DeliverOutcome): string {
+/**
+ * The tool answer for a `deliver` outcome. `false` is refused: nothing reached the agent. `reason` is why the
+ * manager refused it (`refusalOf`), and replaces the generic causes when it is known.
+ */
+export function deliveryText(id: string, outcome: DeliverOutcome, reason?: string): string {
   switch (outcome) {
     case "delivered":
       return `Message sent to agent ${id}.`;
@@ -16,6 +19,9 @@ export function deliveryText(id: string, outcome: DeliverOutcome): string {
     case false:
       // Not a transient state to re-try blindly: the message was never delivered, and four of the five causes are final.
       // Lead with that, and name the causes as alternatives so the text is true for every branch that returns false.
-      return `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`;
+      // A known reason is more useful than the list, and every refusal route carries one.
+      return reason
+        ? `Nothing was delivered to agent ${id}: ${reason}`
+        : `Nothing was delivered to agent ${id}: it is still settling, was stopped with its parent, or has no session left to reopen.`;
   }
 }

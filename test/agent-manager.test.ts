@@ -902,7 +902,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
   it("cwd + isolation: worktree — worktree created FROM cwd, session runs at the copy's workPath, cleanup targets cwd's repo", async () => {
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockReturnValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api", commonDir: "/repo/.git",
     });
     resolvedRun();
 
@@ -924,7 +924,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // parentCwd is the base a relative `session_dir` resolves from in the
     // runner: the caller's cwd, never the copy.
     expect(vi.mocked(runAgent).mock.lastCall![3].worktree).toEqual({ path: "/wt/copy/packages/api", parentCwd: "/" });
-    expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
+    expect(cleanupWorktree).toHaveBeenCalledWith("/repo/.git", expect.anything(), "test");
   });
 
   it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {
@@ -933,7 +933,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // copy's root — moving it would also move .pi config discovery.
     const { createWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockReturnValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir", commonDir: "/repo/.git",
     });
     vi.mocked(runAgent).mockClear();
     resolvedRun();
@@ -2726,7 +2726,7 @@ describe("AgentManager — root cwd of a branch (#87)", () => {
   it("seeds a top-level spawn from its own cwd, not from the spawning session's", async () => {
     const { createWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockReturnValueOnce({
-      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"),
+      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"), commonDir: join(root, ".git"),
     });
     resolvedRun();
     manager = new AgentManager();
@@ -2744,7 +2744,7 @@ describe("AgentManager — root cwd of a branch (#87)", () => {
   it("inherits the root through a worktree child, at any depth", async () => {
     const { createWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockReturnValue({
-      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"),
+      path: join(root, "wt"), branch: "pi-agent-x", baseSha: "abc", workPath: join(root, "wt"), commonDir: join(root, ".git"),
     });
     resolvedRun();
     manager = new AgentManager();

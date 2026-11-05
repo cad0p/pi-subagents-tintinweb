@@ -18,6 +18,15 @@ describe("deliveryText", () => {
     expect(refusal).not.toContain("after a reload");
   });
 
+  it("T18: a known reason replaces the cause list; none keeps today's text", () => {
+    expect(deliveryText("abc", false, "refs/heads/pi-agent-abc is gone")).toBe(
+      "Nothing was delivered to agent abc: refs/heads/pi-agent-abc is gone",
+    );
+    expect(deliveryText("abc", false, undefined)).toBe(refusal);
+    // The reason belongs to a refusal; an outcome that took the text ignores it.
+    expect(deliveryText("abc", "resumed", "stale")).not.toContain("stale");
+  });
+
   it("says a message was sent only for an outcome that took it", () => {
     expect(deliveryText("abc", "delivered")).toBe("Message sent to agent abc.");
     expect(deliveryText("abc", "delivered")).not.toContain("Nothing was delivered");
