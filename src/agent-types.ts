@@ -316,11 +316,22 @@ export function resolveSpawnTypeIn(
     return { ok: true, type: fallbackKey, fellBackFrom: raw };
   }
 
-  // Unset: historical behavior, deliberately unchanged. The fallback stays the
-  // default, so the pre-existing hole it leaves — an unregistered
-  // general-purpose resolving to `getConfig`'s all-tools hardcoded tier — is
-  // what `fallbackSubagent: none` is for, not something to close under everyone
-  // silently.
+  // Unset: the implicit fallback is general-purpose, held to the same rule as a
+  // configured one: a registered-but-disabled general-purpose is refused (#142).
+  // Dispatching it would build a hybrid child — the disabled file's prompt,
+  // model and memory on the built-in tier's tools and extensions. This also
+  // covers an explicit "general-purpose" request, which lands here once it
+  // fails the enabled check. An unregistered general-purpose still resolves to
+  // the hardcoded all-tools tier, as it does for a configured fallback.
+  const implicitKey = resolveUnambiguousKeyIn(registry, IMPLICIT_FALLBACK);
+  if (implicitKey !== undefined && registry.get(implicitKey)?.enabled === false) {
+    return {
+      ok: false,
+      message:
+        `${reason} ${IMPLICIT_FALLBACK} is disabled, so it cannot serve as the fallback agent. ` +
+        `Enabled agent types you can use instead: ${available()}.`,
+    };
+  }
   return { ok: true, type: IMPLICIT_FALLBACK, fellBackFrom: raw };
 }
 

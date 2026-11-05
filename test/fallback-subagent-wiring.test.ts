@@ -196,6 +196,65 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  describe("a disabled general-purpose is refused under the implicit fallback (#142)", () => {
+    function disableGeneralPurpose(): void {
+      writeFileSync(
+        join(cwd, ".pi", "agents", "general-purpose.md"),
+        "---\ndescription: Disabled GP\nenabled: false\nmodel: bogus/hybrid-model\n---\nDISABLED GP PROMPT\n",
+      );
+    }
+
+    it.each([
+      ["an unknown type", "definitely-missing"],
+      ["a disabled type", "retired"],
+      ["an omitted type", ""],
+      ["an explicit general-purpose", "general-purpose"],
+    ])("refuses %s through the Agent tool and builds no child", async (_label, type) => {
+      const { tools } = boot();
+      disableGeneralPurpose();
+
+      const result = await tools.get("Agent").execute(
+        "tc-142",
+        { prompt: "do it", description: "disabled gp dispatch", subagent_type: type },
+        undefined, undefined, ctx(),
+      );
+
+      expect(getAllTypes()).toContain("general-purpose");
+      expect(getAvailableTypes()).not.toContain("general-purpose");
+      expect(textOf(result)).toContain("general-purpose is disabled");
+      expect(textOf(result)).toContain("Enabled agent types you can use instead:");
+      expect(textOf(result)).toContain("scout");
+      // No child is built from the disabled file's prompt/model, hybrid or otherwise.
+      expect(runAgent).not.toHaveBeenCalled();
+    });
+
+    it("refuses a background call the same way, before anything spawns", async () => {
+      const { tools } = boot();
+      disableGeneralPurpose();
+
+      const result = await tools.get("Agent").execute(
+        "tc-142b",
+        { prompt: "do it", description: "bg", subagent_type: "typoo", run_in_background: true },
+        undefined, undefined, ctx(),
+      );
+
+      expect(textOf(result)).toContain("general-purpose is disabled");
+      expect(runAgent).not.toHaveBeenCalled();
+    });
+
+    it("refuses cross-extension spawns", () => {
+      boot();
+      disableGeneralPurpose();
+      const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+
+      expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))
+        .toThrow(/general-purpose is disabled/);
+      expect(() => registry.spawn({}, ctx(), "general-purpose", "do it", { description: "rpc" }))
+        .toThrow(/general-purpose is disabled/);
+      expect(runAgent).not.toHaveBeenCalled();
+    });
+  });
+
   it("never persists a blank type into a scheduled job", async () => {
     // `fellBackFrom` is "" for a blank request, and `??` does not treat "" as
     // nullish — the job would be stored with an empty type and re-fail forever.
