@@ -536,8 +536,10 @@ export default function (pi: ExtensionAPI) {
    * was: it must run for every message.
    */
   function drainSpend(event: MessageEndEvent): MessageEndEventResult | undefined {
-    // Only the root activation owns the pool, and only a tool result is counted by pi. A message-less
-    // event is a host that emits the boundary alone: nothing to drain onto, and nothing to claim.
+    // Only the root activation drains: child-side usage would land in the intermediate child's file, raising
+    // the root's frontier for that child while recovery still books the nested id from its own file (double count).
+    // The current harness cannot reach this case: each activation owns its pool, and no non-root path fills one.
+    // Only tool results are counted by pi; a message-less event has nothing to drain onto or claim.
     const message = event?.message;
     if (!isRoot || message?.role !== "toolResult") return undefined;
     const drained = pendingUsage.drain();
