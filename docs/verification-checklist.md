@@ -24,10 +24,11 @@ it reacts to a key, a command or an abort:
   what the footer and status show.
 - If the subagent behaves the way the main session does, it is not a defect.
   The maintainer closes the issue, or dismisses the finding with the reason
-  recorded in the PR body, quoting the main-session behaviour. For example, Esc on a session with nothing in flight draws
-  nothing on a main session either (#216). This never clears a failing Visual
-  proof step: a step that fails is handled as Visual proof says, and the
-  baseline can only show that its sentence needs a design change.
+  recorded in the PR body, quoting the main-session behaviour. For example,
+  Esc on a session with nothing in flight draws nothing on a main session
+  either (#216). This never clears a failing Visual proof step: a step that
+  fails is handled as Visual proof says, and the baseline can only show that
+  its sentence needs a design change.
 - A difference from the main session is a defect only when the extension
   causes it. A deliberate difference must be stated in the README, with its
   reason.
