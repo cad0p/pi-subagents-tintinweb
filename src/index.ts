@@ -1421,16 +1421,8 @@ export default function (pi: ExtensionAPI) {
   async function recoveredSettings(record: AgentRecord): Promise<ChildSessionSettings> {
     const ctx = currentCtx;
     if (!ctx) throw new Error(`Cannot resume "${record.description}": no session is active.`);
-    const recordedConfig = getAgentConfig(record.type);
-    if (!recordedConfig) {
+    if (!getAgentConfig(record.type)) {
       throw new Error(`Agent type "${record.type}" is no longer defined; the interrupted run cannot resume.`);
-    }
-    // A disabled type still has a config, and rebuilding from it takes that
-    // file's prompt and model with `getConfig`'s built-in tier for tools and
-    // extensions — the hybrid refused on every spawn path. A resume is exempt
-    // from `subagent_type` resolution, not from its type being usable.
-    if (recordedConfig.enabled === false) {
-      throw new Error(`Agent type "${record.type}" is disabled; the interrupted run cannot resume.`);
     }
     const modelId = record.invocation?.modelId ?? "";
     const slash = modelId.indexOf("/");

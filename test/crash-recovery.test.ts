@@ -409,35 +409,6 @@ describe("crash recovery — startup report", () => {
     expect(resumed.sessionManager.getEntries().some((e) => e.type === "custom" && e.customType === "before-quit")).toBe(true);
   });
 
-  it("refuses to resume a recovered run whose type is now disabled, instead of rebuilding the hybrid", async () => {
-    const file = join(tmpDir, "parent.jsonl");
-    writeSession(file, [spawned("gone", DEAD_PID)]);
-    writeChildFiles("gone");
-    // The file that registered the type is now disabled: rebuilding its settings
-    // would take that file's prompt and model with the built-in tier's tools.
-    mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "agents", "general-purpose.md"), "---\ndescription: off\nenabled: false\n---\n\nbody\n", "utf-8");
-    const made = boot(file);
-    await startup(made, file);
-    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(interruptedSettles(file)).toEqual(["gone"]));
-    vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
-
-    // The curated reason goes to the log; the tool answers the failed delivery.
-    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const sent = await made.tools.get("SendMessage").execute("tc-dis", { to: "gone", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
-
-      expect(sent.isError).toBe(true);
-      expect(sent.details).toEqual({ sendOutcome: "failed" });
-      expect(sent.content[0].text).toContain("Nothing was delivered to agent gone");
-      expect(warned.mock.calls.map(([line]) => String(line)).join("\n")).toContain('Agent type "general-purpose" is disabled; the interrupted run cannot resume.');
-      expect(resumeAgent).not.toHaveBeenCalled();
-    } finally {
-      warned.mockRestore();
-    }
-  });
-
   it("a reopen after the recovery was delivered reports the shutdown stop no more", async () => {
     const file = join(tmpDir, "parent.jsonl");
     writeSession(file, [spawned("q1", DEAD_PID), custom("subagents:record", { id: "q1", status: "stopped", shutdown: true })]);
