@@ -529,7 +529,7 @@ describe("Agent result rendering", () => {
     const text = "x\u001b[2Jy";
     const res = { content: [{ type: "text" as const, text }], details: undefined };
 
-    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme);
+    const rendered = tools.get("Agent").renderResult(res, { expanded: false, isPartial: false }, mockTheme, renderCallContext);
     expect(rendered.text).not.toContain("\u001b");
     expect(rendered.text).not.toContain("[2J");
     expect(rendered.text).toBe("xy");
@@ -560,6 +560,7 @@ describe("Agent result rendering", () => {
       { content: [{ type: "text" as const, text: 42 as any }], details: undefined },
       { expanded: false, isPartial: false },
       mockTheme,
+      renderCallContext,
     );
     expect(rendered.text).toBe("");
   });
@@ -864,6 +865,7 @@ describe("Agent result rendering", () => {
 
       // The call registers nothing, so the out-of-scope job never warns.
       expect(textOf(rejected)).toContain("Cannot combine `schedule` with `inherit_context`");
+      expect(rejected.isError).toBe(true);
       const warnings = c.ui.notify.mock.calls
         .map(([msg]: [string]) => msg)
         .filter((msg: string) => msg.includes("out-of-scope"));
@@ -1526,6 +1528,37 @@ describe("agents command terminal surfaces", () => {
       expect(failed).toBeDefined();
       expect(failed?.message).toBe("Generation failed: boomtail forged");
       expect(failed?.message).not.toContain("\u001b");
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to generate an agent while general-purpose is disabled, instead of spawning the hybrid", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "pi-gen-disabled-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(cwd);
+      mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "agents", "general-purpose.md"), "---\ndescription: disabled\nenabled: false\n---\n\nbody\n", "utf-8");
+      // The generator spawns general-purpose directly, so nothing else refuses it:
+      // a spawn here would take the disabled file's prompt on the all-tools tier.
+      vi.mocked(runAgent).mockClear();
+      vi.mocked(runAgent).mockImplementation(() => Promise.reject(new Error("unexpected generator start")));
+      const { pi, commands } = makePi();
+      subagentsExtension(pi);
+
+      const { c, notifications } = commandCtx(generateAnswers);
+      c.ui.input.mockResolvedValueOnce("a test agent").mockResolvedValueOnce("gen-disabled");
+
+      await commands.get("agents").handler("", c);
+
+      const refused = notifications.find(n => n.message.startsWith("Cannot generate agents:"));
+      expect(refused?.message).toContain("general-purpose is disabled");
+      expect(refused?.level).toBe("warning");
+      expect(notifications.some(n => n.message.startsWith("Created "))).toBe(false);
+      // No generator run: the refusal happens before the spawn, not after it fails.
+      expect(vi.mocked(runAgent).mock.calls.some(([, , , opts]) => isGeneratorRun(opts))).toBe(false);
     } finally {
       process.chdir(previousCwd);
       rmSync(cwd, { recursive: true, force: true });

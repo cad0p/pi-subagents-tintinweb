@@ -119,6 +119,9 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
 
     expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
     expect(textOf(result)).toContain("scout");
+    // A refusal is a failed tool result: pi paints the row and records the
+    // transcript entry from the returned `isError`, not from a throw (#142).
+    expect(result.isError).toBe(true);
     // The whole point: nothing ran.
     expect(runAgent).not.toHaveBeenCalled();
   });
@@ -136,6 +139,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     );
 
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
+    // A fallback spawn is not a refusal, so it must not carry the failed flag.
+    expect(result.isError).toBeFalsy();
     // Not merely "something ran" — a fallback that routed anywhere else would pass that.
     expect(runAgent).toHaveBeenCalledWith(
       expect.anything(), "general-purpose", "do it", expect.anything(),
@@ -176,6 +181,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
 
     expect(textOf(result)).toContain('Note: Unknown agent type "definitely-missing"');
     expect(textOf(result)).toContain("started in background");
+    expect(result.isError).toBeFalsy();
   });
 
   it("refuses a disabled type, which used to dispatch with a mixed identity", async () => {
@@ -193,7 +199,70 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     );
 
     expect(textOf(result)).toContain("Unknown or disabled agent type");
+    expect(result.isError).toBe(true);
     expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  describe("a disabled general-purpose is refused under the implicit fallback (#142)", () => {
+    function disableGeneralPurpose(): void {
+      writeFileSync(
+        join(cwd, ".pi", "agents", "general-purpose.md"),
+        "---\ndescription: Disabled GP\nenabled: false\nmodel: bogus/hybrid-model\n---\nDISABLED GP PROMPT\n",
+      );
+    }
+
+    it.each([
+      ["an unknown type", "definitely-missing"],
+      ["a disabled type", "retired"],
+      ["an omitted type", ""],
+      ["an explicit general-purpose", "general-purpose"],
+    ])("refuses %s through the Agent tool and builds no child", async (_label, type) => {
+      const { tools } = boot();
+      disableGeneralPurpose();
+
+      const result = await tools.get("Agent").execute(
+        "tc-142",
+        { prompt: "do it", description: "disabled gp dispatch", subagent_type: type },
+        undefined, undefined, ctx(),
+      );
+
+      expect(getAllTypes()).toContain("general-purpose");
+      expect(getAvailableTypes()).not.toContain("general-purpose");
+      expect(textOf(result)).toContain("general-purpose is disabled");
+      expect(textOf(result)).toContain("Enabled agent types you can use instead:");
+      expect(textOf(result)).toContain("scout");
+      // The visual-proof clause: a refusal must reach pi as a failed tool call.
+      expect(result.isError).toBe(true);
+      // No child is built from the disabled file's prompt/model, hybrid or otherwise.
+      expect(runAgent).not.toHaveBeenCalled();
+    });
+
+    it("refuses a background call the same way, before anything spawns", async () => {
+      const { tools } = boot();
+      disableGeneralPurpose();
+
+      const result = await tools.get("Agent").execute(
+        "tc-142b",
+        { prompt: "do it", description: "bg", subagent_type: "typoo", run_in_background: true },
+        undefined, undefined, ctx(),
+      );
+
+      expect(textOf(result)).toContain("general-purpose is disabled");
+      expect(result.isError).toBe(true);
+      expect(runAgent).not.toHaveBeenCalled();
+    });
+
+    it("refuses cross-extension spawns", () => {
+      boot();
+      disableGeneralPurpose();
+      const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+
+      expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))
+        .toThrow(/general-purpose is disabled/);
+      expect(() => registry.spawn({}, ctx(), "general-purpose", "do it", { description: "rpc" }))
+        .toThrow(/general-purpose is disabled/);
+      expect(runAgent).not.toHaveBeenCalled();
+    });
   });
 
   it("never persists a blank type into a scheduled job", async () => {
@@ -208,6 +277,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       undefined, undefined, ctx(),
     );
     expect(textOf(result)).toContain("Scheduled");
+    expect(result.isError).toBeFalsy();
 
     const storeDir = join(cwd, ".pi", "subagent-schedules");
     const jobs = readdirSync(storeDir).flatMap((f) =>

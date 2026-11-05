@@ -21,7 +21,7 @@ import { ambiguousAgentIdText } from "./agent-id.js";
 import { AgentManager, NUDGE_HOLD_MS, readPolicy, type SpawnOptions } from "./agent-manager.js";
 import { agentAmbiguousResponse, agentNotFoundResponse, agentReportResponse, consumeResult, ownedResolution } from "./agent-result-tool.js";
 import { type ChildSessionSettings, getDefaultMaxTurns, getGraceTurns, isDiagnosticActivity, normalizeMaxTurns, resolveChildSettings, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, IMPLICIT_FALLBACK, implicitFallbackProblem, isDefaultsDisabled, isFallbackResolvable, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { type BackgroundWorkSource, registerSubagentDisplayProvider, registerSubagentProvider } from "./background-work.js";
 import { saveCheckpoint } from "./checkpoint.js";
 import { inChildSessionContext, takeLeakedChildContextRead } from "./child-context.js";
@@ -60,6 +60,16 @@ import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./workt
 /** Tool execute return value for a text response. */
 function textResult<D>(msg: string, details?: D) {
   return { content: [{ type: "text" as const, text: msg }], details };
+}
+
+/**
+ * A refused call: nothing was spawned or scheduled, so the result must be a
+ * failed one. pi reads `isError` off the returned result (pi-agent-core
+ * `agent-loop.js`, `isError: result.isError === true`), and it drives the
+ * error row background, the transcript's `isError`, and the provider marker.
+ */
+function refusal(msg: string) {
+  return { content: [{ type: "text" as const, text: msg }], details: undefined, isError: true };
 }
 
 /** Folds one tool event into an agent's activity state. Shared by the spawn callbacks and the live sink of a reloaded child. */
@@ -1918,7 +1928,10 @@ Terse command-style prompts produce shallow, generic work.
       // Display copies only: `execute` hands the model the raw child text.
       if (!details) {
         const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-        return new Text(typeof text === "string" ? stripControlChars(text) : "", 0, 0);
+        const body = typeof text === "string" ? stripControlChars(text) : "";
+        // A refusal carries no details: paint it with the error colour so the row
+        // matches the failed tool result pi records for it.
+        return new Text(context.isError ? theme.fg("error", body) : body, 0, 0);
       }
 
       // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
@@ -1964,7 +1977,7 @@ Terse command-style prompts produce shallow, generic work.
       // properties and RPC forwards them verbatim — refuse the removed flag here
       // rather than silently spawning an agent that is not hermetic.
       const isolatedError = isolatedParamError(params);
-      if (isolatedError) return textResult(isolatedError, true);
+      if (isolatedError) return refusal(isolatedError);
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
@@ -1976,7 +1989,7 @@ Terse command-style prompts produce shallow, generic work.
       // the caller is still unaware. `fallbackSubagent` decides whether an
       // unresolvable type falls back or fails closed.
       const dispatch = resolveSpawnType(rawType);
-      if (!dispatch.ok) return textResult(dispatch.message);
+      if (!dispatch.ok) return refusal(dispatch.message);
       const subagentType = dispatch.ok ? dispatch.type : rawType;
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
@@ -2062,13 +2075,13 @@ Terse command-style prompts produce shallow, generic work.
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
-          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+          return refusal("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
         }
         if (params.inherit_context) {
-          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+          return refusal("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
         }
         if (!scheduler.isActive()) {
-          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+          return refusal("Scheduler is not active in this session yet. Try again after the session has fully started.");
         }
         try {
           const job = scheduler.addJob({
@@ -2091,7 +2104,7 @@ Terse command-style prompts produce shallow, generic work.
             `Manage via /agents → Scheduled jobs.`,
           );
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
+          return refusal(err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -2152,7 +2165,7 @@ Terse command-style prompts produce shallow, generic work.
             ...bgCallbacks,
           });
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
+          return refusal(err instanceof Error ? err.message : String(err));
         }
         warnOnOutOfScopeModel();
 
@@ -2829,6 +2842,21 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showGenerateWizard(ctx: ExtensionCommandContext, targetDir: string) {
+    // The generator is the extension's own spawn of general-purpose, outside
+    // `resolveSpawnType` (see below), so the fallback policy never sees it: with a
+    // registered-but-disabled general-purpose it would build exactly the hybrid
+    // #142 is about — that file's prompt and model on the all-tools tier. Refuse
+    // here rather than being the one route that still runs it.
+
+    const gpProblem = implicitFallbackProblem();
+    if (gpProblem !== undefined) {
+      ctx.ui.notify(
+        `Cannot generate agents: general-purpose is ${gpProblem}. ` +
+          `Keep exactly one enabled "general-purpose" agent and try again.`,
+        "warning",
+      );
+      return;
+    }
     const description = await ctx.ui.input("Describe what this agent should do");
     if (!description) return;
 
@@ -3307,13 +3335,14 @@ ${systemPrompt}
         // The setter re-registers the registry itself, so the next spawn already
         // sees the toggle; this applier only has to report what it orphaned.
         setDisableDefaultAgents(enabled);
+        const fallback = getFallbackSubagent() ?? IMPLICIT_FALLBACK;
         const orphaned = fallbackRow(getFallbackSubagent(), getAvailableTypes(), NO_FALLBACK, isFallbackResolvable)
           .unresolvable;
         notifyApplied(
           ctx,
           `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.` +
             (orphaned
-              ? ` Fallback agent "${getFallbackSubagent()}" no longer resolves — unknown agent types will be refused until it is changed.`
+              ? ` Fallback agent "${fallback}" no longer resolves — unknown agent types will be refused until it is changed.`
               : ""),
         );
       } else if (id === "outputTranscript") {

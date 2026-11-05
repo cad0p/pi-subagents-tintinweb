@@ -390,6 +390,64 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
     ["router", makeAgentConfig({ name: "router" })],
   ]);
 
+  describe("a disabled general-purpose is never the implicit fallback (#142)", () => {
+    const registry = () => new Map([
+      ["general-purpose", makeAgentConfig({ name: "general-purpose", enabled: false })],
+      ["scout", makeAgentConfig({ name: "scout" })],
+      ["retired", makeAgentConfig({ name: "retired", enabled: false })],
+    ]);
+
+    it.each([
+      ["an unknown type", "typoo"],
+      ["a disabled type", "retired"],
+      ["an omitted type", undefined],
+      ["an explicit general-purpose", "general-purpose"],
+      ["an explicit GENERAL-PURPOSE", "GENERAL-PURPOSE"],
+    ])("refuses %s, naming general-purpose and the enabled types", (_label, requested) => {
+      const result = resolveSpawnTypeIn(registry(), requested);
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.message).toContain("general-purpose is disabled");
+      expect(result.message).toContain("Enabled agent types you can use instead: scout.");
+    });
+
+    it("still resolves an enabled type, and an unregistered general-purpose still falls back", () => {
+      expect(resolveSpawnTypeIn(registry(), "scout")).toEqual({ ok: true, type: "scout" });
+      const noGp = new Map([["scout", makeAgentConfig({ name: "scout" })]]);
+      expect(resolveSpawnTypeIn(noGp, "typoo")).toEqual({ ok: true, type: "general-purpose", fellBackFrom: "typoo" });
+    });
+
+    it("refuses a case-ambiguous general-purpose, as a configured fallback naming it is refused", () => {
+      // Two files differ only by case (disableDefaultAgents plus General-Purpose.md
+      // and GENERAL-PURPOSE.md): resolveUnambiguousKeyIn returns undefined for both
+      // "absent" and "ambiguous", and only the absent case may fall back to the
+      // built-in tier. The configured path already refuses this registry.
+      const ambiguous = new Map([
+        ["General-Purpose", makeAgentConfig({ name: "General-Purpose", enabled: false })],
+        ["GENERAL-PURPOSE", makeAgentConfig({ name: "GENERAL-PURPOSE", enabled: false })],
+        ["scout", makeAgentConfig({ name: "scout" })],
+      ]);
+      const result = resolveSpawnTypeIn(ambiguous, "typoo");
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.message).toContain("general-purpose is ambiguous");
+      expect(result.message).toContain("Enabled agent types you can use instead: scout.");
+      expect(resolveSpawnTypeIn(ambiguous, "general-purpose").ok).toBe(false);
+      // Ambiguous is not the same as unusable: one enabled variant beside a
+      // disabled one picks no key either, so dispatch must not guess that one.
+      const oneEnabled = new Map([
+        ["General-Purpose", makeAgentConfig({ name: "General-Purpose" })],
+        ["GENERAL-PURPOSE", makeAgentConfig({ name: "GENERAL-PURPOSE", enabled: false })],
+      ]);
+      expect(resolveSpawnTypeIn(oneEnabled, "typoo").ok).toBe(false);
+    });
+
+    it("lets a configured enabled fallback take over", () => {
+      setFallbackSubagent("scout");
+      expect(resolveSpawnTypeIn(registry(), "typoo")).toEqual({ ok: true, type: "scout", fellBackFrom: "typoo" });
+    });
+  });
+
   it("resolves an enabled type case-insensitively", () => {
     registerAgents(roster());
     expect(resolveSpawnType("SCOUT")).toEqual({ ok: true, type: "scout" });

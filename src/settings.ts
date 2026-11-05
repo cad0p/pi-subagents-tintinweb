@@ -17,13 +17,13 @@ import { IMPLICIT_FALLBACK, NO_FALLBACK } from "./agent-types.js";
  * agent, once the defaults are disabled. Including it makes Enter mean "cycle
  * from what is shown", which is what every other row means.
  *
- * `unresolvable` reports an explicitly configured fallback that no longer names
- * an enabled agent — deleted, disabled, or a default with `disableDefaultAgents`
- * on. Dispatch refuses in that state, so the row must say so rather than
- * presenting it as a working target. `general-purpose` is the exception in both
- * directions: it resolves to the permissive hardcoded tier whether it is
- * configured or unset, and dispatch accepts it either way, so an unset fallback
- * is never unresolvable and neither is an explicit `general-purpose`.
+ * `unresolvable` reports a fallback target dispatch would refuse — deleted,
+ * disabled, or a default with `disableDefaultAgents` on. Dispatch refuses in
+ * that state, so the row must say so rather than presenting it as a working
+ * target. The unset default is checked too: it targets `general-purpose`, which
+ * resolves to the permissive hardcoded tier only while no agent file claims the
+ * name. A registered-but-disabled (or case-ambiguous) `general-purpose` is
+ * refused whether the value is implicit or explicit, so the row flags both.
  */
 export function fallbackRow(
   configured: string | undefined,
@@ -36,10 +36,11 @@ export function fallbackRow(
   // uniqueness rule needs the full registry (a disabled agent still claims its
   // name), which `available` alone cannot express — so the caller supplies the
   // verdict rather than this function re-deriving a half-truth.
-  // Only a *configured* value can be unresolvable: an unset fallback deliberately
-  // targets the permissive hardcoded tier even when that agent is unregistered or
-  // disabled, so calling it broken would report a refusal dispatch never performs.
-  const unresolvable = configured !== undefined && value.trim().toLowerCase() !== noneValue && !resolvable(value);
+  // An unset fallback is checked as general-purpose, the name it targets: with
+  // nothing claiming that name dispatch still uses the permissive hardcoded tier,
+  // which `resolvable` reports. A registered-but-disabled general-purpose is a
+  // refusal, and the row must show it instead of a target that never works.
+  const unresolvable = value.trim().toLowerCase() !== noneValue && !resolvable(value);
   return { value, values: [...new Set([value, ...available, noneValue])], unresolvable };
 }
 

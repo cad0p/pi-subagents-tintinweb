@@ -453,6 +453,30 @@ describe("SubagentScheduler — fire path", () => {
     );
   });
 
+  it("refuses at fire time when general-purpose has been disabled since the job was armed (#142)", () => {
+    scheduler.addJob({
+      name: "gp-job", description: "gp", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "run",
+    });
+    registerAgents(new Map([
+      ["general-purpose", {
+        name: "general-purpose", description: "gp", builtinToolNames: [], extensions: false, skills: false,
+        systemPrompt: "DISABLED GP PROMPT", promptMode: "replace", inheritContext: false, enabled: false,
+      }],
+    ]));
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(pi.events.emit).toHaveBeenCalledWith(
+      "subagents:scheduled",
+      expect.objectContaining({
+        type: "error",
+        error: expect.stringContaining("general-purpose is disabled"),
+      }),
+    );
+  });
+
   it("one-shot fires once and auto-disables", async () => {
     const job = scheduler.addJob({
       name: "soon", description: "once", schedule: "+1s",

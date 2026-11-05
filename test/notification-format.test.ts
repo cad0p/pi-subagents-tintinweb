@@ -807,6 +807,12 @@ describe("completion header names the agent type", () => {
     expect(emptyType.split("\n")[0]).toBe(`**✓ Agent completed: Test Agent**${BODY}`);
   });
 
+  it("sanitizes the config name when there is no display name", () => {
+    registerCustom({ name: "Code\nReviewer\t**x**", displayName: undefined });
+    const header = formatTaskNotification(createRecord({ type: "Code\nReviewer\t**x**" }), settings).split("\n")[0];
+    expect(header).toBe(`**✓ Code Reviewer **x** completed: Test Agent**${BODY}`);
+  });
+
   it("bounds a long display name like the description", () => {
     registerCustom({ displayName: "A".repeat(400) });
     const header = formatTaskNotification(createRecord({ type: "reviewer" }), settings).split("\n")[0];
