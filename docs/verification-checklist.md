@@ -55,6 +55,9 @@ quickly. This applies to plans, review findings and proof sentences:
 - It is still a defect when the stale configuration loses work (a branch, a
   session file, a result) or runs the agent outside the isolation it was
   spawned with.
+- This never clears a failing Visual proof step: a step that fails is handled
+  as Visual proof says, and this rule can only show that its sentence needs a
+  design change.
 
 ## Automated gates
 
@@ -243,8 +246,9 @@ under Evidence. A verdict counts only for the SHA it reviewed.
   only reproduces pi's own main-session behaviour is not a finding.
 - Tell the reviewer that a configuration changed after spawn gets the
   simplest behaviour (see Configuration changed after spawn above): a finding
-  that only asks for a guard against such a change is not a finding, unless
-  the change loses work or breaks the agent's isolation.
+  that only asks for a guard, refusal, persisted flag or test against such a
+  change is not a finding, unless the stale configuration loses work or runs
+  the agent outside the isolation it was spawned with.
 - For any change to what a pi session shows or how it behaves over time,
   the brief also includes each step's expected outcome quoted verbatim from
   the issue, the before capture with its SHA, and the raw after-capture and
@@ -344,6 +348,8 @@ In the PR body, record:
   model-action clause, and any changed code path a cleared failure names;
 - for each baseline comparison, the pi version and the cited source or the
   main-session capture;
+- for each finding dismissed under Configuration changed after spawn, the
+  finding and the maintainer's reason;
 - every review round: the head it reviewed, the agent type, the verdict, and
   whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
