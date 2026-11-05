@@ -71,6 +71,8 @@ export interface NestedSpawnOptions {
 export interface NestedAgentManager {
   spawn(pi: ExtensionAPI, ctx: ExtensionContext, type: string, prompt: string, options: NestedSpawnOptions): string;
   deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome>;
+  /** Why the last delivery to a record was refused, when it was. */
+  refusalOf(id: string): string | undefined;
   getRecord(id: string): AgentRecord | undefined;
   /** Resolve a caller-supplied id or prefix; ownership is applied by the tool, after resolution. */
   resolveRecord(idOrPrefix: string): AgentResolution<AgentRecord> | undefined;
@@ -334,7 +336,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         return textResult(`Nested agent not found or not owned by this parent: "${params.to}".`, true);
       }
       const outcome = await context.manager.deliver(record.id, params.message);
-      return textResult(deliveryText(record.id, outcome), outcome === false);
+      return textResult(deliveryText(record.id, outcome, context.manager.refusalOf(record.id)), outcome === false);
     },
   });
 

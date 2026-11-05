@@ -1102,6 +1102,7 @@ export default function (pi: ExtensionAPI) {
         manager: {
           spawn: spawnTopLevel,
           resolveRecord: (idOrPrefix) => manager.resolveRecord(idOrPrefix),
+          refusalOf: (id) => manager.refusalOf(id),
           abort: (id) => {
             const record = manager.getRecord(id);
             return !record?.parentAgentId && manager.abort(id);
@@ -1405,8 +1406,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Re-derives the settings of a recovered run from what its ledger entries kept. A worktree that is gone
-   * runs in the parent's cwd (the crash note says so); a missing agent type cannot resume.
+   * Re-derives the settings of a recovered run from what its ledger entries kept. A worktree record is
+   * recreated before these settings are built, so `runCwd` exists and the copy's scoping survives: a worktree
+   * agent never falls back to the parent's cwd. A missing agent type, or a worktree that cannot be recreated,
+   * cannot resume.
    */
   async function recoveredSettings(record: AgentRecord): Promise<ChildSessionSettings> {
     const ctx = currentCtx;
@@ -2364,7 +2367,7 @@ Terse command-style prompts produce shallow, generic work.
       const targetId = record?.id ?? adopting[0] ?? params.to;
       const { state: sendState, callbacks: sendCallbacks } = createActivityTracker(() => targetId, record?.effectiveMaxTurns);
       const outcome = await manager.steer(targetId, params.message, sendCallbacks);
-      if (outcome === false) return sendResult(deliveryText(targetId, false), "failed");
+      if (outcome === false) return sendResult(deliveryText(targetId, false, manager.refusalOf(targetId)), "failed");
       const current = manager.getRecord(targetId);
       // A resumed run already has its session: seed the row's activity, as the Agent resume path did.
       if ((outcome === "resumed" || outcome === "resumedAfterCrash") && current?.session) {
@@ -2626,7 +2629,7 @@ Terse command-style prompts produce shallow, generic work.
             ctx.ui.notify(`Stopped "${toSingleLine(record.description)}".`, "info");
           }
         }, keybindings, (message: string) => {
-          void manager.steer(record.id, message).then((outcome) => ctx.ui.notify(deliveryText(record.id, outcome), outcome === false ? "warning" : "info"));
+          void manager.steer(record.id, message).then((outcome) => ctx.ui.notify(deliveryText(record.id, outcome, manager.refusalOf(record.id)), outcome === false ? "warning" : "info"));
         }, showCost);
       },
       {

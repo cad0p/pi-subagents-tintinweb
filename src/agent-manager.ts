@@ -58,7 +58,7 @@ import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, Isolati
 import type { AgentActivity } from "./ui/agent-display.js";
 import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
 import { addUsage, isEmptyUsage, type LifetimeUsage, readSessionUsage, type SessionLike } from "./usage.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, recreateWorktree, validateWorktree, type WorktreeCleanupResult, } from "./worktree.js";
 
 /** Quiet time the finish check needs, observed on two ticks, before it finishes an idle record. Tests shorten it. */
 let quietMs = 1000;
@@ -361,16 +361,20 @@ export type ResumeCallbacks = Pick<
 >;
 
 /**
- * The prefix a resumed interrupted run carries: what cut it short (a crash, or pi shutting down) and when. Names the
- * worktree's fate when it is gone (its run then uses the parent cwd).
+ * The prefix a resumed interrupted run carries: what cut it short (a crash, or pi shutting down) and when. A worktree
+ * the resume had to recreate is named, with the source its contents come from; a leftover copy says nothing. The run
+ * never falls back to the parent's cwd.
  */
-function interruptionNote(record: AgentRecord, text: string): string {
+function interruptionNote(record: AgentRecord, text: string, recreated: boolean): string {
   const event = record.stoppedAtShutdown ? "stop" : "crash";
   const when =
     record.crashedAt === undefined
       ? `The ${event} time is unknown; it was detected at ${new Date(record.interruptedAt ?? record.startedAt).toISOString()}.`
       : `Your last saved activity was at ${new Date(record.crashedAt).toISOString()}; the ${event} came after it.`;
-  const gone = record.worktree && !existsSync(record.worktree.path) ? " Its worktree no longer exists; the run uses the parent's working directory instead." : "";
+  const source = record.worktreeResult?.branch ? `branch \`${record.worktreeResult.branch}\`` : "the base commit";
+  const gone = recreated && record.worktree
+    ? ` Its worktree was recreated at ${record.worktree.path} from ${source}; uncommitted changes made before the interruption are not in it.`
+    : "";
   const cause = record.stoppedAtShutdown ? "stopped when pi shut down" : "interrupted by a crash";
   return `You were ${cause}. ${when} A command may have been killed midway; check state before continuing.${gone}\n\n${text}`;
 }
@@ -379,6 +383,14 @@ export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   /** In-flight reopens by agent id, so concurrent restores share one session. */
   private reopening = new Map<string, Promise<AgentSession | undefined>>();
+  /**
+   * Worktrees a resume recreated and no run has taken over yet, with the settle
+   * state that resurrection replaced. Presence is the mark: only a marked id's
+   * copy is released, so a later eviction cannot remove a run's worktree.
+   */
+  private recreatedWorktrees = new Map<string, { prior: AgentRecord["worktreeResult"]; anchor: string }>();
+  /** Why the last delivery to a record was refused, so every route can name it instead of listing the causes. */
+  private refusals = new Map<string, string>();
   /** Where each record's ledger entries go: the session file of the run that spawned it (see writeLedger). */
   private ledgerWriters = new Map<string, LedgerWriter>();
   /** Supplied by the extension: re-derives the child settings of a recovered record, which has none until its run starts. */
@@ -590,7 +602,7 @@ export class AgentManager {
     try {
       this.startAgent(id, record, args);
     } catch (err) {
-      this.reclaimWorktree(record, options.cwd ?? ctx.cwd);
+      this.reclaimWorktree(record);
       this.agents.delete(id);
       this.ledgerWriters.delete(id);
       throw err;
@@ -643,7 +655,9 @@ export class AgentManager {
       // subdirectory, silently dropping extensions/skills.
       worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
       worktreePromptInfo = { path: worktreeCwd, parentCwd: baseCwd };
-      this.worktreeRepos.add(baseCwd);
+      // The common dir, not the caller's cwd: a caller-supplied repo the user
+      // deletes after the settle would otherwise never be pruned.
+      this.worktreeRepos.add(wt.commonDir);
     }
 
     record.status = "running";
@@ -654,7 +668,7 @@ export class AgentManager {
     // reacting to `subagents:started`). Settle it through the stopped tail
     // instead of starting — and counting — a run the user already stopped.
     if (this.stoppedInStartPrologue(record)) {
-      this.settleStoppedWithoutRun(record, baseCwd);
+      this.settleStoppedWithoutRun(record, true);
       return;
     }
 
@@ -681,9 +695,10 @@ export class AgentManager {
         record.completedAt ??= Date.now();
         detach();
         // Best-effort worktree cleanup on error
-        if (record.worktree) {
+        const anchor = record.worktree?.commonDir;
+        if (record.worktree && anchor) {
           try {
-            record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, options.description);
+            record.worktreeResult = cleanupWorktree(anchor, record.worktree, options.description);
           } catch { /* ignore cleanup errors */ }
         }
         return "";
@@ -707,8 +722,9 @@ export class AgentManager {
       record.completedAt ??= Date.now();
       detach();
       // Clean up worktree if used
-      if (record.worktree) {
-        const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
+      const anchor = record.worktree?.commonDir;
+      if (record.worktree && anchor) {
+        const wtResult = cleanupWorktree(anchor, record.worktree, options.description);
         record.worktreeResult = wtResult;
         if (wtResult.hasChanges && wtResult.branch) {
           // With a caller-supplied cwd the branch lives in THAT repo, not the
@@ -1653,6 +1669,9 @@ export class AgentManager {
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
       shutdown: shutdown || undefined,
+      // What a resume needs and the record cannot keep across a crash: the branch
+      // the settle kept (absent when nothing changed) and the checkout's HEAD.
+      worktree: record.worktree ? { branch: record.worktreeResult?.branch, baseSha: record.worktree.baseSha } : undefined,
     });
   }
 
@@ -1722,6 +1741,8 @@ export class AgentManager {
     const parked = record.pendingInput;
     record.pendingInput = undefined;
     if (parked) this.flushParked(record.id, parked);
+    this.releaseResumedWorktree(record);
+    this.handOverIdle();
   }
 
   /** Delivers input that was answered "held" earlier. A refusal now cannot reach the sender, so it is logged. */
@@ -1742,14 +1763,15 @@ export class AgentManager {
    * stop through the completion surface exactly once and marks the record fully
    * unwound. No counter change: a never-started record never held a slot.
    *
-   * `baseCwd` is the repo a prologue-created worktree came from; omit it on
-   * paths where this run's prologue created none (a record stopped while
-   * queued, an already-aborted parent signal, or a resume stopped during its
-   * start prologue). A resumed record can still carry the prior run's worktree
-   * reference — a resume never creates one, and reclaiming that stale path
-   * would clobber the prior run's `worktreeResult`.
+   * `createdWorktree` says this spawn's prologue created the run's worktree.
+   * Omit it on paths where it created none (a record stopped while queued, an
+   * already-aborted parent signal, or a resume stopped during its start
+   * prologue). A resumed record can still carry a worktree — recreate by this
+   * resume, or the prior run's — and reclaiming that would clobber the prior
+   * run's `worktreeResult`; the resume paths release it through
+   * `releaseResumedWorktree` instead.
    */
-  private settleStoppedWithoutRun(record: AgentRecord, baseCwd?: string, shutdown = false): void {
+  private settleStoppedWithoutRun(record: AgentRecord, createdWorktree = false, shutdown = false): void {
     record.status = "stopped";
     record.completedAt ??= Date.now();
     // No turn ever executed — zero the run-local counter so the completion
@@ -1757,12 +1779,8 @@ export class AgentManager {
     record.turnCount = 0;
     // Reclaim a worktree created by the start prologue (a stop issued during
     // the `subagents:started` emit): the run never made changes, so this
-    // removes the copy and its git registration outright. `baseCwd` is absent
-    // on the queued-abort, already-aborted-signal, and resume start-prologue
-    // paths, where this run's prologue created no worktree.
-    if (baseCwd) {
-      this.reclaimWorktree(record, baseCwd);
-    }
+    // removes the copy and its git registration outright.
+    if (createdWorktree) this.reclaimWorktree(record);
     this.notifyCompleted(record, shutdown);
     record.settled = true;
   }
@@ -1771,15 +1789,16 @@ export class AgentManager {
    * Best-effort reclamation of a worktree the start prologue created when the
    * run never executed: a throwing started listener on the spawn or queue
    * path, or a stop issued during the `subagents:started` emit. Removes the
-   * copy and its git registration from `baseCwd`'s repo, records the cleanup
-   * outcome, and clears the record's reference so no later path retries it.
-   * Cleanup errors are ignored — the failure or stop that triggered the
+   * copy and its git registration from its repo's common dir, records the
+   * cleanup outcome, and clears the record's reference so no later path retries
+   * it. Cleanup errors are ignored — the failure or stop that triggered the
    * reclaim is the actionable signal.
    */
-  private reclaimWorktree(record: AgentRecord, baseCwd: string): void {
-    if (!record.worktree) return;
+  private reclaimWorktree(record: AgentRecord): void {
+    const anchor = record.worktree?.commonDir;
+    if (!record.worktree || !anchor) return;
     try {
-      record.worktreeResult = cleanupWorktree(baseCwd, record.worktree, record.description);
+      record.worktreeResult = cleanupWorktree(anchor, record.worktree, record.description);
     } catch { /* ignore cleanup errors */ }
     record.worktree = undefined;
   }
@@ -1849,7 +1868,7 @@ export class AgentManager {
       record.turnCount = 0;
       // A throwing onStart can follow worktree creation: reclaim the copy
       // and its registration (best-effort, like the run handlers' cleanup).
-      this.reclaimWorktree(record, args.options.cwd ?? args.ctx.cwd);
+      this.reclaimWorktree(record);
       this.notifyCompleted(record);
     }
   }
@@ -1912,6 +1931,7 @@ export class AgentManager {
       // A listener threw (stale extension context). Restore the pre-resume
       // state and refuse: the tool reports failure and the counter is untouched.
       Object.assign(record, prior);
+      this.releaseResumedWorktree(record);
       void this.retireSession(record).then(() => this.endTransition(record));
       return undefined;
     }
@@ -1926,9 +1946,12 @@ export class AgentManager {
     // already stopped.
     if (this.stoppedInStartPrologue(record)) {
       this.settleStoppedWithoutRun(record);
+      this.releaseResumedWorktree(record);
       void this.retireSession(record).then(() => this.endTransition(record));
       return undefined;
     }
+    // The run owns the copy from here on: only an exit that leaves no run releases it.
+    this.recreatedWorktrees.delete(id);
     record.settled = false;
     this.writeLedger(id, "subagent-resumed", resumedEntry(id, currentOwnerStamp()));
     // No slot is taken here. The run's first provider request meets the gate (acquireSlot), so a resume
@@ -1939,6 +1962,7 @@ export class AgentManager {
         if (record.status !== "stopped") record.status = "error";
         record.error = failed.error instanceof Error ? failed.error.message : String(failed.error);
         record.completedAt ??= Date.now();
+        this.cleanupResumedWorktree(record);
         return "";
       }
       // Stop wins; a stopped resume is never overwritten with completed.
@@ -1948,6 +1972,15 @@ export class AgentManager {
       }
       record.result = run.text;
       record.completedAt ??= Date.now();
+      const priorResult = record.worktreeResult;
+      const cleaned = this.cleanupResumedWorktree(record);
+      if (cleaned?.hasChanges && cleaned.branch) {
+        record.result = (record.result ?? "") +
+          `\n\n---\nChanges saved to branch \`${cleaned.branch}\`. Merge with: \`git merge ${cleaned.branch}\``;
+      } else if (cleaned?.branch && priorResult?.branch === cleaned.branch) {
+        record.result = (record.result ?? "") +
+          `\n\n---\nNo new changes; this agent's earlier changes are on branch \`${cleaned.branch}\`.`;
+      }
       return run.text;
     });
     this.armCap(record, life);
@@ -1987,6 +2020,10 @@ export class AgentManager {
    * no live session, so the reopened one is the session the run uses. The session file is the source; an
    * in-memory child (no file) reopens from the entries captured at settle. Concurrent callers share one
    * reopen, so two AgentSessions never write the same file.
+   *
+   * A worktree the settle removed is recreated here, synchronously, before anything can await: an eviction
+   * during the settings await would otherwise leave a copy nothing releases, and a recovered record's
+   * settings are built after it, so they see the directory and never fall back to the parent's cwd.
    */
   async restoreSession(id: string): Promise<AgentSession | undefined> {
     const record = this.agents.get(id);
@@ -1996,6 +2033,8 @@ export class AgentManager {
     if (!sessionFile && !memoryEntries) return undefined;
     let reopen = this.reopening.get(id);
     if (!reopen) {
+      const refusal = this.ensureResumeWorktree(record);
+      if (refusal) throw new Error(`Cannot resume ${id}: ${refusal}`);
       // Settings are resolved inside the shared promise, so concurrent callers share one resolution and one reopen.
       reopen = this.childSettingsOf(record)
         .then((childSettings) => {
@@ -2029,6 +2068,66 @@ export class AgentManager {
       this.reopening.set(id, reopen);
     }
     return reopen;
+  }
+
+  /**
+   * The worktree a settled run needs before it can run again, at the path its
+   * session file and settings already name: validated when a copy is still
+   * there (a crash leaves one), else recreated on the branch the last settle kept
+   * or detached at the run's base commit. Returns why the resume cannot proceed —
+   * never a fallback to the parent's cwd.
+   */
+  private ensureResumeWorktree(record: AgentRecord): string | undefined {
+    const worktree = record.worktree;
+    if (!worktree) return undefined;
+    const anchor = worktree.commonDir;
+    if (!anchor) return "its repository is not recorded";
+    if (existsSync(worktree.path)) return validateWorktree(worktree, anchor);
+    // A settle written before this release recorded no state: the branch is
+    // unknown, and re-basing (detached at the base) would hide committed work.
+    if (!record.worktreeResult) return "its worktree state is unknown (the record predates it)";
+    const reason = recreateWorktree(worktree, anchor, record.worktreeResult.branch);
+    if (reason) return reason;
+    // The copy this resume created, and the settle state it replaced: an exit
+    // that leaves no run gives both back (releaseResumedWorktree).
+    this.recreatedWorktrees.set(record.id, { prior: record.worktreeResult, anchor });
+    this.worktreeRepos.add(anchor);
+    return undefined;
+  }
+
+  /**
+   * Gives back a worktree a resume recreated when no run took it over: a refused
+   * or stopped start prologue, a failed reopen, an eviction. Removes the copy and
+   * keeps the settle state the record already had — the new copy is clean, so its
+   * cleanup says nothing about the branch the earlier run kept. Idempotent: only
+   * an id the mark holds is released, and the mark goes with it.
+   */
+  private releaseResumedWorktree(record: AgentRecord): void {
+    const mark = this.recreatedWorktrees.get(record.id);
+    if (!mark) return;
+    this.recreatedWorktrees.delete(record.id);
+    if (!record.worktree) return;
+    try {
+      cleanupWorktree(mark.anchor, record.worktree, record.description);
+    } catch { /* ignore cleanup errors, as every cleanup path does */ }
+    record.worktreeResult = mark.prior;
+  }
+
+  /**
+   * The worktree step of a resumed run's settle: cleans the copy from the repo
+   * anchor and keeps the branch the earlier settle named. Returns the cleanup
+   * result, or undefined when the record has no worktree (or no recorded repo).
+   */
+  private cleanupResumedWorktree(record: AgentRecord): WorktreeCleanupResult | undefined {
+    const worktree = record.worktree;
+    const anchor = worktree?.commonDir;
+    if (!worktree || !anchor) return undefined;
+    const prior = record.worktreeResult;
+    const cleaned = cleanupWorktree(anchor, worktree, record.description);
+    // Nothing new changed and the branch is the one already recorded: the prior
+    // settle's state stays, and the result note says where the work is.
+    if (!cleaned.branch || prior?.branch !== cleaned.branch) record.worktreeResult = cleaned;
+    return cleaned;
   }
 
   /** The settings a child is built from: the ones its run recorded, else re-derived for a recovered record. */
@@ -2066,6 +2165,8 @@ export class AgentManager {
    * (see `DeliverOutcome`). `callbacks` observe the run a finished record is resumed into.
    */
   async deliver(id: string, text: string, callbacks?: ResumeCallbacks): Promise<DeliverOutcome> {
+    // A refusal answers one delivery: the next one reports its own outcome.
+    this.refusals.delete(id);
     const parked = this.adopting.get(id);
     if (parked) {
       parked.push(text);
@@ -2106,18 +2207,29 @@ export class AgentManager {
     }
     // Still settling: the settle tail has not dropped the session yet, so a send once it has will go through.
     if (record.settled === false) return false;
-    // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the log, and callers get false.
+    // A failed reopen (for example a missing session file) is a failed delivery: the curated reason goes to the
+    // log and to the tool text, and callers get false.
     const reopened = await this.restoreSession(id).catch((err: unknown) => {
-      console.warn(`[pi-subagents] ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[pi-subagents] ${message}`);
+      const prefix = `Cannot resume ${id}: `;
+      this.refusals.set(id, message.startsWith(prefix) ? message.slice(prefix.length) : message);
       return undefined;
     });
     const current = this.agents.get(id);
-    if (!reopened || !current) return false;
+    if (!reopened || !current) {
+      // Nobody owns a copy the reopen made; an evicted record already gave its own back.
+      this.releaseResumedWorktree(current ?? record);
+      return false;
+    }
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     const interrupted = current.status === "interrupted";
-    const prompt = interrupted ? interruptionNote(current, text) : text;
-    if (!this.resume(id, prompt, callbacks)) return false;
+    const prompt = interrupted ? interruptionNote(current, text, this.recreatedWorktrees.has(current.id)) : text;
+    if (!this.resume(id, prompt, callbacks)) {
+      this.releaseResumedWorktree(current);
+      return false;
+    }
     return interrupted ? "resumedAfterCrash" : "resumed";
   }
 
@@ -2204,6 +2316,11 @@ export class AgentManager {
     return this.agents.get(id) ?? this.drainingRecords().find((r) => r.id === id);
   }
 
+  /** Why the last delivery to a record was refused, when it was refused: the tool text names it. */
+  refusalOf(id: string): string | undefined {
+    return this.refusals.get(id);
+  }
+
   /**
    * Resolve a caller-supplied id: the exact id first, then a unique
    * case-insensitive prefix of at least 4 characters, over the same records
@@ -2283,6 +2400,8 @@ export class AgentManager {
     // `ctx.newSession()`/`fork()`, and deleting the path it started with would
     // leak the one it actually wrote.
     const sessionFile = record.session?.sessionManager.getSessionFile() ?? record.sessionFile;
+    // A reopen in flight may have recreated this record's worktree for a run the removal never starts.
+    this.releaseResumedWorktree(record);
     const retired = this.retireSession(record);
     this.agents.delete(id);
     clearChildUI(id);
@@ -2382,7 +2501,7 @@ export class AgentManager {
       }
       const record = this.agents.get(entry.id);
       if (record) {
-        this.settleStoppedWithoutRun(record, undefined, true);
+        this.settleStoppedWithoutRun(record, false, true);
         count++;
       }
     }
@@ -2526,6 +2645,17 @@ export class AgentManager {
     this.handover.emit({ kind: "slotFreed" });
   }
 
+  /**
+   * Hands over what became idle after a delivery that produced no run in a draining manager: `moveIdle` runs
+   * only at `beginDrain` and on a draining run's settle, so otherwise the record the delivery reopened would
+   * stay here and never reach the successor. A record that is being reopened, tearing down, or running is
+   * skipped and nothing is emitted for it. No slot is freed — this delivery never held one.
+   */
+  private handOverIdle(): void {
+    if (!this.handover) return;
+    for (const items of this.moveIdle()) this.handover.emit({ kind: "settled", items });
+  }
+
   /** Removes every top-level subtree with no live run from this manager, parents first. */
   private moveIdle(): HandoverItem[][] {
     const groups: HandoverItem[][] = [];
@@ -2533,7 +2663,9 @@ export class AgentManager {
       if (!this.agents.has(record.id)) continue;
       if (record.parentAgentId !== undefined && this.agents.has(record.parentAgentId)) continue;
       const group = this.subtree(record);
-      if (group.some((member) => member.status === "queued" || member.status === "running" || member.settled === false || member.transition !== undefined)) continue;
+      // A record mid-reopen stays: its delivery finishes here, and moving it would tear down the
+      // session it is about to resume into.
+      if (group.some((member) => member.status === "queued" || member.status === "running" || member.settled === false || member.transition !== undefined || this.reopening.has(member.id))) continue;
       for (const member of group) this.agents.delete(member.id);
       groups.push(group.map((member) => ({ dto: toDto(member), session: member.session })));
     }

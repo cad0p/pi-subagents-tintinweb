@@ -34,6 +34,7 @@ describe("cross-extension RPC", () => {
       })),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
+      refusalOf: vi.fn(),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };

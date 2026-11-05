@@ -59,6 +59,7 @@ function makeManager(): NestedAgentManager {
       return id;
     },
     deliver: vi.fn(async () => "delivered" as const),
+    refusalOf: () => undefined,
     resultReachedParent: () => false,
     getRecord: (id: string) => records.get(id),
     resolveRecord: (idOrPrefix: string) => resolveAgentRecord([...records.values()], idOrPrefix),

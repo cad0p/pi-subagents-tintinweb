@@ -593,7 +593,7 @@ export class FleetList {
           },
           keybindings,
           (message: string) => {
-            void this.manager.steer(record.id, message).then((outcome) => this.ui?.notify(deliveryText(record.id, outcome), outcome === false ? "warning" : "info"));
+            void this.manager.steer(record.id, message).then((outcome) => this.ui?.notify(deliveryText(record.id, outcome, this.manager.refusalOf(record.id)), outcome === false ? "warning" : "info"));
           },
           this.showCost(),
         );
