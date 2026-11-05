@@ -56,6 +56,7 @@ All notable changes to this project will be documented in this file.
 - *(native-view)* Esc only interrupts the shown run; leave with the arrows (closes #211) ([#212](https://github.com/cad0p/pi-subagents-tintinweb/pull/212))
 - *(usage)* A subagent's spend is its pi session's spend (closes #218) ([#222](https://github.com/cad0p/pi-subagents-tintinweb/pull/222))
 - *(usage)* A subagent's spend reaches the parent on the next tool result, and survives a quit or crash (closes #215) ([#223](https://github.com/cad0p/pi-subagents-tintinweb/pull/223))
+- *(nested)* Root a nested agent's relative session_dir at its branch base (closes #87) ([#230](https://github.com/cad0p/pi-subagents-tintinweb/pull/230))
 
 ### 🚜 Refactor
 
@@ -69,6 +70,8 @@ All notable changes to this project will be documented in this file.
 - *(checklist)* Name a numbered opencode-go account and load its provider ([#170](https://github.com/cad0p/pi-subagents-tintinweb/pull/170)) (closes #169)
 - *(checklist)* Fast-forward the main checkout after every merge (closes #174) ([#175](https://github.com/cad0p/pi-subagents-tintinweb/pull/175))
 - *(readme)* The footer needs pi-background-work, in a matching version pair (closes #180) ([#181](https://github.com/cad0p/pi-subagents-tintinweb/pull/181))
+- *(checklist)* Compare session behaviour with pi's main session before calling it a defect (closes #216) ([#225](https://github.com/cad0p/pi-subagents-tintinweb/pull/225))
+- *(checklist)* A configuration change after spawn gets the simplest behaviour (closes #228) ([#229](https://github.com/cad0p/pi-subagents-tintinweb/pull/229))
 
 
 ## [0.22.0] - 2026-10-21
