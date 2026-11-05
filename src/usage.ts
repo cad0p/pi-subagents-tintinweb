@@ -165,8 +165,10 @@ export function readUsageMarkers(entries: readonly SessionEntry[]): Map<string, 
   for (const entry of entries) {
     if (entry.type !== "message") continue;
     const marker = (entry.message as { subagentUsage?: Partial<UsageMarker> }).subagentUsage;
-    if (!marker || marker.v !== 1 || typeof marker.agents !== "object" || marker.agents === null) continue;
-    for (const [id, total] of Object.entries(marker.agents)) {
+    if (marker?.v !== 1 || !marker) continue;
+    const agents = marker.agents;
+    if (typeof agents !== "object" || agents === null) continue;
+    for (const [id, total] of Object.entries(agents)) {
       const parsed = readLifetimeUsage(total);
       if (parsed) markers.set(id, parsed);
     }

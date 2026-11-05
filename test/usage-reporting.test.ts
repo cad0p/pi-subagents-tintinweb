@@ -173,16 +173,33 @@ describe("reporting subagent usage back to the parent session", () => {
     (globalThis as Record<symbol, { getRecord(id: string): AgentRecord | undefined; listAgents(): AgentRecord[] }>)[MANAGER_KEY];
 
   describe("the parent session's accounting", () => {
-    it("attaches a complete pi Usage to the tool result", async () => {
-      // Catches a stubbed feature (no `usage` at all) and an incomplete one: pi
-      // reads `usage.cost.total` with no guard, so a partial object throws
-      // inside pi rather than at the call site.
-      const { tools } = boot({ reportUsage: true });
+    /** Feed a result through the registered message_end handler, the way pi finalizes it before persisting.
+     *  Returns the message pi would persist — the handler's replacement, or the message itself untouched. */
+    function settled(
+      lifecycle: Map<string, unknown>,
+      result: Partial<ToolResult>,
+      role: "toolResult" | "user" = "toolResult",
+    ): ToolResult & { subagentUsage?: { v: number; agents: Record<string, Usage> } } {
+      const handler = lifecycle.get("message_end") as
+        | ((event: { message: Record<string, unknown> }) => { message: Record<string, unknown> } | undefined)
+        | undefined;
+      if (!handler) throw new Error("no message_end handler registered");
+      const message = { ...result, role, content: result.content ?? [{ type: "text", text: "" }] };
+      return (handler({ message })?.message ?? message) as ToolResult & { subagentUsage?: { v: number; agents: Record<string, Usage> } };
+    }
+
+    it("carries the spend on the finalized message, not on the tool's own result", async () => {
+      // Catches the shape this replaced: draining at the tool's execute return, before the result
+      // message exists. The tool result must be untouched, and the message pi persists must carry both
+      // the usage and the marker — one without the other either loses the spend or re-books it.
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpending({ input: 100, output: 50, cacheWrite: 10, cacheRead: 900, cost: 0.0123 });
 
       const result = await spawn(tools);
+      expect(result).not.toHaveProperty("usage");
 
-      expect(result.usage).toEqual({
+      const message = settled(lifecycle, result);
+      expect(message.usage).toEqual({
         input: 100,
         output: 50,
         // Included, unlike our own display total (#38): pi sums cacheRead across
@@ -193,44 +210,50 @@ describe("reporting subagent usage back to the parent session", () => {
         totalTokens: 1060,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0123 },
       });
+      // The marker names the agent whose frontier moved, at that agent's own session total.
+      const agents = Object.entries(message.subagentUsage?.agents ?? {});
+      expect(message.subagentUsage?.v).toBe(1);
+      expect(agents).toHaveLength(1);
+      expect(agents[0][1].input).toBe(100);
     });
 
     it("reports each message's spend exactly once", async () => {
       // Catches a pool that fails to reset: the second result would re-report
       // the first run's spend, and the parent's totals would climb on every
       // later tool call for work that happened once.
-      const { tools } = boot({ reportUsage: true });
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
-      await spawn(tools);
+      settled(lifecycle, await spawn(tools));
 
       runSpendingNothing();
-      const second = await spawn(tools);
+      const second = settled(lifecycle, await spawn(tools));
 
       expect(second).not.toHaveProperty("usage");
+      expect(second).not.toHaveProperty("subagentUsage");
     });
 
     it("attaches nothing — not a zero — when nothing is pending", async () => {
       // The absence is the contract: a zero-valued `usage` would tell pi this
       // result spent nothing, which is not the same statement as "there was
       // nothing to report", and would add a row of zeros to the session totals.
-      const { tools } = boot({ reportUsage: true });
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpendingNothing();
 
-      const result = await spawn(tools);
+      const result = settled(lifecycle, await spawn(tools));
 
       expect(result).not.toHaveProperty("usage");
-      expect(Object.keys(result)).toEqual(["content", "details"]);
+      expect(result).not.toHaveProperty("subagentUsage");
     });
 
     it("carries what a later run spends on the later result", async () => {
       // Catches a pool that drains into the wrong call — e.g. one that attaches
       // only to the Agent tool and loses background spend entirely.
-      const { tools } = boot({ reportUsage: true });
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0.01 });
-      await spawn(tools);
+      settled(lifecycle, await spawn(tools));
 
       runSpending({ input: 7, output: 3, cacheWrite: 0, cost: 0.002 });
-      const second = await spawn(tools);
+      const second = settled(lifecycle, await spawn(tools));
 
       expect(second.usage?.totalTokens).toBe(10);
       expect(second.usage?.cost.total).toBe(0.002);
@@ -239,30 +262,83 @@ describe("reporting subagent usage back to the parent session", () => {
     it("reports spend through get_subagent_result too", async () => {
       // Background agents finish with no tool result of their own to ride on;
       // whichever of our tools is called next has to carry them.
-      const { tools } = boot({ reportUsage: true });
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpendingLater({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
 
-      const spawned = await spawn(tools);
+      const spawned = settled(lifecycle, await spawn(tools));
       // The run had not spent yet when the spawning tool returned.
       expect(spawned).not.toHaveProperty("usage");
       await flush();
 
       const id = managerHandle().listAgents()[0].id;
-      const result = await getResult(tools, id);
+      const result = settled(lifecycle, await getResult(tools, id));
 
       expect(result.usage?.cost.total).toBe(0.0123);
       expect(result.usage?.totalTokens).toBe(160);
     });
 
-    it("attaches nothing when the setting is off", async () => {
-      // Catches a feature that is always on: it would change numbers the user
-      // already tracks (a statusline reading session cost would step up).
-      const { tools } = boot({ reportUsage: false });
+    it("carries spend on any tool's result, not only this extension's three", async () => {
+      // The reason the drain moved to message_end: a built-in tool's result is the common case for a
+      // background agent finishing between calls, and a filter on toolName would lose it.
+      const { lifecycle, tools } = boot({ reportUsage: true });
+      runSpendingLater({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
+      await spawn(tools);
+      await flush();
+
+      const readShaped = settled(lifecycle, { content: [{ type: "text", text: "file body" }] });
+
+      expect(readShaped.usage?.totalTokens).toBe(160);
+      expect(readShaped.subagentUsage?.v).toBe(1);
+    });
+
+    it("adds to a result that already carries usage instead of replacing it", async () => {
+      // A tool that ran other tools (codemode) has its own usage on the result message already,
+      // combined by the session at message_start. Assigning would drop the parent's own spend.
+      const { lifecycle, tools } = boot({ reportUsage: true });
+      runSpendingLater({ input: 100, output: 50, cacheWrite: 10, cost: 0.01 });
+      await spawn(tools);
+      await flush();
+
+      const own = {
+        input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+      };
+      const message = settled(lifecycle, { usage: own, content: [{ type: "text", text: "nested" }] });
+
+      expect(message.usage?.input).toBe(101);
+      expect(message.usage?.cacheRead).toBe(3);
+      expect(message.usage?.cost.total).toBeCloseTo(0.51, 10);
+    });
+
+    it("leaves a user or steering message alone and keeps the pool for the next tool result", async () => {
+      // pi emits message_end for the user's own prompt and for a queued steering message too. Draining
+      // there would lose the spend — getSessionStats() ignores a user message's usage — and write a
+      // marker claiming it was booked.
+      const { lifecycle, tools } = boot({ reportUsage: true });
+      runSpendingLater({ input: 100, output: 50, cacheWrite: 10, cost: 0.01 });
+      await spawn(tools);
+      await flush();
+
+      const user = settled(lifecycle, { content: [{ type: "text", text: "hello" }] }, "user");
+      expect(user).not.toHaveProperty("usage");
+      expect(user).not.toHaveProperty("subagentUsage");
+
+      const next = settled(lifecycle, { content: [{ type: "text", text: "later" }] });
+      expect(next.usage?.totalTokens).toBe(160);
+    });
+
+    it("attaches no usage when the setting is off, and claims the frontier as an exclusion", async () => {
+      // Catches a feature that is always on: it would change numbers the user already tracks. The
+      // marker still rides out (it accounts for nothing), which is what keeps a recovery from booking
+      // the window as a gap once a tool result happens.
+      const { tools, lifecycle } = boot({ reportUsage: false });
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
 
       const result = await spawn(tools);
+      const message = settled(lifecycle, result);
 
-      expect(result).not.toHaveProperty("usage");
+      expect(message).not.toHaveProperty("usage");
+      expect(message.subagentUsage?.agents).toHaveProperty(managerHandle().listAgents()[0].id);
       // And the text result is untouched — the setting must not change what the
       // orchestrator reads.
       expect(textOf(result)).toContain("Agent started in background");
@@ -271,10 +347,10 @@ describe("reporting subagent usage back to the parent session", () => {
     it("defaults to on", async () => {
       // A default is only a default if it is pinned: this file boots with an
       // empty settings object, so nothing but the code default can be in play.
-      const { tools } = boot({});
+      const { tools, lifecycle } = boot({});
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0.0123 });
 
-      const result = await spawn(tools);
+      const result = settled(lifecycle, await spawn(tools));
 
       expect(result.usage?.cost.total).toBe(0.0123);
       expect(result.usage?.totalTokens).toBe(160);
@@ -283,10 +359,10 @@ describe("reporting subagent usage back to the parent session", () => {
     it("reports an unpriced model's tokens with a zero cost rather than dropping them", async () => {
       // A model pi has no rates for still spent tokens. Dropping the object
       // would lose the token count from the session's totals.
-      const { tools } = boot({ reportUsage: true });
+      const { tools, lifecycle } = boot({ reportUsage: true });
       runSpending({ input: 100, output: 50, cacheWrite: 10, cost: 0 });
 
-      const result = await spawn(tools);
+      const result = settled(lifecycle, await spawn(tools));
 
       expect(result.usage?.totalTokens).toBe(160);
       expect(result.usage?.cost.total).toBe(0);
@@ -303,7 +379,7 @@ describe("reporting subagent usage back to the parent session", () => {
       // holds its own message plus both descendants', the child its own plus the
       // grandchild's, the grandchild its own), so a record-derived report would
       // say 900 and is caught here.
-      const { pi, tools } = boot({ reportUsage: true });
+      const { pi, tools, lifecycle } = boot({ reportUsage: true });
       const perMessage: LifetimeUsage = { input: 100, output: 50, cacheWrite: 0, cost: 0.01 };
 
       vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
@@ -325,10 +401,12 @@ describe("reporting subagent usage back to the parent session", () => {
         return { responseText: "done", session, aborted: false, steered: false };
       });
 
-      const result = await spawn(tools);
+      const result = settled(lifecycle, await spawn(tools));
 
       expect(result.usage?.totalTokens).toBe(450);
       expect(result.usage?.cost.total).toBeCloseTo(0.03, 10);
+      // One marker per agent: each node's own frontier, never a folded total.
+      expect(Object.keys(result.subagentUsage?.agents ?? {})).toHaveLength(3);
 
       const records = managerHandle().listAgents();
       const recordTotal = records.reduce((sum, r) => sum + r.lifetimeUsage.input + r.lifetimeUsage.output, 0);
