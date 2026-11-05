@@ -25,11 +25,16 @@ it reacts to a key, a command or an abort:
 - If the subagent behaves the way the main session does, it is not a defect.
   Close the issue or reject the finding, and quote the main-session behaviour
   as the reason. For example, Esc on a session with nothing in flight draws
-  nothing on a main session either (#216).
+  nothing on a main session either (#216). This never clears a failing Visual
+  proof step: a step that fails is handled as Visual proof says, and the
+  baseline can only show that its sentence needs a design change.
 - A difference from the main session is a defect only when the extension
-  causes it. A deliberate difference must be listed in
-  `docs/fork-differences.md` or the README, with its reason.
-- Cite the pi source (`file:line` in `node_modules/@earendil-works/`) or a
+  causes it. A deliberate difference must be stated in the README, with its
+  reason.
+- The baseline run is not the Visual proof's before capture, which is taken on
+  `main` or a released version of this extension.
+- Cite the pi source (`file:line` under
+  `node_modules/@earendil-works/pi-coding-agent/dist/`, with the pi version) or a
   capture of the main-session run under Evidence.
 
 ## Automated gates
@@ -314,6 +319,8 @@ In the PR body, record:
   fixed it and the time of the first run, the before capture's SHA or version, the head SHA of every after
   run, the quoted line per clause, the quoted instruction for each
   model-action clause, and any changed code path a cleared failure names;
+- for each baseline comparison, the pi version and the cited source or the
+  main-session capture;
 - every review round: the head it reviewed, the agent type, the verdict, and
   whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
