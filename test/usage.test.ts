@@ -423,6 +423,20 @@ describe("usage", () => {
       expect(drained.marker?.agents.a?.input).toBe(430);
     });
 
+    it("books only the growth after reporting is turned back on", () => {
+      // owner pick C's kept half: every off read seeds the frontier in memory, so the toggle back on
+      // reports growth from there — not the window the user opted out of, and not a crash.
+      const pool = new PendingUsagePool();
+      pool.report("a", totals(100));
+      pool.drain();
+
+      pool.seed("a", totals(150)); // a read while off
+      expect(pool.drain().usage).toBeUndefined(); // nothing booked, the frontier still claims it
+
+      pool.report("a", totals(180)); // the first read after turning back on
+      expect(pool.drain().usage?.input).toBe(30);
+    });
+
     it("publishes the frontier a reload hands over instead of one opaque sum", () => {
       const pool = new PendingUsagePool();
       pool.report("a", totals(120));

@@ -247,6 +247,25 @@ describe("durable usage accounting", () => {
       return record.id;
     }
 
+    it("keeps the marker verbatim through a real session file", async () => {
+      // The carrier rests on pi storing an unknown message key as-is: this is the alarm if a pi release
+      // starts stripping it. A marker that does not survive the round trip is spend re-booked on resume.
+      const { tools, lifecycle } = boot({ reportUsage: true });
+      await start(lifecycle, []);
+      settleWithFile(usage(100, 50));
+      await spawnRun(tools);
+      const message = settledMessage(lifecycle, { toolCallId: "read-1", toolName: "read", content: [{ type: "text", text: "body" }] });
+      expect(message.subagentUsage?.v).toBe(1);
+
+      const sm = SessionManager.create(cwd, join(cwd, "sessions"));
+      sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }] } as never);
+      sm.appendMessage(message as never);
+      const reopened = SessionManager.open(sm.getSessionFile()!, undefined, cwd);
+      const stored = reopened.getEntries().find((entry) => entry.type === "message" && (entry.message as { toolCallId?: string }).toolCallId === "read-1");
+
+      expect((stored?.message as { subagentUsage?: Marker }).subagentUsage).toEqual(message.subagentUsage);
+    });
+
     it("writes the accounted entry before unlinking the file, and still unlinks", async () => {
       // Catches a journal written after the unlink (the spend would be gone) and a journal that
       // blocks the unlink (the disk would grow forever).
