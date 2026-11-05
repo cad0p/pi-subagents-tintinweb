@@ -578,6 +578,23 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
   });
 
+  it("T9: a refused steer from the viewer notifies the manager's refusal reason", async () => {
+    const agents = [makeRecord({ id: "live", description: "the one" })];
+    const h = harness(agents);
+    vi.mocked(h.manager.steer).mockResolvedValueOnce(false);
+    vi.mocked(h.manager.refusalOf).mockReturnValueOnce("branch pi-agent-x is gone");
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+
+    const viewer = h.overlayComponent();
+    viewer!.handleInput("\r");
+    for (const ch of "go left") viewer!.handleInput(ch);
+    viewer!.handleInput("\r");
+
+    await vi.waitFor(() => expect(h.notifications).toContain("Nothing was delivered to agent live: branch pi-agent-x is gone"));
+  });
+
   it("does NOT auto-close when the viewed agent finishes (final output stays readable)", () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);

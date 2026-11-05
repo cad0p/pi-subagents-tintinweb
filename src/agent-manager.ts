@@ -2218,8 +2218,10 @@ export class AgentManager {
     });
     const current = this.agents.get(id);
     if (!reopened || !current) {
-      // Nobody owns a copy the reopen made; an evicted record already gave its own back.
+      // Nobody owns a copy the reopen made; an evicted record already gave its own back. A reopen that
+      // failed leaves no transition to emit the hand-over from, so the sweep runs here.
       this.releaseResumedWorktree(current ?? record);
+      this.handOverIdle();
       return false;
     }
     // Another input may have started or parked the record while the session reopened: take the current state.
@@ -2228,6 +2230,7 @@ export class AgentManager {
     const prompt = interrupted ? interruptionNote(current, text, this.recreatedWorktrees.has(current.id)) : text;
     if (!this.resume(id, prompt, callbacks)) {
       this.releaseResumedWorktree(current);
+      this.handOverIdle();
       return false;
     }
     return interrupted ? "resumedAfterCrash" : "resumed";

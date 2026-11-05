@@ -370,6 +370,14 @@ describe("nested Agent tool", () => {
     expect(textOf(result)).toContain("Nothing was delivered to agent");
     expect((result as { isError?: boolean }).isError).toBe(true);
   });
+
+  it("T9: the nested SendMessage names the manager's refusal reason", async () => {
+    records.set("child-2", { id: "child-2", status: "completed", parentAgentId: "parent-1" } as AgentRecord);
+    vi.mocked(manager.deliver).mockResolvedValueOnce(false);
+    vi.spyOn(manager, "refusalOf").mockReturnValueOnce("branch pi-agent-x is gone");
+    const result = await run(2, { to: "child-2", message: "more" });
+    expect(textOf(result)).toBe("Nothing was delivered to agent child-2: branch pi-agent-x is gone");
+  });
 });
 
 describe("nested result / steer / checkpoint tools", () => {

@@ -1189,6 +1189,61 @@ describe("agents command terminal surfaces", () => {
     expect(notifications.map(n => n.message)).toContain('Stopped "desctail forged".');
   });
 
+  it("T9: a refused steer from the /agents viewer notifies the manager's refusal reason", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
+    const { pi, tools, commands } = makePi();
+    delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+    subagentsExtension(pi);
+
+    const { c, notifications } = commandCtx((title, options) => {
+      if (title === "Agents") return options.find(o => o.startsWith("Running agents ("));
+      if (title === "Running agents") return options[0];
+      return undefined;
+    });
+    const spawn = await tools.get("Agent").execute(
+      "tc-spawn",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      undefined, undefined, c,
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1] as string;
+    // A settled record whose session file is gone: the viewer opens its transcript, and the steer's reopen is refused.
+    const record = (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+    record.status = "completed";
+    record.settled = true;
+    record.session = undefined;
+    record.childSettings = { effectiveCwd: "/tmp" };
+    const gone = join(tmpdir(), `pi-subagents-gone-${id}.jsonl`);
+    record.sessionFile = gone;
+
+    let opened = false;
+    c.ui.custom.mockImplementation((factory: any) =>
+      new Promise<undefined>(resolve => {
+        const viewer = factory({ terminal: { rows: 40, columns: 80 }, requestRender: vi.fn() }, mockTheme, undefined, resolve);
+        viewer.handleInput("\r");
+        for (const ch of "go left") viewer.handleInput(ch);
+        viewer.handleInput("\r");
+        opened = true;
+        resolve(undefined);
+      }),
+    );
+    // Back-navigation re-shows the menu once; stop after the first viewer.
+    let runningSelects = 0;
+    c.ui.select.mockImplementation(async (title: string, options: string[]) => {
+      if (title === "Agents") return runningSelects === 0 ? options.find(o => o.startsWith("Running agents (")) : undefined;
+      if (title === "Running agents") return runningSelects++ === 0 ? options[0] : undefined;
+      return undefined;
+    });
+
+    await commands.get("agents").handler("", c);
+
+    expect(opened).toBe(true);
+    await vi.waitFor(() =>
+      expect(notifications.map(n => n.message)).toContain(
+        `Nothing was delivered to agent ${id}: its session file ${gone} is missing or unreadable.`,
+      ),
+    );
+  });
+
   it("collapses a newline in a record status in the running-agents menu", async () => {
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {})); // never completes
     const { pi, tools, commands } = makePi();
