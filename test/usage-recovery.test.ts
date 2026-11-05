@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type AccountedTotal, ACCOUNTED_ENTRY, LEDGER_VERSION, readAccounted, type SpawnedLedgerEntry, spawnsOf } from "../src/ledger.js";
+import { ACCOUNTED_ENTRY, type AccountedTotal, LEDGER_VERSION, readAccounted, type SpawnedLedgerEntry, spawnsOf } from "../src/ledger.js";
 import { type LifetimeUsage, readUsageMarkers, sessionFileUsage } from "../src/usage.js";
 import { isLegacyUsageFile, legacySeeds, walkUsageTotals } from "../src/usage-recovery.js";
 
