@@ -2445,7 +2445,7 @@ export class AgentManager {
    * may briefly exceed maxConcurrent until it settles. A subtree with a live run stays
    * here and reports through the handover when it settles. Nothing is aborted or disposed.
    */
-  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map(), frontier: ReadonlyMap<string, LifetimeUsage> = new Map()): ReloadHandover {
+  beginDrain(nudged: NudgeEntry[], unreported: LifetimeUsage | undefined, activity: ReadonlyMap<string, AgentActivity> = new Map(), frontier: ReadonlyMap<string, LifetimeUsage> = new Map(), written: ReadonlyMap<string, LifetimeUsage> = new Map()): ReloadHandover {
     const queued: QueuedSpec[] = [];
     const gated: GateEntry[] = [];
     const nested: { id: string; record: AgentRecord; args: SpawnArgs }[] = [];
@@ -2465,9 +2465,9 @@ export class AgentManager {
     }
     this.slotFifo = [];
     for (const { id, record, args } of nested) this.startQueued(id, record, args);
-    // The per-agent frontier, not one opaque sum: the successor recomputes its pool as frontier minus the
-    // totals the file already claims, so every adopted agent gets a marker on its first drain.
-    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders, frontier);
+    // The per-agent frontier and written claim beside the aggregate, not one opaque sum: the successor seeds
+    // both and pools only the aggregate, so a frontier a seed moved is never reported as spend.
+    const handover = new ReloadHandover(this.moveIdle().flat(), queued, nudged, unreported, this, activity, this.slotHolders, frontier, written);
     this.handover = handover;
     this.onStart = undefined;
     this.onCompact = undefined;
@@ -2505,7 +2505,6 @@ export class AgentManager {
     record.settled = true;
     this.agents.set(record.id, record);
     this.ledgerWriters.set(record.id, writer);
-    this.accountedWriter ??= writer;
     if (notify) this.notifyCompleted(record);
     return record;
   }

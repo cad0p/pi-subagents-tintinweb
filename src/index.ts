@@ -39,7 +39,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { localOwnerHost } from "./owner-identity.js";
 import { ProgramStatusReporter } from "./program-status.js";
-import { type AgentDto, failedSpecDto, fromDto, frontierOf, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeRetainedOf, takeStrandedHandovers, takeUnreportedOf } from "./reload-handover.js";
+import { type AgentDto, failedSpecDto, fromDto, frontierOf, type HandoverEvent, type HandoverItem, legacyDelivered, publishHandovers, type ReloadHandover, slotHoldersOf, takeHandovers, takeNudgeEntries, takeRetainedOf, takeStrandedHandovers, takeUnreportedOf, writtenOf } from "./reload-handover.js";
 import { formatLifetimeTokens, setReportShowCost } from "./result-report.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -378,6 +378,13 @@ export default function (pi: ExtensionAPI) {
     // Whatever accumulated while it was on is stale the moment it goes off:
     // draining it later would bill the parent for a window the user opted out
     // of, in one lump, on some unrelated later tool call.
+    //
+    // The drain takes both halves and this activation keeps neither: the spend is
+    // dropped, and the marker it returned was never a file claim to begin with.
+    // Owner pick C writes no accounted entry while reporting is off — every read
+    // while off still seeds the frontier in memory, and that is all. Accepted
+    // limit: a crash after an off window, then a start with reporting back on,
+    // books that window's spend once, because nothing on disk says it was opted out.
     if (!b) pendingUsage.drain();
   }
   /** Show `~$X` next to token counts in the subagent surfaces. */
@@ -1027,16 +1034,17 @@ export default function (pi: ExtensionAPI) {
     const entries = ctx.sessionManager?.getEntries?.();
     if (!entries) return;
     const own = ownEntries(ctx.sessionManager.getHeader?.() ?? null, entries);
-    const accounted = readAccounted(own);
+    const { claims: accounted, stamped } = readAccounted(own);
     const spawns = spawnsOf(own);
     // A file with spawns and no stamp predates markers: reading its missing markers as zero would book
-    // every surviving child's whole lifetime at once, on this start and every start after it.
-    const legacy = isLegacyUsageFile(spawns, accounted);
+    // every surviving child's whole lifetime at once, on this start and every start after it. The stamp,
+    // not a claim, is the discriminator: a stamped file whose children have no claim yet is this build's.
+    const legacy = isLegacyUsageFile(spawns, stamped);
     const booked = new Map<string, LifetimeUsage>();
     for (const [id, claim] of accounted) if (claim.booked) booked.set(id, claim.total);
     // Never a claim still to be booked: seeding `written` from it would make the drain that books it
     // skip its marker, and the next start would book the same gap from the same entry.
-    pendingUsage.seedMarkers(readUsageMarkers(own), booked);
+    pendingUsage.seedAccounted(readUsageMarkers(own), booked);
     // On reload only the legacy branch consumes the walk, so a stamped file opens no child session.
     recoveredUsageTotals = legacy || reason === "startup" || reason === "resume" ? walkUsageTotals(spawns, accounted) : new Map();
     const seeds: Record<string, AccountedTotal> = {};
@@ -1207,7 +1215,7 @@ export default function (pi: ExtensionAPI) {
         // Keep both hand-over contracts: an older successor reads only the aggregate, while this release
         // prefers the per-agent frontier and ignores the aggregate to avoid adding the same spend twice.
         const unreported = pendingUsage.takeLifetime();
-        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, unreported, new Map(agentActivity), pendingUsage.frontierSnapshot())]);
+        publishHandovers(ctx.sessionManager.getSessionId(), [...held, manager.beginDrain(handoverNudges, unreported, new Map(agentActivity), pendingUsage.frontierSnapshot(), pendingUsage.writtenSnapshot())]);
         held = [];
       }
     } else {
@@ -1270,20 +1278,14 @@ export default function (pi: ExtensionAPI) {
     // survive that republish (see `takeUnreported`). Read through `takeUnreportedOf`, never directly: an older
     // hand-over has no such member, and a call on it throws here, before anything is adopted — and `takeHandovers`
     // has already emptied the store, so that hand-over would be adopted by nobody and stopped by nobody.
-    const frontiers = new Map<ReloadHandover, ReadonlyMap<string, LifetimeUsage> | undefined>();
     for (const h of held) {
+      // Seed both maps and pool only the aggregate. The frontier is not pending spend: a first-bind seed or
+      // an off-window read moves it while the pool stays empty, so reporting it would hand the successor
+      // history the old activation deliberately excluded. A pre-frontier publisher has only the aggregate.
       const frontier = frontierOf(h);
-      frontiers.set(h, frontier);
-      if (frontier) {
-        // The aggregate is published for older successors, but the map claims the same pending spend;
-        // adding both would duplicate it. Pool the per-agent difference from what the file already claims.
-        for (const [id, total] of frontier) pendingUsage.report(id, total);
-      } else {
-        // A pre-frontier publisher has only the aggregate. Prefer its separate accessor if available,
-        // then the old take() fallback below; never call a member an older hand-over does not have.
-        const unreported = takeUnreportedOf(h);
-        if (unreported) pendingUsage.add(unreported);
-      }
+      if (frontier) pendingUsage.seedState(frontier, writtenOf(h) ?? new Map());
+      const unreported = takeUnreportedOf(h);
+      if (unreported) pendingUsage.add(unreported);
     }
     for (const h of held) manager.adoptSlotHolders(slotHoldersOf(h));
     openSlots();
@@ -1310,9 +1312,9 @@ export default function (pi: ExtensionAPI) {
       // The queued specs are taken here, in the loop, and not with the unreported spend above: this is the activation
       // that spawns them, and a hand-over this loop has not reached must be republished with its queue intact.
       const taken = h.take();
-      // An older hand-over may not expose takeUnreported(), in which case this is its only spend field.
-      // New publishers also carry this aggregate, but a present frontier map already represented the same spend.
-      if (!frontiers.get(h) && taken.unreported) pendingUsage.add(taken.unreported);
+      // A publisher from a release without takeUnreported has only this field. A current one had it consumed
+      // above, beside the maps it published with it, so there is nothing left to add twice.
+      if (taken.unreported) pendingUsage.add(taken.unreported);
       // Records of an older activation carry no spawnerSessionId or resultDelivered. Found here, fixed after
       // the idle loop, once this hand-over's pending nudges are known.
       const legacyIds = [...h.draining.ownAgents(), ...h.idleItems().map((item) => item.dto)]
@@ -1480,17 +1482,14 @@ export default function (pi: ExtensionAPI) {
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
+      // Same rule as adoption: seed the claim, pool only the aggregate, never the frontier itself.
       const frontier = frontierOf(h);
-      if (frontier) {
-        for (const [id, total] of frontier) pendingUsage.report(id, total);
-      } else {
-        const unreported = takeUnreportedOf(h);
-        if (unreported) pendingUsage.add(unreported);
-      }
+      if (frontier) pendingUsage.seedState(frontier, writtenOf(h) ?? new Map());
+      const unreported = takeUnreportedOf(h);
+      if (unreported) pendingUsage.add(unreported);
       const taken = h.take();
-      // The aggregate is present for older readers; only an older publisher lacking a frontier needs
-      // the fallback. A newer stranded pool has the same spend in its map.
-      if (!frontier && taken.unreported) pendingUsage.add(taken.unreported);
+      // The aggregate is present for older readers too; a current one had it consumed above.
+      if (taken.unreported) pendingUsage.add(taken.unreported);
       h.stop(replayStoppedUsage);
       h.draining.abortAll();
       h.draining.dispose();

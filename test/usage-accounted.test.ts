@@ -122,6 +122,26 @@ describe("durable usage accounting", () => {
     } as never;
   }
 
+  /** A root activation backed by a real session file: what one start writes, the next start reads back. */
+  function bootOnFile(existingFile?: string) {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ reportUsage: true }));
+    const sm = existingFile ? SessionManager.open(existingFile, undefined, cwd) : SessionManager.create(cwd, join(cwd, "parent-sessions"));
+    // A stamp written before the session's first flush never reaches the file, so open with one message.
+    if (!existingFile) sm.appendMessage({ role: "user", content: [{ type: "text", text: "go" }] } as never);
+    const { pi, tools, lifecycle } = makePi();
+    pi.appendEntry.mockImplementation((customType: string, data: unknown) => { sm.appendCustomEntry(customType, data); });
+    subagentsExtension(pi);
+    const file = sm.getSessionFile();
+    if (!file) throw new Error("parent session file was not written");
+    return { pi, tools, lifecycle, sm, file };
+  }
+
+  /** The session_start context for an activation backed by `sm`. */
+  function ctxOn(sm: SessionManager) {
+    return { ...spawnCtx(cwd), hasUI: false, mode: "print", sessionManager: sm } as never;
+  }
+
   type Lifecycle = Map<string, (event: unknown, ctx: unknown) => unknown>;
 
   async function start(lifecycle: Lifecycle, entries: SessionEntry[], reason = "startup", header?: unknown) {
@@ -265,6 +285,56 @@ describe("durable usage accounting", () => {
       await start(lifecycle, [accountedEntry({})]);
 
       expect(settledMessage(lifecycle)).not.toHaveProperty("usage");
+    });
+  });
+
+  describe("resume of a stamped file", () => {
+    it("books a settled child's spend that no tool result ever carried", async () => {
+      // The live B2 sequence, end to end through two activations on one session file: this start stamps the
+      // file, the child settles with spend in its own file, and no tool result follows, so nothing was drained
+      // and no marker was written. Before the fix the empty stamp was read as "no accounted entry", the file
+      // was taken for a pre-marker one, and the child's whole total was seeded as booked: the spend vanished
+      // and the next drain wrote a marker claiming it.
+      const first = bootOnFile();
+      const childSpend = usage(100, 50);
+      const childSessionFile = childFile(childSpend);
+      const stats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        const session = {
+          getSessionStats: () => ({ tokens: { ...stats, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite }, cost: stats.cost }),
+          dispose: vi.fn(), subscribe: () => () => {}, isStreaming: false,
+          abort: vi.fn(), steer: vi.fn(),
+          agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
+          clearQueue: () => ({ steering: [], followUp: [] }),
+          sessionManager: { getSessionId: () => "child", getSessionFile: () => childSessionFile, getHeader: () => ({ type: "session" }), getEntries: () => [] },
+        };
+        options.onSessionCreated?.(session as never, attachSessionLifecycle(session as never));
+        Object.assign(stats, { input: childSpend.input, output: childSpend.output });
+        options.onUsage?.();
+        return { responseText: "done", session: session as never, aborted: false, steered: false };
+      });
+      await first.lifecycle.get("session_start")?.({ type: "session_start", reason: "startup" }, ctxOn(first.sm));
+      const agent = first.tools.get("Agent") as { execute(id: string, params: Record<string, unknown>, s?: unknown, u?: unknown, c?: unknown): Promise<unknown> };
+      await agent.execute("tc-1", { prompt: "go", description: "spend", subagent_type: "general-purpose" }, undefined, undefined, spawnCtx(cwd));
+      const manager = (globalThis as Record<symbol, { listAgents(): AgentRecord[] }>)[MANAGER_KEY];
+      await manager.listAgents()[0]?.promise;
+
+      // Exactly the stamp and the spawn entry: no drain ran, so the file claims nothing.
+      const written = SessionManager.open(first.file, undefined, cwd).getEntries();
+      expect(written.filter((entry) => entry.type === "custom" && entry.customType === ACCOUNTED_ENTRY)).toHaveLength(1);
+      expect(existsSync(childSessionFile)).toBe(true);
+
+      // A new activation on the same file, the way /resume opens it, then one tool result.
+      const second = bootOnFile(first.file);
+      await second.lifecycle.get("session_start")?.({ type: "session_start", reason: "resume" }, ctxOn(second.sm));
+      const message = settledMessage(second.lifecycle);
+
+      expect(message.usage).toMatchObject({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } });
+      expect(message.subagentUsage?.agents).toEqual({
+        [manager.listAgents()[0].id]: { input: 100, output: 50, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      });
+      // The resume wrote its own empty stamp again — not a legacy seed of the total it just booked.
+      expect(accountedWrites(second.pi).at(-1)?.agents).toEqual({});
     });
   });
 

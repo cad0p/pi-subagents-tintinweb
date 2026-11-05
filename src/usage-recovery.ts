@@ -51,11 +51,13 @@ export function walkUsageTotals(
 
 /**
  * Whether a session file was written before this build claimed its children's spend: it has spawns
- * and no accounted entry at all. `booked` totals are what keeps the rule from firing twice — an
- * empty stamp is still a stamp, so a fork or a file with nothing to claim is not legacy.
+ * and no accounted entry at all. The stamp is what keeps the rule from firing twice — an empty stamp
+ * is still a stamp, so a fork or a file whose children have no claim yet is not legacy. Counting
+ * claims instead would read every stamped file with no claim as pre-marker and seed its children's
+ * whole lifetime as booked.
  */
-export function isLegacyUsageFile(spawns: ReadonlyMap<string, unknown>, accounted: ReadonlyMap<string, unknown>): boolean {
-  return spawns.size > 0 && accounted.size === 0;
+export function isLegacyUsageFile(spawns: ReadonlyMap<string, unknown>, stamped: boolean): boolean {
+  return spawns.size > 0 && !stamped;
 }
 
 /** The stamp a legacy file gets: every spawn's total, booked, so the exclusion survives a quit with no tool result. */

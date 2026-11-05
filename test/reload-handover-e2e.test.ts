@@ -600,6 +600,27 @@ describe("subagents across a real /reload (faux provider)", () => {
     expect(toolResultUsage(root, "Agent")?.totalTokens).toBe(10);
   }, 20_000);
 
+  it("books nothing for a frontier that only a seed moved", async () => {
+    const root = session;
+    if (!root) throw new Error("no session");
+    const dto = handoverItem("seeded-id");
+    const totals = { input: 7, output: 3, cacheWrite: 0 };
+    // A resumed child with prior history: its first bind seeded the frontier, no read grew the pool, and no
+    // drain followed before the reload. So the aggregate is absent and the written claim is still empty.
+    const handover = new ReloadHandover([{ dto }], [], [], undefined, emptyPool(), new Map(), new Set(), new Map([[dto.id, totals]]), new Map());
+    const undo = publishExtra([handover]);
+    try {
+      await reloadRoot(root);
+    } finally {
+      undo();
+    }
+
+    // That total is the child's own history, not spend this parent was ever told about. Pooling the frontier
+    // would put ten tokens on this result and a marker beside them claiming history nobody watched accrue.
+    await root.prompt("spawn-now");
+    expect(toolResultUsage(root, "Agent")).toBeUndefined();
+  }, 20_000);
+
   it("adopts a hand-over from a release without takeUnreported, and folds in the spend its take still carries", async () => {
     const root = session;
     if (!root) throw new Error("no session");

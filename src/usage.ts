@@ -225,11 +225,11 @@ export class PendingUsagePool {
   }
 
   /**
-   * Seed the frontier and the written claim for every id a startup found already accounted
-   * for: the markers in the file, and the totals of booked claims. Never a claim still to be
-   * booked, or the drain that books it would skip its marker.
+   * Seed the frontier and the written claim for every id a startup found already accounted for: the
+   * markers in the file, and the totals of booked claims. Each is a claim, so it raises both. Never a
+   * claim still to be booked, or the drain that books it would skip its marker.
    */
-  seedMarkers(markers: ReadonlyMap<string, LifetimeUsage>, booked: ReadonlyMap<string, LifetimeUsage>): void {
+  seedAccounted(markers: ReadonlyMap<string, LifetimeUsage>, booked: ReadonlyMap<string, LifetimeUsage>): void {
     for (const source of [markers, booked]) {
       for (const [id, total] of source) {
         const frontier = maxUsage(this.frontier.get(id) ?? zeroUsage(), total);
@@ -239,9 +239,29 @@ export class PendingUsagePool {
     }
   }
 
+  /**
+   * Seed a reload hand-over's accounting state exactly as it stands: the frontier every read was
+   * accounted through, and the claim a persisted marker already covers. They differ where an exclusion
+   * (a first-bind seed, an off read) moved the frontier with no spend, so each raises its own map.
+   * The hand-over's aggregate is the pending spend and is added separately, never derived from these.
+   */
+  seedState(frontier: ReadonlyMap<string, LifetimeUsage>, written: ReadonlyMap<string, LifetimeUsage>): void {
+    for (const [id, total] of frontier) this.frontier.set(id, maxUsage(this.frontier.get(id) ?? zeroUsage(), total));
+    for (const [id, total] of written) {
+      const claim = maxUsage(this.written.get(id) ?? zeroUsage(), total);
+      this.written.set(id, claim);
+      this.frontier.set(id, maxUsage(this.frontier.get(id) ?? zeroUsage(), claim));
+    }
+  }
+
   /** Every accounted agent's frontier: a reload hands this over instead of one opaque sum. */
   frontierSnapshot(): Map<string, LifetimeUsage> {
     return new Map(this.frontier);
+  }
+
+  /** Every written claim beside it, so a successor can seed both and pool only what is still pending. */
+  writtenSnapshot(): Map<string, LifetimeUsage> {
+    return new Map(this.written);
   }
 
   /**

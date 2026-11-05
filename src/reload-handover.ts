@@ -122,8 +122,10 @@ export class ReloadHandover {
   private queued: QueuedSpec[];
   private nudged: NudgeEntry[];
   private unreported?: LifetimeUsage;
-  /** Per-agent accounting frontier: the successor pools `frontier - written` and marks each adopted id once. */
+  /** Per-agent accounting frontier: the successor seeds it, so an id only a seed moved is never pooled. */
   readonly frontier: ReadonlyMap<string, LifetimeUsage>;
+  /** Per-agent written claim beside it. The pending spend is the aggregate, never the frontier difference. */
+  readonly written: ReadonlyMap<string, LifetimeUsage>;
   /** Settled child files the draining manager kept; the successor writes their removal entry and unlinks them. */
   private retained: RetainedSettled[] = [];
   private stopped = false;
@@ -141,12 +143,14 @@ export class ReloadHandover {
     /** The pool slots the draining runs hold. The old manager shares this set, so its releases reach it until adoption. */
     readonly slotHolders: Set<string> = new Set(),
     frontier: ReadonlyMap<string, LifetimeUsage> = new Map(),
+    written: ReadonlyMap<string, LifetimeUsage> = new Map(),
   ) {
     this.items = items;
     this.queued = queued;
     this.nudged = nudged;
     this.unreported = unreported;
     this.frontier = frontier;
+    this.written = written;
   }
 
   /** Records files a draining manager kept instead of unlinking. Called once, from its dispose. */
@@ -367,6 +371,12 @@ export function takeUnreportedOf(handover: ReloadHandover): LifetimeUsage | unde
 export function frontierOf(handover: ReloadHandover): ReadonlyMap<string, LifetimeUsage> | undefined {
   const frontier = (handover as { frontier?: unknown }).frontier;
   return frontier instanceof Map ? (frontier as ReadonlyMap<string, LifetimeUsage>) : undefined;
+}
+
+/** The written claim beside that frontier; a publisher with no frontier has no claim map either. */
+export function writtenOf(handover: ReloadHandover): ReadonlyMap<string, LifetimeUsage> | undefined {
+  const written = (handover as { written?: unknown }).written;
+  return written instanceof Map ? (written as ReadonlyMap<string, LifetimeUsage>) : undefined;
 }
 
 /** The settled files a draining manager kept, for a successor that knows how to retire them. */

@@ -209,25 +209,36 @@ function readNoticeIds(data: unknown): string[] {
   return notice.ids.filter((id): id is string => typeof id === "string");
 }
 
+/** What a session's accounted entries say: the latest claim per id, and whether the file carries a stamp at all. */
+export interface AccountedRead {
+  claims: Map<string, AccountedTotal>;
+  /** Some entry of this type was written by this build, whatever it claimed. An empty stamp counts. */
+  stamped: boolean;
+}
+
 /**
  * The accounted entries a session wrote, latest per id. A malformed entry, or one from a later
- * version, is ignored; an entry with no agents is the format stamp and contributes nothing.
+ * version, is ignored. The stamp and the claims are reported separately: an entry with no agents
+ * claims nothing, but it still marks the file as this build's, which is what keeps the legacy rule
+ * from reading every missing marker as spend to book.
  */
-export function readAccounted(entries: readonly SessionEntry[]): Map<string, AccountedTotal> {
-  const accounts = new Map<string, AccountedTotal>();
+export function readAccounted(entries: readonly SessionEntry[]): AccountedRead {
+  const claims = new Map<string, AccountedTotal>();
+  let stamped = false;
   for (const entry of entries) {
     if (entry.type !== "custom" || entry.customType !== ACCOUNTED_ENTRY) continue;
     if (isNewerLedgerEntry(entry.data)) continue;
     const agents = (entry.data as { agents?: unknown } | undefined)?.agents;
     if (typeof agents !== "object" || agents === null) continue;
+    stamped = true;
     for (const [id, claim] of Object.entries(agents as Record<string, unknown>)) {
       if (typeof claim !== "object" || claim === null) continue;
       const { total, booked } = claim as { total?: unknown; booked?: unknown };
       const parsed = readLifetimeUsage(total);
-      if (parsed) accounts.set(id, { total: parsed, booked: booked === true });
+      if (parsed) claims.set(id, { total: parsed, booked: booked === true });
     }
   }
-  return accounts;
+  return { claims, stamped };
 }
 
 /** Every spawn a session's ledger names, latest entry per id: settled runs included, which a replay drops. */

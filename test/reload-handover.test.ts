@@ -30,6 +30,7 @@ import {
   takeUnreportedOf,
   toDto,
   toSpawnData,
+  writtenOf,
 } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
 import { addUsage, type LifetimeUsage } from "../src/usage.js";
@@ -147,21 +148,25 @@ describe("ReloadHandover buffering", () => {
     expect(older.take().unreported).toEqual(delta);
   });
 
-  it("publishes the aggregate beside the frontier so an older successor still takes its spend", () => {
+  it("publishes the aggregate beside the frontier and its written claim, for a successor that seeds both", () => {
     const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
     const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
-    const handover = new ReloadHandover([], [], [], aggregate, stubPool, new Map(), new Set(), frontier);
+    const written = new Map<string, LifetimeUsage>();
+    const handover = new ReloadHandover([], [], [], aggregate, stubPool, new Map(), new Set(), frontier, written);
 
-    // An older reader does not know the frontier member; its existing take() contract still sees the aggregate.
+    // An older reader does not know either member; its existing take() contract still sees the aggregate.
     expect(handover.take().unreported).toEqual(aggregate);
     expect(frontierOf(handover)).toEqual(frontier);
+    expect(writtenOf(handover)).toEqual(written);
   });
 
   it("recognizes an older publisher by the absence of its frontier member", () => {
     const older = new ReloadHandover([], [], [], { input: 1, output: 0, cacheWrite: 0 }, stubPool);
     Reflect.deleteProperty(older, "frontier");
+    Reflect.deleteProperty(older, "written");
 
     expect(frontierOf(older)).toBeUndefined();
+    expect(writtenOf(older)).toBeUndefined();
     expect(older.take().unreported).toEqual({ input: 1, output: 0, cacheWrite: 0 });
   });
 
@@ -388,11 +393,14 @@ describe("AgentManager hand-over", () => {
     const manager = track(new AgentManager());
     const aggregate: LifetimeUsage = { input: 7, output: 3, cacheWrite: 0 };
     const frontier = new Map([["agent", { input: 7, output: 3, cacheWrite: 0 }]]);
-    const handover = manager.beginDrain([], aggregate, new Map(), frontier);
+    const written = new Map([["agent", { input: 5, output: 0, cacheWrite: 0 }]]);
+    const handover = manager.beginDrain([], aggregate, new Map(), frontier, written);
 
     // A downgraded successor only knows take().unreported; the new frontier is additive, not a replacement.
     expect(handover.take().unreported).toEqual(aggregate);
     expect(frontierOf(handover)).toEqual(frontier);
+    // The claim map rides beside it, so the successor seeds both instead of pooling the frontier difference.
+    expect(writtenOf(handover)).toEqual(written);
   });
 
   it("hands a retained settled file to the successor, which journals before unlinking", async () => {

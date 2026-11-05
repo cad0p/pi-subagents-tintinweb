@@ -160,18 +160,18 @@ describe("usage recovery", () => {
   });
 
   describe("isLegacyUsageFile", () => {
-    it("treats a file with spawns and no accounted entry as pre-marker", () => {
-      expect(isLegacyUsageFile(new Map([["a", {}]]), new Map())).toBe(true);
+    it("treats a file with spawns and no stamp as pre-marker", () => {
+      expect(isLegacyUsageFile(new Map([["a", {}]]), false)).toBe(true);
     });
 
-    it("does not treat a stamped file as legacy, even with no markers in it", () => {
-      // The discriminator is the stamp, not the absence of markers: a this-build file with nothing
-      // drained yet must book its real gap.
-      expect(isLegacyUsageFile(new Map([["a", {}]]), new Map([["a", { total: totals(1), booked: true }]]))).toBe(false);
+    it("does not treat a stamped file as legacy, even when it claims nothing", () => {
+      // The discriminator is the stamp, not a claim: a this-build file whose children have no claim yet
+      // (an empty stamp on every start) must book its real gap instead of seeding it as booked.
+      expect(isLegacyUsageFile(new Map([["a", {}]]), true)).toBe(false);
     });
 
     it("does not treat an empty file as legacy", () => {
-      expect(isLegacyUsageFile(new Map(), new Map())).toBe(false);
+      expect(isLegacyUsageFile(new Map(), false)).toBe(false);
     });
   });
 
@@ -187,20 +187,33 @@ describe("usage recovery", () => {
     it("keeps the latest entry per id", () => {
       const entries = [accounted({ a: { total: totals(10), booked: false } }), accounted({ a: { total: totals(20), booked: true } })];
 
-      expect(readAccounted(entries).get("a")).toEqual({ total: totals(20), booked: true });
+      expect(readAccounted(entries).claims.get("a")).toEqual({ total: totals(20), booked: true });
     });
 
     it("reads a later version as no claim at all", () => {
       // A downgrade must not misread a shape it does not know: ignoring it books nothing extra.
       const entries = [custom(ACCOUNTED_ENTRY, { v: LEDGER_VERSION + 1, agents: { a: { total: totals(10), booked: false } } })];
 
-      expect(readAccounted(entries).size).toBe(0);
+      expect(readAccounted(entries).claims.size).toBe(0);
     });
 
-    it("ignores a malformed total and an empty stamp", () => {
+    it("ignores a malformed total but still reports the stamp", () => {
+      // The stamp and the claims answer different questions: a bad claim costs its own total, while the
+      // file is still this build's and must not be read as pre-marker.
       const entries = [custom(ACCOUNTED_ENTRY, { v: LEDGER_VERSION, agents: { a: { total: { input: "x" }, booked: false } } }), accounted({})];
 
-      expect(readAccounted(entries).size).toBe(0);
+      expect(readAccounted(entries)).toMatchObject({ stamped: true });
+      expect(readAccounted(entries).claims.size).toBe(0);
+    });
+
+    it("stamps a file whose only account entry is the empty format stamp", () => {
+      // The exact shape every root start writes: no claim, but a stamp. Reading this as "no account" is
+      // what made every stamped file legacy and lost a settled child's spend at the next resume.
+      expect(readAccounted([accounted({})])).toEqual({ claims: new Map(), stamped: true });
+    });
+
+    it("does not stamp a file with no accounted entry at all", () => {
+      expect(readAccounted([])).toEqual({ claims: new Map(), stamped: false });
     });
   });
 

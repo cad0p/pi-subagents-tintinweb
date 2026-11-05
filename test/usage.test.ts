@@ -403,7 +403,7 @@ describe("usage", () => {
       // What a startup does before it computes a gap: the marker is a claim, so neither the pool nor
       // a later drain may move for it.
       const pool = new PendingUsagePool();
-      pool.seedMarkers(new Map([["a", totals(400)]]), new Map());
+      pool.seedAccounted(new Map([["a", totals(400)]]), new Map());
 
       expect(pool.drain()).toEqual({ usage: undefined, marker: undefined });
       pool.report("a", totals(450));
@@ -414,13 +414,34 @@ describe("usage", () => {
       // A booked claim is money the parent has already agreed not to take again: the next marker at
       // that total must not re-add it, and growth past it must still be booked.
       const pool = new PendingUsagePool();
-      pool.seedMarkers(new Map(), new Map([["a", totals(400)]]));
+      pool.seedAccounted(new Map(), new Map([["a", totals(400)]]));
 
       expect(pool.drain()).toEqual({ usage: undefined, marker: undefined });
       pool.report("a", totals(430));
       const drained = pool.drain();
       expect(drained.usage?.totalTokens).toBe(30);
       expect(drained.marker?.agents.a?.input).toBe(430);
+    });
+
+    it("seeds a hand-over's frontier and written claim instead of pooling their difference", () => {
+      // What a reload hands over for a resumed child whose first bind seeded its history: the frontier is
+      // 400, the written claim 300, and the pool it had taken is empty. Seeding must not read the frontier
+      // as spend, and the first drain must still claim that frontier as an exclusion.
+      const pool = new PendingUsagePool();
+      pool.seedState(new Map([["a", totals(400)]]), new Map([["a", totals(300)]]));
+
+      const drained = pool.drain();
+      expect(drained.usage).toBeUndefined();
+      expect(drained.marker?.agents.a?.input).toBe(400);
+    });
+
+    it("pools nothing for a hand-over whose claim already covers its frontier", () => {
+      // Fully drained before the reload: frontier and written are the same total, so the successor's first
+      // drain has nothing to add and no marker to write either.
+      const pool = new PendingUsagePool();
+      pool.seedState(new Map([["a", totals(400)]]), new Map([["a", totals(400)]]));
+
+      expect(pool.drain()).toEqual({ usage: undefined, marker: undefined });
     });
 
     it("books only the growth after reporting is turned back on", () => {
