@@ -51,7 +51,7 @@ import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservin
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, readUsageMarkers, toReportedUsage, type UsageMarker } from "./usage.js";
+import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, isEmptyUsage, type LifetimeUsage, PendingUsagePool, readUsageMarkers, toReportedUsage, type UsageMarker } from "./usage.js";
 import { isLegacyUsageFile, legacySeeds, walkUsageTotals } from "./usage-recovery.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
@@ -529,18 +529,20 @@ export default function (pi: ExtensionAPI) {
    * was: it must run for every message.
    */
   function drainSpend(event: MessageEndEvent): MessageEndEventResult | undefined {
-    // Only the root activation owns the pool, and only a tool result is counted by pi.
-    if (!isRoot || event.message.role !== "toolResult") return undefined;
+    // Only the root activation owns the pool, and only a tool result is counted by pi. A message-less
+    // event is a host that emits the boundary alone: nothing to drain onto, and nothing to claim.
+    const message = event?.message;
+    if (!isRoot || message?.role !== "toolResult") return undefined;
     const drained = pendingUsage.drain();
     // While reporting is off the sink seeds instead of reporting, so nothing is pooled. A marker
     // still has to ride out for the exclusions it claims; it carries no usage by definition.
     const usage = reportUsage ? drained.usage : undefined;
     if (!usage && !drained.marker) return undefined;
-    const message = event.message as typeof event.message & { usage?: Usage; subagentUsage?: UsageMarker };
+    const carrier = message as typeof message & { usage?: Usage; subagentUsage?: UsageMarker };
     return {
       message: {
-        ...message,
-        ...(usage ? { usage: message.usage ? combineUsage(message.usage, usage) : usage } : {}),
+        ...carrier,
+        ...(usage ? { usage: carrier.usage ? combineUsage(carrier.usage, usage) : usage } : {}),
         ...(drained.marker ? { subagentUsage: drained.marker } : {}),
       },
     };
@@ -807,6 +809,10 @@ export default function (pi: ExtensionAPI) {
     if (record.usageBaseline) {
       if (source === "seed" || !reportUsage) pendingUsage.seed(record.id, record.usageBaseline);
       else pendingUsage.report(record.id, record.usageBaseline);
+    } else if (!isEmptyUsage(delta)) {
+      // No baseline to compare against (a hand-over DTO from a release that carried none): the delta is
+      // all there is, and dropping it would lose spend the old activation already emitted.
+      pendingUsage.add(delta);
     }
     // The same delta, live, for anyone keeping their own ledger — a footer that breaks spend down by
     // agent type and thinking level, say. This is the one place every agent's spend passes through,
@@ -1017,9 +1023,12 @@ export default function (pi: ExtensionAPI) {
    * never empty and its first drain writes exactly the difference.
    */
   function seedUsageAccounting(reason: SessionStartEvent["reason"], ctx: ExtensionContext): void {
-    const entries = ownEntries(ctx.sessionManager.getHeader(), ctx.sessionManager.getEntries());
-    const accounted = readAccounted(entries);
-    const spawns = spawnsOf(entries);
+    // A host that cannot list its entries has nothing to recover from, and no file to stamp.
+    const entries = ctx.sessionManager?.getEntries?.();
+    if (!entries) return;
+    const own = ownEntries(ctx.sessionManager.getHeader?.() ?? null, entries);
+    const accounted = readAccounted(own);
+    const spawns = spawnsOf(own);
     // A file with spawns and no stamp predates markers: reading its missing markers as zero would book
     // every surviving child's whole lifetime at once, on this start and every start after it.
     const legacy = isLegacyUsageFile(spawns, accounted);
@@ -1027,7 +1036,7 @@ export default function (pi: ExtensionAPI) {
     for (const [id, claim] of accounted) if (claim.booked) booked.set(id, claim.total);
     // Never a claim still to be booked: seeding `written` from it would make the drain that books it
     // skip its marker, and the next start would book the same gap from the same entry.
-    pendingUsage.seedMarkers(readUsageMarkers(entries), booked);
+    pendingUsage.seedMarkers(readUsageMarkers(own), booked);
     // On reload only the legacy branch consumes the walk, so a stamped file opens no child session.
     recoveredUsageTotals = legacy || reason === "startup" || reason === "resume" ? walkUsageTotals(spawns, accounted) : new Map();
     const seeds: Record<string, AccountedTotal> = {};
@@ -1463,8 +1472,11 @@ export default function (pi: ExtensionAPI) {
   /** Stops the runs of handovers no activation adopted: their session has been replaced, so nothing will take them over. */
   function stopStranded(sessionId: string): void {
     for (const h of takeStrandedHandovers(sessionId)) {
-      const unreported = h.take().unreported;
-      if (unreported) pendingUsage.add(unreported);
+      const taken = h.take();
+      // This release publishes a per-agent frontier and no aggregate: a hand-over nothing adopts still
+      // owns that spend, and this is the only reader it has left.
+      for (const [id, total] of frontierOf(h)) pendingUsage.report(id, total);
+      if (taken.unreported) pendingUsage.add(taken.unreported);
       h.stop(replayStoppedUsage);
       h.draining.abortAll();
       h.draining.dispose();

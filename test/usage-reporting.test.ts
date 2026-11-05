@@ -310,6 +310,25 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(message.usage?.cost.total).toBeCloseTo(0.51, 10);
     });
 
+    it("seeds a resumed session's existing spend instead of reporting it", async () => {
+      // A child that binds to a session which already spent (a resume) was never watched: its whole
+      // total is a seed, not a delta. Booking it would add history the parent never witnessed.
+      const { lifecycle, tools } = boot({ reportUsage: true });
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        const session = fakeSession(vi.fn(), { input: 500, output: 250, cacheWrite: 0, cacheRead: 0, cost: 1 });
+        host(options, session);
+        options.onUsage?.();
+        return { responseText: "done", session, aborted: false, steered: false };
+      });
+
+      const message = settled(lifecycle, await spawn(tools));
+
+      expect(message).not.toHaveProperty("usage");
+      const agents = Object.entries(message.subagentUsage?.agents ?? {});
+      expect(agents).toHaveLength(1);
+      expect(agents[0][1].input).toBe(500);
+    });
+
     it("leaves a user or steering message alone and keeps the pool for the next tool result", async () => {
       // pi emits message_end for the user's own prompt and for a queued steering message too. Draining
       // there would lose the spend — getSessionStats() ignores a user message's usage — and write a
