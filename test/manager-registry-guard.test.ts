@@ -18,6 +18,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import type { SpawnOptions } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
@@ -101,5 +102,25 @@ describe("Symbol.for manager registry across activations", () => {
     // The root's own shutdown releases the slot.
     await root.lifecycle.get("session_shutdown")?.({ reason: "quit" });
     expect((globalThis as any)[MANAGER_KEY]).toBeUndefined();
+  });
+
+  it("ignores a forged rootCwd option: a spawn's base is its own session's cwd", async () => {
+    delete (globalThis as any)[MANAGER_KEY];
+    const root = makePi();
+    subagentsExtension(root.pi);
+    const entry = (globalThis as any)[MANAGER_KEY];
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any);
+
+    // spawnTopLevel is not exported — the activation registry is the only door a
+    // cross-package caller has, and it forwards options unvalidated. A root base
+    // names a directory a relative `session_dir` resolves in, so a forged one
+    // would be a path-traversal primitive.
+    entry.spawn(root.pi, ctx(), "general-purpose", "go", {
+      description: "forged root",
+      rootCwd: "/etc",
+    } as SpawnOptions);
+
+    const opts = vi.mocked(runAgent).mock.calls.at(-1)![3];
+    expect(opts.nestedRuntime?.rootCwd).toBe(process.cwd());
   });
 });
