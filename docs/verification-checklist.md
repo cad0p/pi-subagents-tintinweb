@@ -38,6 +38,27 @@ it reacts to a key, a command or an abort:
   `node_modules/@earendil-works/pi-coding-agent/dist/`, with the pi version) or a
   capture of the main-session run under Evidence.
 
+## Configuration changed after spawn
+
+A setting or an agent file that changes while an agent exists (a type
+disabled, `worktreeIsolation` switched off, a frontmatter key edited) is a
+temporary state: the next agent uses the new value, so it repairs itself
+quickly. This applies to plans, review findings and proof sentences:
+
+- For an existing agent that meets the changed configuration (a resume, a
+  crash recovery, a run in flight), pick the behaviour that needs the least
+  code, usually what the code already does or what the agent was spawned
+  with.
+- Add no guard, refusal, persisted flag or test only for this case. A finding
+  that only asks for one is not a finding; the maintainer dismisses it with
+  this rule as the reason, recorded in the PR body.
+- It is still a defect when the stale configuration loses work (a branch, a
+  session file, a result) or runs the agent outside the isolation it was
+  spawned with.
+- This never clears a failing Visual proof step: a step that fails is handled
+  as Visual proof says, and this rule can only show that its sentence needs a
+  design change.
+
 ## Automated gates
 
 Run all four from the repository root; all must pass (mirrors `CONTRIBUTING.md`'s
@@ -223,6 +244,11 @@ under Evidence. A verdict counts only for the SHA it reviewed.
 - Tell the reviewer to check each finding about what a session shows or how
   it behaves against pi's main session (see Baseline above). A finding that
   only reproduces pi's own main-session behaviour is not a finding.
+- Tell the reviewer that a configuration changed after spawn gets the
+  simplest behaviour (see Configuration changed after spawn above): a finding
+  that only asks for a guard, refusal, persisted flag or test against such a
+  change is not a finding, unless the stale configuration loses work or runs
+  the agent outside the isolation it was spawned with.
 - For any change to what a pi session shows or how it behaves over time,
   the brief also includes each step's expected outcome quoted verbatim from
   the issue, the before capture with its SHA, and the raw after-capture and
@@ -322,6 +348,9 @@ In the PR body, record:
   model-action clause, and any changed code path a cleared failure names;
 - for each baseline comparison, the pi version and the cited source or the
   main-session capture;
+- for each finding dismissed under Configuration changed after spawn, the
+  finding, the setting or file that changed and the agent that met it, and
+  the maintainer's reason;
 - every review round: the head it reviewed, the agent type, the verdict, and
   whether the reviewer found that Visual proof applies;
 - any check that does not apply, and why.
