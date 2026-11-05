@@ -24,7 +24,7 @@ import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { ACCOUNTED_ENTRY, LEDGER_VERSION, type SpawnedLedgerEntry } from "../src/ledger.js";
-import { HANDOVER_KEY, type DrainingPool, publishHandovers, ReloadHandover } from "../src/reload-handover.js";
+import { type DrainingPool, HANDOVER_KEY, publishHandovers, ReloadHandover } from "../src/reload-handover.js";
 import type { AgentRecord } from "../src/types.js";
 import type { LifetimeUsage } from "../src/usage.js";
 import { MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
