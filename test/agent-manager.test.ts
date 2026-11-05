@@ -631,7 +631,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     // Catches the two ways a read-based reporter over-reports: no baseline update
     // (the same delta repeats on every read) and a missing empty-delta return.
     const pushed: LifetimeUsage[] = [];
-    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage, source) => { if (source === "growth") pushed.push(usage); });
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       const child = mockSession();
       hostChild(opts, child); // the seed: baseline = zeros, nothing pushed
@@ -655,7 +655,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     // The renew case: the file grew while no activation was reading it (a run
     // draining across a reload, a settled record reopened for its next run).
     const pushed: LifetimeUsage[] = [];
-    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage, source) => { if (source === "growth") pushed.push(usage); });
     resolvedRun(mockSession());
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
@@ -682,7 +682,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     // the file's totals were reported by the run that produced them, so booking
     // them again would bill the parent twice for work it already paid for.
     const pushed: LifetimeUsage[] = [];
-    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage) => pushed.push(usage));
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (_record, usage, source) => { if (source === "growth") pushed.push(usage); });
     resolvedRun(mockSession());
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
     const record = manager.getRecord(id)!;
@@ -720,7 +720,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     // a shared baseline object (the fold inflates it, so the ancestor's own next
     // delta clamps to 0), and a session total that wrongly includes descendants.
     const pushed: { id: string; usage: LifetimeUsage }[] = [];
-    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage) => pushed.push({ id: record.id, usage }));
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage, source) => { if (source === "growth") pushed.push({ id: record.id, usage }); });
 
     const topSession = mockSession();
     const childSession = mockSession();
@@ -755,7 +755,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     // its own session. Seeding its file's totals then has to keep the fold: the
     // file knows nothing about a descendant, which lives in another session file.
     const pushed: { id: string; usage: LifetimeUsage }[] = [];
-    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage) => pushed.push({ id: record.id, usage }));
+    manager = new AgentManager(undefined, undefined, undefined, undefined, (record, usage, source) => { if (source === "growth") pushed.push({ id: record.id, usage }); });
     resolvedRun(mockSession());
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "ancestor", { description: "ancestor" });
     const record = manager.getRecord(id)!;
@@ -2325,7 +2325,7 @@ describe("AgentManager — session file retention", () => {
 
   it("deletes the file when clearCompleted() removes a default agent's record", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
-    manager = new AgentManager();
+    manager = newRetentionManager();
     const { session, file } = sessionWithFile();
     const { id, resolve } = spawnPending("general-purpose", session);
     resolve(done(session));
@@ -2352,11 +2352,18 @@ describe("AgentManager — session file retention", () => {
     expect(existsSync(file)).toBe(true);
   });
 
+  /** A manager that can journal a removal: its accounted writer is the root's, as in production. */
+  function newRetentionManager(): AgentManager {
+    const m = new AgentManager();
+    m.setAccountedWriter({ appendEntry: () => {} });
+    return m;
+  }
+
   it("evicts the default agent's file after the 60-minute grace window", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
     try {
-      manager = new AgentManager();
+      manager = newRetentionManager();
       const { session, file } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
       resolve(done(session));
@@ -2380,7 +2387,7 @@ describe("AgentManager — session file retention", () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     vi.useFakeTimers();
     try {
-      manager = new AgentManager();
+      manager = newRetentionManager();
       manager.setEvictAfterMinutes(1);
       const { session, file } = sessionWithFile();
       const { id, resolve } = spawnPending("general-purpose", session);
@@ -2452,7 +2459,7 @@ describe("AgentManager — session file retention", () => {
   it("dispose() keeps an in-flight run's file and deletes a settled one's", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
     registerKeeper();
-    manager = new AgentManager();
+    manager = newRetentionManager();
     const inflight = sessionWithFile();
     const settled = sessionWithFile();
     const kept = sessionWithFile();
@@ -2478,7 +2485,7 @@ describe("AgentManager — session file retention", () => {
 
   it("a resumed run keeps the same session file and the same retention decision", async () => {
     root = mkdtempSync(join(tmpdir(), "pi-subagents-retention-"));
-    manager = new AgentManager();
+    manager = newRetentionManager();
     const { session, file } = sessionWithFile();
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts) => {
       hostChild(opts, session);
