@@ -2,7 +2,7 @@
  * checkpoint-tool.test.ts — pins the subagent-facing `checkpoint` tool:
  * writes record.lastCheckpoint, appends to .checkpoints.md in the right
  * format, returns the brief confirmation, finds its own record by sessionId,
- * no-ops cleanly when the record is gone, and never pushes to the parent.
+ * refuses as a FAILED result when the record is gone, and never pushes to the parent.
  *
  * The suite drives the production two-activation topology via
  * makeRootAndChild: the root activation (main session) owns the agent
@@ -152,6 +152,8 @@ describe("checkpoint tool", () => {
       "ckpt-tc", { summary: "doing things" }, undefined, undefined, childCtx("child-sess-3"),
     );
     expect(textOf(res)).toBe("Checkpoint saved (turn 3/10, 47s).");
+    // The refusal's counterpart: a saved checkpoint stays a successful call.
+    expect((res as { isError?: boolean }).isError).toBeFalsy();
   });
 
   it("omits the /maxTurns suffix when invocation.maxTurns is undefined (unlimited)", async () => {
@@ -242,13 +244,16 @@ describe("checkpoint tool", () => {
     expect(b.lastCheckpoint.summary).toBe("B's work");
   });
 
-  it("no-ops with a clear error when the record is not found (session disposed)", async () => {
+  it("returns a FAILED result when the record is not found (session disposed)", async () => {
     const { child } = await setupAgent({ sessionId: "child-sess-4" });
 
     const res = await child.tools.get("checkpoint").execute(
       "ckpt-tc", { summary: "orphan" }, undefined, undefined, childCtx("nonexistent-session"),
     );
     expect(textOf(res)).toBe("Checkpoint failed: agent record not found.");
+    // Nothing was saved, so pi must see a failed call: it paints the row and records the
+    // transcript's isError from the returned result (#231), not from the text.
+    expect((res as { isError?: boolean }).isError).toBe(true);
   });
 
   it("does not push anything to the parent (no pi.sendMessage, no custom_message)", async () => {

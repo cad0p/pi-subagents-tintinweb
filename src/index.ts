@@ -2425,7 +2425,9 @@ Terse command-style prompts produce shallow, generic work.
         const handle = (globalThis as Record<symbol, { listAgents?: () => AgentRecord[] } | undefined>)[MANAGER_KEY];
         const record = handle?.listAgents?.().find((r) => r.sessionId === sessionId);
         if (!record) {
-          return textResult("Checkpoint failed: agent record not found.");
+          // Nothing was saved, so this is a refused call, not a saved one: pi paints the row and writes the
+          // transcript's `isError` from the returned result (#231).
+          return refusal("Checkpoint failed: agent record not found.");
         }
         return textResult(saveCheckpoint(record, params.summary));
       },
