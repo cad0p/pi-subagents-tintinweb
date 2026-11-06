@@ -288,6 +288,8 @@ describe("nested pause — eviction", () => {
     expect(record.endedBy).toBe("pause");
     expect(record.resultDelivered).toBeFalsy();
     expect(manager.getRecord(child)).toBe(record);
+    // The latest result still names the paused child, so its owner is not left to re-dispatch the work.
+    expect(manager.getRecord(parent)!.result).toContain(`paused with parent: ${child}`);
 
     // Stop mode: resume the parent again, then stop it explicitly. The paused child is not relabelled,
     // not marked delivered and still continuable.
@@ -308,6 +310,18 @@ describe("nested pause — eviction", () => {
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());
     vi.mocked(resumeAgent).mockResolvedValue({ text: "continued" } as never);
     expect(await manager.deliver(child, "continue")).toBe("resumed");
+  });
+
+  it("clearCompleted(true) takes an unconsumed paused child with its consumed parent", async () => {
+    const { parent, child } = await parentAndChild();
+
+    // The parent's result was read, the paused child's was not. Only the parent is selected, and its removal must
+    // take the child: a lone `removeRecord` would leave it behind with a dangling parent and an open spawn entry.
+    manager.getRecord(parent)!.resultConsumed = true;
+    expect(manager.getRecord(child)!.resultConsumed).toBeFalsy();
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parent)).toBeUndefined();
+    expect(manager.getRecord(child)).toBeUndefined();
   });
 
   it("clearCompleted(true) does not select a consumed paused child, and the parent's removal takes it", async () => {

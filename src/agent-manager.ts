@@ -1829,10 +1829,14 @@ export class AgentManager {
     const stopped: string[] = [];
     for (const [id, record] of this.agents) {
       if (record.parentAgentId !== parent.id) continue;
-      // Already paused by an earlier settle: only `removeSubtree` with this parent may remove it, and a second
+      // Already paused by an earlier settle: only `removeSubtree` with this parent may remove it, a second
       // settle must not mark it delivered — that flag would evict it before the parent, at its own older
-      // `completedAt`, while its spawn entry is still open.
-      if (record.endedBy === "pause") continue;
+      // `completedAt`, while its spawn entry is still open — and it is named again, so the owner's latest
+      // result still points at the child instead of inviting a re-dispatch.
+      if (record.endedBy === "pause") {
+        paused.push(id);
+        continue;
+      }
       if (mode === "pause" && record.status === "running") {
         // Flagged before the abort: a settle the abort triggers must already see the pause.
         paused.push(id);
