@@ -127,6 +127,33 @@ describe("ledger replay", () => {
   });
 });
 
+// A parent's nesting state: what a recovered run rebuilds its nested tools and its branch root from. An entry from
+// a release before the fields restores none of them, and that absence is read as absence, never as a default.
+const nested = { ...record, depth: 2, maxSubagentDepth: 3, rootCwd: "/repo", rootSessionId: "root-session" } as unknown as AgentRecord;
+
+describe("nesting fields", () => {
+  it("a spawn entry and its replay keep depth, maxSubagentDepth, rootCwd and rootSessionId", () => {
+    const entry = spawnedEntry(nested, "/s/child.jsonl", { pid: 42 });
+    expect(entry).toMatchObject({ depth: 2, maxSubagentDepth: 3, rootCwd: "/repo", rootSessionId: "root-session" });
+    expect(replay([custom("subagent-spawned", entry)])).toEqual([
+      expect.objectContaining({
+        id: "child-1", parentAgentId: "parent-1",
+        depth: 2, maxSubagentDepth: 3, rootCwd: "/repo", rootSessionId: "root-session",
+      }),
+    ]);
+  });
+
+  it("an entry that recorded none restores them as undefined, inventing no default", () => {
+    expect(replay([spawn()])[0]).toMatchObject({
+      depth: undefined, maxSubagentDepth: undefined, rootCwd: undefined, rootSessionId: undefined,
+    });
+  });
+
+  it("a spawn entry from a later ledger version is ignored, nesting fields and all", () => {
+    expect(replay([custom("subagent-spawned", { ...spawnedEntry(nested, "/s/child.jsonl", { pid: 42 }), v: LEDGER_VERSION + 1 })])).toEqual([]);
+  });
+});
+
 describe("shutdown stops", () => {
   const notice = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION, ids: ["child-1"] });
   const newerNotice = custom(SHUTDOWN_NOTICE_ENTRY, { v: LEDGER_VERSION + 1, ids: ["child-1"] });

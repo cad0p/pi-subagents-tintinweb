@@ -54,7 +54,9 @@ export function listSubagentWork(source: BackgroundWorkSource | undefined, conte
       if (items.length >= MAX_ITEMS) break;
       try {
         const sessionId = record.spawnerSessionId;
-        if (record.resultDelivered || sessionId === undefined || !context.sessionIds.includes(sessionId)) continue;
+        // A paused child is not work in flight: its own parent continues it, and listing it would park that
+        // parent in `waiting` on a child it has to resume itself.
+        if (record.resultDelivered || record.endedBy === "pause" || sessionId === undefined || !context.sessionIds.includes(sessionId)) continue;
         if (!isListableString(record.id, MAX_ITEM_ID_LENGTH) || !isListableString(sessionId, MAX_SESSION_ID_LENGTH)) continue;
         const identity = `${sessionId}\0${record.id}`;
         if (seen.has(identity)) continue;

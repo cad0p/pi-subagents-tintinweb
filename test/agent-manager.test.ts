@@ -1310,7 +1310,7 @@ describe("AgentManager — deliver()", () => {
       depth: 2,
     });
 
-    (manager as unknown as { abortOwnedChildren(parent: AgentRecord): void }).abortOwnedChildren({ id: "parent-x" } as AgentRecord);
+    (manager as unknown as { endOwnedChildren(parent: AgentRecord, mode: "stop" | "pause"): void }).endOwnedChildren({ id: "parent-x" } as AgentRecord, "stop");
     await manager.getRecord(running)!.promise?.catch(() => {});
 
     expect(manager.getRecord(running)!.ownerAborted).toBe(true);
@@ -2645,11 +2645,12 @@ describe("AgentManager — nested children", () => {
 
   it("an owner-aborted child is never delivered, and the parent result names it", async () => {
     manager = new AgentManager();
-    resolvedRun();
-    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
     hangingRun();
+    const parent = manager.spawn(mockPi, mockCtx, "general-purpose", "p", { description: "parent" });
     const child = manager.spawn(mockPi, mockCtx, "general-purpose", "c", { description: "child", parentAgentId: parent, depth: 2 });
     const deliver = vi.spyOn(manager, "deliver");
+    // Only a deliberate stop kills the subtree; any other end pauses it (see nested-pause.test.ts).
+    manager.abort(parent);
     await manager.getRecord(parent)!.promise;
     await manager.getRecord(child)!.promise?.catch(() => {});
     manager.deliverNested(manager.getRecord(child)!, "stopped result");

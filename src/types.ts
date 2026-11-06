@@ -210,6 +210,9 @@ export interface AgentRecord {
   capForced?: boolean;
   /** Set when the owning parent settled and aborted this nested child. Input is refused: nobody can read the answer. */
   ownerAborted?: boolean;
+  /** How this run ended when it was not its own finish: `stop` = a deliberate stop (user, RPC, parent cascade,
+   *  quit), `pause` = its parent's settle paused it. Cleared by `resume`. */
+  endedBy?: "stop" | "pause";
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: WorktreeRecord;
   /** Worktree cleanup result after agent completion. */

@@ -1433,10 +1433,21 @@ export default function (pi: ExtensionAPI) {
     const requested = record.invocation?.requestedThinking;
     const parentCwd = record.cwd ?? ctx.cwd;
     const cwd = record.runCwd && existsSync(record.runCwd) ? record.runCwd : parentCwd;
+    // A recovered parent gets its nested tools back, exactly as the live path hands them down. A top-level record
+    // is depth 1; a nested entry that recorded no depth predates the field and is treated as at the cap — the
+    // tool-less state it has today, so no old ledger entry gains a capability it never had.
+    const depth = record.depth ?? (record.parentAgentId === undefined ? 1 : Number.POSITIVE_INFINITY);
     return resolveChildSettings(ctx, record.type, {
       pi,
       agentId: record.id,
       parentAgentId: record.parentAgentId,
+      nestedRuntime: {
+        manager,
+        parentAgentId: record.id,
+        depth,
+        maxSubagentDepth: record.maxSubagentDepth,
+        rootCwd: record.rootCwd,
+      },
       model,
       thinkingLevel: requested === "off" ? undefined : requested,
       cwd,

@@ -18,8 +18,10 @@ import type { AgentRecord } from "./types.js";
  * turn limit was hit) — the parent should treat human intervention differently
  * from a budget cutoff. `interrupted` names its cause: a crash, or pi shutting down.
  */
-export function getStatusNote(record: Pick<AgentRecord, "status" | "limitReason" | "capMinutes" | "timeLimit" | "stoppedAtShutdown">): string {
+export function getStatusNote(record: Pick<AgentRecord, "status" | "limitReason" | "capMinutes" | "timeLimit" | "stoppedAtShutdown" | "endedBy">): string {
   const { status, limitReason, capMinutes, timeLimit } = record;
+  // Before the status cases: a paused child is `stopped`, but "STOPPED BY THE USER" is the wrong story.
+  if (record.endedBy === "pause") return " (PAUSED when its parent ended — output is partial; its parent continues it with SendMessage)";
   if (limitReason === "time") {
     const minutes = capMinutes === undefined ? "" : ` ${capMinutes} min`;
     // Mirrors getStatusWord (src/index.ts): change both together.
