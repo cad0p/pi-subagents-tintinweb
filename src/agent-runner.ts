@@ -1468,8 +1468,9 @@ export async function runAgent(
   // would be its parent's worktree. For a top-level isolated spawn
   // `worktree.parentCwd` is that root — agent-manager sets it to the same
   // `baseCwd` it uses for the worktree copy. Without either, `effectiveCwd` is
-  // already the agent's cwd. Read `options.nestedRuntime` and not its depth-filtered
-  // local: an agent at the cap has no nested tools, but its own base still applies.
+  // already the agent's cwd. Read `options.nestedRuntime`, not the depth-filtered
+  // `nestedRuntime` local in `resolveChildSettings`: an agent at the cap has no nested tools,
+  // but its own base still applies.
   const configuredSessionDir = resolveConfiguredSessionDir(
     agentConfig?.sessionDir,
     options.nestedRuntime?.rootCwd ?? options.worktree?.parentCwd ?? effectiveCwd,

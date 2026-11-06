@@ -441,13 +441,18 @@ describe("nested result / steer / checkpoint tools", () => {
     const result = await run(3, { summary: "halfway" });
 
     expect(textOf(result)).toContain("Checkpoint saved (turn 3");
+    // The refusal's counterpart: a saved checkpoint stays a successful call.
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
     expect(records.get("child-1")!.lastCheckpoint).toEqual({ turn: 3, summary: "halfway" });
     expect(readFileSync(`${outputFile}.checkpoints.md`, "utf-8")).toContain("halfway");
   });
 
-  it("checkpoint reports a missing record instead of throwing", async () => {
+  it("checkpoint reports a missing record as a FAILED result instead of throwing", async () => {
     const result = await run(3, { summary: "x" });
     expect(textOf(result)).toContain("record not found");
+    // Nothing was saved: the result must be a failed one so the child's transcript and
+    // row show a failure (#231).
+    expect((result as { isError?: boolean }).isError).toBe(true);
   });
 });
 
