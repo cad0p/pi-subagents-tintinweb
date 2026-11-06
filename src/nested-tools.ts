@@ -356,7 +356,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // top-level registration does.
       const sessionId = ctx.sessionManager.getSessionId();
       const record = context.manager.listAgents().find(r => r.sessionId === sessionId);
-      // Nothing was saved: a failed result, so the parent's transcript and row show the refusal (#231).
+      // Nothing was saved: a failed result, so the calling child's model and transcript see the refusal (#231).
       if (!record) return textResult("Checkpoint failed: agent record not found.", true);
       return textResult(saveCheckpoint(record, params.summary));
     },

@@ -441,6 +441,8 @@ describe("nested result / steer / checkpoint tools", () => {
     const result = await run(3, { summary: "halfway" });
 
     expect(textOf(result)).toContain("Checkpoint saved (turn 3");
+    // The refusal's counterpart: a saved checkpoint stays a successful call.
+    expect((result as { isError?: boolean }).isError).toBeFalsy();
     expect(records.get("child-1")!.lastCheckpoint).toEqual({ turn: 3, summary: "halfway" });
     expect(readFileSync(`${outputFile}.checkpoints.md`, "utf-8")).toContain("halfway");
   });
