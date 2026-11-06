@@ -59,6 +59,7 @@ All notable changes to this project will be documented in this file.
 - *(nested)* Root a nested agent's relative session_dir at its branch base (closes #87) ([#230](https://github.com/cad0p/pi-subagents-tintinweb/pull/230))
 - *(dispatch)* Refuse a disabled general-purpose under the implicit fallback (closes #142) ([#226](https://github.com/cad0p/pi-subagents-tintinweb/pull/226))
 - *(worktree)* A resumed worktree agent gets its worktree back (closes #227) ([#232](https://github.com/cad0p/pi-subagents-tintinweb/pull/232))
+- *(checkpoint)* A checkpoint for a missing record is a failed tool result (closes #231) ([#234](https://github.com/cad0p/pi-subagents-tintinweb/pull/234))
 
 ### 🚜 Refactor
 
