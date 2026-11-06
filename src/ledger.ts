@@ -28,6 +28,12 @@ export interface SpawnedLedgerEntry {
   thinking?: ThinkingLevel;
   runCwd?: string;
   configCwd?: string;
+  /** The record's nesting depth, branch cap and branch root: what a recovered parent needs to nest again. Additive
+   *  and feature-detected by absence — an entry from an older release restores none of them. */
+  depth?: number;
+  maxSubagentDepth?: number;
+  rootCwd?: string;
+  rootSessionId?: string;
   /**
    * Legacy: written by releases that had an `isolated` flag. Nothing reads it
    * any more, and new entries omit it — the field stays optional so a ledger
@@ -95,6 +101,10 @@ export function spawnedEntry(record: AgentRecord, sessionFile: string, owner: Ow
     thinking: record.childSettings?.thinkingLevel,
     runCwd: record.childSettings?.effectiveCwd,
     configCwd: record.childSettings?.configCwd,
+    depth: record.depth,
+    maxSubagentDepth: record.maxSubagentDepth,
+    rootCwd: record.rootCwd,
+    rootSessionId: record.rootSessionId,
     spawnedAt: record.startedAt,
     ownerPid: owner.pid,
     bootId: owner.bootId,
@@ -200,6 +210,10 @@ function interruptedRecord(spawned: SpawnedLedgerEntry, crashCount: number, now:
     worktree: spawned.worktree && typeof worktree === "object" ? { ...spawned.worktree, baseSha: worktree.baseSha } : spawned.worktree,
     worktreeResult: worktree === "unknown" ? undefined : { hasChanges: worktree?.branch !== undefined, branch: worktree?.branch },
     runCwd: spawned.runCwd, configCwd: spawned.configCwd,
+    // Absent on an entry from an older release: left undefined rather than defaulted, so no old entry gains a
+    // capability it never had (`recoveredSettings` reads an absent depth as "at the cap" for a nested record).
+    depth: spawned.depth, maxSubagentDepth: spawned.maxSubagentDepth,
+    rootCwd: spawned.rootCwd, rootSessionId: spawned.rootSessionId,
     invocation: { modelId: spawned.model, requestedThinking: spawned.thinking },
     settled: true, crashCount, stoppedAtShutdown: shutdown || undefined,
   };

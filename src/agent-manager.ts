@@ -54,6 +54,7 @@ import {
   toDto,
   toSpawnData,
 } from "./reload-handover.js";
+import { toSingleLine } from "./text-safety.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
 import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
@@ -1293,6 +1294,9 @@ export class AgentManager {
     const parent = parentId ? this.getRecord(parentId) : undefined;
     // An owner abort is the parent's own stop, not a result to hand on.
     if (!parentId || !parent || child.ownerAborted) return;
+    // A paused child's parent ended its run: its partial result stays in the record for a pull, and the
+    // parent's resume takes it from there. Waking a settled parent for it would be the pause undone.
+    if (child.endedBy === "pause") return;
     if (!parent.session) {
       // A settled parent is resumed with the result; its finish is then its one notification to its owner.
       this.resumeNested(parentId, [{ child, content }]);
@@ -1569,8 +1573,9 @@ export class AgentManager {
     if (!this.onComplete || record.notified) return;
     if (this.handover && !record.parentAgentId) return;
     record.notified = true;
-    // A shutdown stop already wrote its settle entry (abortAll); every other settle writes it here.
-    if (!this.stopLedgered.delete(record.id)) this.ledgerSettle(record, shutdown);
+    // A shutdown stop already wrote its settle entry (abortAll); every other settle writes it here. A paused
+    // child writes none: its spawn entry stays open, so a crash rebuilds it as `interrupted`, the resumable status.
+    if (!this.stopLedgered.delete(record.id) && record.endedBy !== "pause") this.ledgerSettle(record, shutdown);
     try { this.onComplete(record); } catch { /* ignore completion side-effect errors */ }
   }
 
@@ -1686,11 +1691,13 @@ export class AgentManager {
     this.releaseHeld(record.id);
     // Children spawned by this run must not outlive it — they are hidden from
     // every surface and reachable only through this agent, so an orphan would
-    // burn tokens unseen. Runs on every settle path, which is what also covers
-    // a resumed turn: grandchildren follow transitively, each through its own
-    // settle tail.
+    // burn tokens unseen. Only a deliberate stop kills them; every other end
+    // (completion, error, turn limit, time limit) pauses them, so the parent
+    // alone can continue them. Runs on every settle path, which is what also
+    // covers a resumed turn: grandchildren follow transitively, each through its
+    // own settle tail.
     // Each step is failure-safe: a throw here would strand `transition` and `settled = false` forever.
-    try { this.abortOwnedChildren(record); } catch { /* keep the completion tail failure-safe */ }
+    try { this.endOwnedChildren(record, record.endedBy === "stop" ? "stop" : "pause"); } catch { /* keep the completion tail failure-safe */ }
     try { record.outputCleanup?.(); } catch { /* ignore */ }
     record.outputCleanup = undefined;
     // The settle flush: the last read of the run's own session, so the completion report and the settled record
@@ -1809,17 +1816,29 @@ export class AgentManager {
   }
 
   /**
-   * Stop the nested children a settled parent owns. Nested records are hidden
-   * from the UI and only their owner can consume them, so a child outliving its
-   * parent would burn tokens unseen with no way to reach it. Grandchildren are
-   * covered transitively — each abort lands in that child's own settle path.
-   * A child that had already finished was not stopped: it keeps its file and stays
-   * resumable through `deliver`.
+   * End the nested children a settled parent owns: killed by a deliberate stop (`mode === "stop"`), paused by
+   * any other end. Nested records are hidden from the UI and only their owner can consume them, so a child
+   * outliving its parent would burn tokens unseen with no way to reach it. A paused child is the exception the
+   * parent can reach: it stays stopped, undelivered and resumable through `deliver`, costs nothing while
+   * paused, and is evicted with the parent (`removeSubtree`). Grandchildren are covered transitively — each
+   * end lands in that child's own settle path. A child that had already finished was not stopped: it keeps its
+   * file and stays resumable through `deliver`.
    */
-  private abortOwnedChildren(parent: AgentRecord): void {
+  private endOwnedChildren(parent: AgentRecord, mode: "stop" | "pause"): void {
+    const paused: string[] = [];
     const stopped: string[] = [];
     for (const [id, record] of this.agents) {
       if (record.parentAgentId !== parent.id) continue;
+      // Already paused by an earlier settle: only `removeSubtree` with this parent may remove it, and a second
+      // settle must not mark it delivered — that flag would evict it before the parent, at its own older
+      // `completedAt`, while its spawn entry is still open.
+      if (record.endedBy === "pause") continue;
+      if (mode === "pause" && record.status === "running") {
+        // Flagged before the abort: a settle the abort triggers must already see the pause.
+        paused.push(id);
+        this.abort(id, "pause");
+        continue;
+      }
       const live = record.status === "queued" || record.status === "running";
       // Flagged before the abort: a settle the abort triggers must already see the owner's stop.
       if (live) {
@@ -1827,8 +1846,13 @@ export class AgentManager {
         stopped.push(id);
       }
       this.abort(id);
-      // The owning parent settled, so no one can pull this child's result: it is delivered.
+      // The owning parent ended, so no one can pull this child's result: it is delivered, which lets the
+      // parent's eviction take it with the subtree.
       record.resultDelivered = true;
+    }
+    if (paused.length > 0) {
+      const note = `paused with parent: ${paused.join(", ")}. They are stopped, not finished: only this agent can continue them. SendMessage ${parent.id} to resume it, and it continues them; do not re-dispatch their work.`;
+      parent.result = parent.result ? `${parent.result}\n\n${note}` : note;
     }
     if (stopped.length > 0) {
       const note = `stopped with parent: ${stopped.join(", ")}`;
@@ -1940,6 +1964,8 @@ export class AgentManager {
     record.notified = false;
     record.resultDelivered = false;
     record.nestedStalled = false;
+    // A continued run is an ordinary run again: its next end is judged on its own.
+    record.endedBy = undefined;
     // A started listener can stop the record synchronously; settle it through
     // the stopped tail instead of starting — and counting — a run that was
     // already stopped.
@@ -2226,13 +2252,27 @@ export class AgentManager {
     // Another input may have started or parked the record while the session reopened: take the current state.
     if (current.status === "running" || current.status === "queued" || current.transition) return this.deliver(id, text, callbacks);
     const interrupted = current.status === "interrupted";
-    const prompt = interrupted ? interruptionNote(current, text, this.recreatedWorktrees.has(current.id)) : text;
+    // The paused note first: it says what to do, and the interruption note already wraps the caller's text.
+    const paused = this.pausedChildrenNote(current.id);
+    const prompt = (paused ? `${paused}\n\n` : "") + (interrupted ? interruptionNote(current, text, this.recreatedWorktrees.has(current.id)) : text);
     if (!this.resume(id, prompt, callbacks)) {
       this.releaseResumedWorktree(current);
       this.handOverIdle();
       return false;
     }
     return interrupted ? "resumedAfterCrash" : "resumed";
+  }
+
+  /**
+   * The resume note for a parent whose settle paused its nested children: they are stopped, not finished, and only
+   * this parent can continue them. Derived from the records, so it repeats on every resume until each child is
+   * continued and disappears by itself once none is left.
+   */
+  private pausedChildrenNote(parentId: string): string {
+    const paused = [...this.agents.values()].filter((record) => record.parentAgentId === parentId && record.endedBy === "pause");
+    if (paused.length === 0) return "";
+    const named = paused.map((record) => `${record.id} "${toSingleLine(record.description)}"`).join(", ");
+    return `Your nested children were paused when your run ended: ${named}. They are stopped, not finished: continue each with SendMessage <id>. Do not re-dispatch their work.`;
   }
 
   /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */
@@ -2354,7 +2394,13 @@ export class AgentManager {
     return this.drainingPools.flatMap((pool) => pool.ownAgents()).filter((r) => !this.agents.has(r.id));
   }
 
-  abort(id: string): boolean {
+  /**
+   * Ends a run: `mode` records how. `stop` is a deliberate stop (user, RPC, parent cascade, quit) and kills the
+   * record's own children; `pause` is a parent's settle, and its children are paused in turn. Never set on a
+   * record that is already settled — an explicit stop of a parent does not relabel the paused children it can no
+   * longer kill.
+   */
+  abort(id: string, mode: "stop" | "pause" = "stop"): boolean {
     const record = this.getRecord(id);
     if (!record) return false;
     // A parked dialog dies with the stop: its promise resolves as cancelled, so the child's tool
@@ -2365,11 +2411,13 @@ export class AgentManager {
     // Remove from queue if queued
     if (record.status === "queued") {
       this.slotFifo = this.slotFifo.filter((entry) => entry.kind !== "spawn" || entry.id !== id);
+      record.endedBy = mode;
       this.settleStoppedWithoutRun(record);
       return true;
     }
 
     if (record.status !== "running") return false;
+    record.endedBy = mode;
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
@@ -2438,6 +2486,21 @@ export class AgentManager {
     return retired;
   }
 
+  /**
+   * Removes a record and its nested descendants, parents first. The eviction and the session switch take a
+   * subtree, never a lone child: a paused child is reachable only through its parent, so it goes with it. A member
+   * that is not yet settled is skipped — both callers select settled records, and `removeRecord` would retire a
+   * live session.
+   */
+  private removeSubtree(id: string): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    for (const member of this.subtree(record)) {
+      if (member.settled === false || !this.agents.has(member.id)) continue;
+      this.removeRecord(member.id, member);
+    }
+  }
+
   /** Claims a settled run's total before its file goes: booked when reporting is off, a total to book otherwise. */
   private journalRemoval(id: string, total: LifetimeUsage): boolean {
     return this.writeAccounted({ [id]: { total: { ...total }, booked: !this.usageReporting } });
@@ -2467,7 +2530,7 @@ export class AgentManager {
       // Listed as background work until delivered, so kept until then. Bounded: a top-level result is
       // delivered by its nudge, a nested one by its parent's pull or by the parent's settle.
       if (!record.resultDelivered) continue;
-      this.removeRecord(id, record);
+      this.removeSubtree(id);
     }
   }
 
@@ -2482,8 +2545,11 @@ export class AgentManager {
       if (record.status === "running" || record.status === "queued") continue;
       // See cleanup(): an unwinding run keeps its record until it settles.
       if (record.settled === false) continue;
+      // A paused child is removed only with its parent: its result may be pulled (`resultConsumed`) and still be
+      // continuable, so selecting it here would unlink its file with no `removeSubtree` involved.
+      if (record.endedBy === "pause" && record.parentAgentId !== undefined && this.agents.has(record.parentAgentId)) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
-      this.removeRecord(id, record);
+      this.removeSubtree(id);
     }
   }
 
@@ -2505,6 +2571,7 @@ export class AgentManager {
       }
       const record = this.agents.get(entry.id);
       if (record) {
+        record.endedBy = "stop";
         this.settleStoppedWithoutRun(record, false, true);
         count++;
       }
@@ -2515,6 +2582,7 @@ export class AgentManager {
       if (record.status === "running") {
         dropChildDialogs(record.id);
         record.dialog = undefined;
+        record.endedBy = "stop";
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();

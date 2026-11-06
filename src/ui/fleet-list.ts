@@ -102,20 +102,22 @@ function rightAlign(left: string, right: string, width: number): string {
   return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
 }
 
-type RowKind = "queued" | "blocked" | "waiting" | "running" | "finished";
+type RowKind = "queued" | "blocked" | "waiting" | "running" | "paused" | "finished";
 /** Display order for overflow counts. */
-const ROW_KINDS: RowKind[] = ["blocked", "running", "waiting", "queued", "finished"];
+const ROW_KINDS: RowKind[] = ["blocked", "running", "waiting", "queued", "paused", "finished"];
 
-/** Disjoint row categories, checked in order: queued, blocked, waiting, running, finished. */
+/** Disjoint row categories, checked in order: queued, blocked, waiting, running, paused, finished. */
 function rowKind(record: AgentRecord): RowKind {
   if (isQueued(record)) return "queued";
   if (record.status === "running") return record.dialog ? "blocked" : record.waiting ? "waiting" : "running";
+  // A paused record is `stopped` and settled, so it can only take this arm; a resumed one runs again.
+  if (record.endedBy === "pause") return "paused";
   return "finished";
 }
 
 /** `2 running, 1 finished`; zero counts are omitted. */
 function countsText(records: AgentRecord[]): string {
-  const counts: Record<RowKind, number> = { queued: 0, blocked: 0, waiting: 0, running: 0, finished: 0 };
+  const counts: Record<RowKind, number> = { queued: 0, blocked: 0, waiting: 0, running: 0, paused: 0, finished: 0 };
   for (const record of records) counts[rowKind(record)] += 1;
   return ROW_KINDS.filter(kind => counts[kind] > 0).map(kind => `${counts[kind]} ${kind}`).join(", ");
 }
@@ -311,7 +313,9 @@ export class FleetList {
     const qualifying = all.filter(a => (isQueued(a) || a.completedAt != null || a.status === "interrupted" || this.manager.isDraining(a.id) || (a.session ?? a.sessionSnapshot) !== undefined) && (
       a.status === "running" || a.status === "queued"
       || a.id === this.viewingAgentId
-      || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
+      // A paused child is the one settled row that does not linger out: it stays until its parent resumes it or
+      // the eviction takes it, and its ancestors stay above it through the walk below.
+      || (a.completedAt != null && (now - a.completedAt < FINISHED_LINGER_MS || a.endedBy === "pause"))
     ));
     const byId = new Map(all.map(a => [a.id, a] as const));
     const shown = new Set<string>();
@@ -662,7 +666,7 @@ export class FleetList {
   private renderAgentRow(rosterIndex: number, sel: number, entry: AgentEntry, width: number, theme: Theme): string {
     const { record } = entry;
     const kind = rowKind(record);
-    const icon = kind === "finished" ? `${finishedStatus(record, theme).icon} ` : "";
+    const icon = kind === "finished" || kind === "paused" ? `${finishedStatus(record, theme).icon} ` : "";
     const modeLabel = getPromptModeLabel(record.type);
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
     const drainTag = this.manager.isDraining(record.id) ? ` ${theme.fg("dim", "(draining)")}` : "";
@@ -685,7 +689,7 @@ export class FleetList {
     const turns = turnCount === undefined ? "" : formatTurns(turnCount, maxTurns);
     if (kind === "queued") return theme.fg("dim", `queued · turn ${turnCount ?? 0}`);
     if (kind === "blocked") return theme.fg("warning", blockedLabel(record) ?? `blocked · ${elapsed}`);
-    if (kind === "finished") {
+    if (kind === "finished" || kind === "paused") {
       // The activity tracker is dropped at finish, so turns fall back to the record, as the notification
       // does; a run stopped before it started has no turn to show.
       const stats = [turnCount ? turns : "", toolText, cost, elapsed].filter(part => part !== "").join(" · ");
