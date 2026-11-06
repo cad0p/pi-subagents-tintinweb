@@ -6,8 +6,8 @@ import { type AgentSession, type AgentSessionEvent, type ExtensionAPI, type Exte
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, type CapEvent, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
-import { createNestedSubagentTools } from "../src/nested-tools.js";
 import { formatTaskNotification } from "../src/index.js";
+import { createNestedSubagentTools } from "../src/nested-tools.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
 import { renderAgentReport } from "../src/result-report.js";
 import type { AgentRecord } from "../src/types.js";

@@ -7,9 +7,7 @@ import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
 import { listSubagentWork } from "../src/background-work.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
-import { toDto } from "../src/reload-handover.js";
 import { getStatusNote } from "../src/status-note.js";
-import type { AgentRecord } from "../src/types.js";
 import { finishedStatus } from "../src/ui/agent-display.js";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -68,28 +66,18 @@ const hangingRun = (session: AgentSession = mockSession()) =>
     }) as never;
   });
 
-const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
-/** Lets a settle finish its chain: the observer's decide, afterRun, then the completion callback. */
-const settle = async () => {
-  for (let i = 0; i < 5; i++) await flush();
-};
-
 let manager: AgentManager;
 let root: string;
-let files: string[];
 
 /** A child session backed by a real file, so a resume can reopen it and a removal can unlink it. */
 const sessionWithFile = (): { session: AgentSession; file: string } => {
   const sessionManager = SessionManager.create(root, join(root, "sessions"));
   sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() });
-  const file = sessionManager.getSessionFile()!;
-  files.push(file);
-  return { session: mockSession(sessionManager), file };
+  return { session: mockSession(sessionManager), file: sessionManager.getSessionFile()! };
 };
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "nested-pause-"));
-  files = [];
   manager = new AgentManager();
 });
 
