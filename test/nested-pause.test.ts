@@ -311,6 +311,10 @@ describe("nested pause — eviction", () => {
     expect(record.ownerAborted).toBeUndefined();
     // The second settle names the still-paused child again (#235 S1).
     expect(manager.pausedChildrenNotice(parent)).toContain(`${child} "child"`);
+    // The user stopped this parent explicitly, and the same message's report says so: the pointer asks first
+    // instead of telling its owner to undo the stop.
+    expect(manager.pausedChildrenNotice(parent)).toContain(`Resume ${parent} with SendMessage({ to: "${parent}", message: "continue" }) only if the user asks; they stopped it deliberately.`);
+    expect(manager.pausedChildrenNotice(parent)).not.toContain("without asking the user");
 
     // Still continuable by its parent.
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());

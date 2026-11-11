@@ -176,7 +176,8 @@ describe("nested pause — full stack (#235)", () => {
     const notices = run.parentSession.messages
       .filter((message) => (message as { customType?: string }).customType === "subagent-notification")
       .map((message) => String((message as { content?: unknown }).content));
-    expect(notices.some((notice) => notice.includes(`Resume ${leadId} now:`))).toBe(true);
+    // The lead was capped, not stopped by the user: the pointer tells its owner to resume it without asking.
+    expect(notices.some((notice) => notice.includes(`Resume ${leadId} now: SendMessage({ to: "${leadId}", message: "continue" }) without asking the user.`))).toBe(true);
     expect(notices.some((notice) => notice.includes(`1 nested child was paused when ${leadId} (lead) ended: ${lensId} "lens"`))).toBe(true);
     expect(String(lead?.result ?? "")).not.toContain("paused with parent:");
 

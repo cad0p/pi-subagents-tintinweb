@@ -579,8 +579,7 @@ export default function (pi: ExtensionAPI) {
   /**
    * One notice for the recovered records of a batch: their ids by cause (a crash, or a quit that stopped them), the
    * resume each one allows, then each note the policy gave. A first interruption is resumed by the main agent at once;
-   * a crash loop waits for the user, and its note says so. A record that left nested children paused carries that
-   * pointer first, in its own section: it names a different agent than the recovery does.
+   * a crash loop waits for the user, and its note says so.
    */
   function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
     const headline = (group: AgentRecord[], cause: string) => {
@@ -603,8 +602,7 @@ export default function (pi: ExtensionAPI) {
       // The policy's note counts crashes; a shutdown stop is held by a policy that resumes nothing, and says only that.
       if (note) lines.push(`${record.id}: ${record.stoppedAtShutdown ? "ask the user before resuming" : note}`);
     }
-    const paused = records.map((record) => manager.pausedChildrenNotice(record.id)).filter(Boolean);
-    return [...paused, lines.join("\n")].join("\n\n");
+    return lines.join("\n");
   }
 
   /**
@@ -673,13 +671,16 @@ export default function (pi: ExtensionAPI) {
     ].join("\n");
   }
 
-  /** Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them. */
+  /**
+   * Send the open batch as one message. Records are re-checked at send time: a pull has already dropped them, the
+   * pointer to a settled parent's paused children excepted — it is no part of the result the pull returned.
+   */
   function emitNudgeBatch() {
     const batch = nudgeBatch;
     nudgeBatch = undefined;
     if (!batch) return;
     clearTimeout(batch.timer);
-    const records = [...batch.records.values()].filter((record) => !record.resultConsumed);
+    const records = [...batch.records.values()].filter((record) => !record.resultConsumed || manager.pausedChildrenNotice(record.id) !== "");
     const { unstarted } = batch;
     if (records.length === 0 && !unstarted) return;
     // A crash-recovered record carries its own notice, and so do the runs with no transcript. The batch takes a turn
@@ -690,7 +691,8 @@ export default function (pi: ExtensionAPI) {
     const sections = [
       ...(interrupted.length > 0 ? [formatInterruptedNotice(interrupted, batch.crash)] : []),
       ...(unstarted ? [formatUnstartedNotice(unstarted)] : []),
-      ...completed.map(settledNotification),
+      // A pulled record contributes its pointer alone: the report is already in the parent's context, the section is not.
+      ...completed.map((record) => (record.resultConsumed ? manager.pausedChildrenNotice(record.id) : settledNotification(record))),
     ];
 
     try {
@@ -1144,7 +1146,8 @@ export default function (pi: ExtensionAPI) {
             if (record.status === "running" || record.status === "queued") return false;
             record.resultConsumed = true;
             record.resultDelivered = true;
-            cancelNudge(record.id);
+            // The tool's rule: a record that paused nested children keeps the nudge that carries their pointer.
+            if (!manager.pausedChildrenNotice(record.id)) cancelNudge(record.id);
             return true;
           },
           steer: (id, message) => manager.steer(id, message),
@@ -2267,8 +2270,9 @@ Terse command-style prompts produce shallow, generic work.
       if (!record) return agentNotFoundResponse(params.agent_id);
 
       // Consuming suppresses the completion notification. Safe for every status:
-      // only a settled record has a nudge parked, so a running one has none to cancel.
-      if (consumeResult(record)) cancelNudge(record.id);
+      // only a settled record has a nudge parked, so a running one has none to cancel. A record that paused nested
+      // children keeps its nudge: this report carries no pointer, and the batch is the only channel for it.
+      if (consumeResult(record) && !manager.pausedChildrenNotice(record.id)) cancelNudge(record.id);
 
       return agentReportResponse(record);
     },

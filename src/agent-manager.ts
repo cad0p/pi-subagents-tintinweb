@@ -2265,8 +2265,9 @@ export class AgentManager {
   /**
    * The completion notification's own section for a parent whose settle paused its nested children. Written in the
    * extension's voice, like the crash notice: this pointer is not part of the parent's result, and it says how to
-   * resume the parent — the only agent that can continue them — without asking the user. Derived from the records,
-   * so it is drawn only while a paused child is still there. Empty when the parent paused none.
+   * resume the parent — the only agent that can continue them. A parent the user stopped explicitly is resumed only
+   * on the user's word: the stop was deliberate, and the report in the same message says so. Derived from the
+   * records, so it is drawn only while a paused child is still there. Empty when the parent paused none.
    */
   pausedChildrenNotice(parentId: string): string {
     const paused = this.pausedChildren(parentId);
@@ -2275,8 +2276,13 @@ export class AgentManager {
     const parent = this.agents.get(parentId);
     const ended = parent ? `${parentId} (${toSingleLine(parent.description)})` : parentId;
     const named = paused.map((record) => `${record.id} "${toSingleLine(record.description)}"`).join(", ");
+    // The user's own stop is not undone by this section, whoever reads it. A parent record already evicted keeps the
+    // plain wording: nothing is left to say the stop was deliberate.
+    const instruction = parent?.endedBy === "stop"
+      ? `Resume ${parentId} with SendMessage({ to: "${parentId}", message: "continue" }) only if the user asks; they stopped it deliberately.`
+      : `Resume ${parentId} now: SendMessage({ to: "${parentId}", message: "continue" }) without asking the user.`;
     return [
-      `Resume ${parentId} now: SendMessage({ to: "${parentId}", message: "continue" }) without asking the user.`,
+      instruction,
       `${paused.length} nested ${one ? "child was" : "children were"} paused when ${ended} ended: ${named}. ${one ? "It is" : "They are"} stopped, not finished; only ${parentId} can continue ${one ? "it" : "them"}. Do not start a new Agent for ${one ? "its" : "their"} work.`,
     ].join("\n");
   }
