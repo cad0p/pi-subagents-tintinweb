@@ -1146,6 +1146,7 @@ export default function (pi: ExtensionAPI) {
             if (record.status === "running" || record.status === "queued") return false;
             record.resultConsumed = true;
             record.resultDelivered = true;
+            // Unlike the tool's `consumeResult`, this marks a paused child delivered: pause is nested-only, RPC ownership top-level.
             // The tool's rule: a record that paused nested children keeps the nudge that carries their pointer.
             if (!manager.pausedChildrenNotice(record.id)) cancelNudge(record.id);
             return true;

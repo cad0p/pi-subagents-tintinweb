@@ -2272,13 +2272,16 @@ export class AgentManager {
   pausedChildrenNotice(parentId: string): string {
     const paused = this.pausedChildren(parentId);
     if (paused.length === 0) return "";
-    const one = paused.length === 1;
+    // A paused child is evicted only with its parent (`removeSubtree`), and both `clearCompleted` and `cleanup`
+    // skip a child whose parent is still held, so this lookup cannot miss. If it ever did, name nothing: a pointer
+    // would offer an id no record can answer.
     const parent = this.agents.get(parentId);
-    const ended = parent ? `${parentId} (${toSingleLine(parent.description)})` : parentId;
+    if (!parent) return "";
+    const one = paused.length === 1;
+    const ended = `${parentId} (${toSingleLine(parent.description)})`;
     const named = paused.map((record) => `${record.id} "${toSingleLine(record.description)}"`).join(", ");
-    // The user's own stop is not undone by this section, whoever reads it. A parent record already evicted keeps the
-    // plain wording: nothing is left to say the stop was deliberate.
-    const instruction = parent?.endedBy === "stop"
+    // The user's own stop is not undone by this section, whoever reads it.
+    const instruction = parent.endedBy === "stop"
       ? `Resume ${parentId} with SendMessage({ to: "${parentId}", message: "continue" }) only if the user asks; they stopped it deliberately.`
       : `Resume ${parentId} now: SendMessage({ to: "${parentId}", message: "continue" }) without asking the user.`;
     return [

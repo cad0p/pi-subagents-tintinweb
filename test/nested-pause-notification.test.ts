@@ -21,7 +21,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { type AgentManager, setQuietMs } from "../src/agent-manager.js";
-import { attachSessionLifecycle, type ChildSessionSettings, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { IMPL_KEY, type ImplV1 } from "../src/impl-route.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
@@ -66,11 +66,21 @@ function sessionStub(): AgentSession & { sendCustomMessage: Mock } {
 /** Resolves the parent's run: a nested child must exist before its parent's settle can pause it. */
 let releaseParent: () => void = () => {};
 
+/** A run that stays live until its signal aborts, like an agent at work. */
+function hang(opts: { signal?: AbortSignal }): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    opts.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  });
+}
+
 /**
- * runAgent routed by prompt. "parent" hosts its session and fails when the test releases it; "lead" and "child" hang
- * until the run is aborted, like a live agent.
+ * runAgent routed by prompt. "parent" hosts its session and fails when the test releases it, or completes when the
+ * test asks for that; "lead" and "child" hang until the run is aborted, like a live agent.
  */
-function routedRun(sessions: { lead: AgentSession; parent: AgentSession; child: AgentSession }): void {
+function routedRun(
+  sessions: { lead: AgentSession; parent: AgentSession; child: AgentSession },
+  parentEnd: "fails" | "completes" = "fails",
+): void {
   let open: () => void = () => {};
   const gate = new Promise<void>((resolve) => {
     open = resolve;
@@ -80,12 +90,9 @@ function routedRun(sessions: { lead: AgentSession; parent: AgentSession; child: 
     const session = prompt === "parent" ? sessions.parent : prompt === "lead" ? sessions.lead : sessions.child;
     opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
     opts.onSessionCreated?.(session, attachSessionLifecycle(session));
-    if (prompt !== "parent") {
-      return new Promise((_resolve, reject) => {
-        opts.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-      }) as never;
-    }
+    if (prompt !== "parent") return hang(opts);
     await gate;
+    if (parentEnd === "completes") return { responseText: "done", session, aborted: false, steered: false };
     throw new Error(FAILURE);
   });
 }
@@ -128,8 +135,9 @@ describe("nested pause — the pointer in the completion notification", () => {
     shutdown = undefined;
     vi.mocked(runAgent).mockReset();
     vi.restoreAllMocks();
-    // A session_start registers this process's background-work providers and never disposes them. Left in place, a
-    // later parent parks as waiting on its own running nested child instead of settling.
+    // A session_start registers this process's background-work providers and never disposes them. Their presence is
+    // the waiting gate: with them a parent that completes on a live nested child parks as `waiting`, without them it
+    // settles and pauses that child. The tests that read each mode say so, and this keeps the mode from carrying over.
     Reflect.deleteProperty(globalThis, Symbol.for(BACKGROUND_WORK_REGISTRY_KEY));
     Reflect.deleteProperty(globalThis, Symbol.for(BACKGROUND_WORK_DISPLAY_KEY));
     if (previousHome == null) delete process.env.HOME;
@@ -203,6 +211,53 @@ describe("nested pause — the pointer in the completion notification", () => {
     const content = pi.sendMessage.mock.calls[0][0].content as string;
     expect(content).toContain(`Resume ${parentId} now: SendMessage({ to: "${parentId}", message: "continue" }) without asking the user.`);
     expect(content).not.toContain("Agent error");
+  });
+
+  it("a parent that completes with a live nested child parks as waiting", async () => {
+    const { pi, tools, lifecycle } = activate();
+    // The providers session_start registers are the waiting gate: they list the live child and hold its parent open.
+    await lifecycle.get("session_start")({}, ctx());
+    vi.useFakeTimers();
+    routedRun({ lead: sessionStub(), parent: sessionStub(), child: sessionStub() }, "completes");
+
+    const parentId = agentIdOf(await spawnTop(tools, "parent"));
+    const childId = spawnNested(pi, parentId, "child", 2);
+    releaseParent();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Parked, not settled: the parent is idle on background work, so nothing may announce it as finished.
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    expect(liveRecord(parentId)).toMatchObject({ status: "running", waiting: { items: [childId] } });
+  });
+
+  it("a stopped parent's notice carries its report and the pointer that defers to the user", async () => {
+    const { pi, tools } = activate();
+    vi.useFakeTimers();
+    // No session_start here: without the providers, an ending parent settles instead of parking, and pauses its child.
+    routedRun({ lead: sessionStub(), parent: sessionStub(), child: sessionStub() }, "completes");
+
+    const parentId = agentIdOf(await spawnTop(tools, "parent"));
+    const childId = spawnNested(pi, parentId, "child", 2);
+    releaseParent();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(liveRecord(childId)).toMatchObject({ endedBy: "pause" });
+
+    // The parent runs again and the user stops that run (the same abort the Esc key and the RPC stop call): the
+    // already-paused child is left alone, and this settle's notice has to carry both sections.
+    vi.mocked(createChildSession).mockResolvedValueOnce(sessionStub());
+    vi.mocked(resumeAgent).mockImplementation((_session, _prompt, callbacks) => hang(callbacks ?? {}));
+    expect(await liveManager().deliver(parentId, "continue")).toBe("resumed");
+    liveManager().abort(parentId);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const notices = pi.sendMessage.mock.calls.map(([payload]) => payload.content as string);
+    const stopped = notices.find((content) => content.includes("STOPPED BY THE USER"));
+    expect(stopped).toBeDefined();
+    // In one message: the report names the user's stop, and the pointer defers to it instead of telling its owner
+    // to resume the parent behind the user's back.
+    expect(stopped).toContain(`Resume ${parentId} with SendMessage({ to: "${parentId}", message: "continue" }) only if the user asks; they stopped it deliberately.`);
+    expect(stopped).toContain(`1 nested child was paused when ${parentId} (parent) ended: ${childId} "child"`);
+    expect(stopped).not.toContain("without asking the user");
   });
 
   it("the pointer precedes the report in the same message", async () => {
