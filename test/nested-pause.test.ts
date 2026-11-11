@@ -288,8 +288,12 @@ describe("nested pause — eviction", () => {
     expect(record.endedBy).toBe("pause");
     expect(record.resultDelivered).toBeFalsy();
     expect(manager.getRecord(child)).toBe(record);
-    // The latest result still names the paused child, so its owner is not left to re-dispatch the work.
-    expect(manager.getRecord(parent)!.result).toContain(`paused with parent: ${child}`);
+    // The pointer is the notification's own section, not part of the parent's result: the latest result never
+    // names the paused child, and the notice names it again after every settle, so its owner is not left to
+    // re-dispatch the work.
+    expect(manager.getRecord(parent)!.result ?? "").not.toContain("paused with parent:");
+    expect(manager.pausedChildrenNotice(parent)).toContain(`1 nested child was paused when ${parent} (p)`);
+    expect(manager.pausedChildrenNotice(parent)).toContain(`${child} "child"`);
 
     // Stop mode: resume the parent again, then stop it explicitly. The paused child is not relabelled,
     // not marked delivered and still continuable.
@@ -305,6 +309,8 @@ describe("nested pause — eviction", () => {
     expect(record.endedBy).toBe("pause");
     expect(record.resultDelivered).toBeFalsy();
     expect(record.ownerAborted).toBeUndefined();
+    // The second settle names the still-paused child again (#235 S1).
+    expect(manager.pausedChildrenNotice(parent)).toContain(`${child} "child"`);
 
     // Still continuable by its parent.
     vi.mocked(createChildSession).mockResolvedValueOnce(mockSession());

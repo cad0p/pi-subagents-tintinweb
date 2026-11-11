@@ -1,7 +1,8 @@
 /**
  * nested-pause-e2e.test.ts — issue #235, full stack: a lead's time limit pauses its running nested lens, the
- * lead's resume opens with the paused note, the lead continues the lens with its nested SendMessage, and the
- * lens's result reaches the lead as a subagent-notification.
+ * lead's completion notification names the paused lens in its own section, the lead's resume opens with the paused
+ * note, the lead continues the lens with its nested SendMessage, and the lens's result reaches the lead as a
+ * subagent-notification.
  *
  * Nothing is mocked but the model: real child sessions on the faux provider, real caps from
  * `.pi/background-work.json`, and the paused state asserted between the lead's settle and the resume. Those caps
@@ -167,6 +168,17 @@ describe("nested pause — full stack (#235)", () => {
     if (lead?.status !== "completed") expect(lead?.limitReason).toBe("time");
     expect(lens?.status).toBe("completed");
     expect(lensResumed).toBe(true);
+
+    // The main session's notification for the lead carries the paused pointer in a section of its own, and the
+    // pointer is not part of the lead's result.
+    const leadId = String(lead?.id ?? "");
+    const lensId = String(lens?.id ?? "");
+    const notices = run.parentSession.messages
+      .filter((message) => (message as { customType?: string }).customType === "subagent-notification")
+      .map((message) => String((message as { content?: unknown }).content));
+    expect(notices.some((notice) => notice.includes(`Resume ${leadId} now:`))).toBe(true);
+    expect(notices.some((notice) => notice.includes(`1 nested child was paused when ${leadId} (lead) ended: ${lensId} "lens"`))).toBe(true);
+    expect(String(lead?.result ?? "")).not.toContain("paused with parent:");
 
     // The lens's second run appended to the same session file.
     const lensFile = String(lens?.sessionFile);

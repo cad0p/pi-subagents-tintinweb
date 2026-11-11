@@ -579,7 +579,8 @@ export default function (pi: ExtensionAPI) {
   /**
    * One notice for the recovered records of a batch: their ids by cause (a crash, or a quit that stopped them), the
    * resume each one allows, then each note the policy gave. A first interruption is resumed by the main agent at once;
-   * a crash loop waits for the user, and its note says so.
+   * a crash loop waits for the user, and its note says so. A record that left nested children paused carries that
+   * pointer first, in its own section: it names a different agent than the recovery does.
    */
   function formatInterruptedNotice(records: AgentRecord[], crash: Map<string, CrashRecoveryDecision>): string {
     const headline = (group: AgentRecord[], cause: string) => {
@@ -602,7 +603,19 @@ export default function (pi: ExtensionAPI) {
       // The policy's note counts crashes; a shutdown stop is held by a policy that resumes nothing, and says only that.
       if (note) lines.push(`${record.id}: ${record.stoppedAtShutdown ? "ask the user before resuming" : note}`);
     }
-    return lines.join("\n");
+    const paused = records.map((record) => manager.pausedChildrenNotice(record.id)).filter(Boolean);
+    return [...paused, lines.join("\n")].join("\n\n");
+  }
+
+  /**
+   * A settled record's completion notification: the paused-children pointer first, then the report. It is the only
+   * channel for the pointer — `get_subagent_result` polls a running record and carries no end-notification section.
+   */
+  function settledNotification(record: AgentRecord): string {
+    return [
+      manager.pausedChildrenNotice(record.id),
+      formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost),
+    ].filter(Boolean).join("\n\n");
   }
 
   /**
@@ -677,7 +690,7 @@ export default function (pi: ExtensionAPI) {
     const sections = [
       ...(interrupted.length > 0 ? [formatInterruptedNotice(interrupted, batch.crash)] : []),
       ...(unstarted ? [formatUnstartedNotice(unstarted)] : []),
-      ...completed.map((record) => formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost)),
+      ...completed.map(settledNotification),
     ];
 
     try {
@@ -764,7 +777,7 @@ export default function (pi: ExtensionAPI) {
     if (record.parentAgentId) {
       const text = record.status === "interrupted"
         ? formatInterruptedNotice([record], new Map([[record.id, crashRecoveryDecision(record.crashCount ?? 1, readPolicy(record.cwd ?? process.cwd()))]]))
-        : formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost);
+        : settledNotification(record);
       manager.deliverNested(record, text);
       return;
     }
@@ -1358,7 +1371,7 @@ export default function (pi: ExtensionAPI) {
       for (const { id, target } of pending) {
         const record = manager.getRecord(id);
         if (!record) continue;
-        if (target) manager.deliverNested(record, formatTaskNotification(record, { failurePreviewMaxChars: effectiveFailurePreviewCap(failurePreviewMaxChars) }, showCost));
+        if (target) manager.deliverNested(record, settledNotification(record));
         else sendIndividualNudge(record);
       }
     }

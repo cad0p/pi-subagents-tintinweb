@@ -1825,21 +1825,15 @@ export class AgentManager {
    * file and stays resumable through `deliver`.
    */
   private endOwnedChildren(parent: AgentRecord, mode: "stop" | "pause"): void {
-    const paused: string[] = [];
     const stopped: string[] = [];
     for (const [id, record] of this.agents) {
       if (record.parentAgentId !== parent.id) continue;
-      // Already paused by an earlier settle: only `removeSubtree` with this parent may remove it, a second
+      // Already paused by an earlier settle: only `removeSubtree` with this parent may remove it, and a second
       // settle must not mark it delivered — that flag would evict it before the parent, at its own older
-      // `completedAt`, while its spawn entry is still open — and it is named again, so the owner's latest
-      // result still points at the child instead of inviting a re-dispatch.
-      if (record.endedBy === "pause") {
-        paused.push(id);
-        continue;
-      }
+      // `completedAt`, while its spawn entry is still open.
+      if (record.endedBy === "pause") continue;
       if (mode === "pause" && record.status === "running") {
         // Flagged before the abort: a settle the abort triggers must already see the pause.
-        paused.push(id);
         this.abort(id, "pause");
         continue;
       }
@@ -1853,10 +1847,6 @@ export class AgentManager {
       // The owning parent ended, so no one can pull this child's result: it is delivered, which lets the
       // parent's eviction take it with the subtree.
       record.resultDelivered = true;
-    }
-    if (paused.length > 0) {
-      const note = `paused with parent: ${paused.join(", ")}. They are stopped, not finished: only this agent can continue them. SendMessage ${parent.id} to resume it, and it continues them; do not re-dispatch their work.`;
-      parent.result = parent.result ? `${parent.result}\n\n${note}` : note;
     }
     if (stopped.length > 0) {
       const note = `stopped with parent: ${stopped.join(", ")}`;
@@ -2267,16 +2257,42 @@ export class AgentManager {
     return interrupted ? "resumedAfterCrash" : "resumed";
   }
 
+  /** The nested children a parent's end paused: stopped, undelivered, and reachable only through that parent. */
+  private pausedChildren(parentId: string): AgentRecord[] {
+    return [...this.agents.values()].filter((record) => record.parentAgentId === parentId && record.endedBy === "pause");
+  }
+
+  /**
+   * The completion notification's own section for a parent whose settle paused its nested children. Written in the
+   * extension's voice, like the crash notice: this pointer is not part of the parent's result, and it says how to
+   * resume the parent — the only agent that can continue them — without asking the user. Derived from the records,
+   * so it is drawn only while a paused child is still there. Empty when the parent paused none.
+   */
+  pausedChildrenNotice(parentId: string): string {
+    const paused = this.pausedChildren(parentId);
+    if (paused.length === 0) return "";
+    const one = paused.length === 1;
+    const parent = this.agents.get(parentId);
+    const ended = parent ? `${parentId} (${toSingleLine(parent.description)})` : parentId;
+    const named = paused.map((record) => `${record.id} "${toSingleLine(record.description)}"`).join(", ");
+    return [
+      `Resume ${parentId} now: SendMessage({ to: "${parentId}", message: "continue" }) without asking the user.`,
+      `${paused.length} nested ${one ? "child was" : "children were"} paused when ${ended} ended: ${named}. ${one ? "It is" : "They are"} stopped, not finished; only ${parentId} can continue ${one ? "it" : "them"}. Do not start a new Agent for ${one ? "its" : "their"} work.`,
+    ].join("\n");
+  }
+
   /**
    * The resume note for a parent whose settle paused its nested children: they are stopped, not finished, and only
    * this parent can continue them. Derived from the records, so it repeats on every resume until each child is
    * continued and disappears by itself once none is left.
    */
   private pausedChildrenNote(parentId: string): string {
-    const paused = [...this.agents.values()].filter((record) => record.parentAgentId === parentId && record.endedBy === "pause");
+    const paused = this.pausedChildren(parentId);
     if (paused.length === 0) return "";
+    const one = paused.length === 1;
     const named = paused.map((record) => `${record.id} "${toSingleLine(record.description)}"`).join(", ");
-    return `Your nested children were paused when your run ended: ${named}. They are stopped, not finished: continue each with SendMessage <id>. Do not re-dispatch their work.`;
+    const calls = paused.map((record) => `SendMessage({ to: "${record.id}", message: "continue" })`).join(", ");
+    return `Your nested ${one ? "child was" : "children were"} paused when your run ended: ${named}. ${one ? "It is" : "They are"} stopped, not finished: continue ${one ? "it" : "each"} with ${calls} without asking the user. Do not re-dispatch ${one ? "its" : "their"} work.`;
   }
 
   /** Counts a delivered prompt as pending preflight until the returned release runs (idempotent). */

@@ -1190,7 +1190,13 @@ describe("run cap", () => {
     expect(paused).toMatchObject({ status: "stopped", endedBy: "pause" });
     expect(paused.ownerAborted).toBeUndefined();
     expect(paused.resultDelivered).toBeFalsy();
-    expect(parent.result).toContain(`paused with parent: ${child}`);
+    // The pointer is the completion notification's own section, not part of the parent's result.
+    expect(parent.result ?? "").not.toContain("paused with parent:");
+    const notice = manager.pausedChildrenNotice(parent.id);
+    expect(notice).toContain(`Resume ${parent.id} now:`);
+    expect(notice).toContain(`SendMessage({ to: "${parent.id}", message: "continue" }) without asking the user.`);
+    expect(notice).toContain(`1 nested child was paused when ${parent.id} (work) ended: ${child} "child"`);
+    expect(notice).toContain("It is stopped, not finished; only");
     // No settle entry for the paused child: its spawn entry stays open, so a crash rebuilds it as interrupted.
     const settles = vi.mocked(pi.appendEntry).mock.calls.filter(
       ([customType, data]) => customType === "subagents:record" && (data as { id?: string }).id === child,
@@ -1218,6 +1224,9 @@ describe("run cap", () => {
     vi.advanceTimersByTime(CAP_MS);
     await settle();
     expect(manager.getRecord(child)).toMatchObject({ status: "stopped", endedBy: "pause" });
+    // The completion notification carries the pointer in its own section, in the crash notice's voice.
+    expect(manager.pausedChildrenNotice(parent.id)).toContain(`1 nested child was paused when ${parent.id} (work) ended: ${child} "child"`);
+    expect(parent.result ?? "").not.toContain("paused with parent:");
 
     // The orchestrator's SendMessage resumes the parent; its prompt opens with the paused note.
     const prompts: string[] = [];
@@ -1228,7 +1237,9 @@ describe("run cap", () => {
       return new Promise(() => {}) as never;
     });
     expect(await manager.deliver(parent.id, "continue")).toBe("resumed");
-    expect(prompts[0]).toContain("Your nested children were paused when your run ended:");
+    expect(prompts[0]).toContain("Your nested child was paused when your run ended:");
+    expect(prompts[0]).toContain(`SendMessage({ to: "${child}", message: "continue" })`);
+    expect(prompts[0]).toContain("without asking the user");
     expect(prompts[0]).toContain(child);
     expect(prompts[0]).toContain('"child"');
 
