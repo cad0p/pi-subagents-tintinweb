@@ -61,6 +61,7 @@ All notable changes to this project will be documented in this file.
 - *(worktree)* A resumed worktree agent gets its worktree back (closes #227) ([#232](https://github.com/cad0p/pi-subagents-tintinweb/pull/232))
 - *(checkpoint)* A checkpoint for a missing record is a failed tool result (closes #231) ([#234](https://github.com/cad0p/pi-subagents-tintinweb/pull/234))
 - *(nesting)* A parent's end pauses its nested children instead of killing them (closes #235) ([#236](https://github.com/cad0p/pi-subagents-tintinweb/pull/236))
+- *(transcript)* A resumed nested agent keeps appending to its output file (closes #237) ([#239](https://github.com/cad0p/pi-subagents-tintinweb/pull/239))
 
 ### 🚜 Refactor
 
