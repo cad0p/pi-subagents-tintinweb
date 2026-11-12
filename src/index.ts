@@ -775,8 +775,8 @@ export default function (pi: ExtensionAPI) {
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
     // A settle replays a shown transcript once; the live repaints come from the child's own bus, which the
-    // view taps on the session it shows. Every record reaches this callback, nested ones included; the bus
-    // events it emits are top-level only.
+    // view taps on the session it shows. Every record reaches this callback, nested ones included; the
+    // lifecycle events this callback emits are top-level only.
     nativeView?.onRecordEvent(record.id);
     // A settled record keeps a snapshot, not the live session: drop the activity
     // handle too, so the child session is unreachable once its teardown ran.

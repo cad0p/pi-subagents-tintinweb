@@ -1096,10 +1096,12 @@ export class NativeTranscriptView {
     }
     // The two arrivals that reach the rebuilt transcript: `entry_appended` for an appended entry
     // (`ctx.appendEntry` included), `message_end` for a user, assistant, toolResult or custom
-    // message. Two reachable entries pi renders are neither, and stay stale until the next arrival
-    // repaints: a compaction summary (`sessionManager.appendCompaction`, no `entry_appended`; a
-    // top-level record repaints that one from `subagents:compacted`) and a bashExecution message
-    // (`sessionManager.appendMessage`, no `message_end`). `tool_execution_end` is deliberately not
+    // message. Two pi-rendered entries arrive through neither. A compaction summary is the reachable
+    // one, and stays stale until the next arrival repaints (`sessionManager.appendCompaction`, no
+    // `entry_appended`; a top-level record repaints that one from `subagents:compacted`). A
+    // bashExecution message cannot occur in a child view (`sessionManager.appendMessage`, no
+    // `message_end`; only `executeBash` and an extension handling bash itself record one).
+    // `tool_execution_end` is deliberately not
     // here either: it appends nothing, so a rebuild would only redraw the frame on screen. pi
     // notifies listeners and *then* appends (`_emit`, then `appendMessage`), with no await between,
     // so the rebuild waits one microtask: by then the entry is on the session and the rebuild sees
