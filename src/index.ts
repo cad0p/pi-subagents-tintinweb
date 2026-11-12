@@ -763,6 +763,14 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  // One subscribe site for both spawn paths and both resume paths: a record's transcript is record-scoped,
+  // while everything below the nested return is session-scoped.
+  const subscribeTranscript = (record: AgentRecord) => {
+    if (record.session && record.outputFile && record.childSettings) {
+      record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, record.childSettings.effectiveCwd, record.session.messages.length);
+    }
+  };
+
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
     // PR 1 re-reads a shown transcript when its run completes. Every record reaches this callback,
@@ -801,7 +809,12 @@ export default function (pi: ExtensionAPI) {
 
     sendIndividualNudge(record);
   }, undefined, (record) => {
-    if (record.parentAgentId) return;
+    if (record.parentAgentId) {
+      // A nested record has no session-scoped work here. Its transcript is record-scoped: a resume must keep
+      // appending to the same .output file its completion notification names.
+      subscribeTranscript(record);
+      return;
+    }
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -813,9 +826,7 @@ export default function (pi: ExtensionAPI) {
     cancelNudge(record.id);
     // A resumed run starts from a session that already exists: stream it from where its transcript ends and
     // mark its row running. A fresh spawn has no session yet; onSessionCreated streams it.
-    if (record.session && record.outputFile && record.childSettings) {
-      record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, record.childSettings.effectiveCwd, record.session.messages.length);
-    }
+    subscribeTranscript(record);
     if (record.session) {
       fleet.ensureTimer();
       fleet.update();
