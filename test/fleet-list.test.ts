@@ -1011,6 +1011,64 @@ describe("FleetList nested rows (#146)", () => {
     expect(h.overlayOpened()).toBe(true);
     expect(h.overlayComponent()).toBeDefined();
   });
+
+  it("keeps a paused child's row past the linger window, with its parent above it (#235)", () => {
+    vi.useFakeTimers();
+    try {
+      const completedAt = Date.now();
+      // The parent ended (a time limit, say) and is long past its own window: the child it paused is the
+      // only reason its row is still on screen, as a context row.
+      const p = parent({ startedAt: completedAt - 20_000, status: "completed", completedAt });
+      const c = child({
+        startedAt: completedAt - 10_000,
+        status: "stopped",
+        endedBy: "pause",
+        completedAt,
+        session: undefined,
+        sessionSnapshot: FAKE_SESSION as any,
+      });
+      const h = harness([p, c]);
+      vi.setSystemTime(completedAt + 60_000); // both rows are well past FINISHED_LINGER_MS
+
+      h.press(DOWN); // activate (main)
+      h.press(DOWN); // the parent row
+      expect(h.render().find(l => l.includes("parent job"))).toContain("▸ 1 nested (1 paused)");
+
+      h.press(RIGHT); // expand → the child row, selected
+      const paused = h.render();
+      const parentIdx = paused.findIndex(l => l.includes("parent job"));
+      const childIdx = paused.findIndex(l => l.includes("child job"));
+      expect(parentIdx).toBeGreaterThanOrEqual(0); // the parent outlives its own window too
+      expect(childIdx).toBeGreaterThan(parentIdx);
+      expect(paused[parentIdx]).toContain("✓"); // its own run finished normally
+      expect(paused[childIdx]).toMatch(/^ {2}⏺ {3}↳ /); // nested under it, not a depth-1 root
+      expect(paused[childIdx]).toMatch(/ paused$/); // paused, not killed: never " stopped"
+
+      // The parent resumes it: `resume` clears the flag, so the run is an ordinary one again.
+      c.status = "running";
+      c.completedAt = undefined;
+      c.endedBy = undefined;
+      h.press(LEFT); // collapse → the parent row, with the tag
+      expect(h.render().find(l => l.includes("parent job"))).toContain("▸ 1 nested (1 running)");
+      h.press(RIGHT);
+      const resumed = h.render().find(l => l.includes("child job"));
+      expect(resumed).toBeDefined();
+      expect(resumed).not.toContain(" paused");
+
+      // It settles again: a flag the resume left behind would only surface here, as a paused tag.
+      c.status = "completed";
+      c.completedAt = Date.now();
+      h.press(LEFT);
+      expect(h.render().find(l => l.includes("parent job"))).toContain("▸ 1 nested (1 finished)");
+      h.press(RIGHT);
+      const settled = h.render().find(l => l.includes("child job"));
+      expect(settled).toBeDefined();
+      expect(settled).toContain("✓");
+      expect(settled).not.toContain(" paused");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("FleetList selection follows the record (#146)", () => {

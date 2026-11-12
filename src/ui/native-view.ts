@@ -1185,6 +1185,6 @@ export class NativeTranscriptView {
 /** FleetView's current refusal for a record with no readable transcript. */
 export function noTranscriptMessage(record: AgentRecord): string {
   if (record.status === "queued" || (record.status === "running" && record.gated === true)) return "queued, not started yet";
-  if (record.status === "stopped" && record.completedAt != null) return "stopped before it started";
+  if (record.status === "stopped" && record.completedAt != null && record.endedBy !== "pause") return "stopped before it started";
   return `Agent is ${toSingleLine(record.status)} — no session available.`;
 }

@@ -2,17 +2,21 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type BackgroundWorkItem, registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
-import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, type AgentSessionEvent, type ExtensionAPI, type ExtensionContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, type CapEvent, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
-import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { formatTaskNotification } from "../src/index.js";
+import { createNestedSubagentTools } from "../src/nested-tools.js";
 import type { HandoverEvent } from "../src/reload-handover.js";
 import { renderAgentReport } from "../src/result-report.js";
 import type { AgentRecord } from "../src/types.js";
 import { answerChildDialog, createChildUIProxy, onChildDialogFlag } from "../src/ui/child-ui.js";
 
-vi.mock("../src/agent-runner.js", async (importOriginal) => ({ ...(await importOriginal()), runAgent: vi.fn(), createChildSession: vi.fn() }));
+vi.mock("../src/agent-runner.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/agent-runner.js")>();
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn(actual.resumeAgent), createChildSession: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
@@ -163,15 +167,17 @@ const fakeChild = () => {
 type FakeChild = ReturnType<typeof fakeChild>;
 
 /** Hosts each spawned child the way the runner does: settings, session with its lifecycle, then the prompt. */
-const runChild = (fake: FakeChild) =>
+const runFakes = (pick: (prompt: string) => FakeChild) =>
   vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts) => {
-    const session = fake as unknown as AgentSession;
+    const session = pick(prompt) as unknown as AgentSession;
     opts.onChildSettings?.({ effectiveCwd: "/tmp" } as ChildSessionSettings);
     const lifecycle = attachSessionLifecycle(session);
     opts.onSessionCreated?.(session, lifecycle);
     const result = await lifecycle.prompt(prompt, { signal: opts.signal, observer: opts.observer });
     return { ...result, responseText: result.text, session } as unknown as Awaited<ReturnType<typeof runAgent>>;
   });
+
+const runChild = (fake: FakeChild) => runFakes(() => fake);
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 /** Lets a settle finish its chain: the observer's decide, afterRun, then the completion callback. */
@@ -1156,4 +1162,129 @@ describe("run cap", () => {
     expect(child.dispose).toHaveBeenCalled();
     expect(record.session).toBeUndefined();
   });
+
+  /** A capped parent with one running nested child. The child keeps the default (30 min) cap, so only the parent's fires. */
+  const parentWithNestedChild = async () => {
+    const parentFake = fakeChild();
+    const childFake = fakeChild();
+    runFakes((prompt) => (prompt === "child work" ? childFake : parentFake));
+    const parent = spawnChild(capDir);
+    const child = manager.spawn(pi, ctx, "general-purpose", "child work", {
+      description: "child",
+      parentAgentId: parent.id,
+      depth: 2,
+    });
+    await settle();
+    expect(manager.getRecord(child)!.status).toBe("running");
+    return { parent, child };
+  };
+
+  it("a hard stop pauses the running nested child instead of killing it", async () => {
+    const { parent, child } = await parentWithNestedChild();
+
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+
+    const paused = manager.getRecord(child)!;
+    expect(parent).toMatchObject({ status: "completed", limitReason: "time", timeLimit: "stopped" });
+    expect(paused).toMatchObject({ status: "stopped", endedBy: "pause" });
+    expect(paused.ownerAborted).toBeUndefined();
+    expect(paused.resultDelivered).toBeFalsy();
+    // The pointer is the completion notification's own section, not part of the parent's result.
+    expect(parent.result ?? "").not.toContain("paused with parent:");
+    const notice = manager.pausedChildrenNotice(parent.id);
+    expect(notice).toContain(`Resume ${parent.id} now:`);
+    expect(notice).toContain(`SendMessage({ to: "${parent.id}", message: "continue" }) without asking the user.`);
+    expect(notice).toContain(`1 nested child was paused when ${parent.id} (work) ended: ${child} "child"`);
+    expect(notice).toContain("It is stopped, not finished; only");
+    // No settle entry for the paused child: its spawn entry stays open, so a crash rebuilds it as interrupted.
+    const settles = vi.mocked(pi.appendEntry).mock.calls.filter(
+      ([customType, data]) => customType === "subagents:record" && (data as { id?: string }).id === child,
+    );
+    expect(settles).toEqual([]);
+  });
+
+
+  it("the issue's sequence: the parent's resume opens with the paused note, and the continued child's result reaches it", async () => {
+    const parentFake = fakeChild();
+    const childFake = fakeChild();
+    const dir = mkdtempSync(join(tmpdir(), "run-cap-session-"));
+    dirs.push(dir);
+    const withFile = (fake: FakeChild) => {
+      const sessions = SessionManager.create(dir, join(dir, "sessions"));
+      sessions.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() });
+      fake.sessionManager = { ...fake.sessionManager, getSessionFile: () => sessions.getSessionFile()! };
+    };
+    withFile(parentFake);
+    withFile(childFake);
+    runFakes((prompt) => (prompt === "child work" ? childFake : parentFake));
+    const parent = spawnChild(capDir);
+    const child = manager.spawn(pi, ctx, "general-purpose", "child work", { description: "child", parentAgentId: parent.id, depth: 2 });
+    await settle();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    expect(manager.getRecord(child)).toMatchObject({ status: "stopped", endedBy: "pause" });
+    // The completion notification carries the pointer in its own section, in the crash notice's voice.
+    expect(manager.pausedChildrenNotice(parent.id)).toContain(`1 nested child was paused when ${parent.id} (work) ended: ${child} "child"`);
+    expect(parent.result ?? "").not.toContain("paused with parent:");
+
+    // The orchestrator's SendMessage resumes the parent; its prompt opens with the paused note.
+    const prompts: string[] = [];
+    vi.mocked(createChildSession).mockResolvedValueOnce(parentFake as unknown as AgentSession);
+    vi.mocked(resumeAgent).mockImplementationOnce(async (_session, prompt) => {
+      prompts.push(prompt);
+      parentFake.begin();
+      return new Promise(() => {}) as never;
+    });
+    expect(await manager.deliver(parent.id, "continue")).toBe("resumed");
+    expect(prompts[0]).toContain("Your nested child was paused when your run ended:");
+    expect(prompts[0]).toContain(`SendMessage({ to: "${child}", message: "continue" })`);
+    expect(prompts[0]).toContain("without asking the user");
+    expect(prompts[0]).toContain(child);
+    expect(prompts[0]).toContain('"child"');
+
+    // The parent continues it with its nested SendMessage tool: the child resumes and finishes.
+    vi.mocked(createChildSession).mockResolvedValueOnce(childFake as unknown as AgentSession);
+    vi.mocked(resumeAgent).mockImplementationOnce(async () => ({ text: "DONE" }) as never);
+    const send = createNestedSubagentTools({
+      manager,
+      pi,
+      parentAgentId: parent.id,
+      depth: 1,
+      maxSubagentDepth: 3,
+      allowedSubagents: "all",
+      configCwd: "/tmp",
+    }).find((tool) => tool.name === "SendMessage")!;
+    const answer = await send.execute("call-1", { to: child, message: "do the short second step now and report" });
+    expect(answer.content[0].text).toContain("resumed");
+    vi.advanceTimersByTime(500);
+    await settle();
+    expect(manager.getRecord(child)).toMatchObject({ status: "completed", result: "DONE" });
+    expect(manager.getRecord(child)!.endedBy).toBeUndefined();
+
+    // The completion surface hands the child's text to its parent: one subagent-notification, and the result is delivered.
+    manager.deliverNested(manager.getRecord(child)!, "DONE");
+    vi.advanceTimersByTime(NUDGE_HOLD_MS);
+    await settle();
+    const wake = parentFake.sendCustomMessage.mock.calls.at(-1)?.[0];
+    expect(wake?.customType).toBe("subagent-notification");
+    expect(wake?.content).toContain("DONE");
+    parentFake.deliver();
+    await settle();
+    expect(manager.getRecord(child)!.resultDelivered).toBe(true);
+  });
+
+  it("a paused child's result is never handed to its parent", async () => {
+    const { child } = await parentWithNestedChild();
+    vi.advanceTimersByTime(CAP_MS);
+    await settle();
+    const deliver = vi.spyOn(manager, "deliver");
+
+    manager.deliverNested(manager.getRecord(child)!, "partial");
+    await settle();
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(manager.getRecord(child)!.resultDelivered).toBeFalsy();
+  });
 });
+

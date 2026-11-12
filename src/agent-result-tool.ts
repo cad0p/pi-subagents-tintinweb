@@ -77,7 +77,9 @@ export function agentAmbiguousResponse(query: string, candidates: AgentRecord[])
 export function consumeResult(record: AgentRecord): boolean {
   if (record.status === "running" || record.status === "queued") return false;
   record.resultConsumed = true;
-  record.resultDelivered = true;
+  // A paused child's result is partial: its parent can still continue it, so the record must not become
+  // evictable on its own — only with its parent (see AgentManager.removeSubtree).
+  if (record.endedBy !== "pause") record.resultDelivered = true;
   return true;
 }
 

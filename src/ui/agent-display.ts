@@ -159,7 +159,7 @@ export function formatTurns(turnCount: number, maxTurns?: number | null): string
 
 /** Icon and trailing status text for a finished agent (shared by the FleetView rows and the result views). */
 export function finishedStatus(
-  a: { status: string; error?: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped" },
+  a: { status: string; error?: string; limitReason?: "time"; timeLimit?: "wrapped" | "stopped"; endedBy?: "stop" | "pause" },
   theme: Theme,
 ): { icon: string; statusText: string } {
   if (a.status === "completed") {
@@ -169,6 +169,8 @@ export function finishedStatus(
     return { icon: theme.fg("success", "✓"), statusText: a.limitReason === "time" ? theme.fg("warning", timeText) : "" };
   }
   if (a.status === "steered") return { icon: theme.fg("warning", "✓"), statusText: theme.fg("warning", " (turn limit)") };
+  // Warning, not dim: a paused child is resumable by its parent, like an interrupted run.
+  if (a.endedBy === "pause") return { icon: theme.fg("warning", "■"), statusText: theme.fg("warning", " paused") };
   if (a.status === "stopped") return { icon: theme.fg("dim", "■"), statusText: theme.fg("dim", " stopped") };
   if (a.status === "interrupted") return { icon: theme.fg("warning", "■"), statusText: theme.fg("warning", " interrupted") };
   if (a.status === "error") {

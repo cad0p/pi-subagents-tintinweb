@@ -23,9 +23,11 @@ vi.mock("../src/agent-runner.js", async (importOriginal) => ({
 }));
 
 import { setQuietMs } from "../src/agent-manager.js";
-import { attachSessionLifecycle, resumeAgent, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
+import { spawnedEntry } from "../src/ledger.js";
+import type { AgentRecord } from "../src/types.js";
 import { agentIdOf, MANAGER_KEY, makePi, spawnCtx } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);
@@ -733,6 +735,156 @@ describe("crash recovery — resume", () => {
 
     await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
     expect(vi.mocked(resumeAgent).mock.calls[0][1]).toContain(`Your last saved activity was at ${saved}`);
+  });
+});
+
+/** The four nested tools a delegating agent gets, sorted: the names `resolveChildSettings` builds. */
+const NESTED_TOOL_NAMES = ["Agent", "SendMessage", "checkpoint", "get_subagent_result"];
+
+/** The extension's manager handle: `getRecord` hides nested records, `listAgents` does not. */
+function handle() {
+  return (globalThis as Record<symbol, {
+    getRecord(id: string): AgentRecord | undefined;
+    listAgents(): AgentRecord[];
+  } | undefined>)[MANAGER_KEY]!;
+}
+
+/** An agent that may delegate: its resolved settings carry the four nested tools. */
+function writeNester(): void {
+  mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+  writeFileSync(join(tmpDir, ".pi", "agents", "nester.md"), "---\ndescription: delegates\nallowed_subagents: all\n---\nDelegates.\n");
+}
+
+/** A recovered record's settings are resolved by its first resume; the nested tools it got are the ones it runs with. */
+async function resolvedNestedTools(made: ReturnType<typeof makePi>, id: string): Promise<ChildSessionSettings["nestedTools"]> {
+  vi.mocked(resumeAgent).mockReturnValue(new Promise<never>(() => {}));
+  const sent = await made.tools.get("SendMessage").execute("tc-resume", { to: id, message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+  expect(sent.details).toMatchObject({ sendOutcome: "resumedAfterCrash" });
+  return handle().getRecord(id)?.childSettings?.nestedTools ?? [];
+}
+
+/** A spawn entry for a run of the delegating type, owned by a dead process. */
+function nestingEntry(id: string, extra: Record<string, unknown> = {}, sessionFile = join(tmpDir, `${id}.jsonl`)) {
+  return custom("subagent-spawned", {
+    v: 1,
+    id,
+    type: "nester",
+    description: `task ${id}`,
+    sessionFile,
+    persistSession: false,
+    spawnedAt: Date.now() - 60_000,
+    ownerPid: DEAD_PID,
+    ...extra,
+  });
+}
+
+describe("crash recovery — recovered nesting", () => {
+  it("resolves a recovered run's nested tools from the depth and cap it recorded", async () => {
+    writeNester();
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [
+      nestingEntry("depth-one", { depth: 1, maxSubagentDepth: 2 }),
+      nestingEntry("depth-two", { depth: 2, maxSubagentDepth: 2 }),
+      // A release before the field wrote no depth. Top-level, so it reads as depth 1 and nests again.
+      nestingEntry("no-depth", { maxSubagentDepth: 2 }),
+    ]);
+    writeChildFiles("depth-one", "depth-two", "no-depth");
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+
+    // Below the cap: the four tools. At it: none.
+    expect((await resolvedNestedTools(made, "depth-one")).map((tool) => tool.name).sort()).toEqual(NESTED_TOOL_NAMES);
+    expect(await resolvedNestedTools(made, "depth-two")).toEqual([]);
+    expect((await resolvedNestedTools(made, "no-depth")).map((tool) => tool.name).sort()).toEqual(NESTED_TOOL_NAMES);
+  });
+
+  it("a nested entry that recorded no depth resumes without nested tools", async () => {
+    writeNester();
+    // The lead's own ledger holds its crashed child, which recorded no depth: nested, so the cap, not 1.
+    const leadFile = join(tmpDir, "lead.jsonl");
+    writeSession(leadFile, [nestingEntry("legacy-child", { parentId: "lead" }, join(tmpDir, "legacy-child.jsonl"))]);
+    writeChildFiles("legacy-child");
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [nestingEntry("lead", { depth: 1, maxSubagentDepth: 2 }, leadFile)]);
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    await resolvedNestedTools(made, "lead");
+
+    // The lead continues its crashed child with the nested SendMessage, the one path a nested id answers.
+    const send = handle().getRecord("lead")?.childSettings?.nestedTools.find((tool) => tool.name === "SendMessage");
+    expect(send).toBeDefined();
+    await send!.execute("tc-legacy", { to: "legacy-child", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+
+    const child = handle().listAgents().find((record) => record.id === "legacy-child");
+    expect(child?.status).toBe("running");
+    expect(child?.childSettings?.nestedTools).toEqual([]);
+  });
+});
+
+describe("crash recovery — a recovered parent's nested transcript", () => {
+  /** A parent entry written the way the ledger writes it: the field under test is the one `spawnedEntry` emits. */
+  function parentEntry(id: string, extra: Partial<AgentRecord> = {}) {
+    const recovered = {
+      id, type: "nester", description: `task ${id}`, cwd: tmpDir, persistSession: false,
+      startedAt: Date.now() - 60_000, depth: 1, maxSubagentDepth: 2, ...extra,
+    } as unknown as AgentRecord;
+    return custom("subagent-spawned", spawnedEntry(recovered, join(tmpDir, `${id}.jsonl`), { pid: DEAD_PID }));
+  }
+
+  /** Resume the recovered parent, then let its own nested Agent tool spawn one child. */
+  async function spawnNestedChild(made: ReturnType<typeof makePi>, parentId: string) {
+    vi.mocked(runAgent).mockReturnValue(new Promise(() => {}));
+    const agentTool = (await resolvedNestedTools(made, parentId)).find((tool) => tool.name === "Agent");
+    expect(agentTool).toBeDefined();
+    const result = await agentTool!.execute(
+      "tc-nested",
+      { prompt: "do the nested work", description: "nested task", subagent_type: "general-purpose" },
+      undefined,
+      undefined,
+      spawnCtx(tmpDir),
+    );
+    const text = (result.content[0] as { text: string }).text;
+    const childId = text.match(/Agent ID: (\S+)/)?.[1];
+    return { text, isError: (result as { isError?: boolean }).isError === true, child: handle().listAgents().find((record) => record.id === childId) };
+  }
+
+  it("files the nested child under the root session the parent entry recorded", async () => {
+    writeNester();
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [parentEntry("rooted", { rootSessionId: "root-session" })]);
+    writeChildFiles("rooted");
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+
+    const spawned = await spawnNestedChild(made, "rooted");
+
+    expect(spawned.isError).toBe(false);
+    const child = spawned.child;
+    expect(child).toBeDefined();
+    expect(spawned.text).toContain("Output file:");
+    expect(child!.outputFile).toContain(join("root-session", "tasks", `${child!.id}.output`));
+    expect(existsSync(child!.outputFile!)).toBe(true);
+  });
+
+  it("a parent entry with no rootSessionId spawns its nested child without a transcript and without an error", async () => {
+    writeNester();
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [parentEntry("rootless")]);
+    writeChildFiles("rootless");
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+
+    const spawned = await spawnNestedChild(made, "rootless");
+
+    expect(spawned.isError).toBe(false);
+    expect(spawned.text).toContain("Agent ID:");
+    expect(spawned.child).toBeDefined();
+    expect(spawned.text).not.toContain("Output file:");
+    expect(spawned.child?.outputFile).toBeUndefined();
   });
 });
 
