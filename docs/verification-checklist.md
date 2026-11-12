@@ -89,15 +89,18 @@ note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
-`xhigh`. When native Anthropic is unavailable or the account is at its limit,
-every check, Visual proof steps included, runs on the fallback,
-`deepseek-v4.1-flash` at `max`, on `opencode-go-2` or any of its
-`opencode-go-3`, `opencode-go-4`, ... siblings. Those accounts are registered by
-`@cad0p/pi-fallback-provider`. On a terminal error it rotates through
+`xhigh`. A check, Visual proof steps included, may also run on the fallback,
+`deepseek-v4.1-flash` at `max`, on `opencode-go` or any `opencode-go-N`
+account: `opencode-go-2` and its `opencode-go-3`, `opencode-go-4`, ...
+siblings, all registered by `@cad0p/pi-fallback-provider`. Take it on the
+fallback when native Anthropic is unavailable or the account is at its limit,
+so the check is not left unstarted. On a terminal error it rotates through
 `enabledModels` in list order, skipping the failed model, so `opencode-go-2`
-in the command below is only the starting account. The `opencode-go-*`
-siblings are tried only because they are listed there; with none listed, it
-warns "No fallback models available." `--no-extensions`
+in the command below is only the starting account. The `opencode-go*`
+entries are tried only because they are listed there; with none listed, it
+warns "No fallback models available." For a proof, `enabledModels` must hold
+only `opencode-go*/deepseek-v4.1-flash:max`: a rotated run that settles on
+another model is an after run, and it fails. `--no-extensions`
 drops discovered extensions, so pass each one the run needs with its own `-e`: the
 global `system-prompt.ts` (required for native Anthropic) and, on the fallback, the
 installed `~/.pi/agent/npm/node_modules/@cad0p/pi-fallback-provider/index.ts`. Add
@@ -199,11 +202,12 @@ flows). A test passing is not proof of what the user sees.
   not count. A model making another choice is a failed proof, not model
   variance.
 - A run passes only on native `anthropic/claude-haiku-5-5` at `xhigh` from the
-  reference setup above, or on `opencode-go-*/deepseek-v4.1-flash` at `max` from
-  the fallback command above, on any `opencode-go-N` account. A run of the flow
-  on any other model, logged anywhere (manual TUI checks included), is still an
-  after run, and it fails. The fallback is the route when Anthropic is
-  unavailable, so a proof is never blocked on the Anthropic quota.
+  reference setup above, or on `deepseek-v4.1-flash` at `max` from the
+  fallback command above, on `opencode-go` or any `opencode-go-N` account. A
+  run of the flow on any other model, logged anywhere (manual TUI checks
+  included), is still an after run, and it fails. Take the run on the fallback
+  when native Anthropic is unavailable or at its limit, so the step is not left
+  unstarted.
 - A run that does not pass is a failed proof: the author fixes the change,
   never the expected outcome (only the maintainer changes that, as above).
   Any failed run blocks the head. No one dismisses it. It clears only on a
@@ -347,8 +351,10 @@ In the PR body, record:
 - each command you ran and its result;
 - the manual observations (what you saw, not just "works");
 - for visual proof, each step's expected outcome with the issue edit that
-  fixed it and the time of the first run, the before capture's SHA or version, the head SHA of every after
-  run, the quoted line per clause, the quoted instruction for each
+  fixed it and the time of the first run, the before capture's SHA or version,
+  the head SHA of every after run with its provider, model and thinking level,
+  the `opencode-go` account each run settled on when the fallback rotated, the
+  quoted line per clause, the quoted instruction for each
   model-action clause, and any changed code path a cleared failure names;
 - for each baseline comparison, the pi version and the cited source or the
   main-session capture;
