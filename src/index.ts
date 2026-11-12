@@ -814,6 +814,10 @@ export default function (pi: ExtensionAPI) {
       // A nested record has no session-scoped work here. Its transcript is record-scoped: a resume must keep
       // appending to the same .output file its completion notification names.
       subscribeTranscript(record);
+      // Nothing else paints a nested resume: the started event below is top-level only, and `deliver` never
+      // reports one. This paint is what attaches the view's tap on the reopened session, so the resumed turn
+      // shows as it lands. After the subscribe, so a throwing child entry renderer cannot skip the output stream.
+      nativeView?.onRecordEvent(record.id);
       return;
     }
     // Emit started event when agent transitions to running (including from queue)

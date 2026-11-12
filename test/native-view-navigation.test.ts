@@ -17,14 +17,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
-  return { ...actual, runAgent: vi.fn() };
+  return {
+    ...actual,
+    runAgent: vi.fn(),
+    resumeAgent: vi.fn(),
+    // Only a resumed nested record reaches this; the stubbing test replaces it, and any other path
+    // fails loudly instead of building a real child session in a temp cwd.
+    createChildSession: vi.fn(async () => { throw new Error("createChildSession is not stubbed in this test"); }),
+  };
 });
 
 import { setQuietMs } from "../src/agent-manager.js";
-import { attachSessionLifecycle, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { createNestedSubagentTools } from "../src/nested-tools.js";
 import { captureInteractiveMode, TO_MAIN_KEYS } from "../src/ui/native-view.js";
-import { agentIdOf, MANAGER_KEY, makePi } from "./helpers/subagents-harness.js";
+import { agentIdOf, makePi, textOf } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
 setQuietMs(20);
@@ -32,6 +40,7 @@ setQuietMs(20);
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
+const RIGHT = "\x1b[C";
 const LEFT = "\x1b[D";
 const ESC = "\x1b";
 
@@ -88,6 +97,9 @@ function childSession(sessionId: string): AgentSession {
     clearQueue: () => ({ steering: [], followUp: [] }),
     getContextUsage: () => ({ tokens: 0, contextWindow: 1000, percent: 0 }),
     getLastAssistantText: () => "child reply",
+    // A nested result wakes its parent through this; without it a settled child's notification
+    // throws inside a timer instead of being dropped quietly.
+    sendCustomMessage: async () => {},
   } as unknown as AgentSession;
 }
 
@@ -101,6 +113,8 @@ function mockRuns() {
   vi.mocked(runAgent).mockImplementation(((_ctx, _type, prompt, opts) => {
     const session = childSession(String(prompt));
     sessions.set(String(prompt), session);
+    // What a real run reports so a settled record can reopen: without it a resume refuses.
+    opts.onChildSettings?.({ effectiveCwd: "/child" } as ChildSessionSettings);
     opts.onSessionCreated?.(session, attachSessionLifecycle(session));
     if (prompt === "hang") {
       // The real runner turns its abort signal into session.abort() and a run that returns aborted.
@@ -130,6 +144,14 @@ interface Harness {
   notifications: string[];
   /** Spawn a background agent; its prompt names the session the fake runner hands over. */
   spawn: (description: string, prompt: string) => Promise<string>;
+  /** Run the top-level `SendMessage` tool, which resumes a settled record. */
+  send: (to: string, message: string) => Promise<any>;
+  /** Spawn a nested record under `parentId`, with the options the nested Agent tool passes. */
+  nested: (parentId: string, description: string, prompt: string) => string;
+  /** Run the nested `SendMessage` tool an owning parent gets, against the real manager. */
+  sendFromParent: (parentId: string, to: string, message: string) => Promise<any>;
+  /** Full transcript paints so far, as the view's own renderer counted them. */
+  renders: () => number;
   shutdown: () => Promise<void>;
 }
 
@@ -138,12 +160,14 @@ interface Harness {
  * prototype getters with no setter, so the view has to shadow and delete them; writable fields on
  * the instance would pass whether or not it did.
  */
-function modePrototype() {
+function modePrototype(onRender: () => void) {
   return {
     get session() { return this.runtimeHost.session; },
     get sessionManager() { return this.session.sessionManager; },
     get settingsManager() { return this.session.settingsManager; },
     renderSessionEntries(this: any, entries: any[]) {
+      // One call is one full transcript paint: the unit the live tap's cost is counted in.
+      onRender();
       // pi's renderer reads every runtime field off this, and paints into this.chatContainer.
       const sessionId = this.sessionManager.getSessionId();
       this.pendingTools.clear();
@@ -166,7 +190,8 @@ async function harness(): Promise<Harness> {
   const documentContainer = new Container();
   documentContainer.addChild(hostContainer);
 
-  const proto = modePrototype();
+  let renders = 0;
+  const proto = modePrototype(() => { renders++; });
   const hostSession = {
     extensionRunner: { getEntryRenderer: () => undefined },
     sessionManager: {
@@ -289,6 +314,20 @@ async function harness(): Promise<Harness> {
   };
 
   const { pi, tools, lifecycle } = makePi();
+  // A bus that delivers: the extension's record events are how a top-level settle or resume reaches
+  // the view, and with a no-op emit this suite could not tell one paint from two.
+  const busHandlers = new Map<string, Set<(raw: any) => unknown>>();
+  pi.events = {
+    on: (event: string, handler: (raw: any) => unknown) => {
+      const set = busHandlers.get(event) ?? new Set();
+      busHandlers.set(event, set);
+      set.add(handler);
+      return () => { set.delete(handler); };
+    },
+    emit: (event: string, payload: unknown) => {
+      for (const handler of [...(busHandlers.get(event) ?? [])]) handler(payload);
+    },
+  };
   subagentsExtension(pi);
   // The probe the extension installs at factory time wraps pi's real prototype; give it this one
   // and fire pi's first render, which is the moment the real capture happens.
@@ -316,13 +355,49 @@ async function harness(): Promise<Harness> {
       );
       return agentIdOf(result);
     },
+    send: (to, message) => {
+      const tool = tools.get("SendMessage");
+      if (!tool) throw new Error("the SendMessage tool is missing");
+      return tool.execute("tc-send", { to, message }, undefined, undefined, ctx);
+    },
+    nested: (parentId, description, prompt) => {
+      return rootManager().spawn(pi, ctx, "general-purpose", prompt, {
+        description,
+        parentAgentId: parentId,
+        depth: 2,
+        maxSubagentDepth: 2,
+        configCwd: cwd,
+      });
+    },
+    sendFromParent: (parentId, to, message) => {
+      const tool = createNestedSubagentTools({
+        manager: rootManager(),
+        pi,
+        parentAgentId: parentId,
+        depth: 1,
+        maxSubagentDepth: 2,
+        allowedSubagents: "all",
+        configCwd: cwd,
+      }).find((candidate) => candidate.name === "SendMessage");
+      if (!tool) throw new Error("the nested SendMessage tool is missing");
+      return tool.execute("tc-nested-send", { to, message }, undefined, undefined, ctx);
+    },
+    renders: () => renders,
     shutdown: async () => { await lifecycle.get("session_shutdown")?.({}, ctx); rmSync(cwd, { recursive: true, force: true }); },
   };
 }
 
+/**
+ * The real manager, as the nested tools get it: the registry entry is the cross-package surface, and
+ * it deliberately hides nested records and strips nesting from a spawn.
+ */
+function rootManager(): any {
+  return (globalThis as Record<symbol, any>)[Symbol.for("pi-subagents:impl")].root().manager;
+}
+
 /** The live record the real manager keeps for `id`. */
 function record(id: string): any {
-  return (globalThis as Record<symbol, any>)[MANAGER_KEY].getRecord(id);
+  return rootManager().getRecord(id);
 }
 
 /** The `main` row; the open view's hint also names `main`, so match the row's ending. */
@@ -333,6 +408,32 @@ function mainRow(h: Harness): string {
 /** The row carrying `text` in the painted list. */
 function row(h: Harness, text: string): string {
   return h.painted().find((line) => line.includes(text)) ?? "";
+}
+
+/**
+ * The session a resumed child gets back: a mutable transcript the test appends to, and a listener
+ * set, because the view's tap is what this test has to observe on it.
+ */
+function resumedSession(seed: string) {
+  const listeners = new Set<(event: unknown) => void>();
+  const entries: any[] = [{
+    type: "message",
+    message: { role: "user", content: [{ type: "text", text: seed }], timestamp: Date.now() },
+  }];
+  const base = childSession("resumed") as any;
+  return {
+    entries,
+    listenerCount: () => listeners.size,
+    emit: (event: unknown) => { for (const listener of [...listeners]) listener(event); },
+    session: {
+      ...base,
+      sessionManager: { ...base.sessionManager, buildContextEntries: () => entries },
+      subscribe: (listener: (event: unknown) => void) => {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+    } as AgentSession,
+  };
 }
 
 describe("FleetView arrows and Esc through the real extension (#178)", () => {
@@ -491,6 +592,116 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(completed.content).toContain("**✓ Agent completed: clean two**");
       expect(completedOptions).toEqual(stoppedOptions);
       expect(completedOptions).toEqual({ deliverAs: "steer", triggerTurn: true });
+    } finally {
+      await h.shutdown();
+    }
+  });
+});
+
+describe("the child-bus tap through the real extension (#245)", () => {
+  let prevCwd: string;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    initTheme("dark");
+    prevCwd = process.cwd();
+    tmpDir = mkdtempSync(join(tmpdir(), "pi-live-"));
+    mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
+    process.chdir(tmpDir);
+  });
+
+  afterEach(() => {
+    process.chdir(prevCwd);
+    rmSync(tmpDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  /** Stub a resumed run that stays live, with a session this test can drive. */
+  function stubResume(seed: string) {
+    const reopened = resumedSession(seed);
+    vi.mocked(createChildSession).mockResolvedValue(reopened.session);
+    // The resumed run stays live: its own settle would paint for reasons these tests are not about.
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise<never>(() => {}));
+    return reopened;
+  }
+
+  /** A message that lands on the resumed session, appended as pi has it when the event arrives. */
+  function land(session: ReturnType<typeof resumedSession>, text: string) {
+    const message = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
+    session.entries.push({ type: "message", message });
+    session.emit({ type: "message_end", message });
+  }
+
+  // A top-level resume already paints twice on its own: the tool goes through `steer`, whose delivery
+  // emit is the early repaint this issue is about, and then `started` repaints again. The arm's line
+  // must add none of that, which is why it lives in the nested branch: at the top of the callback every
+  // top-level resume would rebuild the same transcript a third time.
+  it("a top-level resume adds no paint of its own, then follows the record's bus", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      const id = await h.spawn("top job", "settled");
+      await vi.waitFor(() => expect(record(id).status).toBe("completed"));
+      h.press(DOWN);
+      h.press(DOWN);
+      expect(h.transcript()).not.toContain("HOST TEXT");
+
+      const reopened = stubResume("TOP PRIOR");
+      const paints = h.renders();
+      const sent = await h.send(id, "resume");
+      expect(textOf(sent)).toContain("resumed it with the message");
+
+      expect(h.renders()).toBe(paints + 2);
+      expect(h.transcript()).toContain("resumed: TOP PRIOR");
+
+      land(reopened, "TOP TURN LANDS");
+      await flush();
+      expect(h.renders()).toBe(paints + 3);
+      expect(h.transcript()).toContain("resumed: TOP TURN LANDS");
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  // A nested resume emits nothing of its own: its started event is top-level only and `deliver` never
+  // reports one, so the view stayed on the settled run for the whole of the resumed turn (#245). The
+  // onStart paint is the only one this adds, and it is what attaches the tap that keeps the view live.
+  it("a nested record resumed by its owner's SendMessage paints once, then follows the child's bus", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      const parentId = await h.spawn("parent job", "hang");
+      await flush();
+      const nestedId = h.nested(parentId, "nested job", "settled");
+      await vi.waitFor(() => expect(record(nestedId).status).toBe("completed"));
+
+      // The view on the nested record: ↓ into the list, ↓ onto its parent, → expands onto the child.
+      h.press(DOWN);
+      h.press(DOWN);
+      expect(h.transcript()).toContain("hang: CHILD hang");
+      h.press(RIGHT);
+      expect(h.transcript()).not.toContain("HOST TEXT");
+      expect(h.transcript()).not.toContain("CHILD hang");
+
+      const reopened = stubResume("PRIOR TURN");
+      const paints = h.renders();
+      const sent = await h.sendFromParent(parentId, nestedId, "resume");
+      expect(textOf(sent)).toContain("resumed it with the message");
+      expect(record(nestedId).status).toBe("running");
+
+      // Exactly the one paint the nested arm adds; without it the resumed turn waits for the settle.
+      expect(h.renders()).toBe(paints + 1);
+      // That paint is what subscribes: the reopened session carries a listener, and it shows its turn.
+      expect(reopened.listenerCount()).toBeGreaterThan(0);
+      expect(h.transcript()).toContain("resumed: PRIOR TURN");
+
+      // The resumed turn lands on the child's own bus: shown without ctrl+r and without a manual repaint.
+      land(reopened, "RESUMED TURN LANDS");
+      await flush();
+
+      expect(h.renders()).toBe(paints + 2);
+      expect(h.transcript()).toContain("resumed: RESUMED TURN LANDS");
     } finally {
       await h.shutdown();
     }
