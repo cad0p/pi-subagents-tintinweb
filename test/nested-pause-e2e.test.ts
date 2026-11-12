@@ -80,6 +80,8 @@ describe("nested pause — full stack (#235)", () => {
     let lensSpawned = false;
     let lensContinued = false;
     let lensResumed = false;
+    /** The lens's transcript at the pause: the entries the resume must not write again. */
+    let pausedTail: string[] = [];
 
     const respond: FauxResponder = async (context) => {
       if (mentions(context, LENS)) {
@@ -144,6 +146,8 @@ describe("nested pause — full stack (#235)", () => {
         expect(lens?.endedBy).toBe("pause");
         expect(lens?.resultDelivered).toBeFalsy();
         expect(lens?.ownerAborted).toBeUndefined();
+        // The settle flush has run (settled is true): the file is the paused run's final transcript.
+        pausedTail = readFileSync(String(lens?.outputFile), "utf-8").trimEnd().split("\n");
         return sendMessageCall({ to: String(liveRecord("lead")?.id ?? ""), message: "Continue the lens and report its result." });
       }
       return "orchestrator done";
@@ -190,5 +194,25 @@ describe("nested pause — full stack (#235)", () => {
     // The resumed lead's own file recorded the resume.
     const leadFile = String(lead?.sessionFile);
     expect(readFileSync(leadFile, "utf8")).toContain("subagent-resumed");
+
+    // #237: the resumed lens keeps its transcript file streaming — the continued instruction and its DONE turn are
+    // appended to the file the notification names, and nothing of the paused run is written a second time.
+    //
+    // Compare the message payloads, never the raw lines: every entry carries a write-time outer timestamp
+    // (src/output-file.ts), so a re-written paused entry is neither a duplicate of its old raw line nor visible to a
+    // raw-line count. The exact length is the backfill guard (anchor 1 would double the paused tail), and the
+    // per-message occurrence count is the resumed-rewrite guard (a second subscription would duplicate the
+    // instruction and the DONE turn).
+    const lensTranscript = readFileSync(String(lens?.outputFile), "utf-8").trimEnd().split("\n");
+    const lensMessages = lensTranscript.map((line) => JSON.stringify((JSON.parse(line) as { message: unknown }).message));
+    const pausedMessages = pausedTail.map((line) => JSON.stringify((JSON.parse(line) as { message: unknown }).message));
+    expect(pausedTail.length).toBeGreaterThan(1);
+    // The paused run's aborted turn is in the tail: its bash call is the step that was cut.
+    expect(pausedMessages.some((message) => message.includes("sleep 300"))).toBe(true);
+    expect(lensMessages.filter((message) => message.includes("do the short second step now and report"))).toHaveLength(1);
+    expect(lensMessages.filter((message) => message.includes("DONE"))).toHaveLength(1);
+    // Every paused entry appears exactly once — the pause tail is written once, not re-written and not skipped.
+    for (const message of pausedMessages) expect(lensMessages.filter((other) => other === message)).toHaveLength(1);
+    expect(lensTranscript).toHaveLength(pausedTail.length + 2);
   });
 });
