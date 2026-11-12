@@ -763,8 +763,9 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // One subscribe site for both spawn paths and both resume paths: a record's transcript is record-scoped,
-  // while everything below the nested return is session-scoped.
+  // The one resume subscribe site: a resumed record is the only record that reaches onStart with a session, and
+  // its transcript is record-scoped. A fresh or queued spawn has no session yet, so this is a no-op there and the
+  // spawn paths' own onSessionCreated subscribes instead (`src/index.ts`'s Agent tool, `src/nested-tools.ts`).
   const subscribeTranscript = (record: AgentRecord) => {
     if (record.session && record.outputFile && record.childSettings) {
       record.outputCleanup = streamToOutputFile(record.session, record.outputFile, record.id, record.childSettings.effectiveCwd, record.session.messages.length);

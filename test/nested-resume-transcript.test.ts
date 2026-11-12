@@ -33,6 +33,8 @@ const FIRST_PROMPT = "PROBE-FIRST-PROMPT";
 const SPAWN_ANSWER = "PROBE-SPAWN-ANSWER";
 const RESUMED_PROMPT = "PROBE-RESUMED-PROMPT";
 const RESUMED_ANSWER = "PROBE-RESUMED-DONE";
+const SECOND_PROMPT = "PROBE-SECOND-PROMPT";
+const SECOND_ANSWER = "PROBE-SECOND-DONE";
 const QUEUED_PROMPT = "PROBE-QUEUED-PROMPT";
 const QUEUED_ANSWER = "PROBE-QUEUED-ANSWER";
 
@@ -92,8 +94,11 @@ function hang(opts: { signal?: AbortSignal }): Promise<never> {
 /** The transcript's lines, and the message an entry carries. */
 const linesOf = (file: string): string[] => readFileSync(file, "utf-8").trimEnd().split("\n");
 const messageOf = (line: string): string => JSON.stringify((JSON.parse(line) as { message: unknown }).message);
-const occurrences = (haystack: string[], needle: string): number => haystack.filter((line) => line === needle).length;
 
+// Every leg below resumes a depth-1 child. Depth 2+ is not covered: `subscribeTranscript` branches only on
+// `record.parentAgentId`, and a grandchild takes the same branch through the same manager, `onStart` and restore
+// (the nested tools' `depth` only decides whether the tools are injected, not whether they resume). A depth-2 leg
+// would therefore duplicate this wiring rather than probe anything new, and the recorded live proof is depth 1.
 describe("nested resume — the transcript keeps streaming (#237)", () => {
   let cwd: string;
   let previousCwd: string;
@@ -226,10 +231,87 @@ describe("nested resume — the transcript keeps streaming (#237)", () => {
     const after = linesOf(outputFile);
     // Exactly the two new entries: the paused tail was flushed at the settle and is never written again.
     expect(after).toHaveLength(before.length + 2);
-    for (const line of before) expect(occurrences(after, line)).toBe(1);
+    // Compare the message payload, not the raw line: every entry carries a write-time outer timestamp, so a
+    // re-written prior entry is not a duplicate of its old raw line and a length check alone cannot see it.
+    const beforeMessages = before.map(messageOf);
+    for (const message of beforeMessages) expect(after.filter((line) => messageOf(line) === message)).toHaveLength(1);
     const messages = after.map(messageOf);
     expect(messages.filter((message) => message.includes(RESUMED_PROMPT))).toHaveLength(1);
     expect(messages.filter((message) => message.includes(RESUMED_ANSWER))).toHaveLength(1);
+  });
+
+  it("a second resume of the same record appends only its own turn, on top of the first", async () => {
+    const { tools } = activate();
+    const parentSession = sessionStub();
+    const childSession = sessionStub([
+      { role: "user", text: FIRST_PROMPT },
+      { role: "assistant", text: SPAWN_ANSWER },
+    ]);
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts) => {
+      if (prompt === "parent") {
+        hostChild(opts, parentSession);
+        return hang(opts);
+      }
+      await nextTick();
+      hostChild(opts, childSession);
+      return { responseText: SPAWN_ANSWER, session: childSession, aborted: false, steered: false };
+    });
+
+    const parentId = await spawnTop(tools, "parent");
+    const nested = nestedTools(parentId);
+    const spawned = await nested[0].execute("tc-nested", { subagent_type: "probe", description: "probe", prompt: FIRST_PROMPT }, undefined, undefined, ctx());
+    const childId = agentIdOf(spawned);
+    await liveManager().getRecord(childId)!.promise;
+
+    const record = liveRecord(childId)!;
+    const outputFile = String(record.outputFile);
+    const before = linesOf(outputFile);
+    expect(before).toHaveLength(2);
+
+    const send = nested.find((tool) => tool.name === "SendMessage")!;
+    // Each resume reopens the record's whole prior transcript, then appends its own turn. The first resume
+    // leaves two entries; the second reopens all four and adds two more, so the file grows by two each time
+    // and no earlier entry is ever written twice.
+    const firstReopen = sessionStub([
+      { role: "user", text: FIRST_PROMPT },
+      { role: "assistant", text: SPAWN_ANSWER },
+    ]);
+    vi.mocked(createChildSession).mockResolvedValueOnce(firstReopen);
+    vi.mocked(resumeAgent).mockImplementationOnce(async (session) => {
+      (session as StubSession).append("user", RESUMED_PROMPT);
+      (session as StubSession).append("assistant", RESUMED_ANSWER);
+      return { text: RESUMED_ANSWER };
+    });
+    const first = await send.execute("tc-resume-1", { to: childId, message: RESUMED_PROMPT }, undefined, undefined, ctx());
+    expect(textOf(first)).toContain("resumed");
+    await liveManager().getRecord(childId)!.promise;
+
+    const mid = linesOf(outputFile);
+    expect(mid).toHaveLength(before.length + 2);
+    for (const message of before.map(messageOf)) expect(mid.filter((line) => messageOf(line) === message)).toHaveLength(1);
+
+    const secondReopen = sessionStub([
+      { role: "user", text: FIRST_PROMPT },
+      { role: "assistant", text: SPAWN_ANSWER },
+      { role: "user", text: RESUMED_PROMPT },
+      { role: "assistant", text: RESUMED_ANSWER },
+    ]);
+    vi.mocked(createChildSession).mockResolvedValueOnce(secondReopen);
+    vi.mocked(resumeAgent).mockImplementationOnce(async (session) => {
+      (session as StubSession).append("user", SECOND_PROMPT);
+      (session as StubSession).append("assistant", SECOND_ANSWER);
+      return { text: SECOND_ANSWER };
+    });
+    const second = await send.execute("tc-resume-2", { to: childId, message: SECOND_PROMPT }, undefined, undefined, ctx());
+    expect(textOf(second)).toContain("resumed");
+    await liveManager().getRecord(childId)!.promise;
+
+    const after = linesOf(outputFile);
+    expect(after).toHaveLength(mid.length + 2);
+    // Every entry from the paused tail and the first resume appears exactly once; the second resume adds two.
+    for (const message of mid.map(messageOf)) expect(after.filter((line) => messageOf(line) === message)).toHaveLength(1);
+    expect(after.filter((line) => messageOf(line).includes(SECOND_PROMPT))).toHaveLength(1);
+    expect(after.filter((line) => messageOf(line).includes(SECOND_ANSWER))).toHaveLength(1);
   });
 
   it("writes a queued nested spawn's transcript once: the file exists before the session does", async () => {

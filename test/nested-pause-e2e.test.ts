@@ -197,13 +197,22 @@ describe("nested pause — full stack (#235)", () => {
 
     // #237: the resumed lens keeps its transcript file streaming — the continued instruction and its DONE turn are
     // appended to the file the notification names, and nothing of the paused run is written a second time.
+    //
+    // Compare the message payloads, never the raw lines: every entry carries a write-time outer timestamp
+    // (src/output-file.ts), so a re-written paused entry is neither a duplicate of its old raw line nor visible to a
+    // raw-line count. The exact length is the backfill guard (anchor 1 would double the paused tail), and the
+    // per-message occurrence count is the resumed-rewrite guard (a second subscription would duplicate the
+    // instruction and the DONE turn).
     const lensTranscript = readFileSync(String(lens?.outputFile), "utf-8").trimEnd().split("\n");
     const lensMessages = lensTranscript.map((line) => JSON.stringify((JSON.parse(line) as { message: unknown }).message));
+    const pausedMessages = pausedTail.map((line) => JSON.stringify((JSON.parse(line) as { message: unknown }).message));
     expect(pausedTail.length).toBeGreaterThan(1);
     // The paused run's aborted turn is in the tail: its bash call is the step that was cut.
-    expect(pausedTail.some((line) => line.includes("sleep 300"))).toBe(true);
-    expect(lensMessages.some((message) => message.includes("do the short second step now and report"))).toBe(true);
-    expect(lensMessages.some((message) => message.includes("DONE"))).toBe(true);
-    for (const line of pausedTail) expect(lensTranscript.filter((other) => other === line)).toHaveLength(1);
+    expect(pausedMessages.some((message) => message.includes("sleep 300"))).toBe(true);
+    expect(lensMessages.filter((message) => message.includes("do the short second step now and report"))).toHaveLength(1);
+    expect(lensMessages.filter((message) => message.includes("DONE"))).toHaveLength(1);
+    // Every paused entry appears exactly once — the pause tail is written once, not re-written and not skipped.
+    for (const message of pausedMessages) expect(lensMessages.filter((other) => other === message)).toHaveLength(1);
+    expect(lensTranscript).toHaveLength(pausedTail.length + 2);
   });
 });
