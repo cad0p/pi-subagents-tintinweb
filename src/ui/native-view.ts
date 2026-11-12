@@ -1094,11 +1094,11 @@ export class NativeTranscriptView {
       im.ui.requestRender();
       return;
     }
-    // The two arrivals that reach the rebuilt transcript: `entry_appended` for an entry written
-    // through `ctx.appendEntry`, `message_end` for a user, assistant or toolResult message. Two
-    // entries pi renders are neither, and stay stale until the next arrival repaints: a compaction
-    // summary (`sessionManager.appendCompaction`, no `entry_appended`; a top-level record repaints
-    // that one from `subagents:compacted`) and a bashExecution message
+    // The two arrivals that reach the rebuilt transcript: `entry_appended` for an appended entry
+    // (`ctx.appendEntry` included), `message_end` for a user, assistant, toolResult or custom
+    // message. Two reachable entries pi renders are neither, and stay stale until the next arrival
+    // repaints: a compaction summary (`sessionManager.appendCompaction`, no `entry_appended`; a
+    // top-level record repaints that one from `subagents:compacted`) and a bashExecution message
     // (`sessionManager.appendMessage`, no `message_end`). `tool_execution_end` is deliberately not
     // here either: it appends nothing, so a rebuild would only redraw the frame on screen. pi
     // notifies listeners and *then* appends (`_emit`, then `appendMessage`), with no await between,
