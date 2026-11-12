@@ -7,9 +7,10 @@
  * (`ctx.ui.setFooter`). A close puts the host container back at its saved index; it is re-attached,
  * never rebuilt, so a host turn that was streaming keeps its components.
  *
- * The transcript is read when the view opens, on the refresh key, on a queued dialog, on the
- * extension bus events that name the record, and on the child's own bus as each message or tool
- * result lands. There is no per-token tap: a message is shown once it is complete.
+ * The transcript is read when the view opens, on the refresh key, on the extension bus events that
+ * name the record, and on the child's own bus as each message or tool result lands. A child-UI
+ * change or a dialog flag updates the footer and the parked dialog in place, never re-reading it.
+ * There is no per-token tap: a message is shown once it is complete.
  */
 
 import {
@@ -1093,12 +1094,16 @@ export class NativeTranscriptView {
       im.ui.requestRender();
       return;
     }
-    // Every entry pi shows arrives as one of these two: `entry_appended` for an entry written through
-    // `ctx.appendEntry`, `message_end` for a user, assistant or toolResult message. `tool_execution_end`
-    // is deliberately not here: it appends nothing, so a rebuild would only redraw the frame on
-    // screen. pi notifies listeners and *then* appends (`_emit`, then `appendMessage`), with no await
-    // between, so the rebuild waits one microtask: by then the entry is on the session and the
-    // rebuild sees it. A view that closed or switched records in between paints nothing.
+    // The two arrivals that reach the rebuilt transcript: `entry_appended` for an entry written
+    // through `ctx.appendEntry`, `message_end` for a user, assistant or toolResult message. Two
+    // entries pi renders are neither, and stay stale until the next arrival repaints: a compaction
+    // summary (`sessionManager.appendCompaction`, no `entry_appended`; a top-level record repaints
+    // that one from `subagents:compacted`) and a bashExecution message
+    // (`sessionManager.appendMessage`, no `message_end`). `tool_execution_end` is deliberately not
+    // here either: it appends nothing, so a rebuild would only redraw the frame on screen. pi
+    // notifies listeners and *then* appends (`_emit`, then `appendMessage`), with no await between,
+    // so the rebuild waits one microtask: by then the entry is on the session and the rebuild sees
+    // it. A view that closed or switched records in between paints nothing.
     if (event.type !== "message_end" && event.type !== "entry_appended") return;
     if (this.state !== state || !state.active) return;
     queueMicrotask(() => {

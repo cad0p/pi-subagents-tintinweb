@@ -774,8 +774,9 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: send one notification per agent
   const manager = new AgentManager((record) => {
-    // PR 1 re-reads a shown transcript when its run completes. Every record reaches this callback,
-    // nested ones included; the bus events above are top-level only.
+    // A settle replays a shown transcript once; the live repaints come from the child's own bus, which the
+    // view taps on the session it shows. Every record reaches this callback, nested ones included; the bus
+    // events above are top-level only.
     nativeView?.onRecordEvent(record.id);
     // A settled record keeps a snapshot, not the live session: drop the activity
     // handle too, so the child session is unreachable once its teardown ran.
@@ -816,7 +817,9 @@ export default function (pi: ExtensionAPI) {
       subscribeTranscript(record);
       // Nothing else paints a nested resume: the started event below is top-level only, and `deliver` never
       // reports one. This paint is what attaches the view's tap on the reopened session, so the resumed turn
-      // shows as it lands. After the subscribe, so a throwing child entry renderer cannot skip the output stream.
+      // shows as it lands. After the subscribe, so a throwing child entry renderer cannot skip the output
+      // stream; it also widens `onStart`'s window, where a throw refuses the resume and retires the reopened
+      // session — the same shape a top-level resume already has through `subagents:started`.
       nativeView?.onRecordEvent(record.id);
       return;
     }
@@ -927,7 +930,8 @@ export default function (pi: ExtensionAPI) {
       })
     : undefined;
   if (nativeView) {
-    // The events that name a record. They fire per run, never per token (PR 1 is a snapshot).
+    // The events that name a record. They fire per run, never per token; the per-entry repaints come from the
+    // child's own bus, which the view taps directly (native-view.ts's `onSessionEvent`).
     for (const event of ["subagents:started", "subagents:steered", "subagents:compacted", "subagents:completed", "subagents:failed"]) {
       pi.events.on(event, (raw: unknown) => {
         if (typeof raw === "object" && raw !== null && "id" in raw && typeof raw.id === "string") nativeView.onRecordEvent(raw.id);
