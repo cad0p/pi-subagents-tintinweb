@@ -89,9 +89,10 @@ note the pi version in the PR body. Renderer behavior differs across pi
 versions; when the change targets a newer runtime, verify on that version too.
 
 Maintainer reference setup: native `anthropic/claude-haiku-5-5` at thinking
-`xhigh`; for checks that do not exercise a Visual proof step, fall back to
-`opencode-go-2/deepseek-v4.1-flash` at `max` when Anthropic is unavailable. That
-account and its `opencode-go-3`, `opencode-go-4`, ... siblings are registered by
+`xhigh`. When native Anthropic is unavailable or the account is at its limit,
+every check, Visual proof steps included, runs on the fallback,
+`deepseek-v4.1-flash` at `max`, on `opencode-go-2` or any of its
+`opencode-go-3`, `opencode-go-4`, ... siblings. Those accounts are registered by
 `@cad0p/pi-fallback-provider`. On a terminal error it rotates through
 `enabledModels` in list order, skipping the failed model, so `opencode-go-2`
 in the command below is only the starting account. The `opencode-go-*`
@@ -107,7 +108,8 @@ spawned from the session follow the same `-e` flags (#92).
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
   -e <repo>/src/index.ts --provider anthropic --model claude-haiku-5-5 --thinking xhigh
 
-# fallback: -e <fallback-provider>/index.ts is what makes opencode-go-2 resolve;
+# fallback, for every check (Visual proof included):
+# -e <fallback-provider>/index.ts is what makes opencode-go-2 resolve;
 # a terminal error rotates through enabledModels, skipping the failed model
 pi --no-extensions $(for f in ~/.pi/agent/extensions/*.ts; do printf -- '-e %s ' "$f"; done) \
   -e <fallback-provider>/index.ts -e <repo>/src/index.ts \
@@ -196,10 +198,12 @@ flows). A test passing is not proof of what the user sees.
   step fails, whatever the model chose. A prompt typed during the run does
   not count. A model making another choice is a failed proof, not model
   variance.
-- Only runs on native Anthropic from the reference setup above can pass. A
-  run of the flow on any other model, logged anywhere (manual TUI checks
-  included), is still an after run, and it fails. If Anthropic is
-  unavailable, wait.
+- A run passes only on native `anthropic/claude-haiku-5-5` at `xhigh` from the
+  reference setup above, or on `opencode-go-*/deepseek-v4.1-flash` at `max` from
+  the fallback command above, on any `opencode-go-N` account. A run of the flow
+  on any other model, logged anywhere (manual TUI checks included), is still an
+  after run, and it fails. The fallback is the route when Anthropic is
+  unavailable, so a proof is never blocked on the Anthropic quota.
 - A run that does not pass is a failed proof: the author fixes the change,
   never the expected outcome (only the maintainer changes that, as above).
   Any failed run blocks the head. No one dismisses it. It clears only on a
