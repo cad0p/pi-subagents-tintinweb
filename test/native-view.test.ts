@@ -791,6 +791,117 @@ describe("native transcript view", () => {
     expect(child.listenerCount()).toBe(1);
   });
 
+  // While a record runs, the transcript was rebuilt only at run start, delivery, compaction and
+  // settle — and the delivery repaint runs before pi has persisted the delivered text, so the one
+  // frame it produces provably does not contain the message. The child's own bus does carry the
+  // arrival; the view dropped it, and the transcript showed a run's messages only once it ended
+  // (#245). These tests are that tap: message_end and entry_appended repaint, deferred one microtask
+  // because pi notifies listeners and *then* appends.
+  it("C1 a message that lands in a running record appears without a manual repaint", async () => {
+    // Nested on purpose: the tap is per session (the child's own bus), so depth changes nothing.
+    const h = harness({ record: { parentAgentId: "parent-1", depth: 2 } });
+    h.openChild();
+    const entries = [message("user", "CHILD TEXT")];
+    h.record.session.sessionManager.buildContextEntries = () => entries;
+    const paints = h.renderSpy.mock.calls.length;
+
+    // pi's order, which is why the tap defers: listeners first (_emit at agent-session.js:766),
+    // appendMessage second (:768-781).
+    h.record.session.emit({ type: "message_end", message: message("user", "DELIVERED TEXT").message });
+    entries.push(message("user", "DELIVERED TEXT"));
+    await Promise.resolve();
+
+    expect(h.renderSpy.mock.calls.length).toBe(paints + 1);
+    expect(h.documentContainer.render(120).join("\n")).toContain("DELIVERED TEXT");
+  });
+
+  // A tool result is a toolResult message, so its arrival is a message_end as well. A bare
+  // tool_execution_end persists nothing (it fires before the result message is built), so a rebuild
+  // there could only redraw the frame already on screen: the negative keeps anyone from re-adding it.
+  it("C2 a tool result repaints on its message_end, and a bare tool_execution_end repaints nothing", async () => {
+    const h = harness();
+    h.openChild();
+    const entries = [message("user", "CHILD TEXT")];
+    h.record.session.sessionManager.buildContextEntries = () => entries;
+    const paints = h.renderSpy.mock.calls.length;
+
+    h.record.session.emit({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: {}, isError: false });
+    await Promise.resolve();
+    expect(h.renderSpy.mock.calls.length).toBe(paints);
+
+    entries.push(message("assistant", "RESULT TEXT"));
+    h.record.session.emit({ type: "message_end", message: message("assistant", "RESULT TEXT").message });
+    await Promise.resolve();
+    expect(h.renderSpy.mock.calls.length).toBe(paints + 1);
+    expect(h.documentContainer.render(120).join("\n")).toContain("RESULT TEXT");
+  });
+
+  // A child extension writing an entry with ctx.appendEntry emits entry_appended and nothing else. A
+  // wake/held message cannot cover this clause: it goes through _appendCustomMessage, which appends
+  // first and then emits message_start and message_end too.
+  it("C3 entry_appended alone rebuilds the transcript once", async () => {
+    const h = harness();
+    h.openChild();
+    const entries = [message("user", "CHILD TEXT")];
+    h.record.session.sessionManager.buildContextEntries = () => entries;
+    const paints = h.renderSpy.mock.calls.length;
+
+    const custom = { type: "custom", customType: "child-only", data: {}, timestamp: Date.now() };
+    entries.push(custom);
+    h.record.session.emit({ type: "entry_appended", entry: custom });
+    await Promise.resolve();
+
+    expect(h.renderSpy.mock.calls.length).toBe(paints + 1);
+    expect(h.documentContainer.render(120).join("\n")).toContain("CUSTOM CHILD");
+  });
+
+  // A model switch appends a model_change entry, so it is also an entry_appended. The record
+  // write-back must stay the only thing it does: rebuilding the transcript for it too would repaint
+  // the whole child tree on every switch. A3 pins the adoption, this pins the single path.
+  it("C4 a model_change entry adopts the session model and does not rebuild the transcript", async () => {
+    const h = harness();
+    h.record.invocation = { modelId: "anthropic/child-model" };
+    h.openChild();
+    const child = h.record.session;
+    const paints = h.renderSpy.mock.calls.length;
+
+    child.state.model = { id: "next-model", provider: "openai", contextWindow: 200000, reasoning: false };
+    child.model = child.state.model;
+    child.emit({ type: "entry_appended", entry: { type: "model_change", provider: "openai", modelId: "next-model" } });
+    await Promise.resolve();
+
+    expect(h.renderSpy.mock.calls.length).toBe(paints);
+    expect(h.record.invocation?.modelId).toBe("openai/next-model");
+  });
+
+  // Guard test, not a reachable path: the identity check only matters when open() runs in the same
+  // task as the emit, and open()'s only callers are FleetView's followSelection and this view's own
+  // open — a keypress cannot be in flight with a microtask it queued. It pins the guard rather than
+  // a reported symptom: a microtask queued for a record the view stopped showing must not repaint
+  // whatever it shows now.
+  it("C5 a message_end queued for a closed view, or for one a switch moved away from, paints nothing", async () => {
+    const closed = harness();
+    closed.openChild();
+    const paints = closed.renderSpy.mock.calls.length;
+    closed.record.session.emit({ type: "message_end", message: message("user", "LATE TEXT").message });
+    closed.view.close("restore"); // before the queued microtask runs
+    await Promise.resolve();
+    expect(closed.renderSpy.mock.calls.length).toBe(paints);
+
+    const h = harness();
+    const second: AgentRecord = { ...h.record, id: "child-2", session: childSession() };
+    h.manager.getRecord.mockImplementation((id: string) => (id === h.record.id ? h.record : id === second.id ? second : undefined));
+    h.openChild();
+    const first = h.record.session;
+    const opened = h.renderSpy.mock.calls.length;
+    first.emit({ type: "message_end", message: message("user", "STALE TEXT").message });
+    expect(h.view.open("child-2")).toBe("opened");
+    const switched = h.renderSpy.mock.calls.length;
+    expect(switched).toBe(opened + 1); // open()'s own paint, nothing more
+    await Promise.resolve();
+    expect(h.renderSpy.mock.calls.length).toBe(switched);
+  });
+
   // pi's host `showStatus` fires on every ctrl+o toggle, and the wrapper used to answer it with a
   // full child render: the components were recreated (an expansion reset) and pi's alt-screen
   // render reset the text selection, so a selection lasted a moment.
@@ -815,7 +926,7 @@ describe("native transcript view", () => {
 
   // A rebuild clears the child container, and pi's alt-screen render drops the text selection with
   // it. A structural event that arrives mid-selection waits for the selection to end.
-  it("B2 a rebuild waits for an open selection and flushes once it ends", () => {
+  it("B2 a rebuild waits for an open selection and flushes once it ends", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const h = harness();
@@ -833,6 +944,23 @@ describe("native transcript view", () => {
       const lines = h.documentContainer.render(120).join("\n");
       expect(lines).toContain("LATER TEXT");
       expect(lines.match(/LATER TEXT/g)).toHaveLength(1);
+      const flushed = h.renderSpy.mock.calls.length;
+
+      // The new tap goes through the same guard: a message that lands during a selection holds the
+      // rebuild back, and the selection ending flushes exactly one — not one per event.
+      h.record.session.sessionManager.buildContextEntries = () => [message("user", "INCOMING TEXT")];
+      selecting = true;
+      h.record.session.emit({ type: "message_end", message: message("user", "INCOMING TEXT").message });
+      await Promise.resolve();
+      expect(h.documentContainer.render(120).join("\n")).not.toContain("INCOMING TEXT");
+      expect(h.renderSpy.mock.calls.length).toBe(flushed);
+
+      selecting = false;
+      vi.advanceTimersByTime(200);
+      const shown = h.documentContainer.render(120).join("\n");
+      expect(shown).toContain("INCOMING TEXT");
+      expect(shown.match(/INCOMING TEXT/g)).toHaveLength(1);
+      expect(h.renderSpy.mock.calls.length).toBe(flushed + 1);
     } finally {
       vi.useRealTimers();
     }

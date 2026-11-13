@@ -7,9 +7,10 @@
  * (`ctx.ui.setFooter`). A close puts the host container back at its saved index; it is re-attached,
  * never rebuilt, so a host turn that was streaming keeps its components.
  *
- * PR 1 is a snapshot: the transcript is read when the view opens, on the refresh key, on a queued
- * dialog, and on the extension bus events that name the record. There is no per-token tap; the
- * live view is PR 2.
+ * The transcript is read when the view opens, on the refresh key, on the extension bus events that
+ * name the record, and on the child's own bus as each message or tool result lands. A child-UI
+ * change or a dialog flag updates the footer and the parked dialog in place, never re-reading it.
+ * There is no per-token tap: a message is shown once it is complete.
  */
 
 import {
@@ -1070,25 +1071,46 @@ export class NativeTranscriptView {
   }
 
   /**
-   * The one thing on the child's own bus no other event carries: a model (or thinking level)
-   * switched inside the run. The footer repaints itself from the session, but `record.invocation`
-   * is what RecordFooter and the FleetView row read, so it is refreshed from the live session here
-   * and pi is asked for a frame.
+   * The child's own bus, two jobs. A model (or thinking level) switched inside the run: the footer
+   * repaints itself from the session, but `record.invocation` is what RecordFooter and the FleetView
+   * row read, so it is refreshed from the live session here and pi is asked for a frame. And the
+   * transcript: a message or a tool result that lands while this record is shown is re-read, which
+   * is what makes the view live instead of a snapshot.
    */
   private onSessionEvent(state: ViewState, event: AgentSessionEvent): void {
     const switched = event.type === "thinking_level_changed"
       || (event.type === "entry_appended" && event.entry.type === "model_change");
-    if (!switched || this.state !== state || !state.active) return;
-    const record = this.options.manager.getRecord(state.id);
-    const session = record?.session;
-    const im = this.options.getMode();
-    if (!record || !session || !im) return;
-    // The spawn's own write-back, so a switch inside the run records the model and the effective
-    // level the same way a spawn does — the caller's request stays when pi clamped it.
-    adoptSessionModel(record, session);
-    const theme = this.options.getContext()?.ui.theme;
-    if (theme && state.editor) state.editor.borderColor = theme.getThinkingBorderColor(session.thinkingLevel);
-    im.ui.requestRender();
+    if (switched) {
+      if (this.state !== state || !state.active) return;
+      const record = this.options.manager.getRecord(state.id);
+      const session = record?.session;
+      const im = this.options.getMode();
+      if (!record || !session || !im) return;
+      // The spawn's own write-back, so a switch inside the run records the model and the effective
+      // level the same way a spawn does — the caller's request stays when pi clamped it.
+      adoptSessionModel(record, session);
+      const theme = this.options.getContext()?.ui.theme;
+      if (theme && state.editor) state.editor.borderColor = theme.getThinkingBorderColor(session.thinkingLevel);
+      im.ui.requestRender();
+      return;
+    }
+    // The two arrivals that reach the rebuilt transcript: `entry_appended` for an appended entry
+    // (`ctx.appendEntry` included), `message_end` for a user, assistant, toolResult or custom
+    // message. Two pi-rendered entries arrive through neither. A compaction summary is the reachable
+    // one, and stays stale until the next arrival repaints (`sessionManager.appendCompaction`, no
+    // `entry_appended`; a top-level record repaints that one from `subagents:compacted`). A
+    // bashExecution message cannot occur in a child view (`sessionManager.appendMessage`, no
+    // `message_end`; only `executeBash` and an extension handling bash itself record one).
+    // `tool_execution_end` is deliberately not
+    // here either: it appends nothing, so a rebuild would only redraw the frame on screen. pi
+    // notifies listeners and *then* appends (`_emit`, then `appendMessage`), with no await between,
+    // so the rebuild waits one microtask: by then the entry is on the session and the rebuild sees
+    // it. A view that closed or switched records in between paints nothing.
+    if (event.type !== "message_end" && event.type !== "entry_appended") return;
+    if (this.state !== state || !state.active) return;
+    queueMicrotask(() => {
+      if (this.state === state && state.active) this.repaint();
+    });
   }
 
   /** Clear only the footer this view installed: another extension's wins, as the wrappers do. */
