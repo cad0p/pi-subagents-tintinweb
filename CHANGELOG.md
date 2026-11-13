@@ -62,6 +62,7 @@ All notable changes to this project will be documented in this file.
 - *(checkpoint)* A checkpoint for a missing record is a failed tool result (closes #231) ([#234](https://github.com/cad0p/pi-subagents-tintinweb/pull/234))
 - *(nesting)* A parent's end pauses its nested children instead of killing them (closes #235) ([#236](https://github.com/cad0p/pi-subagents-tintinweb/pull/236))
 - *(transcript)* A resumed nested agent keeps appending to its output file (closes #237) ([#239](https://github.com/cad0p/pi-subagents-tintinweb/pull/239))
+- *(transcript)* The native view repaints a child's transcript as messages land (closes #245) ([#246](https://github.com/cad0p/pi-subagents-tintinweb/pull/246))
 
 ### 🚜 Refactor
 
@@ -77,6 +78,7 @@ All notable changes to this project will be documented in this file.
 - *(readme)* The footer needs pi-background-work, in a matching version pair (closes #180) ([#181](https://github.com/cad0p/pi-subagents-tintinweb/pull/181))
 - *(checklist)* Compare session behaviour with pi's main session before calling it a defect (closes #216) ([#225](https://github.com/cad0p/pi-subagents-tintinweb/pull/225))
 - *(checklist)* A configuration change after spawn gets the simplest behaviour (closes #228) ([#229](https://github.com/cad0p/pi-subagents-tintinweb/pull/229))
+- *(checklist)* A Visual proof may pass on the opencode-go fallback (closes #243) ([#244](https://github.com/cad0p/pi-subagents-tintinweb/pull/244))
 
 
 ## [0.22.0] - 2026-10-21
