@@ -605,7 +605,7 @@ describe("usage", () => {
       expect(sumShares(parent.byModel)).toEqual({ input: 110, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
     });
 
-    it("does not mutate or alias the delta's map", () => {
+    it("does not mutate or alias either side's map", () => {
       // The record's lifetime, baseline and fold are shallow copies of one another: an in-place
       // merge would inflate the baseline and swallow the record's next delta.
       const parent = mapped(100, "p/own");
@@ -617,6 +617,19 @@ describe("usage", () => {
       expect(delta.byModel).toEqual(deltaSnapshot);
       expect(parent.byModel).not.toBe(delta.byModel);
       expect(parent.byModel?.["p/child"]).not.toBe(delta.byModel?.["p/child"]);
+
+      // The target's side, and the common one: a first growth merges into the account its seed
+      // read already named, whose share object the baseline beside that lifetime also holds.
+      // Cloning only a key the target does not have would inflate that baseline in place.
+      const grown = mapped(100, "p/own");
+      const before = grown.byModel;
+      const oldShare = before?.["p/own"];
+
+      addUsage(grown, mapped(10, "p/own"));
+
+      expect(grown.byModel?.["p/own"]).toEqual({ input: 110, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(before?.["p/own"]).toEqual({ input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(grown.byModel?.["p/own"]).not.toBe(oldShare);
     });
 
     it("drops the map when either side has none, in both directions", () => {
@@ -659,6 +672,31 @@ describe("usage", () => {
       const second = readSessionUsage({ getSessionStats: () => statsOf(120), sessionManager: { getEntries: () => entries } }, first.stats);
 
       expect(second.delta.byModel).toEqual({ "b/m": { input: 20, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    });
+
+    it("counts the next own growth in full after a descendant's fold, though the seed shares one map", () => {
+      // readRecordUsage seeds a record's baseline and lifetime as two shallow copies of one
+      // read.stats, so both hold the same byModel map, and a descendant's spend is folded into
+      // that lifetime. Merging in place there would raise the baseline's share of the account past
+      // the file's next read, and excessUsage would clamp the record's own next growth away.
+      const entries = [assistant("a", "m", billed(100))];
+      let input = 100;
+      const session = () => ({ getSessionStats: () => statsOf(input), sessionManager: { getEntries: () => entries } });
+
+      const seed = readSessionUsage(session());
+      const baseline: LifetimeUsage = { ...seed.stats };
+      const lifetime: LifetimeUsage = { ...seed.stats };
+      addUsage(lifetime, {
+        input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0,
+        byModel: { "a/m": { input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } },
+      });
+
+      entries.push(assistant("a", "m", billed(50)));
+      input = 150;
+      const next = readSessionUsage(session(), baseline);
+
+      expect(next.delta.byModel).toEqual({ "a/m": { input: 50, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+      expect(sumShares(next.delta.byModel)).toEqual({ input: next.delta.input, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
     });
 
     it("reports no breakdown when the baseline has none, or the session has no entries", () => {
