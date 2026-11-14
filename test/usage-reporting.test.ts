@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Usage } from "@earendil-works/pi-ai";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -39,10 +39,17 @@ type ToolResult = { content: { type: string; text: string }[]; details?: unknown
 type FakeStats = { input: number; output: number; cacheWrite: number; cacheRead: number; cost: number };
 
 /** A child session stand-in — only the members the manager touches. `stats` is what the
- *  manager reads: it starts at zero and a test accrues spend into it. */
-function fakeSession(dispose: () => void = vi.fn(), stats: FakeStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }): AgentSession & { stats: FakeStats } {
+ *  manager reads: it starts at zero and a test accrues spend into it. `entries` is what
+ *  `getEntries()` reports, so a test can make the live read see the same spend pi would
+ *  have persisted (the #247 breakdown comes from those entries). */
+function fakeSession(
+  dispose: () => void = vi.fn(),
+  stats: FakeStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+  entries: SessionEntry[] = [],
+): AgentSession & { stats: FakeStats; entries: SessionEntry[] } {
   return {
     stats,
+    entries,
     getSessionStats: () => ({
       tokens: { input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite },
       cost: stats.cost,
@@ -53,8 +60,8 @@ function fakeSession(dispose: () => void = vi.fn(), stats: FakeStats = { input: 
     abort: vi.fn(),
     steer: vi.fn(),
     agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
-    sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
-  } as unknown as AgentSession & { stats: FakeStats };
+    sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => entries },
+  } as unknown as AgentSession & { stats: FakeStats; entries: SessionEntry[] };
 }
 
 /** Accrue spend into a session's totals, the way pi appends it to the file. */
@@ -64,6 +71,23 @@ function accrue(session: AgentSession & { stats: FakeStats }, usage: LifetimeUsa
   session.stats.cacheWrite += usage.cacheWrite;
   session.stats.cacheRead += usage.cacheRead ?? 0;
   session.stats.cost += usage.cost ?? 0;
+}
+
+/** Accrue spend AND append the assistant message that produced it, on a named account. */
+function accrueOn(session: AgentSession & { stats: FakeStats; entries: SessionEntry[] }, provider: string, model: string, usage: LifetimeUsage): void {
+  accrue(session, usage);
+  const cacheRead = usage.cacheRead ?? 0;
+  session.entries.push({
+    type: "message", id: `m-${session.entries.length}`, parentId: null, timestamp: new Date().toISOString(),
+    message: {
+      role: "assistant", content: [], provider, model,
+      usage: {
+        input: usage.input, output: usage.output, cacheRead, cacheWrite: usage.cacheWrite,
+        totalTokens: usage.input + usage.output + cacheRead + usage.cacheWrite,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost ?? 0 },
+      },
+    },
+  } as unknown as SessionEntry);
 }
 
 /** Host a session the way the runner does: bind it, then hand the run its hooks. */
@@ -172,21 +196,22 @@ describe("reporting subagent usage back to the parent session", () => {
   const managerHandle = () =>
     (globalThis as Record<symbol, { getRecord(id: string): AgentRecord | undefined; listAgents(): AgentRecord[] }>)[MANAGER_KEY];
 
+  /** Feed a result through the registered message_end handler, the way pi finalizes it before persisting.
+   *  Returns the message pi would persist — the handler's replacement, or the message itself untouched. */
+  function settled(
+    lifecycle: Map<string, unknown>,
+    result: Partial<ToolResult>,
+    role: "toolResult" | "user" = "toolResult",
+  ): ToolResult & { subagentUsage?: { v: number; agents: Record<string, LifetimeUsage> } } {
+    const handler = lifecycle.get("message_end") as
+      | ((event: { message: Record<string, unknown> }) => { message: Record<string, unknown> } | undefined)
+      | undefined;
+    if (!handler) throw new Error("no message_end handler registered");
+    const message = { ...result, role, content: result.content ?? [{ type: "text", text: "" }] };
+    return (handler({ message })?.message ?? message) as ToolResult & { subagentUsage?: { v: number; agents: Record<string, LifetimeUsage> } };
+  }
+
   describe("the parent session's accounting", () => {
-    /** Feed a result through the registered message_end handler, the way pi finalizes it before persisting.
-     *  Returns the message pi would persist — the handler's replacement, or the message itself untouched. */
-    function settled(
-      lifecycle: Map<string, unknown>,
-      result: Partial<ToolResult>,
-      role: "toolResult" | "user" = "toolResult",
-    ): ToolResult & { subagentUsage?: { v: number; agents: Record<string, Usage> } } {
-      const handler = lifecycle.get("message_end") as
-        | ((event: { message: Record<string, unknown> }) => { message: Record<string, unknown> } | undefined)
-        | undefined;
-      if (!handler) throw new Error("no message_end handler registered");
-      const message = { ...result, role, content: result.content ?? [{ type: "text", text: "" }] };
-      return (handler({ message })?.message ?? message) as ToolResult & { subagentUsage?: { v: number; agents: Record<string, Usage> } };
-    }
 
     it("carries the spend on the finalized message, not on the tool's own result", async () => {
       // Catches the shape this replaced: draining at the tool's execute return, before the result
@@ -541,6 +566,48 @@ describe("reporting subagent usage back to the parent session", () => {
       const parent = events.find((e) => e.description === "spend");
       expect(child).toMatchObject({ depth: 2, parentAgentId: parent?.id });
       expect(events.reduce((sum, e) => sum + (e.usage as Usage).cost.total, 0)).toBeCloseTo(0.02, 10);
+    });
+
+    it("splits each reading by the account that billed it, and the marker by the agent's whole run", async () => {
+      // Account rotation mid-run (pi-fallback-provider), same model: the event's single `model`
+      // names where the run started, so a tracker keying on it attributes both readings to one
+      // account. Each reading carries its own split, and the marker carries the cumulative one.
+      const { pi, tools, lifecycle } = boot({});
+      vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+        const session = fakeSession();
+        host(options, session);
+        accrueOn(session, "opencode-go-2", "deepseek-v4.1-flash", { input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+        options.onUsage?.();
+        accrueOn(session, "opencode-go-6", "deepseek-v4.1-flash", { input: 10, output: 5, cacheWrite: 0, cost: 0.002 });
+        options.onUsage?.();
+        return { responseText: "done", session, aborted: false, steered: false };
+      });
+
+      const message = settled(lifecycle, await spawn(tools));
+
+      const events = usageEvents(pi);
+      expect(events).toHaveLength(2);
+      expect(events[0].byModel).toEqual({
+        "opencode-go-2/deepseek-v4.1-flash": {
+          input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+        },
+      });
+      // The second reading splits only its own growth: the first account is not re-reported.
+      expect(events[1].byModel).toEqual({
+        "opencode-go-6/deepseek-v4.1-flash": {
+          input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.002 },
+        },
+      });
+      expect(events[1].byModel).not.toHaveProperty("opencode-go-2/deepseek-v4.1-flash");
+
+      // The marker is the durable half: both accounts, cumulative, and it sums to the agent total.
+      const agent = Object.values(message.subagentUsage?.agents ?? {})[0];
+      expect(Object.keys(agent.byModel ?? {})).toEqual(["opencode-go-2/deepseek-v4.1-flash", "opencode-go-6/deepseek-v4.1-flash"]);
+      const shares = Object.values(agent.byModel ?? {});
+      expect(shares.reduce((sum, share) => sum + share.input, 0)).toBe(agent.input);
+      expect(shares.reduce((sum, share) => sum + (share.cost ?? 0), 0)).toBeCloseTo(agent.cost ?? 0, 12);
     });
 
     it("emits the last subagents:usage before subagents:disposed", async () => {

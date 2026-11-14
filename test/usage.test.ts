@@ -1,3 +1,5 @@
+import type { Usage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   addUsage,
@@ -9,9 +11,15 @@ import {
   getSessionTokens,
   isEmptyUsage,
   type LifetimeUsage,
+  maxUsage,
   PendingUsagePool,
+  readLifetimeUsage,
   readSessionUsage,
+  sessionFileUsage,
+  toReportedByModel,
   toReportedUsage,
+  UNATTRIBUTED_USAGE_KEY,
+  type UsageTotals,
 } from "../src/usage.js";
 
 // Regression for issue #38 — token semantics + context indicator
@@ -483,6 +491,338 @@ describe("usage", () => {
         { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, totalFromProvider: true } },
         { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       ).cost.totalFromProvider).toBe(false);
+    });
+  });
+
+  // ---- Per-account breakdown (#247) ----
+  //
+  // A subagent can rotate accounts mid-run, switch models, or roll nested children up, so one model
+  // per record cannot say which account was billed. Every row here pins one half of the invariant:
+  // the breakdown is keyed the way pi keys its own /session table, it rides the carriers a reader
+  // already gets, and it sums to the total it splits.
+
+  const billed = (input: number, output = 0, cacheWrite = 0, cacheRead = 0, cost = 0): Usage => ({
+    input, output, cacheRead, cacheWrite,
+    totalTokens: input + output + cacheRead + cacheWrite,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+  });
+
+  const entry = (base: Record<string, unknown>): SessionEntry =>
+    ({ id: `e-${Math.random()}`, parentId: null, timestamp: new Date().toISOString(), ...base }) as unknown as SessionEntry;
+
+  const assistant = (provider: string, model: string, usage: Usage, responseModel?: string): SessionEntry =>
+    entry({ type: "message", message: { role: "assistant", content: [], provider, model, usage, ...(responseModel ? { responseModel } : {}) } });
+
+  const toolResult = (usage: Usage): SessionEntry =>
+    entry({ type: "message", message: { role: "toolResult", toolCallId: "t", toolName: "read", content: [], isError: false, usage } });
+
+  const sumShares = (byModel: Record<string, UsageTotals> | undefined): UsageTotals => {
+    const total: UsageTotals = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+    for (const share of Object.values(byModel ?? {})) addUsage(total, share);
+    return total;
+  };
+
+  describe("sessionFileUsage byModel", () => {
+    it("keys an account rotation apart, same model or not, and the shares sum to the totals", () => {
+      // The reason the record is a map: pi-fallback-provider moves a run from one account to
+      // another mid-flight. Keying on the model would collapse these into one key.
+      const usage = sessionFileUsage([
+        assistant("opencode-go-2", "deepseek-v4.1-flash", billed(100, 20, 0, 40, 0.01)),
+        assistant("opencode-go-6", "deepseek-v4.1-flash", billed(50, 10, 5, 0, 0.002)),
+      ]);
+
+      expect(Object.keys(usage.byModel ?? {})).toEqual(["opencode-go-2/deepseek-v4.1-flash", "opencode-go-6/deepseek-v4.1-flash"]);
+      expect(sumShares(usage.byModel)).toEqual({
+        input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead, cost: usage.cost,
+      });
+    });
+
+    it("bills a routed request to the model that answered it", () => {
+      // pi's own rule (getUsageCostBreakdown): a fallback that answers with another model is
+      // billed to that model, so the breakdown follows responseModel when it is set.
+      const usage = sessionFileUsage([
+        assistant("p", "a", billed(10)),
+        assistant("p", "b", billed(20)),
+        assistant("p", "a", billed(40), "b"),
+      ]);
+
+      expect(usage.byModel).toMatchObject({ "p/a": { input: 10 }, "p/b": { input: 60 } });
+    });
+
+    it("puts summary and tool-result spend in one unattributed bucket, and a cache warm on its account", () => {
+      // Compaction and /tree summaries carry usage with no provider or model in pi 1.5.0; a tool
+      // result's own usage has none either. Bucketing them predictably is what keeps the sum, and
+      // a tree-navigator's fromHook summary (no usage) must add nothing at all.
+      const usage = sessionFileUsage([
+        entry({ type: "compaction", summary: "", firstKeptEntryId: "x", usage: billed(100, 10) }),
+        entry({ type: "branch_summary", fromId: "x", summary: "", usage: billed(20) }),
+        entry({ type: "branch_summary", fromId: "x", summary: "", fromHook: true }),
+        entry({ type: "usage", kind: "cache_warm", provider: "opencode-go-9", model: "m", usage: billed(5) }),
+        toolResult(billed(7)),
+      ]);
+
+      expect(usage.byModel?.[UNATTRIBUTED_USAGE_KEY]).toEqual({ input: 127, output: 10, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(usage.byModel?.["opencode-go-9/m"]).toEqual({ input: 5, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(sumShares(usage.byModel)).toEqual({
+        input: usage.input, output: usage.output, cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead, cost: usage.cost,
+      });
+    });
+
+    it("reads a summary's own provider and model when a later pi writes them", () => {
+      // earendil-works/pi#11090 tracks the missing fields. The read is add-only, so a pi that
+      // starts writing them attributes the spend instead of leaving it unattributed.
+      const usage = sessionFileUsage([
+        entry({ type: "compaction", summary: "", firstKeptEntryId: "x", usage: billed(9), provider: "p", model: "m" }),
+      ]);
+
+      expect(usage.byModel).toEqual({ "p/m": { input: 9, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    });
+
+    it("carries no breakdown at all for a session with nothing spent", () => {
+      // The absent key is the contract: a reader that finds byModel may trust it to sum, so an
+      // empty object would be a claim about nothing.
+      expect(sessionFileUsage([])).not.toHaveProperty("byModel");
+      expect(sessionFileUsage([assistant("p", "m", billed(0))])).not.toHaveProperty("byModel");
+    });
+  });
+
+  describe("addUsage breakdown merge", () => {
+    const mapped = (input: number, account: string): LifetimeUsage => ({
+      input, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0,
+      byModel: { [account]: { input, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } },
+    });
+
+    it("merges a child's accounts beside the parent's own, never inside one", () => {
+      // The nested roll-up: folding a descendant into an ancestor must key by account. Folding it
+      // into the ancestor's own model would name an account that spent nothing.
+      const parent = mapped(100, "p/own");
+      addUsage(parent, mapped(10, "p/child"));
+
+      expect(parent.byModel).toEqual({
+        "p/own": { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+        "p/child": { input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      });
+      expect(sumShares(parent.byModel)).toEqual({ input: 110, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    });
+
+    it("does not mutate or alias either side's map", () => {
+      // The record's lifetime, baseline and fold are shallow copies of one another: an in-place
+      // merge would inflate the baseline and swallow the record's next delta.
+      const parent = mapped(100, "p/own");
+      const delta = mapped(10, "p/child");
+      const deltaSnapshot = structuredClone(delta.byModel);
+
+      addUsage(parent, delta);
+
+      expect(delta.byModel).toEqual(deltaSnapshot);
+      expect(parent.byModel).not.toBe(delta.byModel);
+      expect(parent.byModel?.["p/child"]).not.toBe(delta.byModel?.["p/child"]);
+
+      // The target's side, and the common one: a first growth merges into the account its seed
+      // read already named, whose share object the baseline beside that lifetime also holds.
+      // Cloning only a key the target does not have would inflate that baseline in place.
+      const grown = mapped(100, "p/own");
+      const before = grown.byModel;
+      const oldShare = before?.["p/own"];
+
+      addUsage(grown, mapped(10, "p/own"));
+
+      expect(grown.byModel?.["p/own"]).toEqual({ input: 110, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(before?.["p/own"]).toEqual({ input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(grown.byModel?.["p/own"]).not.toBe(oldShare);
+    });
+
+    it("drops the map when either side has none, in both directions", () => {
+      // A map that names only the delta's accounts would not sum to the totals, and keeping a stale
+      // map when the delta has none would leave it summing short. Reachable via a pre-#247 claim or
+      // a recovered ancestor, so both directions drop rather than mislead.
+      const intoUnmapped: LifetimeUsage = { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+      addUsage(intoUnmapped, mapped(10, "p/child"));
+      expect(intoUnmapped).not.toHaveProperty("byModel");
+      expect(intoUnmapped.input).toBe(110);
+
+      const fromUnmapped = mapped(100, "p/own");
+      addUsage(fromUnmapped, { input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(fromUnmapped).not.toHaveProperty("byModel");
+      expect(fromUnmapped.input).toBe(110);
+    });
+
+    it("adopts the delta's map when the target spent nothing yet", () => {
+      // The first growth of a fresh record: its lifetime is all zeros, so the delta's map is the
+      // whole truth. Dropping it here would lose the first account a run ever spent on.
+      const fresh: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+      addUsage(fresh, mapped(10, "p/first"));
+
+      expect(fresh.byModel).toEqual({ "p/first": { input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    });
+  });
+
+  describe("readSessionUsage breakdown", () => {
+    const statsOf = (input: number) => ({ tokens: { input, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0 });
+
+    it("reports the per-key growth of a delta, not the whole file's map", () => {
+      // Catches a delta carrying the cumulative map: a listener adding each delta would count the
+      // first turn's spend again on every later one.
+      const entries = [assistant("a", "m", billed(100, 10))];
+      const session = { getSessionStats: () => statsOf(100), sessionManager: { getEntries: () => entries } };
+      const first = readSessionUsage(session);
+      expect(first.stats.byModel).toEqual({ "a/m": { input: 100, output: 10, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+
+      entries.push(assistant("b", "m", billed(20)));
+      const second = readSessionUsage({ getSessionStats: () => statsOf(120), sessionManager: { getEntries: () => entries } }, first.stats);
+
+      expect(second.delta.byModel).toEqual({ "b/m": { input: 20, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    });
+
+    it("counts the next own growth in full after a descendant's fold, though the seed shares one map", () => {
+      // readRecordUsage seeds a record's baseline and lifetime as two shallow copies of one
+      // read.stats, so both hold the same byModel map, and a descendant's spend is folded into
+      // that lifetime. Merging in place there would raise the baseline's share of the account past
+      // the file's next read, and excessUsage would clamp the record's own next growth away.
+      const entries = [assistant("a", "m", billed(100))];
+      let input = 100;
+      const session = () => ({ getSessionStats: () => statsOf(input), sessionManager: { getEntries: () => entries } });
+
+      const seed = readSessionUsage(session());
+      const baseline: LifetimeUsage = { ...seed.stats };
+      const lifetime: LifetimeUsage = { ...seed.stats };
+      addUsage(lifetime, {
+        input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0,
+        byModel: { "a/m": { input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } },
+      });
+
+      entries.push(assistant("a", "m", billed(50)));
+      input = 150;
+      const next = readSessionUsage(session(), baseline);
+
+      expect(next.delta.byModel).toEqual({ "a/m": { input: 50, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+      expect(sumShares(next.delta.byModel)).toEqual({ input: next.delta.input, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    });
+
+    it("reports no breakdown when the baseline has none, or the session has no entries", () => {
+      // A hand-over from a release before #247: the growth is real, but naming it would attribute
+      // history nobody watched to whichever account grew last.
+      const entries = [assistant("a", "m", billed(120))];
+      const session = { getSessionStats: () => statsOf(120), sessionManager: { getEntries: () => entries } };
+
+      expect(readSessionUsage(session, { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 }).delta).not.toHaveProperty("byModel");
+      expect(readSessionUsage({ getSessionStats: () => statsOf(120) }).stats).not.toHaveProperty("byModel");
+    });
+
+    it("keeps the seed delta empty even though the session has spend", () => {
+      // The absent-baseline branch is a seed, never growth: a delta carrying the file's map would
+      // let a first bind book history it never watched.
+      const entries = [assistant("a", "m", billed(100))];
+      const seed = readSessionUsage({ getSessionStats: () => statsOf(100), sessionManager: { getEntries: () => entries } });
+
+      expect(seed.stats.input).toBe(100);
+      expect(seed.delta).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    });
+  });
+
+  describe("maxUsage breakdown", () => {
+    it("takes the per-key maximum and keeps the sum", () => {
+      const early: LifetimeUsage = { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: { "a/m": { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } } };
+      const late: LifetimeUsage = { input: 130, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: {
+        "a/m": { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+        "b/m": { input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      } };
+
+      const maxed = maxUsage(early, late);
+
+      expect(maxed.byModel).toEqual(late.byModel);
+      expect(sumShares(maxed.byModel)).toEqual({ input: 130, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+    });
+
+    it("keeps a one-sided map only while that side is the maximum", () => {
+      // A claim from a release before #247 has no map. Keeping the file's map while the claim is
+      // larger would name accounts for spend the claim covers and the file does not.
+      const unmapped: LifetimeUsage = { input: 150, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+      const dominating: LifetimeUsage = { input: 150, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: { "a/m": { input: 150, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } } };
+      const behind: LifetimeUsage = { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: { "a/m": { input: 100, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } } };
+
+      expect(maxUsage(dominating, unmapped).byModel).toEqual(dominating.byModel);
+      expect(maxUsage(behind, unmapped)).not.toHaveProperty("byModel");
+      expect(maxUsage(unmapped, behind)).not.toHaveProperty("byModel");
+    });
+  });
+
+  describe("the pool's marker breakdown", () => {
+    it("claims each agent's accounts at the frontier, and the shares sum to the marker's totals", () => {
+      // The marker is the durable half: a reader of the parent's session file learns the accounts
+      // without the child's file, which eviction deletes. The growth of the second read updates the
+      // same keys rather than appearing as a second agent.
+      const pool = new PendingUsagePool();
+      const first: LifetimeUsage = { input: 100, output: 10, cacheWrite: 0, cacheRead: 5, cost: 0.01, byModel: {
+        "a/m": { input: 70, output: 10, cacheWrite: 0, cacheRead: 5, cost: 0.01 },
+        "b/m": { input: 30, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      } };
+      pool.report("x", first);
+
+      const drained = pool.drain();
+      expect(drained.marker?.agents.x.byModel).toEqual(first.byModel);
+      expect(drained.usage?.totalTokens).toBe(115);
+
+      pool.report("x", { ...first, input: 130, byModel: {
+        "a/m": { input: 70, output: 10, cacheWrite: 0, cacheRead: 5, cost: 0.01 },
+        "b/m": { input: 60, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      } });
+      const second = pool.drain();
+
+      expect(second.usage?.input).toBe(30);
+      expect(sumShares(second.marker?.agents.x.byModel)).toEqual({
+        input: 130, output: 10, cacheWrite: 0, cacheRead: 5, cost: 0.01,
+      });
+    });
+
+    it("keeps the aggregate scalar even when a hand-over delta carries a breakdown", () => {
+      // The pool's number is one total across agents and rides a tool result, which has no
+      // per-agent slot. A cross-agent map there could not be attributed back, so it is dropped.
+      const pool = new PendingUsagePool();
+      pool.add({ input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: { "a/m": { input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } } });
+
+      expect(pool.takeLifetime()).toEqual({ input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(pool.drain()).toEqual({ usage: undefined, marker: undefined });
+    });
+  });
+
+  describe("readLifetimeUsage breakdown", () => {
+    it("reads an older marker's totals and a #247 marker's breakdown alike", () => {
+      const old = readLifetimeUsage({ input: 5, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(old).toEqual({ input: 5, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(old).not.toHaveProperty("byModel");
+
+      const current = readLifetimeUsage({
+        input: 5, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0,
+        byModel: { "a/m": { input: 5, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 } },
+      });
+      expect(current?.byModel).toEqual({ "a/m": { input: 5, output: 2, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+    });
+
+    it("drops a malformed or empty breakdown but keeps the totals", () => {
+      // A partial map would not sum, so it must not survive the read; the totals are still the
+      // number the marker claims, and dropping them too would lose the accounting.
+      const malformed = readLifetimeUsage({ input: 5, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: { "a/m": { input: "nope" } } });
+      expect(malformed).toEqual({ input: 5, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+      expect(readLifetimeUsage({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, byModel: {} })).not.toHaveProperty("byModel");
+    });
+  });
+
+  describe("the event's breakdown", () => {
+    it("renders each account as a pi Usage and omits a key that spent nothing", () => {
+      // The event carries the same shape as its aggregate so a listener has one reader, and a key
+      // with nothing spent is not a row to add.
+      const reported = toReportedByModel({
+        "a/m": { input: 10, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0.001 },
+        "b/m": { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
+      });
+
+      expect(reported?.["a/m"]).toEqual({
+        input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+      });
+      expect(reported).not.toHaveProperty("b/m");
+      expect(toReportedByModel(undefined)).toBeUndefined();
     });
   });
 });
