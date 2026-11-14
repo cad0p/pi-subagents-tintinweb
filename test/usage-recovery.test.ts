@@ -17,6 +17,15 @@ import { isLegacyUsageFile, legacySeeds, walkUsageTotals } from "../src/usage-re
 
 const totals = (input: number, output = 0): LifetimeUsage => ({ input, output, cacheWrite: 0, cacheRead: 0, cost: 0 });
 
+/** The five accumulated fields, for a row whose subject is the totals rather than the #247 breakdown. */
+const flat = ({ byModel: _byModel, ...rest }: LifetimeUsage): LifetimeUsage => rest;
+
+/** The same totals, split across accounts: the breakdown a #247 file or claim carries. */
+const split = (input: number, account: string): LifetimeUsage => ({
+  ...totals(input),
+  byModel: { [account]: { ...totals(input) } },
+});
+
 /** A custom ledger entry the way pi persists one. */
 function custom(customType: string, data: unknown): SessionEntry {
   return { type: "custom", id: `e-${Math.random()}`, parentId: null, timestamp: new Date().toISOString(), customType, data } as SessionEntry;
@@ -72,7 +81,10 @@ describe("usage recovery", () => {
 
       const walked = walkUsageTotals(spawnsOf([spawn("a", childFile)]), new Map(), (file) => entries.get(file));
 
-      expect(walked.get("a")).toEqual(totals(100, 50));
+      expect(flat(walked.get("a")!)).toEqual(totals(100, 50));
+      // The walk carries the per-account split of that same file (#247), so recovery restores the
+      // breakdown for a child whose file is the only thing left.
+      expect(walked.get("a")?.byModel).toEqual({ "faux/faux-1": totals(100, 50) });
     });
 
     it("takes the larger of the file and an accounted claim, never only the claim", () => {
@@ -86,6 +98,24 @@ describe("usage recovery", () => {
       const walked = walkUsageTotals(spawnsOf([spawn("a", childFile)]), new Map([["a", claimed]]), (file) => entries.get(file));
 
       expect(walked.get("a")?.input).toBe(300);
+    });
+
+    it("keeps the file's breakdown while the file is the maximum, and drops a larger claim's absent one", () => {
+      // A claim written before #247 has no breakdown. The file grew past it, so the file's split is
+      // the whole truth and must survive; a larger claim is the whole truth and the file's split is
+      // only a part of it, which would break the sum. Always-keep and always-drop both go red here.
+      const childFile = join(dir, "child.jsonl");
+      writeFileSync(childFile, "");
+      const entries = new Map([[childFile, [assistant({ input: 100, output: 0 })]]]);
+      const spawns = spawnsOf([spawn("a", childFile)]);
+      const fileSplit = sessionFileUsage(entries.get(childFile)!);
+
+      const fileWins = walkUsageTotals(spawns, new Map([["a", { total: totals(40), booked: true }]]), (file) => entries.get(file));
+      expect(fileWins.get("a")?.byModel).toEqual(fileSplit.byModel);
+
+      const claimWins = walkUsageTotals(spawns, new Map([["a", { total: totals(300), booked: true }]]), (file) => entries.get(file));
+      expect(claimWins.get("a")).toEqual(totals(300));
+      expect(claimWins.get("a")).not.toHaveProperty("byModel");
     });
 
     it("recovers an id known only from its accounted entry", () => {
@@ -132,7 +162,7 @@ describe("usage recovery", () => {
 
       expect([...walked.keys()]).toEqual(["a", "b", "c"]);
       expect(Object.fromEntries(Object.entries(seeds).map(([id, value]) => [id, value.booked]))).toEqual({ a: true, b: true, c: true });
-      expect(walked.get("c")).toEqual(totals(10, 1));
+      expect(flat(walked.get("c")!)).toEqual(totals(10, 1));
     });
 
     it("recovers nested totals from root claims when intermediate session files are gone", () => {
@@ -190,6 +220,14 @@ describe("usage recovery", () => {
       expect(readAccounted(entries).claims.get("a")).toEqual({ total: totals(20), booked: true });
     });
 
+    it("round-trips a claim's breakdown", () => {
+      // The claim is a child's total at removal: its split is the last durable word on which
+      // accounts the run used once the file is unlinked.
+      const { claims } = readAccounted([accounted({ a: { total: split(50, "p/m"), booked: false } })]);
+
+      expect(claims.get("a")?.total.byModel).toEqual({ "p/m": totals(50) });
+    });
+
     it("reads a later version as no claim at all", () => {
       // A downgrade must not misread a shape it does not know: ignoring it books nothing extra.
       const entries = [custom(ACCOUNTED_ENTRY, { v: LEDGER_VERSION + 1, agents: { a: { total: totals(10), booked: false } } })];
@@ -229,6 +267,26 @@ describe("usage recovery", () => {
       expect(markers.get("a")).toEqual(totals(30));
       expect(markers.get("b")).toEqual(totals(4));
     });
+
+    it("round-trips a marker's breakdown, and reads an older marker's totals without one", () => {
+      // Add-only in both directions: a marker written before #247 still claims its totals, and one
+      // written after hands the accounts to a reader that never sees the child's file.
+      const markers = readUsageMarkers([marked({ old: totals(10), current: split(30, "p/m") })]);
+
+      expect(markers.get("old")).toEqual(totals(10));
+      expect(markers.get("current")?.byModel).toEqual({ "p/m": totals(30) });
+    });
+
+    it("keeps the totals of a marker whose breakdown is malformed", () => {
+      // A partial map would not sum; losing the claim as well would re-book spend the parent was
+      // already told about. The map mixes a readable share with an unreadable one, so keeping the
+      // readable half would be visible as a breakdown that no longer sums.
+      const broken = { ...totals(20), byModel: { "p/m": totals(20), "p/n": { input: "nope" } } } as unknown as LifetimeUsage;
+      const markers = readUsageMarkers([marked({ a: broken })]);
+
+      expect(markers.get("a")).toEqual(totals(20));
+      expect(markers.get("a")).not.toHaveProperty("byModel");
+    });
   });
 
   describe("sessionFileUsage", () => {
@@ -243,7 +301,9 @@ describe("usage recovery", () => {
 
       const total = sessionFileUsage(entries);
 
-      expect(total).toEqual({ input: 11, output: 5, cacheWrite: 2, cacheRead: 0, cost: 0.5 });
+      expect(flat(total)).toEqual({ input: 11, output: 5, cacheWrite: 2, cacheRead: 0, cost: 0.5 });
+      // The same walk splits it: the assistant message on its account, the cache warm on its own.
+      expect(total.byModel).toEqual({ "faux/faux-1": { input: 10, output: 5, cacheWrite: 0, cacheRead: 0, cost: 0 }, "p/m": { input: 1, output: 0, cacheWrite: 2, cacheRead: 0, cost: 0.5 } });
     });
   });
 });

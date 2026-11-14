@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerBackgroundWorkProvider } from "@cad0p/pi-background-work";
-import { type AgentSession, type ExtensionContext, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, type ExtensionContext, type SessionEntry, SessionManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, NUDGE_HOLD_MS, setQuietMs } from "../src/agent-manager.js";
 import { consumeResult } from "../src/agent-result-tool.js";
@@ -67,6 +67,37 @@ const mockSession = (initial: Partial<MockStats> = {}) => {
   sendCustomMessage: () => Promise.resolve(),
   sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
 } as any);
+};
+
+/**
+ * A fake child session whose entries back its stats: each `spend` appends an assistant message and
+ * moves the totals pi would report, so a live read derives the #247 breakdown from real input.
+ */
+const entryBackedSession = () => {
+  const entries: SessionEntry[] = [];
+  const stats: MockStats = { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 };
+  return {
+    ...mockSession(),
+    getSessionStats: () => ({
+      tokens: { input: stats.input, output: stats.output, cacheRead: stats.cacheRead, cacheWrite: stats.cacheWrite, total: stats.input + stats.output + stats.cacheRead + stats.cacheWrite },
+      cost: stats.cost,
+    }),
+    sessionManager: { getSessionId: () => "child-session-id", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => entries },
+    spend(provider: string, model: string, usage: LifetimeUsage) {
+      stats.input += usage.input;
+      stats.output += usage.output;
+      stats.cacheWrite += usage.cacheWrite;
+      stats.cacheRead += usage.cacheRead ?? 0;
+      stats.cost += usage.cost ?? 0;
+      entries.push({
+        type: "message", id: `m-${entries.length}`, parentId: null, timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant", content: [], provider, model,
+          usage: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite, totalTokens: usage.input + usage.output + (usage.cacheRead ?? 0) + usage.cacheWrite, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: usage.cost ?? 0 } },
+        },
+      } as unknown as SessionEntry);
+    },
+  };
 };
 
 /** Host a child the way the runner does: settings first, then the session with its lifecycle. */
@@ -778,6 +809,59 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(record.lifetimeUsage).toEqual(lifetime(80, 35, 5));
     // One delta for one spend: the grandchild's, counted once.
     expect(pushed.map((p) => p.id)).toEqual([child.id]);
+  });
+
+  it("rolls a nested child's accounts up key by key, never into the ancestor's own account", async () => {
+    // The nested merge (#247): the top record's breakdown is its own account plus each
+    // descendant's, not their sum folded into the model it happens to name. A merge into the
+    // ancestor's own key would leave one key holding all three.
+    manager = new AgentManager(undefined, undefined, undefined, undefined, () => {});
+    const topSession = entryBackedSession();
+    const childSession = entryBackedSession();
+    const grandSession = entryBackedSession();
+    const top = liveRun(topSession);
+    const child = liveRun(childSession, { parentAgentId: top.id, depth: 2 });
+    const grand = liveRun(grandSession, { parentAgentId: child.id, depth: 3 });
+
+    topSession.spend("p", "own", { input: 100, output: 0, cacheWrite: 0 });
+    top.hook();
+    childSession.spend("p", "child", { input: 10, output: 0, cacheWrite: 0 });
+    child.hook();
+    grandSession.spend("q", "grand", { input: 5, output: 0, cacheWrite: 0 });
+    grand.hook();
+
+    const topUsage = manager.getRecord(top.id)!.lifetimeUsage;
+    expect(Object.keys(topUsage.byModel ?? {})).toEqual(["p/own", "p/child", "q/grand"]);
+    expect(topUsage.byModel).toMatchObject({ "p/own": { input: 100 }, "p/child": { input: 10 }, "q/grand": { input: 5 } });
+    // The breakdown sums to the lifetime it splits, tokens exactly.
+    const shares = Object.values(topUsage.byModel ?? {});
+    expect(shares.reduce((sum, share) => sum + share.input + share.output + share.cacheWrite, 0)).toBe(115);
+    // The child's baseline is its own session file, which knows nothing about its grandchild.
+    expect(manager.getRecord(child.id)!.usageBaseline?.byModel).toEqual({ "p/child": { input: 10, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } });
+  });
+
+  it("folds a recovered total's accounts into its ancestors", async () => {
+    // A ledger rebuild hands the manager a file total, not a live read (#215): the ancestor's
+    // breakdown must grow by that total's accounts, or recovery loses the attribution.
+    manager = new AgentManager(undefined, undefined, undefined, undefined, () => {});
+    const topSession = entryBackedSession();
+    const childSession = entryBackedSession();
+    const top = liveRun(topSession);
+    const child = liveRun(childSession, { parentAgentId: top.id, depth: 2 });
+    const record = manager.getRecord(child.id)!;
+    // What a ledger rebuild leaves: no baseline, no lifetime, the file kept.
+    record.usageBaseline = undefined;
+    record.foldedUsage = undefined;
+    record.lifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+
+    const recovered: LifetimeUsage = {
+      input: 40, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0,
+      byModel: { "p/child": { input: 40, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } },
+    };
+    manager.applyRecoveredUsage(child.id, recovered);
+
+    expect(record.lifetimeUsage.byModel).toEqual(recovered.byModel);
+    expect(manager.getRecord(top.id)!.lifetimeUsage.byModel).toEqual(recovered.byModel);
   });
 });
 

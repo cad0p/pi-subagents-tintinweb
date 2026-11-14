@@ -51,7 +51,7 @@ import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservin
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, isEmptyUsage, type LifetimeUsage, PendingUsagePool, readUsageMarkers, toReportedUsage, type UsageMarker } from "./usage.js";
+import { addUsage, combineUsage, formatSessionContext, getLifetimeCost, getLifetimeTotal, getSessionContextPercent, isEmptyUsage, type LifetimeUsage, PendingUsagePool, readUsageMarkers, toReportedByModel, toReportedUsage, type UsageMarker } from "./usage.js";
 import { isLegacyUsageFile, legacySeeds, walkUsageTotals } from "./usage-recovery.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 
@@ -881,12 +881,18 @@ export default function (pi: ExtensionAPI) {
     //
     // `model` and `thinking` are the record's current invocation, read per reading rather than
     // captured at spawn: the record is authoritative only once the session exists and pi has clamped
-    // the level to the model (see `onSessionCreated` in agent-manager.ts).
+    // the level to the model (see `onSessionCreated` in agent-manager.ts). That is why `model` is
+    // kept but is NOT the billing account: an account rotation mid-run leaves it naming where the
+    // agent started (pi-fallback-provider never writes back through adoptSessionModel), and a delta
+    // can span two accounts anyway. `byModel` is the accounting source of truth; `model` stays for
+    // listeners that group by the agent's model.
     const reported = toReportedUsage(delta);
     if (!reported) return;
+    const byModel = toReportedByModel(delta.byModel);
     // A key whose value is unknown is omitted, never `undefined`: `model` and
     // `thinking` until the session has reported them, `parentAgentId` on a
-    // top-level agent.
+    // top-level agent, `byModel` on a delta no entry accounted for (a baseline
+    // from a release that predates #247).
     const invocation = record.invocation;
     pi.events.emit("subagents:usage", {
       id: record.id,
@@ -900,6 +906,7 @@ export default function (pi: ExtensionAPI) {
       ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
       depth: record.depth ?? 1,
       ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
+      ...(byModel ? { byModel } : {}),
       usage: reported,
     });
   }, (record, message) => {
