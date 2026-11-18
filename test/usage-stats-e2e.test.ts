@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager, setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type RunOptions, runAgent } from "../src/agent-runner.js";
 import type { AgentRecord } from "../src/types.js";
-import { getLifetimeTotal, sessionFileUsage } from "../src/usage.js";
+import { getLifetimeTotal, readSessionUsage, sessionFileUsage, UNATTRIBUTED_USAGE_KEY } from "../src/usage.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -142,13 +142,25 @@ describe("a subagent's spend is its pi session's spend (#218)", () => {
     expect(existsSync(sessionFile)).toBe(true);
     const reopened = SessionManager.open(sessionFile, undefined, tmp);
     const stats = session.getSessionStats();
-    expect(sessionFileUsage(reopened.getEntries())).toEqual({
+    const { byModel: fileByModel, ...fileTotals } = sessionFileUsage(reopened.getEntries());
+    expect(fileTotals).toEqual({
       input: stats.tokens.input,
       output: stats.tokens.output,
       cacheWrite: stats.tokens.cacheWrite,
       cacheRead: stats.tokens.cacheRead,
       cost: stats.cost,
     });
+
+    // The per-account split (#247) comes out the same from the live session and from its file,
+    // because both walk the same entries through one function. The assistant turns land on the
+    // backend's account and the real compaction lands in the unattributed bucket.
+    const live = readSessionUsage(session).stats;
+    expect(live.byModel).toEqual(fileByModel);
+    expect(Object.keys(live.byModel ?? {})).toEqual([`${faux.getModel().provider}/${faux.getModel().id}`, UNATTRIBUTED_USAGE_KEY]);
+    const shares = Object.values(live.byModel ?? {});
+    const tokensOf = (u: { input: number; output: number; cacheWrite: number; cacheRead?: number }) => u.input + u.output + u.cacheWrite + (u.cacheRead ?? 0);
+    expect(shares.reduce((sum, share) => sum + tokensOf(share), 0)).toBe(tokensOf(stats.tokens));
+    expect(owned.usageBaseline?.byModel).toEqual(live.byModel);
     // A read happened during the run, not only at settle, and each one left the record
     // equal to the session's own total at that instant.
     expect(checkpoints.length).toBeGreaterThan(0);

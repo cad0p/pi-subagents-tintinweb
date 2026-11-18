@@ -58,7 +58,7 @@ import { toSingleLine } from "./text-safety.js";
 import type { AgentConfig, AgentInvocation, AgentRecord, DeliverOutcome, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import type { AgentActivity } from "./ui/agent-display.js";
 import { clearChildUI, dropChildDialogs } from "./ui/child-ui.js";
-import { addUsage, isEmptyUsage, type LifetimeUsage, readSessionUsage, type SessionLike } from "./usage.js";
+import { addUsage, excessUsage, isEmptyUsage, type LifetimeUsage, readSessionUsage, type SessionLike } from "./usage.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, recreateWorktree, validateWorktree, type WorktreeCleanupResult, } from "./worktree.js";
 
 /** Quiet time the finish check needs, observed on two ticks, before it finishes an idle record. Tests shorten it. */
@@ -1645,15 +1645,9 @@ export class AgentManager {
   applyRecoveredUsage(id: string, total: LifetimeUsage): void {
     const record = this.agents.get(id);
     if (!record) return;
-    const before = record.usageBaseline;
-    const growth = (now: number, was: number | undefined) => Math.max(0, now - (was ?? 0));
-    const delta = {
-      input: growth(total.input, before?.input),
-      output: growth(total.output, before?.output),
-      cacheWrite: growth(total.cacheWrite, before?.cacheWrite),
-      cacheRead: growth(total.cacheRead ?? 0, before?.cacheRead),
-      cost: growth(total.cost ?? 0, before?.cost),
-    };
+    // The same growth rule as a live read, so a recovered total's per-account split grows the
+    // ancestors' breakdowns key by key instead of arriving as an unattributed lump.
+    const delta = excessUsage(total, record.usageBaseline ?? { input: 0, output: 0, cacheWrite: 0 });
     record.usageBaseline = { ...total };
     record.lifetimeUsage = { ...total };
     if (record.foldedUsage) addUsage(record.lifetimeUsage, record.foldedUsage);

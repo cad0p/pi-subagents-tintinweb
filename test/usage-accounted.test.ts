@@ -57,6 +57,11 @@ function lifetime(total: Usage): LifetimeUsage {
   return { input: total.input, output: total.output, cacheWrite: total.cacheWrite, cacheRead: total.cacheRead, cost: total.cost.total };
 }
 
+/** A file total with the #247 breakdown its assistant message produces. */
+function lifetimeOnAccount(total: Usage, account = "faux/faux-1"): LifetimeUsage {
+  return { ...lifetime(total), byModel: { [account]: lifetime(total) } };
+}
+
 describe("durable usage accounting", () => {
   let cwd: string;
   let agentDir: string;
@@ -199,7 +204,7 @@ describe("durable usage accounting", () => {
 
       await start(lifecycle, [spawnEntry("a", file)]);
 
-      expect(accountedWrites(pi).at(-1)?.agents.a).toEqual({ total: lifetime(usage(100, 50)), booked: true });
+      expect(accountedWrites(pi).at(-1)?.agents.a).toEqual({ total: lifetimeOnAccount(usage(100, 50)), booked: true });
       const message = settledMessage(lifecycle);
       expect(message).not.toHaveProperty("usage");
       // The seed still claims the total: without the marker the next start would book it as a gap.
@@ -332,8 +337,10 @@ describe("durable usage accounting", () => {
       const message = settledMessage(second.lifecycle);
 
       expect(message.usage).toMatchObject({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } });
+      // The recovered file's breakdown rides the marker: a reader of the parent's file learns the
+      // account the child spent on even though the child's own file is deleted at removal (#247).
       expect(message.subagentUsage?.agents).toEqual({
-        [manager.listAgents()[0].id]: { input: 100, output: 50, cacheWrite: 0, cacheRead: 0, cost: 0 },
+        [manager.listAgents()[0].id]: lifetimeOnAccount(usage(100, 50)),
       });
       // The resume wrote its own empty stamp again — not a legacy seed of the total it just booked.
       expect(accountedWrites(second.pi).at(-1)?.agents).toEqual({});
