@@ -6,8 +6,9 @@
  * text reaches `session.prompt`, which runs extension commands and expands prompt templates and
  * skill blocks before queueing (`agent-session.js:1656-1686`). The view mirrors that order bound
  * to the shown child: the commands below render into the child's container, the rest of pi's table
- * is refused with a notice naming why, `!` waits for part 4, and any other `/word` is forwarded
- * through `manager.steer` so pi runs it on the child's own runner — which is also why
+ * is refused under the same match pi applies — exact, or the arg-taking names — with a notice
+ * naming why, `!` waits for part 4, and any other `/word` is forwarded through
+ * `manager.steer` so pi runs it on the child's own runner — which is also why
  * `/agents`, registered only on the root activation, is never offered or executed there.
  *
  * pi's handlers close over helpers the exports map keeps private (`{ ".": …, "./rpc-entry": … }`,
@@ -114,10 +115,21 @@ export const REFUSED_COMMANDS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /**
+ * The refused built-ins pi also matches with a trailing argument (`text === "/model" ||
+ * text.startsWith("/model ")`, IM:2610-2737): the dispatcher would have run them on the whole
+ * text, so the view refuses the argument form too. Every other refused built-in is exact-only on
+ * main, where "/quit now" is prompt text — so it forwards here like anything pi would not match.
+ */
+const ARGUMENT_COMMANDS: ReadonlySet<string> = new Set(["model", "thinking", "export", "import", "bug", "login", "compact"]);
+
+/**
  * The refusal for a built-in this table knows but the view does not run, or undefined for a name it
  * does not carry — an extension command, a prompt template, or plain text headed for the model.
+ * `exact` is the submitted-text test pi applies (IM:2595-2755): an argument on a built-in pi
+ * matches exactly is not that command on main either, so it is not refused here.
  */
-export function childCommandRefusal(name: string, toMainKeys: string): string | undefined {
+export function childCommandRefusal(name: string, exact: boolean, toMainKeys: string): string | undefined {
+  if (!exact && !ARGUMENT_COMMANDS.has(name)) return undefined;
   if (SESSION_REPLACING_COMMANDS.has(name)) {
     return `/${name} replaces a session — it acts on the main session; press ${toMainKeys} to go back to main`;
   }
@@ -194,8 +206,9 @@ function formatTokens(count: number): string {
 /** pi's `CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS` (`cache-warmer.js:8`). */
 const MINIMUM_EXPECTED_SAVINGS = 0.05;
 
+/** pi's `formatDollars` (`cache-warmer.js:303`), unexported: the $-prefixed cost rows use it. */
 function formatDollars(value: number): string {
-  return `${value.toFixed(3)}`;
+  return value < 0 ? `-$${Math.abs(value).toFixed(3)}` : `$${value.toFixed(3)}`;
 }
 
 function formatWarmingEconomics(decision: NonNullable<CacheWarmingStatus["decision"]>): string {
@@ -205,7 +218,7 @@ function formatWarmingEconomics(decision: NonNullable<CacheWarmingStatus["decisi
     ? `${probability}% continuation probability while agent is running`
     : `${probability}% continuation probability`;
   const comparison = decision.action === "warm" ? ">=" : "<";
-  return `${probabilityText}, expected savings ${formatDollars(decision.expectedSavings)} ${comparison} ${MINIMUM_EXPECTED_SAVINGS.toFixed(3)}`;
+  return `${probabilityText}, expected savings ${formatDollars(decision.expectedSavings)} ${comparison} $${MINIMUM_EXPECTED_SAVINGS.toFixed(3)}`;
 }
 
 function formatWarmingDecisionTime(nextWarmAt: number | undefined, now: number): string {
@@ -312,11 +325,11 @@ function sessionInfoText(info: ChildSessionInfo, theme: Theme): string {
     lines.push(`${dim("Refresh cost:")} ${formatDollars(decision.warmCost)}`);
   }
   if (cost > 0) {
-    lines.push("", theme.bold("Cost"), `${dim("Total:")} ${cost.toFixed(3)}`);
+    lines.push("", theme.bold("Cost"), `${dim("Total:")} ${formatDollars(cost)}`);
     // A single entry repeats the total, unless it names a model other than the selected one.
     if (breakdown.length > 1 || breakdown[0]?.key !== info.selectedModelKey) {
       for (const entry of breakdown) {
-        lines.push(`  ${theme.fg("dim", `${entry.key}:`)} ${entry.cost.toFixed(3)} ${theme.fg("dim", `(${formatTokens(entry.tokens)} tokens)`)}`);
+        lines.push(`  ${theme.fg("dim", `${entry.key}:`)} ${formatDollars(entry.cost)} ${theme.fg("dim", `(${formatTokens(entry.tokens)} tokens)`)}`);
       }
     }
   }
@@ -389,12 +402,13 @@ function formatKeyText(key: string, options: { capitalize?: boolean } = {}): str
 }
 
 /**
- * pi's `keyDisplayText` (`keybinding-hints.js:27`) for one row: every action's resolved keys,
- * via the global registry IM's own handlers read (pi-coding-agent extends that registry).
+ * pi's `keyDisplayText` (`keybinding-hints.js:27`) for one action, via the global registry IM's
+ * own handlers read (pi-coding-agent extends that registry). A row joins one span per action, the
+ * way IM:5810-5850 prints them.
  */
-function keyDisplay(actions: readonly string[]): string {
-  const resolved = actions.flatMap((action) => getKeybindings().getKeys(action as Keybinding));
-  return resolved.length === 0 ? "" : formatKeyText(resolved.join("/"), { capitalize: true });
+function keyDisplay(action: string): string {
+  const keys = getKeybindings().getKeys(action as Keybinding);
+  return keys.length === 0 ? "" : formatKeyText(keys.join("/"), { capitalize: true });
 }
 
 /** A child runner's registered shortcuts, keyed as pi's `getShortcuts` returns them. */
@@ -458,7 +472,7 @@ export function hotkeysMarkdown(shortcuts: ChildShortcuts | undefined): string {
   for (const section of HOTKEY_ROWS) {
     markdown += `\n**${section.title}**\n| Key | Action |\n|-----|--------|\n`;
     for (const [actions, description] of section.rows) {
-      markdown += `| \x60${keyDisplay(actions)}\x60 | ${description} |\n`;
+      markdown += `| ${actions.map((action) => `\x60${keyDisplay(action)}\x60`).join(" / ")} | ${description} |\n`;
     }
   }
   markdown += "| `/` | Slash commands |\n| `!` | Run bash command |\n| `!!` | Run bash command (excluded from context) |\n";
@@ -601,6 +615,9 @@ export interface ChildCommandSource {
  */
 export function childSlashCommands(session: ChildCommandSource | undefined): SlashCommand[] {
   const commands: SlashCommand[] = CHILD_BUILTIN_COMMANDS.map((command) => ({ ...command }));
+  // pi filters extension commands against the built-ins only (IM:524-526): a prompt template that
+  // shares a name does not drop the extension command — both are offered, as on main.
+  const builtinNames = new Set(commands.map((command) => command.name));
   const modelCommand = commands.find((command) => command.name === "model");
   if (modelCommand) {
     modelCommand.getArgumentCompletions = (prefix) => {
@@ -633,7 +650,6 @@ export function childSlashCommands(session: ChildCommandSource | undefined): Sla
       ...(template.argumentHint ? { argumentHint: template.argumentHint } : {}),
     });
   }
-  const builtinNames = new Set(commands.map((command) => command.name));
   for (const command of session?.extensionRunner.getRegisteredCommands() ?? []) {
     if (builtinNames.has(command.name)) continue;
     const completions = command.getArgumentCompletions;

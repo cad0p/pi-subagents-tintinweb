@@ -1431,7 +1431,8 @@ describe("child view slash commands (#252)", () => {
     expect(shown).toContain("Output: 5");
     expect(shown).toContain("Total: 15");
     // The single breakdown row repeats the total only when it names another model: folded here.
-    expect(shown.match(/0\.250/g)).toHaveLength(1);
+    // pi's cost rows carry a "$" prefix (IM:5714-5733).
+    expect(shown.match(/\$0\.250/g)).toHaveLength(1);
     expect(h.hostContainer.render(120).join("\n")).not.toContain("Session Info");
     // Nothing went to the child through the delivery path: a built-in is not prompt text.
     expect(h.manager.steer).not.toHaveBeenCalled();
@@ -1578,6 +1579,25 @@ describe("child view slash commands (#252)", () => {
     expect((h.hostSession as any).extensionRunner.getRegisteredCommands().map((c: any) => c.name)).toContain("agents");
   });
 
+  // pi filters extension commands against the built-ins only (IM:524-526): a prompt template of the
+  // same name does not drop the extension command — both are offered, as on main.
+  it("S10b an extension command sharing a prompt template's name is still offered", async () => {
+    const h = harness();
+    (h.record.session as any).promptTemplates.push({
+      name: "deploy", description: "from a template", argumentHint: "<env>",
+      sourceInfo: { path: "/t/deploy.md", source: "local", scope: "project", origin: "top-level" },
+    });
+    (h.record.session as any).registeredCommands.push({
+      name: "deploy", invocationName: "deploy", description: "from an extension", handler: vi.fn(),
+      sourceInfo: { path: "/ext/child.ts", source: "local", scope: "project", origin: "top-level" },
+    });
+    h.openChild();
+    const provider = (h.im.editor as any).autocompleteProvider as { getSuggestions: (...args: any[]) => Promise<{ items: { value: string; description?: string }[] } | null> };
+    const suggestions = await provider.getSuggestions(["/deploy"], 0, 7, { signal: new AbortController().signal });
+    const descriptions = (suggestions?.items ?? []).filter((item) => item.value === "deploy").map((item) => item.description);
+    expect(descriptions).toEqual(expect.arrayContaining([expect.stringContaining("from an extension"), expect.stringContaining("from a template")]));
+  });
+
   // Every built-in in pi's table is either run here or refused with a notice naming why; none is
   // forwarded to the child as prompt text, which is what a missing entry would do.
   it("S11 every unsupported built-in is refused with its reason and never forwarded", () => {
@@ -1587,7 +1607,9 @@ describe("child view slash commands (#252)", () => {
       ["/scoped-models", "/scoped-models stays refused in a child view: its selector component is not exported by pi"],
       ["/trust", "/trust stays refused in a child view: its selector and option builder are not exported by pi"],
       ["/compact", "/compact stays refused in a child view: compact() aborts the run it would compact"],
+      ["/compact the noisy part", "/compact stays refused in a child view: compact() aborts the run it would compact"],
       ["/model", "/model is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/model anthropic/claude", "/model is not wired into the child view yet — it lands in part 2 of #249"],
       ["/thinking high", "/thinking is not wired into the child view yet — it lands in part 2 of #249"],
       ["/settings", "/settings is not wired into the child view yet — it lands in part 2 of #249"],
       ["/export out.html", "/export is not wired into the child view yet — it lands in part 5 of #249"],
@@ -1654,13 +1676,25 @@ describe("child view slash commands (#252)", () => {
   it("S15 a suffixed built-in is forwarded to the child, not run here", async () => {
     const h = harness();
     h.openChild();
-    h.im.editor.onSubmit?.("/session foo");
-    h.im.editor.onSubmit?.("/copy junk");
+    const children = childContainer(h).children.length;
+    const suffixed = ["/session foo", "/copy junk", "/changelog x", "/hotkeys x", "/debug x", "/arminsayshi x", "/dementedelves x"];
+    for (const input of suffixed) h.im.editor.onSubmit?.(input);
     await new Promise((r) => setImmediate(r));
-    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/session foo");
-    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/copy junk");
-    expect(render(h)).not.toContain("Session Info");
+    for (const input of suffixed) expect(h.manager.steer, input).toHaveBeenCalledWith("child-1", input);
+    // Nothing ran here: each exact form leaves a mark a dropped `&& exact` would have produced.
+    const shown = render(h);
+    expect(shown).not.toContain("Session Info");
+    expect(shown).not.toContain("What's New");
+    expect(shown).not.toContain("Keyboard Shortcuts");
+    expect(shown).not.toContain("Debug log written");
+    expect(shown).not.toContain("Earendil");
     expect(copyToClipboard).not.toHaveBeenCalled();
+    expect(childContainer(h).children.length).toBe(children);
+    // A refused built-in is exact-only on main too: "/quit now" is prompt text there (IM:2748) and
+    // forwards here; an arg-taking name stays refused with its argument (S11).
+    h.im.editor.onSubmit?.("/quit now");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/quit now");
+    expect(render(h)).not.toContain("replaces a session");
     // A bare "!" is not bash on main either (IM:2741-2745): it falls through as text.
     h.im.editor.onSubmit?.("!");
     expect(h.manager.steer).toHaveBeenCalledWith("child-1", "!");

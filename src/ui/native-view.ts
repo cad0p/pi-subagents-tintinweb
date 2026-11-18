@@ -996,9 +996,10 @@ export class NativeTranscriptView {
 
   /**
    * The built-in half of the dispatcher: true when the input was handled or refused, false when it
-   * is not a built-in this table knows and must be forwarded. pi matches its built-ins on the exact
-   * submitted text (only /name takes anything after it), so an unknown argument falls through to
-   * the model as text, exactly as on main.
+   * is not a built-in this table knows and must be forwarded. pi matches most built-ins on the
+   * exact submitted text, so "/quit now" is prompt text on main and forwards here too; a refusal
+   * fires only where pi would have run the command — the exact text, or an arg-taking name
+   * (child-commands.ts, IM:2595-2755).
    */
   private runChildCommand(im: InteractiveModeView, state: ViewState, trimmed: string): boolean {
     const name = commandName(trimmed);
@@ -1050,7 +1051,7 @@ export class NativeTranscriptView {
       im.ui.requestRender();
       return true;
     }
-    const refusal = childCommandRefusal(name, TO_MAIN_KEYS);
+    const refusal = childCommandRefusal(name, exact, TO_MAIN_KEYS);
     if (refusal) {
       this.notice(im, state, refusal);
       return true;
@@ -1105,7 +1106,7 @@ export class NativeTranscriptView {
         state.childContainer.addChild(new Spacer(1));
         state.childContainer.addChild(new ThemedText(() => theme.fg("dim", `Session name: ${current}`), 1, 0));
       } else {
-        this.notice(im, state, "usage: /name <name>");
+        this.notice(im, state, "Usage: /name <name>");
       }
       im.ui.requestRender();
       return;
