@@ -30,7 +30,7 @@ import {
   type Theme,
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type MarkdownTheme, Spacer, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type MarkdownTheme, Spacer, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { type AgentManager, adoptSessionModel } from "../agent-manager.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
@@ -45,6 +45,8 @@ import {
   childSlashCommands,
   commandName,
   debugLogPath,
+  lastAssistantText,
+  ThemedText,
   writeDebugLog,
 } from "./child-commands.js";
 import {
@@ -969,8 +971,13 @@ export class NativeTranscriptView {
     const trimmed = text.trim();
     if (!trimmed) return;
     if (trimmed.startsWith("!")) {
-      this.notice(im, state, "bash mode is not wired into the child view yet — it lands in part 4 of #249");
-      return;
+      // pi enters bash mode only when a command follows the bang; a bare "!" or "!!" falls through
+      // to the model as text (IM:2741-2745), so the refusal is on the command, not the prefix.
+      const command = (trimmed.startsWith("!!") ? trimmed.slice(2) : trimmed.slice(1)).trim();
+      if (command) {
+        this.notice(im, state, "bash mode is not wired into the child view yet — it lands in part 4 of #249");
+        return;
+      }
     }
     if (trimmed.startsWith("/") && this.runChildCommand(im, state, trimmed)) return;
     state.editor?.addToHistory?.(trimmed);
@@ -1031,6 +1038,8 @@ export class NativeTranscriptView {
     }
     if (name === "arminsayshi" && exact) {
       const ctx = this.options.getContext();
+      // ArminComponent takes pi's whole TUI; ViewTUI is the narrow surface the view doubles, and pi
+      // exports no smaller interface, so the one unchecked widening stays here.
       if (ctx) addArminEgg(state.childContainer, im.ui as unknown as TUI);
       im.ui.requestRender();
       return true;
@@ -1094,7 +1103,7 @@ export class NativeTranscriptView {
       const current = sessionManager?.getSessionName();
       if (current) {
         state.childContainer.addChild(new Spacer(1));
-        state.childContainer.addChild(new Text(theme.fg("dim", `Session name: ${current}`), 1, 0));
+        state.childContainer.addChild(new ThemedText(() => theme.fg("dim", `Session name: ${current}`), 1, 0));
       } else {
         this.notice(im, state, "usage: /name <name>");
       }
@@ -1111,7 +1120,7 @@ export class NativeTranscriptView {
       this.notice(im, state, `session name was normalized from ${JSON.stringify(name)} to ${JSON.stringify(stored)}`);
     }
     state.childContainer.addChild(new Spacer(1));
-    state.childContainer.addChild(new Text(theme.fg("dim", `Session name set: ${stored ?? name}`), 1, 0));
+    state.childContainer.addChild(new ThemedText(() => theme.fg("dim", `Session name set: ${stored ?? name}`), 1, 0));
     im.ui.requestRender();
   }
 
@@ -1140,8 +1149,9 @@ export class NativeTranscriptView {
       this.notice(im, state, "debug log failed: " + (error instanceof Error ? error.message : String(error)));
       return;
     }
+    // IM:5922 — the check line is accent, the path muted, in a ThemedText like pi's.
     state.childContainer.addChild(new Spacer(1));
-    state.childContainer.addChild(new Text(ctx.ui.theme.fg("accent", `✓ Debug log written\n${path}`), 1, 1));
+    state.childContainer.addChild(new ThemedText(() => `${ctx.ui.theme.fg("accent", "✓ Debug log written")}\n${ctx.ui.theme.fg("muted", path)}`, 1, 1));
     im.ui.requestRender();
   }
 
@@ -1167,7 +1177,10 @@ export class NativeTranscriptView {
       await im.handleCopyCommand({ preferSelection: true, flashConfirmation: true });
       return;
     }
-    const text = this.options.manager.getRecord(state.id)?.session?.getLastAssistantText() ?? "";
+    const record = this.options.manager.getRecord(state.id);
+    // A settled record has no session to ask; its transcript carries the same last reply.
+    const text = record?.session?.getLastAssistantText()
+      ?? lastAssistantText(this.options.manager.settledSessionManager(state.id)?.buildSessionContext().messages ?? []);
     if (!text) {
       this.notice(im, state, "no child reply to copy yet");
       return;

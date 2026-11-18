@@ -16,6 +16,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   ArminComponent,
   type CacheWarmingStatus,
@@ -24,6 +25,7 @@ import {
   getPackageDir,
   type PromptTemplate,
   type ResolvedCommand,
+  type SessionContext,
   type SessionEntry,
   type Skill,
   type SourceInfo,
@@ -126,9 +128,53 @@ export function childCommandRefusal(name: string, toMainKeys: string): string | 
   return undefined;
 }
 
-/** The command word of a submitted slash input, without the argument and without a leading slash. */
+/**
+ * pi's `ThemedText` (`components/themed-text.js`), unexported: a Text that rebuilds its themed
+ * string on invalidate, which the UI runs on a theme switch — a plain Text would keep stale colors.
+ */
+export class ThemedText extends Text {
+  private stale = true;
+  constructor(private readonly build: () => string, paddingX = 1, paddingY = 1) {
+    super("", paddingX, paddingY);
+  }
+  invalidate(): void {
+    super.invalidate();
+    this.stale = true;
+  }
+  render(width: number): string[] {
+    if (this.stale) {
+      this.stale = false;
+      this.setText(this.build());
+    }
+    return super.render(width);
+  }
+}
+
+/**
+ * The command word of a submitted slash input, without the argument and without a leading slash.
+ * pi matches its built-ins on the whole text with a literal space (`text === "/model" ||
+ * text.startsWith("/model ")`, IM:2610-2648), so "/name\tx" is not /name here either — a split
+ * on \s+ would run a built-in pi would have forwarded.
+ */
 export function commandName(text: string): string {
-  return text.trim().slice(1).split(/\s+/, 1)[0] ?? "";
+  return text.trim().slice(1).split(" ", 1)[0] ?? "";
+}
+
+/**
+ * pi's `AgentSession.getLastAssistantText` (`core/agent-session.js:3609-3631`) on a messages
+ * array: the same read /copy takes, for a settled record that has no session to ask. It picks the
+ * last assistant message — skipping an aborted one with no content — and joins its text parts; a
+ * last message with no text is no reply, not a reason to walk further back.
+ */
+export function lastAssistantText(messages: SessionContext["messages"]): string {
+  const lastAssistant = [...messages].reverse().find((message): message is AssistantMessage =>
+    message.role === "assistant" && !(message.stopReason === "aborted" && message.content.length === 0));
+  if (!lastAssistant) return "";
+  let text = "";
+  for (const content of lastAssistant.content) {
+    if (content.type === "text") text += content.text;
+  }
+  return text.trim();
 }
 
 /** pi's `formatTokens` (`components/footer.js`), unexported: the /session cost rows use it. */
@@ -210,7 +256,7 @@ export interface ChildSessionInfo {
  * because pi's helpers are unexported: "Cache Re-billed" (`computeCacheWaste`, a ~90-line scan in
  * `cache-stats.js`) and the usage rows' own unattributed bucket label.
  */
-export function addSessionInfo(container: Container, theme: Theme, info: ChildSessionInfo): void {
+function sessionInfoText(info: ChildSessionInfo, theme: Theme): string {
   const usage = sessionFileUsage(info.entries);
   const cacheRead = usage.cacheRead ?? 0;
   const cost = usage.cost ?? 0;
@@ -274,8 +320,13 @@ export function addSessionInfo(container: Container, theme: Theme, info: ChildSe
       }
     }
   }
+  return lines.join("\n");
+}
+
+export function addSessionInfo(container: Container, theme: Theme, info: ChildSessionInfo): void {
+  // pi passes its lines builder to ThemedText (IM:5683,5740): built lazily, rebuilt on a theme switch.
   container.addChild(new Spacer(1));
-  container.addChild(new Text(lines.join("\n"), 1, 0));
+  container.addChild(new ThemedText(() => sessionInfoText(info, theme), 1, 0));
 }
 
 // ---- /changelog ----
@@ -317,11 +368,13 @@ export function addChangelog(container: Container, theme: Theme, markdownTheme: 
     ? entries.reverse().join("\n\n")
     : "No changelog entries found.";
   container.addChild(new Spacer(1));
-  container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-  container.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+  // pi uses DynamicBorder's default border color here (IM:5753,5757); the explicit color is the
+  // jiti-safe form the component's own docs ask extensions to use.
+  container.addChild(new DynamicBorder((text) => theme.fg("border", text)));
+  container.addChild(new ThemedText(() => theme.bold(theme.fg("accent", "What's New")), 1, 0));
   container.addChild(new Spacer(1));
   container.addChild(new Markdown(markdown, 1, 1, markdownTheme));
-  container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+  container.addChild(new DynamicBorder((text) => theme.fg("border", text)));
 }
 
 // ---- /hotkeys ----
@@ -421,11 +474,11 @@ export function hotkeysMarkdown(shortcuts: ChildShortcuts | undefined): string {
 /** IM:5888-5896 — the /hotkeys block around the table. */
 export function addHotkeys(container: Container, theme: Theme, markdownTheme: MarkdownTheme, shortcuts: ChildShortcuts | undefined): void {
   container.addChild(new Spacer(1));
-  container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-  container.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
+  container.addChild(new DynamicBorder((text) => theme.fg("border", text)));
+  container.addChild(new ThemedText(() => theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
   container.addChild(new Spacer(1));
   container.addChild(new Markdown(hotkeysMarkdown(shortcuts), 1, 1, markdownTheme));
-  container.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
+  container.addChild(new DynamicBorder((text) => theme.fg("border", text)));
 }
 
 // ---- easter eggs ----

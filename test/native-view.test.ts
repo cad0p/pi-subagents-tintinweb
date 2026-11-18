@@ -1648,4 +1648,45 @@ describe("child view slash commands (#252)", () => {
     h.im.editor.actionHandlers.get("app.message.dequeue")?.();
     expect(render(h)).toContain("app.message.dequeue is not wired into the child view yet — it lands in part 3 of #249");
   });
+
+  // pi runs a built-in only on its exact text (IM:2653,2643), so a suffixed built-in is prompt text
+  // forwarded to the child, never the view's handler — this is what pins the `&& exact` guards.
+  it("S15 a suffixed built-in is forwarded to the child, not run here", async () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/session foo");
+    h.im.editor.onSubmit?.("/copy junk");
+    await new Promise((r) => setImmediate(r));
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/session foo");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/copy junk");
+    expect(render(h)).not.toContain("Session Info");
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    // A bare "!" is not bash on main either (IM:2741-2745): it falls through as text.
+    h.im.editor.onSubmit?.("!");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "!");
+    // pi splits the command on a literal space (IM:2648), so "/name\tx" is forwarded, not a rename.
+    h.im.editor.onSubmit?.("/name\tx");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/name\tx");
+    expect(render(h)).not.toContain("Session name set");
+    expect(render(h)).not.toContain("#249");
+  });
+
+  // A settled record has no session for getLastAssistantText; the transcript carries the same last
+  // reply, so /copy reads it there — a session-only read would print the no-reply notice instead.
+  it("S16 /copy on a settled record copies the transcript's last reply", async () => {
+    const h = harness({ record: { session: undefined, status: "completed" } });
+    h.manager.settledSessionManager.mockReturnValue({
+      buildContextEntries: () => [message("user", "SETTLED TEXT")],
+      buildSessionContext: () => ({ messages: [message("user", "q").message, message("assistant", "SETTLED REPLY").message] }),
+      getEntries: () => [],
+      getCwd: () => "/settled",
+      getSessionFile: () => "/s.jsonl",
+      getSessionId: () => "sid",
+      getSessionName: () => undefined,
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/copy");
+    await new Promise((r) => setImmediate(r));
+    expect(copyToClipboard).toHaveBeenCalledWith("SETTLED REPLY");
+  });
 });
