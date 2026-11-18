@@ -24,21 +24,21 @@ import {
   runAgent,
 } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
 setQuietMs(20);
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
-const mockSession = () => ({
+const mockSession = (messages: any[] = []) => withStubProjection({
   // What the manager reads for a record's spend: a fresh child starts at zero, and
   // a test moves the totals to simulate what pi appended.
   getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }, cost: 0 }),
   dispose: vi.fn(),
   prompt: vi.fn(async () => {}),
   sessionId: "child-session-id",
-  messages: [],
+  messages,
   subscribe: () => () => {},
   isStreaming: false,
   agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }),
@@ -1373,13 +1373,10 @@ describe("background lifecycle — model-visible surfaces", () => {
     // The resumed session already carries the prior run's transcript: the
     // start index must be its length, so the streamer writes only the new turn.
     const record = handle.getRecord(id);
-    vi.mocked(createChildSession).mockResolvedValueOnce({
-      ...mockSession(),
-      messages: [
-        { role: "user", content: [{ type: "text", text: "PRIOR-USER" }] },
-        { role: "assistant", content: [{ type: "text", text: "PRIOR-ANSWER" }] },
-      ],
-    } as ReturnType<typeof mockSession>);
+    vi.mocked(createChildSession).mockResolvedValueOnce(mockSession([
+      { role: "user", content: [{ type: "text", text: "PRIOR-USER" }] },
+      { role: "assistant", content: [{ type: "text", text: "PRIOR-ANSWER" }] },
+    ]));
 
     vi.mocked(resumeAgent).mockImplementation(async (session: any) => {
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED-ANSWER" }] });

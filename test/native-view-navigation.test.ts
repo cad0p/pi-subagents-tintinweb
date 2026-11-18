@@ -32,7 +32,7 @@ import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, 
 import subagentsExtension from "../src/index.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
 import { captureInteractiveMode, TO_MAIN_KEYS } from "../src/ui/native-view.js";
-import { agentIdOf, makePi, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, makePi, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
 setQuietMs(20);
@@ -63,7 +63,7 @@ const keybindings = { matches: (data: string, action: string) => action === "app
 /** What a child session has to answer for the manager, the view's footer and its autocomplete. */
 function childSession(sessionId: string): AgentSession {
   const model = { id: "child-model", provider: "anthropic", contextWindow: 1000, reasoning: false };
-  return {
+  return withStubProjection({
     sessionId,
     sessionManager: {
       getSessionId: () => sessionId,
@@ -100,7 +100,7 @@ function childSession(sessionId: string): AgentSession {
     // A nested result wakes its parent through this; without it a settled child's notification
     // throws inside a timer instead of being dropped quietly.
     sendCustomMessage: async () => {},
-  } as unknown as AgentSession;
+  }) as unknown as AgentSession;
 }
 
 /**

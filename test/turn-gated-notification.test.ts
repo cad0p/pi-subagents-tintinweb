@@ -57,7 +57,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension, { WIZARD_MAX_TURNS } from "../src/index.js";
 import type { SettingsAppliers, SettingsEmit } from "../src/settings.js";
 import type { AgentDetails } from "../src/ui/agent-display.js";
-import { MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
+import { MANAGER_KEY, makePi, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 setQuietMs(20);
 
@@ -115,13 +115,13 @@ afterEach(() => {
 
 /** A child session stub with the fields the lifecycle and the reopen path read. */
 function fakeChild(): AgentSession {
-  return {
+  return withStubProjection({
     dispose: vi.fn(),
     subscribe: () => () => {},
     sessionId: "child-session",
     messages: [],
     agent: { state: { isStreaming: false }, hasQueuedMessages: () => false }, clearQueue: () => ({ steering: [], followUp: [] }), sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
-  } as unknown as AgentSession;
+  }) as unknown as AgentSession;
 }
 
 /** runAgent that hosts the child as the real runner does (settings, then session), then resolves. */

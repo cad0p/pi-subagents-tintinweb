@@ -79,44 +79,59 @@ export function streamToOutputFile(
   cwd: string,
   startIndex = 1,
 ): () => void {
+  const projection = () => session.sessionManager.buildSessionProjection().entries;
+
   // Messages before `startIndex` are already on disk (the initial user prompt
-  // for a fresh spawn; the prior run's transcript for a resume).
-  let writtenCount = startIndex;
+  // for a fresh spawn; the prior run's transcript for a resume). Track what is
+  // on disk by session-entry id, not by an index into `session.messages`: that
+  // array is pi's projected context, and a boundary `context_edit` with
+  // `replacement: null` removes an entry from it, so an index would sit past
+  // the new end and freeze the transcript (#250). An entry id survives every
+  // rebuild of the projection.
+  const written = new Set<string>();
+  let onDisk = 0;
+  for (const { sourceEntry, messages } of projection()) {
+    if (onDisk + messages.length > startIndex) break;
+    written.add(sourceEntry.id);
+    onDisk += messages.length;
+  }
 
   const flush = () => {
-    const messages = session.messages;
-    while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
-      const entry = {
-        isSidechain: true,
-        agentId,
-        type: msg.role === "assistant" ? "assistant" : msg.role === "user" ? "user" : "toolResult",
-        message: msg,
-        timestamp: new Date().toISOString(),
-        cwd,
-      };
-      try {
-        appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
-      } catch { /* ignore write errors */ }
-      writtenCount++;
+    for (const { sourceEntry, messages } of projection()) {
+      if (written.has(sourceEntry.id)) continue;
+      written.add(sourceEntry.id);
+      for (const msg of messages) {
+        const entry = {
+          isSidechain: true,
+          agentId,
+          type: msg.role === "assistant" ? "assistant" : msg.role === "user" ? "user" : "toolResult",
+          message: msg,
+          timestamp: new Date().toISOString(),
+          cwd,
+        };
+        try {
+          appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
+        } catch { /* ignore write errors */ }
+      }
     }
   };
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") flush();
-    // Compaction replaces session.messages with a shorter, summarized array,
-    // leaving writtenCount past the new end — without re-anchoring, the flush
-    // loop would never match again and streaming would halt for good (#145).
+    // Compaction adds a summary entry and drops the entries it summarized.
     // Flush before it runs so any not-yet-flushed tail still reaches the file,
-    // then re-anchor to the rebuilt array once it lands. The re-anchor is
+    // then mark the rebuilt projection as written once it lands, so the
+    // summary and the kept tail are not written again (#145). The re-anchor is
     // deferred a microtask because on the overflow-retry path pi trims the
     // trailing error assistant message AFTER emitting compaction_end —
-    // anchoring synchronously would sit one past the trimmed array and skip
-    // the first post-compaction message. Aborted/failed compactions leave
-    // session.messages untouched, so only successful ones re-anchor.
+    // anchoring synchronously would mark the trimmed array and skip the first
+    // post-compaction message. Aborted/failed compactions leave the projection
+    // untouched, so only successful ones re-anchor.
     if (event.type === "compaction_start") flush();
     if (event.type === "compaction_end" && !event.aborted && event.result) {
-      queueMicrotask(() => { writtenCount = session.messages.length; });
+      queueMicrotask(() => {
+        for (const { sourceEntry } of projection()) written.add(sourceEntry.id);
+      });
     }
   });
 

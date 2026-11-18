@@ -24,7 +24,7 @@ import { IMPL_KEY, type ImplV1 } from "../src/impl-route.js";
 import subagentsExtension from "../src/index.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
 import type { AgentRecord } from "../src/types.js";
-import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, MANAGER_KEY, makePi, spawnCtx, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
 setQuietMs(20);
@@ -72,7 +72,7 @@ function sessionStub(initial: Array<{ role: "user" | "assistant"; text: string }
       for (const listener of [...listeners]) listener({ type: "turn_end" });
     },
   };
-  return session as unknown as StubSession;
+  return withStubProjection(session) as unknown as StubSession;
 }
 
 /** Hosts a live session the way the runner does: settings first, then the session with its lifecycle. */
