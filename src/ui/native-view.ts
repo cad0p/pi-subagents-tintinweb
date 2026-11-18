@@ -30,10 +30,23 @@ import {
   type Theme,
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type MarkdownTheme, Spacer, Text, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { type AgentManager, adoptSessionModel } from "../agent-manager.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
+import {
+  addArminEgg,
+  addChangelog,
+  addEarendilEgg,
+  addHotkeys,
+  addSessionInfo,
+  type ChildShortcuts,
+  childCommandRefusal,
+  childSlashCommands,
+  commandName,
+  debugLogPath,
+  writeDebugLog,
+} from "./child-commands.js";
 import {
   answerChildDialog,
   type ChildDialogRequest,
@@ -56,25 +69,30 @@ const PROBE_KEY = Symbol.for("pi-subagents:native-view-probe");
 const DEFERRED_REBUILD_MS = 100;
 
 /**
- * pi's 13 app-action handlers that are not kept. Each one acts on the main session or replaces it;
- * a notice is the only honest thing to print. `app.interrupt` and `app.exit` are not in this map
- * (they are the onEscape/onCtrlD fallbacks in CustomEditor.handleInput), so they cannot print one.
+ * pi's app actions that replace or clear the session. A record's session anchors its ledger, usage,
+ * worktree and nested children, so there is no child analogue; a notice is the only honest thing to
+ * print. `app.interrupt` and `app.exit` are not in this map (they are the onEscape/onCtrlD fallbacks
+ * in CustomEditor.handleInput), so they cannot print one.
  */
 const BLOCKED_ACTIONS: readonly AppKeybinding[] = [
-  "app.clear",
-  "app.suspend",
-  "app.thinking.cycle",
-  "app.thinking.toggle",
-  "app.model.cycleForward",
-  "app.model.cycleBackward",
-  "app.model.select",
-  "app.message.followUp",
-  "app.message.dequeue",
   "app.session.new",
   "app.session.tree",
   "app.session.fork",
   "app.session.resume",
 ];
+
+/** Actions a later part of #249 wires to the shown child, so the notice names the part, not main. */
+const LATER_ACTIONS: ReadonlyMap<AppKeybinding, string> = new Map([
+  ["app.clear", "part 3"],
+  ["app.suspend", "part 3"],
+  ["app.message.followUp", "part 3"],
+  ["app.message.dequeue", "part 3"],
+  ["app.thinking.cycle", "part 2"],
+  ["app.thinking.toggle", "part 2"],
+  ["app.model.cycleForward", "part 2"],
+  ["app.model.cycleBackward", "part 2"],
+  ["app.model.select", "part 2"],
+]);
 
 /**
  * The key that leaves a child view: ← goes back one level in FleetView, and repeated it reaches
@@ -108,6 +126,9 @@ export interface EditorLike {
 /** The live renderer pi uses; only the members the view touches. */
 export interface ViewTUI {
   requestRender(force?: boolean): void;
+  /** pi's terminal, for the /debug dump; absent on a double that only renders. */
+  terminal?: { columns: number; rows: number };
+  render?(width: number): string[];
   hasActiveSelection?(): boolean;
 }
 
@@ -140,7 +161,10 @@ export interface InteractiveModeView {
   footer: { invalidate(): void };
   ui: ViewTUI;
   keybindings: KeybindingsManager;
-  settingsManager: { getExternalEditorCommand(): string | undefined };
+  settingsManager: {
+    getExternalEditorCommand(): string | undefined;
+    getCacheWarmingMode(): string;
+  };
   isShuttingDown: boolean;
   resetExtensionUI(): void;
   setupAutocompleteProvider(): void;
@@ -152,7 +176,7 @@ export interface InteractiveModeView {
   handleCtrlD(): void;
   handleOpenExternalEditor(): Promise<void>;
   getRegisteredToolDefinition(name: string): unknown;
-  getMarkdownThemeWithSettings(): unknown;
+  getMarkdownThemeWithSettings(): MarkdownTheme;
   getMarkdownTransformers(): unknown[];
   pushExtensionDialog(component: Component, blocked?: { kind: string; message: string }): void;
   removeExtensionDialog(component: Component): void;
@@ -852,22 +876,19 @@ export class NativeTranscriptView {
       this.repaint();
       return true;
     };
-    const record = this.options.manager.getRecord(state.id);
-    const childSession = record?.session;
-    const sessionManager = childSession?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
-    if (sessionManager) {
-      const provider = new CombinedAutocompleteProvider(undefined, sessionManager.getCwd());
-      state.childProvider = provider;
-      ed.setAutocompleteProvider(provider);
-    }
+    this.setChildAutocomplete(state);
     // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
-    // replace or clear the main session. Only three act on something the view can honour.
+    // replace or clear the main session. Only three act on something the view can honour; every other
+    // action says whether main owns it or a later part of #249 wires it here.
     ed.actionHandlers.clear();
     ed.onAction("app.tools.expand", () => this.toggleExpansion(im, state));
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
     ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
     for (const action of BLOCKED_ACTIONS) {
       ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false)));
+    }
+    for (const [action, part] of LATER_ACTIONS) {
+      ed.onAction(action, () => this.notice(im, state, `${action} is not wired into the child view yet — it lands in ${part} of #249`));
     }
     // The reset runs before our shutdown handler on reload and after it on new/resume; without this
     // wrapper a child draft becomes the host draft on every reload.
@@ -877,7 +898,9 @@ export class NativeTranscriptView {
     };
     state.wrappers.setupAutocompleteProvider = () => {
       state.saved.setupAutocompleteProvider.call(im);
-      if (im.editor === state.editor && state.childProvider) state.editor.setAutocompleteProvider(state.childProvider);
+      // pi rebuilt its own provider for the host session: rebuild the child's from the child's own
+      // runner and templates, so a reload cannot leak the host's commands into this editor.
+      this.setChildAutocomplete(state);
     };
     im.resetExtensionUI = state.wrappers.resetExtensionUI;
     im.setupAutocompleteProvider = state.wrappers.setupAutocompleteProvider;
@@ -932,15 +955,24 @@ export class NativeTranscriptView {
     this.options.manager.abort(state.id);
   }
 
+  /**
+   * Enter in a child view: pi's own dispatch order (IM:2595-2755), bound to the shown child.
+   *
+   * A supported built-in runs here, against the child's session and into the child's container; a
+   * built-in the view does not run yet is refused with a notice naming why; an extension command, a
+   * prompt template or an unknown `/word` goes through `manager.steer`, so pi executes it on the
+   * child's own runner or hands it to the child's model — the `/agents` a root-only registration
+   * never reaches (see child-commands.ts). Bash mode is part 4 and says so.
+   */
   private submit(im: InteractiveModeView, state: ViewState, text: string): void {
     if (!this.canPaint(im, state)) return;
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
-      const what = trimmed.startsWith("!") ? "Bash mode" : "Slash commands";
-      this.notice(im, state, mainSessionNotice(what, true));
+    if (trimmed.startsWith("!")) {
+      this.notice(im, state, "bash mode is not wired into the child view yet — it lands in part 4 of #249");
       return;
     }
+    if (trimmed.startsWith("/") && this.runChildCommand(im, state, trimmed)) return;
     state.editor?.addToHistory?.(trimmed);
     im.ui.requestRender();
     void this.options.manager.steer(state.id, trimmed).then(
@@ -953,6 +985,181 @@ export class NativeTranscriptView {
         if (this.canPaint(im, state)) this.notice(im, state, "delivery failed: " + (error instanceof Error ? error.message : String(error)));
       },
     );
+  }
+
+  /**
+   * The built-in half of the dispatcher: true when the input was handled or refused, false when it
+   * is not a built-in this table knows and must be forwarded. pi matches its built-ins on the exact
+   * submitted text (only /name takes anything after it), so an unknown argument falls through to
+   * the model as text, exactly as on main.
+   */
+  private runChildCommand(im: InteractiveModeView, state: ViewState, trimmed: string): boolean {
+    const name = commandName(trimmed);
+    const exact = trimmed === `/${name}`;
+    if (name === "session" && exact) {
+      this.showSessionInfo(im, state);
+      return true;
+    }
+    if (name === "name") {
+      this.commandName(im, state, trimmed);
+      return true;
+    }
+    if (name === "copy" && exact) {
+      void this.copyChild(im, state);
+      return true;
+    }
+    if (name === "changelog" && exact) {
+      const ctx = this.options.getContext();
+      if (ctx) addChangelog(state.childContainer, ctx.ui.theme, im.getMarkdownThemeWithSettings());
+      im.ui.requestRender();
+      return true;
+    }
+    if (name === "hotkeys" && exact) {
+      const ctx = this.options.getContext();
+      if (ctx) {
+        const child = this.options.manager.getRecord(state.id)?.session;
+        // The child runner's shortcuts are the ones that can fire here, never the host's.
+        const shortcuts: ChildShortcuts | undefined = child?.extensionRunner.getShortcuts(im.keybindings.getEffectiveConfig());
+        addHotkeys(state.childContainer, ctx.ui.theme, im.getMarkdownThemeWithSettings(), shortcuts);
+      }
+      im.ui.requestRender();
+      return true;
+    }
+    if (name === "debug" && exact) {
+      this.writeDebug(im, state);
+      return true;
+    }
+    if (name === "arminsayshi" && exact) {
+      const ctx = this.options.getContext();
+      if (ctx) addArminEgg(state.childContainer, im.ui as unknown as TUI);
+      im.ui.requestRender();
+      return true;
+    }
+    if (name === "dementedelves" && exact) {
+      const ctx = this.options.getContext();
+      if (ctx) addEarendilEgg(state.childContainer, ctx.ui.theme);
+      im.ui.requestRender();
+      return true;
+    }
+    const refusal = childCommandRefusal(name, TO_MAIN_KEYS);
+    if (refusal) {
+      this.notice(im, state, refusal);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * `/session` (IM:5669): the child's own stats, name and usage, from its entries — the walk pi's
+   * `getSessionStats` takes, so a settled record prints the same numbers as a live one. Read-only,
+   * so it works on both. Nothing awaits between reading the record and using the session, so a settle
+   * that lands in between cannot hand this a torn-down session: the read is the value used.
+   */
+  private showSessionInfo(im: InteractiveModeView, state: ViewState): void {
+    const ctx = this.options.getContext();
+    if (!ctx) return;
+    const record = this.options.manager.getRecord(state.id);
+    const child = record?.session;
+    const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    if (!record || !sessionManager) {
+      this.notice(im, state, noTranscriptMessage(record ?? ({ status: "completed" } as AgentRecord)));
+      return;
+    }
+    const model = child?.model;
+    addSessionInfo(state.childContainer, ctx.ui.theme, {
+      entries: sessionManager.getEntries(),
+      sessionFile: sessionManager.getSessionFile(),
+      sessionId: sessionManager.getSessionId(),
+      sessionName: sessionManager.getSessionName(),
+      cacheWarmingStatus: child?.cacheWarmingStatus,
+      cacheWarmingMode: (child?.settingsManager ?? im.settingsManager).getCacheWarmingMode(),
+      selectedModelKey: model ? `${model.provider}/${model.id}` : undefined,
+    });
+    im.ui.requestRender();
+  }
+
+  /**
+   * `/name [name]` (IM:5645). Reading the current name works on a settled record; setting one is a
+   * write into the child's own session file, so a settled record gets the resume-first notice.
+   */
+  private commandName(im: InteractiveModeView, state: ViewState, trimmed: string): void {
+    const ctx = this.options.getContext();
+    if (!ctx) return;
+    const theme = ctx.ui.theme;
+    const record = this.options.manager.getRecord(state.id);
+    const child = record?.session;
+    const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    const name = trimmed.replace(/^\/name\s*/, "").trim();
+    if (!name) {
+      const current = sessionManager?.getSessionName();
+      if (current) {
+        state.childContainer.addChild(new Spacer(1));
+        state.childContainer.addChild(new Text(theme.fg("dim", `Session name: ${current}`), 1, 0));
+      } else {
+        this.notice(im, state, "usage: /name <name>");
+      }
+      im.ui.requestRender();
+      return;
+    }
+    if (!child) {
+      this.notice(im, state, "the agent is settled — /name writes its session file; resume it first");
+      return;
+    }
+    child.setSessionName(name);
+    const stored = sessionManager?.getSessionName();
+    if (stored !== name) {
+      this.notice(im, state, `session name was normalized from ${JSON.stringify(name)} to ${JSON.stringify(stored)}`);
+    }
+    state.childContainer.addChild(new Spacer(1));
+    state.childContainer.addChild(new Text(theme.fg("dim", `Session name set: ${stored ?? name}`), 1, 0));
+    im.ui.requestRender();
+  }
+
+  /** `/debug` (IM:5898): the rendered lines and the child's messages, into pi's debug log. */
+  private writeDebug(im: InteractiveModeView, state: ViewState): void {
+    const ctx = this.options.getContext();
+    if (!ctx) return;
+    const record = this.options.manager.getRecord(state.id);
+    const child = record?.session;
+    const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    const width = im.ui.terminal?.columns ?? 80;
+    const height = im.ui.terminal?.rows ?? 24;
+    // pi dumps the whole screen; the view reads what it has and the log's header says which.
+    const screen = im.ui.render?.(width);
+    const messages = child?.messages ?? sessionManager?.buildSessionContext().messages ?? [];
+    const path = debugLogPath();
+    try {
+      writeDebugLog(path, {
+        width,
+        height,
+        lines: screen ?? state.childContainer.render(width),
+        messages,
+        source: screen ? "pi's rendered screen" : "the child transcript",
+      });
+    } catch (error) {
+      this.notice(im, state, "debug log failed: " + (error instanceof Error ? error.message : String(error)));
+      return;
+    }
+    state.childContainer.addChild(new Spacer(1));
+    state.childContainer.addChild(new Text(ctx.ui.theme.fg("accent", `✓ Debug log written\n${path}`), 1, 1));
+    im.ui.requestRender();
+  }
+
+  /**
+   * Point the view editor's autocomplete at the child: the built-ins plus the child's own prompt
+   * templates, extension commands and skills (IM:468-546). A settled record offers the built-ins, and
+   * a typed extension command still runs through `deliver`. The host's set is never offered, so
+   * `/agents` — registered only on the root activation — cannot appear.
+   */
+  private setChildAutocomplete(state: ViewState): void {
+    const ed = state.editor;
+    if (!ed) return;
+    const child = this.options.manager.getRecord(state.id)?.session;
+    const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
+    if (!sessionManager) return;
+    const provider = new CombinedAutocompleteProvider(childSlashCommands(child), sessionManager.getCwd());
+    state.childProvider = provider;
+    ed.setAutocompleteProvider(provider);
   }
 
   private async copyChild(im: InteractiveModeView, state: ViewState): Promise<void> {
