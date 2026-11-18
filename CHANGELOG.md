@@ -63,6 +63,7 @@ All notable changes to this project will be documented in this file.
 - *(nesting)* A parent's end pauses its nested children instead of killing them (closes #235) ([#236](https://github.com/cad0p/pi-subagents-tintinweb/pull/236))
 - *(transcript)* A resumed nested agent keeps appending to its output file (closes #237) ([#239](https://github.com/cad0p/pi-subagents-tintinweb/pull/239))
 - *(transcript)* The native view repaints a child's transcript as messages land (closes #245) ([#246](https://github.com/cad0p/pi-subagents-tintinweb/pull/246))
+- *(usage)* A subagent's spend records which account it went to (closes #247) ([#248](https://github.com/cad0p/pi-subagents-tintinweb/pull/248))
 
 ### 🚜 Refactor
 
