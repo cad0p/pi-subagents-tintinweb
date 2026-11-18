@@ -30,6 +30,7 @@ All notable changes to this project will be documented in this file.
 - *(debug)* A gated channel for the run cap's heads-up, hard stop and settle (closes #112) ([#193](https://github.com/cad0p/pi-subagents-tintinweb/pull/193))
 - *(scoped-models)* Resolve patterns with pi's scope resolver (closes #199)
 - *(agent-id)* Accept a unique short prefix on every caller surface (closes #205) ([#206](https://github.com/cad0p/pi-subagents-tintinweb/pull/206))
+- *(view)* Dispatch slash commands to the shown child, read-only built-ins first (closes #252) ([#253](https://github.com/cad0p/pi-subagents-tintinweb/pull/253))
 
 ### 🐛 Bug Fixes
 
