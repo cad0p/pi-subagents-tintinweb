@@ -81,26 +81,28 @@ export function streamToOutputFile(
 ): () => void {
   const projection = () => session.sessionManager.buildSessionProjection().entries;
 
-  // Messages before `startIndex` are already on disk (the initial user prompt
-  // for a fresh spawn; the prior run's transcript for a resume). Track what is
+  // `startIndex` messages are already on disk: the leading system entry for a
+  // fresh spawn, the prior run's projected messages for a resume. Track what is
   // on disk by session-entry id, not by an index into `session.messages`: that
   // array is pi's projected context, and a boundary `context_edit` with
   // `replacement: null` removes an entry from it, so an index would sit past
   // the new end and freeze the transcript (#250). An entry id survives every
-  // rebuild of the projection.
+  // rebuild of the projection. Count the prefix off here rather than at
+  // subscribe time: a fresh spawn subscribes before pi projects anything (the
+  // prompt is sent after the session is handed over), so a prefix marked then
+  // would be empty and the system entry would be written as a transcript line.
   const written = new Set<string>();
-  let onDisk = 0;
-  for (const { sourceEntry, messages } of projection()) {
-    if (onDisk + messages.length > startIndex) break;
-    written.add(sourceEntry.id);
-    onDisk += messages.length;
-  }
+  let alreadyOnDisk = startIndex;
 
   const flush = () => {
     for (const { sourceEntry, messages } of projection()) {
       if (written.has(sourceEntry.id)) continue;
       written.add(sourceEntry.id);
       for (const msg of messages) {
+        if (alreadyOnDisk > 0) {
+          alreadyOnDisk--;
+          continue;
+        }
         const entry = {
           isSidechain: true,
           agentId,

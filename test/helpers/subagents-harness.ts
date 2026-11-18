@@ -96,15 +96,17 @@ export function childCtx(sessionId: string) {
 /** Give a stub child session the projection `streamToOutputFile` reads: one
  *  entry per message, an id per message object, as pi's session entries keep
  *  theirs across every projection rebuild. */
-export function withStubProjection<T extends { messages: any[]; sessionManager: any }>(session: T): T {
+export function withStubProjection<
+  T extends { messages: unknown[]; sessionManager: { buildSessionProjection?: unknown } },
+>(session: T): T {
   let n = 0;
   const ids = new WeakMap<object, string>();
   session.sessionManager.buildSessionProjection = () => ({
     entries: session.messages.map((message) => {
-      let id = ids.get(message);
+      let id = ids.get(message as object);
       if (id === undefined) {
         id = `stub-entry-${++n}`;
-        ids.set(message, id);
+        ids.set(message as object, id);
       }
       return { sourceEntry: { id }, messages: [message] };
     }),
