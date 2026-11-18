@@ -31,7 +31,7 @@ setQuietMs(20);
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp", sessionManager: { getSessionId: () => "parent-session" } } as any;
-const mockSession = (messages: any[] = []) => withStubProjection({
+const mockSession = (messages: Array<{ role: string; content: unknown }> = []) => withStubProjection({
   // What the manager reads for a record's spend: a fresh child starts at zero, and
   // a test moves the totals to simulate what pi appended.
   getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 }, cost: 0 }),

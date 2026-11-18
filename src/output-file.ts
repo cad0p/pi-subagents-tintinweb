@@ -81,16 +81,20 @@ export function streamToOutputFile(
 ): () => void {
   const projection = () => session.sessionManager.buildSessionProjection().entries;
 
-  // `startIndex` messages are already on disk: the leading system entry for a
-  // fresh spawn, the prior run's projected messages for a resume. Track what is
-  // on disk by session-entry id, not by an index into `session.messages`: that
-  // array is pi's projected context, and a boundary `context_edit` with
-  // `replacement: null` removes an entry from it, so an index would sit past
-  // the new end and freeze the transcript (#250). An entry id survives every
-  // rebuild of the projection. Count the prefix off here rather than at
-  // subscribe time: a fresh spawn subscribes before pi projects anything (the
-  // prompt is sent after the session is handed over), so a prefix marked then
-  // would be empty and the system entry would be written as a transcript line.
+  // `startIndex` counts the projection's leading messages that are not written.
+  // For a fresh spawn that is message 0, pi's system entry, which the transcript
+  // never contains: the spawn path wrote the file's first line (the prompt), and
+  // the projected prompt entry is written again, as it always was. For a resume
+  // it is the prior run's messages.
+  //
+  // What is written is tracked by session-entry id, not by an index into
+  // `session.messages`: that array is pi's projected context, and a boundary
+  // `context_edit` with `replacement: null` removes an entry from it, so an
+  // index would sit past the new end and freeze the transcript (#250). An entry
+  // id survives every rebuild of the projection. The prefix is counted off at
+  // the flush rather than at subscribe time: a fresh spawn subscribes before pi
+  // projects anything (the prompt is sent after the session is handed over), so
+  // a prefix marked then would be empty and the system entry would be written.
   const written = new Set<string>();
   let alreadyOnDisk = startIndex;
 

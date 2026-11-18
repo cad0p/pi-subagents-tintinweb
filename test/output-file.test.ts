@@ -341,7 +341,9 @@ describe("streamToOutputFile", () => {
     session.fire({ type: "turn_end" });
 
     const entries = readEntries();
-    expect(entries).toHaveLength(2); // initial + the assistant at index 1 (index 0 is the initial user entry)
+    // initial + the assistant at index 1: the leading message is the one the
+    // countdown skips (in production, pi's system entry).
+    expect(entries).toHaveLength(2);
     expect(JSON.stringify(entries.at(-1))).toContain("fresh answer");
   });
 });
