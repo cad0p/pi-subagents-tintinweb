@@ -79,44 +79,65 @@ export function streamToOutputFile(
   cwd: string,
   startIndex = 1,
 ): () => void {
-  // Messages before `startIndex` are already on disk (the initial user prompt
-  // for a fresh spawn; the prior run's transcript for a resume).
-  let writtenCount = startIndex;
+  const projection = () => session.sessionManager.buildSessionProjection().entries;
+
+  // `startIndex` counts the projection's leading messages that are not written.
+  // For a fresh spawn that is message 0, pi's system entry, which the transcript
+  // never contains: the spawn path wrote the file's first line (the prompt), and
+  // the projected prompt entry is written again, as it always was. For a resume
+  // it is the prior run's messages.
+  //
+  // What is written is tracked by session-entry id, not by an index into
+  // `session.messages`: that array is pi's projected context, and a boundary
+  // `context_edit` with `replacement: null` removes an entry from it, so an
+  // index would sit past the new end and freeze the transcript (#250). An entry
+  // id survives every rebuild of the projection. The prefix is counted off at
+  // the flush rather than at subscribe time: a fresh spawn subscribes before pi
+  // projects anything (the prompt is sent after the session is handed over), so
+  // a prefix marked then would be empty and the system entry would be written.
+  const written = new Set<string>();
+  let alreadyOnDisk = startIndex;
 
   const flush = () => {
-    const messages = session.messages;
-    while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
-      const entry = {
-        isSidechain: true,
-        agentId,
-        type: msg.role === "assistant" ? "assistant" : msg.role === "user" ? "user" : "toolResult",
-        message: msg,
-        timestamp: new Date().toISOString(),
-        cwd,
-      };
-      try {
-        appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
-      } catch { /* ignore write errors */ }
-      writtenCount++;
+    for (const { sourceEntry, messages } of projection()) {
+      if (written.has(sourceEntry.id)) continue;
+      written.add(sourceEntry.id);
+      for (const msg of messages) {
+        if (alreadyOnDisk > 0) {
+          alreadyOnDisk--;
+          continue;
+        }
+        const entry = {
+          isSidechain: true,
+          agentId,
+          type: msg.role === "assistant" ? "assistant" : msg.role === "user" ? "user" : "toolResult",
+          message: msg,
+          timestamp: new Date().toISOString(),
+          cwd,
+        };
+        try {
+          appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
+        } catch { /* ignore write errors */ }
+      }
     }
   };
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") flush();
-    // Compaction replaces session.messages with a shorter, summarized array,
-    // leaving writtenCount past the new end — without re-anchoring, the flush
-    // loop would never match again and streaming would halt for good (#145).
+    // Compaction adds a summary entry and drops the entries it summarized.
     // Flush before it runs so any not-yet-flushed tail still reaches the file,
-    // then re-anchor to the rebuilt array once it lands. The re-anchor is
+    // then mark the rebuilt projection as written once it lands, so the
+    // summary and the kept tail are not written again (#145). The re-anchor is
     // deferred a microtask because on the overflow-retry path pi trims the
     // trailing error assistant message AFTER emitting compaction_end —
-    // anchoring synchronously would sit one past the trimmed array and skip
-    // the first post-compaction message. Aborted/failed compactions leave
-    // session.messages untouched, so only successful ones re-anchor.
+    // anchoring synchronously would mark the trimmed array and skip the first
+    // post-compaction message. Aborted/failed compactions leave the projection
+    // untouched, so only successful ones re-anchor.
     if (event.type === "compaction_start") flush();
     if (event.type === "compaction_end" && !event.aborted && event.result) {
-      queueMicrotask(() => { writtenCount = session.messages.length; });
+      queueMicrotask(() => {
+        for (const { sourceEntry } of projection()) written.add(sourceEntry.id);
+      });
     }
   });
 

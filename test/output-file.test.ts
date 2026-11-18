@@ -46,17 +46,32 @@ describe("encodeCwd", () => {
   });
 });
 
+interface FakeEntry {
+  sourceEntry: { id: string };
+  messages: unknown[];
+}
+
 /**
- * Minimal AgentSession fake. streamToOutputFile only reads `session.messages`
- * and calls `session.subscribe(cb)`, so we provide just those — plus test-only
- * helpers to mutate state and fire events deterministically.
+ * Minimal AgentSession fake. streamToOutputFile reads the session's projected
+ * entries (`sessionManager.buildSessionProjection()`) and calls
+ * `session.subscribe(cb)`, so we model those — plus test-only helpers to
+ * mutate the projection and fire events deterministically. Entries carry a
+ * stable id, like pi's session entries.
  */
 function makeFakeSession(initialMessages: unknown[] = []) {
-  let messages: unknown[] = [...initialMessages];
+  let n = 0;
   let cb: ((event: unknown) => void) | null = null;
+  const entryFor = (message: unknown): FakeEntry => ({ sourceEntry: { id: `entry-${++n}` }, messages: [message] });
+  let entries: FakeEntry[] = initialMessages.map(entryFor);
+  const messages = () => entries.flatMap((e) => e.messages);
   return {
     get messages() {
-      return messages;
+      return messages();
+    },
+    sessionManager: {
+      buildSessionProjection() {
+        return { entries, messages: messages() };
+      },
     },
     subscribe(fn: (event: unknown) => void) {
       cb = fn;
@@ -65,11 +80,19 @@ function makeFakeSession(initialMessages: unknown[] = []) {
       };
     },
     push(...msgs: unknown[]) {
-      messages.push(...msgs);
+      entries.push(...msgs.map(entryFor));
     },
-    /** Swap the whole array, like pi's compaction (`agent.state.messages = ...`). */
+    /**
+     * Swap the whole projection, like pi's compaction (`agent.state.messages = ...`).
+     * A message already projected keeps its entry (and id), as pi's rebuild does.
+     */
     replaceAll(msgs: unknown[]) {
-      messages = msgs;
+      const known = new Map(entries.flatMap((e) => e.messages.map((m) => [m, e] as const)));
+      entries = msgs.map((m) => known.get(m) ?? entryFor(m));
+    },
+    /** Drop the entry of `message`, like a `context_edit` with `replacement: null` (#250). */
+    omit(message: unknown) {
+      entries = entries.filter((e) => !e.messages.includes(message));
     },
     fire(event: unknown) {
       cb?.(event);
@@ -144,6 +167,33 @@ describe("streamToOutputFile", () => {
     session.fire({ type: "turn_end" });
 
     expect(readEntries()).toHaveLength(3);
+  });
+
+  it("keeps streaming after a context_edit omits an already-written turn (#250)", () => {
+    const session = makeFakeSession([{ role: "user", content: "go" }]);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work");
+
+    const errored = { role: "assistant", content: [], stopReason: "error" };
+    session.push(errored);
+    session.fire({ type: "turn_end" });
+    expect(JSON.stringify(readEntries().at(-1))).toContain("error");
+
+    // The fallback provider omits the failed attempt, so the projection shrinks.
+    session.omit(errored);
+    expect(session.messages).toHaveLength(1);
+
+    // The next attempt still reaches the file, in order and exactly once.
+    session.push(
+      { role: "user", content: "retry" },
+      { role: "assistant", content: [{ type: "text", text: "ANSWER" }] },
+    );
+    session.fire({ type: "turn_end" });
+
+    const entries = readEntries();
+    expect(entries).toHaveLength(4); // initial + errored + retry + ANSWER
+    expect(JSON.stringify(entries[2])).toContain("retry");
+    expect(JSON.stringify(entries[3])).toContain("ANSWER");
+    expect(JSON.stringify(entries).split('"stopReason":"error"')).toHaveLength(2); // once
   });
 
   it("ignores session events other than turn_end", () => {
@@ -291,7 +341,9 @@ describe("streamToOutputFile", () => {
     session.fire({ type: "turn_end" });
 
     const entries = readEntries();
-    expect(entries).toHaveLength(2); // initial + the assistant at index 1 (index 0 is the initial user entry)
+    // initial + the assistant at index 1: the leading message is the one the
+    // countdown skips (in production, pi's system entry).
+    expect(entries).toHaveLength(2);
     expect(JSON.stringify(entries.at(-1))).toContain("fresh answer");
   });
 });

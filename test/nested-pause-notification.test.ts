@@ -25,7 +25,7 @@ import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, 
 import { IMPL_KEY, type ImplV1 } from "../src/impl-route.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import { agentIdOf, MANAGER_KEY, makePi, textOf } from "./helpers/subagents-harness.js";
+import { agentIdOf, MANAGER_KEY, makePi, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
 setQuietMs(20);
@@ -48,7 +48,7 @@ function ctx() {
 
 /** A session stub: what the lifecycle, the wake and the teardown read. */
 function sessionStub(): AgentSession & { sendCustomMessage: Mock } {
-  return {
+  return withStubProjection({
     dispose: vi.fn(),
     abort: vi.fn(() => Promise.resolve()),
     extensionRunner: { emit: vi.fn() },
@@ -60,7 +60,7 @@ function sessionStub(): AgentSession & { sendCustomMessage: Mock } {
     agent: { state: { isStreaming: false }, hasQueuedMessages: () => false },
     clearQueue: () => ({ steering: [], followUp: [] }),
     sessionManager: { getSessionId: () => "child-session", getSessionFile: () => undefined, getHeader: () => ({ type: "session" }), getEntries: () => [] },
-  } as unknown as AgentSession & { sendCustomMessage: Mock };
+  }) as unknown as AgentSession & { sendCustomMessage: Mock };
 }
 
 /** Resolves the parent's run: a nested child must exist before its parent's settle can pause it. */
