@@ -64,6 +64,7 @@ All notable changes to this project will be documented in this file.
 - *(transcript)* A resumed nested agent keeps appending to its output file (closes #237) ([#239](https://github.com/cad0p/pi-subagents-tintinweb/pull/239))
 - *(transcript)* The native view repaints a child's transcript as messages land (closes #245) ([#246](https://github.com/cad0p/pi-subagents-tintinweb/pull/246))
 - *(usage)* A subagent's spend records which account it went to (closes #247) ([#248](https://github.com/cad0p/pi-subagents-tintinweb/pull/248))
+- *(output)* Keep streaming a transcript after a context_edit omits a turn (closes #250) ([#251](https://github.com/cad0p/pi-subagents-tintinweb/pull/251))
 
 ### 🚜 Refactor
 
