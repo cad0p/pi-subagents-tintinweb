@@ -1,4 +1,14 @@
-import { AssistantMessageComponent, BranchSummaryMessageComponent, copyToClipboard, initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  AssistantMessageComponent,
+  BranchSummaryMessageComponent,
+  copyToClipboard,
+  getMarkdownTheme,
+  initTheme,
+  UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -75,6 +85,9 @@ class FakeEditor {
 
 function childSession(over: Record<string, unknown> = {}): any {
   const listeners = new Set<(event: any) => void>();
+  const registeredCommands: any[] = [];
+  const shortcuts = new Map<string, any>();
+  let childSessionName: string | undefined = "child";
   return {
     sessionId: "child-sid",
     // pi's AgentSession.subscribe: the child's own bus, which the view watches for a model switch.
@@ -89,13 +102,29 @@ function childSession(over: Record<string, unknown> = {}): any {
       buildContextEntries: () => [message("user", "CHILD TEXT")],
       getCwd: () => "/child",
       getSessionId: () => "child-sid",
-      getSessionName: () => "child",
+      getSessionFile: () => "/child/session.jsonl",
+      getSessionName: () => childSessionName,
+      setSessionName: (name: string) => { childSessionName = name; },
       getLeafId: () => null,
       getEntries: () => [],
       getEntryCount: () => 0,
+      buildSessionContext: () => ({ messages: [] }),
     },
     // A live session has these too, and pi's render reaches two of them through `this.session`.
-    settingsManager: { getShowCacheMissNotices: () => true, getExternalEditorCommand: () => undefined },
+    settingsManager: {
+      getShowCacheMissNotices: () => true,
+      getExternalEditorCommand: () => undefined,
+      getEnableSkillCommands: () => false,
+      getCacheWarmingMode: () => "auto",
+    },
+    // The session's own command surface: the view's autocomplete reads it, and only it.
+    promptTemplates: [],
+    resourceLoader: { getSkills: () => ({ skills: [] }) },
+    /** Test hooks: what this activation registered, and what /name wrote. */
+    registeredCommands,
+    shortcuts,
+    setSessionName: (name: string) => { childSessionName = name; },
+    sessionName: () => childSessionName,
     retryAttempt: 2,
     thinkingLevel: "off",
     autoCompactionEnabled: false,
@@ -105,6 +134,8 @@ function childSession(over: Record<string, unknown> = {}): any {
       getEntryRenderer: (type: string) => type === "child-only"
         ? () => new Text("CUSTOM CHILD")
         : undefined,
+      getRegisteredCommands: () => registeredCommands,
+      getShortcuts: () => shortcuts,
     },
     getLastAssistantText: () => "CHILD REPLY",
     getContextUsage: () => ({ tokens: 0, contextWindow: 1000, percent: 0 }),
@@ -178,7 +209,13 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
   // pi 1.4.0's shape: the session lives on a runtime host and is reached through prototype getters
   // with no setter. A plain writable field here is what let a throwing assignment ship.
   const hostSession = {
-    extensionRunner: { getEntryRenderer: () => undefined },
+    extensionRunner: {
+      getEntryRenderer: () => undefined,
+      // The host activation registers /agents (root only, src/index.ts) and a shortcut of its own:
+      // a child view may neither offer nor run either.
+      getRegisteredCommands: () => [{ name: "agents", invocationName: "agents", description: "List agents" }],
+      getShortcuts: () => new Map([["ctrl+u", { description: "host shortcut", extensionPath: "/ext/host.ts" }]]),
+    },
     sessionManager: {
       buildContextEntries: () => [message("user", "HOST TEXT")],
       getEntries: () => [],
@@ -187,6 +224,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
     settingsManager: {
       getExternalEditorCommand: () => undefined,
       getShowCacheMissNotices: () => false,
+      getCacheWarmingMode: () => "auto",
     },
     retryAttempt: 0,
   };
@@ -251,7 +289,11 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
     defaultEditor,
     footer: { invalidate: vi.fn() },
     ui: { requestRender: vi.fn(), hasActiveSelection: () => false },
-    keybindings: { matches: (data: string, action: string) => action === "app.session.rename" && data === "\x12" },
+    keybindings: {
+      matches: (data: string, action: string) => action === "app.session.rename" && data === "\x12",
+      // pi passes this to the child runner's getShortcuts: a shortcut is matched against resolved keys.
+      getEffectiveConfig: () => ({}),
+    },
     isShuttingDown: false,
     showError: vi.fn(),
     showWarning: vi.fn(),
@@ -261,7 +303,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
     handleCtrlD: vi.fn(),
     handleOpenExternalEditor: vi.fn(async () => {}),
     getRegisteredToolDefinition: () => undefined,
-    getMarkdownThemeWithSettings: () => undefined,
+    getMarkdownThemeWithSettings: () => getMarkdownTheme(),
     getMarkdownTransformers: () => [],
     pushExtensionDialog: vi.fn((component: any, blocked?: any) => { im.dialogs.push(component); im.dialogBlocks.push(blocked); }),
     removeExtensionDialog: vi.fn(),
@@ -650,7 +692,9 @@ describe("native transcript view", () => {
     h.im.editor.actionHandlers.get("app.session.new")?.();
     expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press ← to go back to main");
     h.im.editor.onSubmit?.("/model");
-    expect(h.documentContainer.render(120).join("\n")).toContain("Slash commands act on the main session; press ← to go back to main");
+    // A built-in a later part owns names that part, never "main": /model acts on the child in part 2.
+    expect(h.documentContainer.render(120).join("\n")).toContain("/model is not wired into the child view yet — it lands in part 2 of #249");
+    expect(h.documentContainer.render(120).join("\n")).not.toContain("Slash commands act on the main session");
     expect((h.im.defaultEditor as any).actionHandlers.get("app.session.new")).not.toHaveBeenCalled();
     // An action pi may add later is not inherited either: the map starts empty.
     expect(h.im.editor.actionHandlers.has("app.future.action")).toBe(false);
@@ -1341,5 +1385,342 @@ describe("native transcript view", () => {
     expect(confirmed).toBe(false);
     expect(flags.at(-1)).toBeUndefined();
     clearChildUI("proxy-child");
+  });
+});
+
+describe("child view slash commands (#252)", () => {
+  const render = (h: Harness): string => h.documentContainer.render(160).join("\n");
+  const childContainer = (h: Harness): Container => h.documentContainer.children[0] as Container;
+
+  beforeEach(() => {
+    initTheme("dark");
+    vi.mocked(copyToClipboard).mockClear();
+    dropChildDialogs("child-1");
+    clearChildUI("child-1");
+  });
+
+  const assistantEntry = (input: number, output: number, cost: number): any => ({
+    type: "message",
+    id: "m1",
+    timestamp: new Date().toISOString(),
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "t1", name: "bash", arguments: {} }],
+      provider: "anthropic",
+      model: "child-model",
+      usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost } },
+      stopReason: "endTurn",
+    },
+  });
+
+  // The command's whole point: the numbers are the shown child's, and the block lands in the child's
+  // transcript. Reading the host's manager has no getSessionFile/getSessionId at all, so a mutation
+  // that points this at main throws or prints the wrong file.
+  it("S1 /session prints the child's session file, id and totals into the child's container", () => {
+    const h = harness();
+    (h.record.session as any).sessionManager.getEntries = () => [assistantEntry(10, 5, 0.25)];
+    h.openChild();
+    h.im.editor.onSubmit?.("/session");
+
+    const shown = render(h);
+    expect(shown).toContain("Session Info");
+    expect(shown).toContain("/child/session.jsonl");
+    expect(shown).toContain("child-sid");
+    expect(shown).toContain("Assistant: 1");
+    expect(shown).toContain("Tools: 1 calls, 0 results");
+    expect(shown).toContain("Output: 5");
+    expect(shown).toContain("Total: 15");
+    // The single breakdown row repeats the total only when it names another model: folded here.
+    // pi's cost rows carry a "$" prefix (IM:5714-5733).
+    expect(shown.match(/\$0\.250/g)).toHaveLength(1);
+    expect(h.hostContainer.render(120).join("\n")).not.toContain("Session Info");
+    // Nothing went to the child through the delivery path: a built-in is not prompt text.
+    expect(h.manager.steer).not.toHaveBeenCalled();
+  });
+
+  it("S2 /session reads a settled record's own file, not a session it no longer has", () => {
+    const h = harness({ record: { session: undefined, status: "completed" } });
+    const settled = {
+      buildContextEntries: () => [message("user", "SETTLED TEXT")],
+      buildSessionContext: () => ({ messages: [] }),
+      getEntries: () => [assistantEntry(3, 2, 0)],
+      getCwd: () => "/settled",
+      getSessionFile: () => "/settled/session.jsonl",
+      getSessionId: () => "settled-sid",
+      getSessionName: () => "settled-name",
+    };
+    h.manager.settledSessionManager.mockReturnValue(settled);
+    h.openChild();
+    h.im.editor.onSubmit?.("/session");
+
+    const shown = render(h);
+    expect(shown).toContain("/settled/session.jsonl");
+    expect(shown).toContain("settled-sid");
+    expect(shown).toContain("Name: settled-name");
+    expect(shown).toContain("Assistant: 1");
+  });
+
+  // /name writes a session_info entry into the child's own file. The host session has no
+  // setSessionName on the double, so a mutation that fixes the host instead fails here.
+  it("S3 /name sets the shown child's session name and says so", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/name release check");
+
+    expect((h.record.session as any).sessionName()).toBe("release check");
+    expect(render(h)).toContain("Session name set: release check");
+    // The reading form prints the current name instead of a usage line.
+    h.im.editor.onSubmit?.("/name");
+    expect(render(h)).toContain("Session name: release check");
+  });
+
+  it("S4 /name refuses a settled record and writes nothing", () => {
+    const h = harness({ record: { session: undefined, status: "completed" } });
+    const settled = {
+      buildContextEntries: () => [], buildSessionContext: () => ({ messages: [] }), getEntries: () => [],
+      getCwd: () => "/settled", getSessionFile: () => "/s.jsonl", getSessionId: () => "sid", getSessionName: () => "kept",
+    };
+    h.manager.settledSessionManager.mockReturnValue(settled);
+    h.openChild();
+    h.im.editor.onSubmit?.("/name renamed");
+    expect(render(h)).toContain("the agent is settled — /name writes its session file; resume it first");
+    expect(render(h)).not.toContain("Session name set");
+    // Reading still works on a settled record: nothing is written for it.
+    h.im.editor.onSubmit?.("/name");
+    expect(render(h)).toContain("Session name: kept");
+  });
+
+  it("S5 /copy copies the shown child's last reply", async () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/copy");
+    await new Promise((r) => setImmediate(r));
+    expect(copyToClipboard).toHaveBeenCalledWith("CHILD REPLY");
+  });
+
+  it("S6 /hotkeys lists the child runner's shortcuts, never the host's", () => {
+    const h = harness();
+    (h.record.session as any).shortcuts.set("ctrl+y", { description: "child shortcut", extensionPath: "/ext/child.ts" });
+    h.openChild();
+    h.im.editor.onSubmit?.("/hotkeys");
+
+    const shown = render(h);
+    expect(shown).toContain("Keyboard Shortcuts");
+    expect(shown).toContain("child shortcut");
+    // The host activation registers ctrl+u; those shortcuts cannot fire in this view.
+    expect(shown).not.toContain("host shortcut");
+  });
+
+  it("S7 /changelog renders pi's changelog, settled or live", () => {
+    const h = harness({ record: { session: undefined, status: "completed" } });
+    h.manager.settledSessionManager.mockReturnValue({
+      buildContextEntries: () => [], buildSessionContext: () => ({ messages: [] }), getEntries: () => [],
+      getCwd: () => "/settled", getSessionFile: () => "/s.jsonl", getSessionId: () => "sid", getSessionName: () => undefined,
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/changelog");
+    expect(render(h)).toContain("What's New");
+    expect(h.manager.steer).not.toHaveBeenCalled();
+  });
+
+  it("S8 /debug writes the child's messages to pi's debug log and prints the path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-subagent-debug-"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", dir);
+    try {
+      const h = harness();
+      (h.record.session as any).messages = [{ role: "user", content: [{ type: "text", text: "CHILD MESSAGE" }] }];
+      h.openChild();
+      h.im.editor.onSubmit?.("/debug");
+      const written = readFileSync(join(dir, "pi-debug.log"), "utf-8");
+      expect(written).toContain("CHILD MESSAGE");
+      expect(render(h)).toContain("Debug log written");
+      expect(render(h)).toContain(join(dir, "pi-debug.log"));
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // An extension command the child's activation registered runs on the child's own runner, so the
+  // view forwards the text and pi executes it there. Running it here would need the runner's
+  // command context, which only pi builds.
+  it("S9 a child-only extension command is forwarded, never executed here", () => {
+    const h = harness();
+    const handler = vi.fn();
+    (h.record.session as any).registeredCommands.push({
+      name: "deploy", invocationName: "deploy", description: "child only", handler,
+      sourceInfo: { path: "/ext/child.ts", source: "local", scope: "project", origin: "top-level" },
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/deploy now");
+
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/deploy now");
+    expect(handler).not.toHaveBeenCalled();
+    expect(h.im.editor.history).toContain("/deploy now");
+    expect(render(h)).not.toContain("#249");
+  });
+
+  // /agents is registered only on the root activation (src/index.ts), so a child view must neither
+  // offer it nor run it: the host's list has it, the child's does not.
+  it("S10 the command list is the child's: /agents is not offered", async () => {
+    const h = harness();
+    (h.record.session as any).registeredCommands.push({
+      name: "deploy", invocationName: "deploy", description: "child only", handler: vi.fn(),
+      sourceInfo: { path: "/ext/child.ts", source: "local", scope: "project", origin: "top-level" },
+    });
+    h.openChild();
+    // What the view handed the editor: pi's CustomEditor keeps the provider it was given.
+    const provider = (h.im.editor as any).autocompleteProvider as { getSuggestions: (...args: any[]) => Promise<{ items: { value: string }[] } | null> };
+    const suggestions = await provider.getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+    const names = (suggestions?.items ?? []).map((item) => item.value);
+    expect(names).toContain("deploy");
+    expect(names).not.toContain("agents");
+    // The host's activation has it: the omission is about which activation, not about a missing name.
+    expect((h.hostSession as any).extensionRunner.getRegisteredCommands().map((c: any) => c.name)).toContain("agents");
+  });
+
+  // pi filters extension commands against the built-ins only (IM:524-526): a prompt template of the
+  // same name does not drop the extension command — both are offered, as on main.
+  it("S10b an extension command sharing a prompt template's name is still offered", async () => {
+    const h = harness();
+    (h.record.session as any).promptTemplates.push({
+      name: "deploy", description: "from a template", argumentHint: "<env>",
+      sourceInfo: { path: "/t/deploy.md", source: "local", scope: "project", origin: "top-level" },
+    });
+    (h.record.session as any).registeredCommands.push({
+      name: "deploy", invocationName: "deploy", description: "from an extension", handler: vi.fn(),
+      sourceInfo: { path: "/ext/child.ts", source: "local", scope: "project", origin: "top-level" },
+    });
+    h.openChild();
+    const provider = (h.im.editor as any).autocompleteProvider as { getSuggestions: (...args: any[]) => Promise<{ items: { value: string; description?: string }[] } | null> };
+    const suggestions = await provider.getSuggestions(["/deploy"], 0, 7, { signal: new AbortController().signal });
+    const descriptions = (suggestions?.items ?? []).filter((item) => item.value === "deploy").map((item) => item.description);
+    expect(descriptions).toEqual(expect.arrayContaining([expect.stringContaining("from an extension"), expect.stringContaining("from a template")]));
+  });
+
+  // Every built-in in pi's table is either run here or refused with a notice naming why; none is
+  // forwarded to the child as prompt text, which is what a missing entry would do.
+  it("S11 every unsupported built-in is refused with its reason and never forwarded", () => {
+    const h = harness();
+    h.openChild();
+    const cases: Array<[string, string]> = [
+      ["/scoped-models", "/scoped-models stays refused in a child view: its selector component is not exported by pi"],
+      ["/trust", "/trust stays refused in a child view: its selector and option builder are not exported by pi"],
+      ["/compact", "/compact stays refused in a child view: compact() aborts the run it would compact"],
+      ["/compact the noisy part", "/compact stays refused in a child view: compact() aborts the run it would compact"],
+      ["/model", "/model is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/model anthropic/claude", "/model is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/thinking high", "/thinking is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/settings", "/settings is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/export out.html", "/export is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/share", "/share is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/bug it broke", "/bug is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/login anthropic", "/login is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/logout", "/logout is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/reload", "/reload is not wired into the child view yet — it lands in part 5 of #249"],
+      ["/new", "/new replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/resume", "/resume replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/fork", "/fork replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/clone", "/clone replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/tree", "/tree replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/quit", "/quit replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/import file.jsonl", "/import replaces a session — it acts on the main session; press ← to go back to main"],
+      ["!pwd", "bash mode is not wired into the child view yet — it lands in part 4 of #249"],
+    ];
+    for (const [input, notice] of cases) {
+      h.im.editor.onSubmit?.(input);
+      expect(render(h), input).toContain(notice);
+    }
+    expect(h.manager.steer).not.toHaveBeenCalled();
+    // A refused command is not history: pi does not record one either.
+    expect(h.im.editor.history).not.toContain("/new");
+  });
+
+  // pi matches an unknown /word as text and sends it to the model; the child view keeps that, so an
+  // unknown command reaches the child instead of a main-session notice.
+  it("S12 an unknown /word goes to the child as text", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/notacommand please");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/notacommand please");
+    expect(render(h)).not.toContain("#249");
+  });
+
+  it("S13 the easter eggs render into the child's container", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/dementedelves");
+    expect(render(h)).toContain("pi has joined Earendil");
+    expect(render(h)).toContain("https://mariozechner.at/posts/2026-04-08-ive-sold-out/");
+    const before = childContainer(h).children.length;
+    h.im.editor.onSubmit?.("/arminsayshi");
+    expect(childContainer(h).children.length).toBeGreaterThan(before);
+    expect(h.manager.steer).not.toHaveBeenCalled();
+  });
+
+  // The action notices split by owner: a session-replacing action names main, a later part names the
+  // part, so a user is never told that a key main does not own "acts on the main session".
+  it("S14 a blocked action's notice names its owner", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.session.new")?.();
+    expect(render(h)).toContain("app.session.new acts on the main session; press ← to go back to main");
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(render(h)).toContain("app.thinking.cycle is not wired into the child view yet — it lands in part 2 of #249");
+    h.im.editor.actionHandlers.get("app.message.dequeue")?.();
+    expect(render(h)).toContain("app.message.dequeue is not wired into the child view yet — it lands in part 3 of #249");
+  });
+
+  // pi runs a built-in only on its exact text (IM:2653,2643), so a suffixed built-in is prompt text
+  // forwarded to the child, never the view's handler — this is what pins the `&& exact` guards.
+  it("S15 a suffixed built-in is forwarded to the child, not run here", async () => {
+    const h = harness();
+    h.openChild();
+    const children = childContainer(h).children.length;
+    const suffixed = ["/session foo", "/copy junk", "/changelog x", "/hotkeys x", "/debug x", "/arminsayshi x", "/dementedelves x"];
+    for (const input of suffixed) h.im.editor.onSubmit?.(input);
+    await new Promise((r) => setImmediate(r));
+    for (const input of suffixed) expect(h.manager.steer, input).toHaveBeenCalledWith("child-1", input);
+    // Nothing ran here: each exact form leaves a mark a dropped `&& exact` would have produced.
+    const shown = render(h);
+    expect(shown).not.toContain("Session Info");
+    expect(shown).not.toContain("What's New");
+    expect(shown).not.toContain("Keyboard Shortcuts");
+    expect(shown).not.toContain("Debug log written");
+    expect(shown).not.toContain("Earendil");
+    expect(copyToClipboard).not.toHaveBeenCalled();
+    expect(childContainer(h).children.length).toBe(children);
+    // A refused built-in is exact-only on main too: "/quit now" is prompt text there (IM:2748) and
+    // forwards here; an arg-taking name stays refused with its argument (S11).
+    h.im.editor.onSubmit?.("/quit now");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/quit now");
+    expect(render(h)).not.toContain("replaces a session");
+    // A bare "!" is not bash on main either (IM:2741-2745): it falls through as text.
+    h.im.editor.onSubmit?.("!");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "!");
+    // pi splits the command on a literal space (IM:2648), so "/name\tx" is forwarded, not a rename.
+    h.im.editor.onSubmit?.("/name\tx");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/name\tx");
+    expect(render(h)).not.toContain("Session name set");
+    expect(render(h)).not.toContain("#249");
+  });
+
+  // A settled record has no session for getLastAssistantText; the transcript carries the same last
+  // reply, so /copy reads it there — a session-only read would print the no-reply notice instead.
+  it("S16 /copy on a settled record copies the transcript's last reply", async () => {
+    const h = harness({ record: { session: undefined, status: "completed" } });
+    h.manager.settledSessionManager.mockReturnValue({
+      buildContextEntries: () => [message("user", "SETTLED TEXT")],
+      buildSessionContext: () => ({ messages: [message("user", "q").message, message("assistant", "SETTLED REPLY").message] }),
+      getEntries: () => [],
+      getCwd: () => "/settled",
+      getSessionFile: () => "/s.jsonl",
+      getSessionId: () => "sid",
+      getSessionName: () => undefined,
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/copy");
+    await new Promise((r) => setImmediate(r));
+    expect(copyToClipboard).toHaveBeenCalledWith("SETTLED REPLY");
   });
 });
