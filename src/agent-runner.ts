@@ -38,7 +38,7 @@ import { parentExtensionFlags } from "./parent-cli.js";
 import { buildAgentPrompt, type PromptExtras, retargetToolsSection } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { toSingleLine } from "./text-safety.js";
-import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, EffectiveThinkingLevel, SubagentType, ThinkingLevel } from "./types.js";
 import { createChildUIProxy, onChildDialogFlag } from "./ui/child-ui.js";
 
 /**
@@ -876,7 +876,8 @@ export interface ChildSessionSettings {
   parentActiveTools: Set<string>;
   nestedTools: ToolDefinition[];
   model: AgentSessionOptions["model"];
-  thinkingLevel: ThinkingLevel | undefined;
+  /** What the next resume runs at — the requested level, `"off"` included; undefined resolves at resume. */
+  thinkingLevel: EffectiveThinkingLevel | undefined;
   scopedModels: ScopedModel[];
   parentModelRuntime: AgentSessionOptions["modelRuntime"];
 }

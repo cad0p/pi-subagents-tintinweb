@@ -279,7 +279,9 @@ export interface AgentRecord {
    *  parent record's `sessionId` for a nested record, otherwise the main session's id from the spawning
    *  context. The pi-background-work provider reports the record under this key. Never recomputed. */
   spawnerSessionId?: string;
-  /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
+  /** Resolved spawn params for UI display, kept current: a model or thinking switch inside a
+   *  child's view rewrites it (`adoptSessionModel`, and the view's own write-back), so the
+   *  FleetView row and the record footer name the model the session last reported. */
   invocation?: AgentInvocation;
   /** Nesting depth: a top-level subagent is 1, its children 2, and so on. */
   depth?: number;
@@ -311,10 +313,24 @@ export interface AgentRecord {
 
 /**
  * What a session reports as its level: pi's `ThinkingLevel` plus the `"off"` a
- * model with thinking disabled reports. Display-only — spawning still takes a
- * `ThinkingLevel`, so this widening cannot leak into an invocation.
+ * model with thinking disabled reports. Spawning still takes a `ThinkingLevel`
+ * (`RunOptions`), but a resume request can be `"off"`: the child view stores what
+ * the user picked, so the two stored settings (`ChildSessionSettings`,
+ * `SpawnedLedgerEntry`) carry this union.
  */
 export type EffectiveThinkingLevel = ThinkingLevel | "off";
+
+/**
+ * Advertised thinking levels, ordered to mirror pi-ai's EXTENDED_THINKING_LEVELS
+ * (`off` + every `ThinkingLevel`). Single source for the generated-agent template,
+ * the `/agents` wizard and a child view's /thinking completions and cycle, so these
+ * lists can't drift behind pi again (#147). Availability of any level still depends
+ * on the host pi version and the selected model — pi clamps unsupported levels down.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** pi's `DEFAULT_THINKING_LEVEL` (`core/defaults.js`), unexported there: the level a session falls back to. */
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
 export interface AgentInvocation {
   /** Short display name for tight rows, e.g. "haiku 4.5". Always set once known. */
@@ -324,10 +340,9 @@ export interface AgentInvocation {
   /** The level actually in effect, once a session exists to report one. */
   thinking?: EffectiveThinkingLevel;
   /**
-   * What the caller asked for, kept only when they did not get it — pi clamped
-   * the level to the model's capabilities. The snapshot exists to answer "did
-   * the spawn honor my instructions?", which it cannot do if the request is
-   * lost, so it is never overwritten once set.
+   * The latest level request the caller — or a switch made in the child's view —
+   * made, compared against `thinking` for the "(asked X)" tag. A view write always
+   * sets it, because a reload-recovered resume reads its level from this field alone.
    */
   requestedThinking?: EffectiveThinkingLevel;
   maxTurns?: number;

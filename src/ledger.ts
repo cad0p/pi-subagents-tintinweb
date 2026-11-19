@@ -8,7 +8,7 @@
 import { existsSync, statSync } from "node:fs";
 import { type SessionEntry, type SessionHeader, SessionManager } from "@earendil-works/pi-coding-agent";
 import { type OwnerHost, type OwnerStamp, ownerAlive } from "./owner-identity.js";
-import type { AgentRecord, ThinkingLevel } from "./types.js";
+import type { AgentRecord, EffectiveThinkingLevel } from "./types.js";
 import { type LifetimeUsage, readLifetimeUsage } from "./usage.js";
 
 export const LEDGER_VERSION = 1;
@@ -25,7 +25,7 @@ export interface SpawnedLedgerEntry {
   worktree?: AgentRecord["worktree"];
   persistSession: boolean;
   model?: string;
-  thinking?: ThinkingLevel;
+  thinking?: EffectiveThinkingLevel;
   runCwd?: string;
   configCwd?: string;
   /** The record's nesting depth, branch cap and branch root: what a recovered parent needs to nest again. Additive
