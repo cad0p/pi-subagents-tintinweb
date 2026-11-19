@@ -72,4 +72,14 @@ describe("pi internals", () => {
 		expect(/this\.settingsManager\.setHideThinkingBlock\(/.test(source), "toggleThinkingBlockVisibility must keep writing the global hideThinkingBlock setting (interactive-mode.js)").toBe(true);
 		expect(/this\.updateThinkingBlockVisibility\(\)/.test(source), "toggleThinkingBlockVisibility must keep applying the flag to this.chatContainer (interactive-mode.js)").toBe(true);
 	});
+
+	it("updateThinkingBlockVisibility only walks this.chatContainer", () => {
+		// The view calls it a second time once the host container is restored, so main's existing
+		// blocks follow the global flag. That is only safe while it touches nothing but the current
+		// chatContainer's AssistantMessageComponents and the render request.
+		const source = InteractiveMode.toString();
+		expect(/updateThinkingBlockVisibility\(\) \{/.test(source), "updateThinkingBlockVisibility must stay a method of InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/for \(const child of this\.chatContainer\.children\)/.test(source), "updateThinkingBlockVisibility must keep walking this.chatContainer.children (interactive-mode.js)").toBe(true);
+		expect(/child\.setHideThinkingBlock\(this\.hideThinkingBlock\)/.test(source), "updateThinkingBlockVisibility must keep applying this.hideThinkingBlock (interactive-mode.js)").toBe(true);
+	});
 });

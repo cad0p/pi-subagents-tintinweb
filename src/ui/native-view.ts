@@ -243,6 +243,8 @@ export interface InteractiveModeView {
    * which the view swaps to the child's transcript first (toggleThinkingVisibility).
    */
   toggleThinkingBlockVisibility(): void;
+  /** Private (`interactive-mode.js:3887`): re-applies the global flag to `this.chatContainer`, then requests a render. */
+  updateThinkingBlockVisibility(): void;
   isShuttingDown: boolean;
   resetExtensionUI(): void;
   setupAutocompleteProvider(): void;
@@ -1331,7 +1333,9 @@ export class NativeTranscriptView {
    * `hideThinkingBlock`, writes the global setting through the host manager (the getter sees the
    * unshadowed session), applies it to `this.chatContainer` and shows its own status. The swap
    * points that container at the child's transcript, so the gesture does exactly what it does on
-   * main — global write included (owner ruling 2026-11-19, decision 9b).
+   * main — global write included (owner ruling 2026-11-19, decision 9b). The setting is global, so
+   * once the host container is back the apply runs again to flip main's existing blocks too; pi's
+   * apply only walks `this.chatContainer` and requests a render, both safe with the host detached.
    */
   private toggleThinkingVisibility(im: InteractiveModeView, state: ViewState): void {
     const chatContainer = im.chatContainer;
@@ -1341,6 +1345,7 @@ export class NativeTranscriptView {
     } finally {
       im.chatContainer = chatContainer;
     }
+    im.updateThinkingBlockVisibility();
   }
 
   /** IM:4350-4364 — /thinking: the selector with no argument, pi's validation with one. */

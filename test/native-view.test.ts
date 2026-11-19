@@ -392,10 +392,14 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
     toggleThinkingBlockVisibility(this: any) {
       this.hideThinkingBlock = !this.hideThinkingBlock;
       this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
+      this.updateThinkingBlockVisibility();
+      this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
+    },
+    // pi's apply (interactive-mode.js:3887): only the current chatContainer's assistant components.
+    updateThinkingBlockVisibility(this: any) {
       for (const child of this.chatContainer.children) {
         if (child instanceof AssistantMessageComponent) child.setHideThinkingBlock(this.hideThinkingBlock);
       }
-      this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
     },
     extensionDialogs: [],
     dialogs: [],
@@ -2352,9 +2356,15 @@ describe("child view model and thinking (#249 part 2)", () => {
     const h = harness();
     // An assistant entry, so pi's apply arm has a component to reach inside the child container.
     h.record.session.sessionManager.buildContextEntries = () => [message("assistant", "CHILD REPLY")];
+    // A main-side assistant block already rendered in the host container.
+    const hostBlock = new AssistantMessageComponent(message("assistant", "HOST REPLY").message, false);
+    h.hostContainer.addChild(hostBlock);
     h.openChild();
     expect(h.im.hideThinkingBlock).toBe(false);
     h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
+    expect(h.im.chatContainer).toBe(h.hostContainer);
+    // The flag is global: main's already-rendered block flips with the child's.
+    expect((hostBlock as any).hideThinkingBlock).toBe(true);
     // pi's handler, unmodified: the flag and the setting it writes are GLOBAL — back on main,
     // main's blocks hide too — and `this.chatContainer` was the child's transcript for the apply.
     expect(h.im.hideThinkingBlock).toBe(true);
@@ -2368,7 +2378,34 @@ describe("child view model and thinking (#249 part 2)", () => {
     h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
     expect(h.im.hideThinkingBlock).toBe(false);
     for (const component of assistants) expect((component as any).hideThinkingBlock).toBe(false);
+    expect((hostBlock as any).hideThinkingBlock).toBe(false);
     expect(render(h)).toContain("Thinking blocks: visible");
+  });
+
+  it("T11b a throwing toggle still restores the host container", () => {
+    const h = harness();
+    h.openChild();
+    h.im.toggleThinkingBlockVisibility = () => {
+      throw new Error("toggle boom");
+    };
+    expect(() => h.im.editor.actionHandlers.get("app.thinking.toggle")?.()).toThrow("toggle boom");
+    expect(h.im.chatContainer).toBe(h.hostContainer);
+  });
+
+  it("T11c a live /thinking max on a high-capped model stores the clamped level", () => {
+    // The view offers max (the model supports it); the session clamps the write to high, as pi does.
+    const model = fakeModel("anthropic", "child-model", { thinkingLevelMap: { max: "max" } });
+    const child = liveChild({ model, state: { model, thinkingLevel: "off" } });
+    child.setThinkingLevel = vi.fn((level: string) => {
+      child.thinkingLevel = level === "max" ? "high" : level;
+      child.state.thinkingLevel = child.thinkingLevel;
+    });
+    const h = harness({ child });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking max");
+    expect(child.setThinkingLevel).toHaveBeenCalledWith("max", { persist: false });
+    expect(h.record.invocation?.thinking).toBe("high");
+    expect(h.record.invocation?.requestedThinking).toBe("high");
   });
 
   it("T12 /settings is refused for part 5 and its argument form forwards as text", () => {
