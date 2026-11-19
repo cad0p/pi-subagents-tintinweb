@@ -340,9 +340,11 @@ export interface AgentInvocation {
   /** The level actually in effect, once a session exists to report one. */
   thinking?: EffectiveThinkingLevel;
   /**
-   * The latest level request the caller — or a switch made in the child's view —
-   * made, compared against `thinking` for the "(asked X)" tag. A view write always
-   * sets it, because a reload-recovered resume reads its level from this field alone.
+   * The level the spawn requested, or — after a switch made in the child's view —
+   * the level the session ended at: view writes store pi's outcome, never a separate
+   * request, so a `thinking`/`requestedThinking` pair only diverges when pi clamped a
+   * spawn request. Compared against `thinking` for the "(asked X)" tag, and read by a
+   * reload-recovered resume as its level.
    */
   requestedThinking?: EffectiveThinkingLevel;
   maxTurns?: number;

@@ -387,6 +387,16 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
       dispose = created.dispose;
       im.selector = created.component;
     }),
+    // pi's ctrl+t body (interactive-mode.js:3830-3835): the global flag, the global write through
+    // the unshadowed settingsManager, the apply to whatever chatContainer this currently holds.
+    toggleThinkingBlockVisibility(this: any) {
+      this.hideThinkingBlock = !this.hideThinkingBlock;
+      this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
+      for (const child of this.chatContainer.children) {
+        if (child instanceof AssistantMessageComponent) child.setHideThinkingBlock(this.hideThinkingBlock);
+      }
+      this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
+    },
     extensionDialogs: [],
     dialogs: [],
     dialogBlocks: [],
@@ -526,9 +536,9 @@ describe("native transcript view", () => {
     h.openChild();
     // A prototype method in pi, so the instance carries no own property for it either.
     expect(Object.getOwnPropertyDescriptor(h.im, "renderSessionEntries")).toBeUndefined();
-    // pi reads hideThinkingBlock off the instance, not off the session: the child path swaps in the
-    // child's own flag, seeded at open (false here). Flipping the HOST's afterwards and repainting
-    // proves the swap — without it the new entries would render with the host's value.
+    // pi reads hideThinkingBlock off the instance, not off the session, and the flag is GLOBAL —
+    // ctrl+t in the child view is pi's own toggle (owner ruling 2026-11-19), so nothing is swapped
+    // and a repaint after flipping it renders the child's new entries with the flipped value.
     h.im.hideThinkingBlock = true;
     h.view.repaint();
     // Inside the render every field pi's renderSessionItems reads resolved to the child's, which
@@ -540,7 +550,7 @@ describe("native transcript view", () => {
     expect(seen.settingsManager).toBe(child.settingsManager);
     expect(seen.extensionRunner).toBe(child.extensionRunner);
     expect(seen.retryAttempt).toBe(2);
-    expect(seen.hideThinkingBlock).toBe(false);
+    expect(seen.hideThinkingBlock).toBe(true);
     // Afterwards no own property is left: the prototype getter is the restore, nothing to save.
     for (const name of ["session", "sessionManager"]) {
       expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
@@ -1966,7 +1976,7 @@ describe("child view model and thinking (#249 part 2)", () => {
     return h;
   }
 
-  it("T1 shift+tab cycles the child's level and records the request", () => {
+  it("T1 shift+tab cycles the child's level and records it", () => {
     const child = liveChild();
     const h = harness({ child, record: { childSettings: settledSettings() } });
     h.openChild();
@@ -1986,7 +1996,7 @@ describe("child view model and thinking (#249 part 2)", () => {
     expect(h.record.invocation).toEqual({ modelId: "child-model" });
   });
 
-  it("T3 /thinking applies a level, stores the request (off included), and refuses unknowns", () => {
+  it("T3 /thinking applies a level, stores what the session ends at (off included), and refuses unknowns", () => {
     const child = liveChild();
     const h = harness({ child, record: { childSettings: settledSettings() } });
     h.openChild();
@@ -2008,8 +2018,9 @@ describe("child view model and thinking (#249 part 2)", () => {
     expect(h.record.childSettings?.thinkingLevel).toBe("off");
   });
 
-  // The watch's adoptSessionModel writes the OLD request when the level changes; the view's write
-  // is what the record finally holds, so a replaced request never reads "(asked max)".
+  // The watch's adoptSessionModel keeps the OLD spawn request when the level changes; the view's
+  // write is what the record finally holds — the level the session ended at — so a stale spawn
+  // request never survives a view switch as "(asked max)".
   it("T3b a live switch replaces the request the event watch preserved", () => {
     const child = liveChild();
     const h = harness({
@@ -2337,20 +2348,26 @@ describe("child view model and thinking (#249 part 2)", () => {
     expect(h.record.invocation?.thinking).toBe("medium");
   });
 
-  it("T11 ctrl+t flips the child's hide-thinking flag and never the global setting", () => {
+  it("T11 ctrl+t runs pi's own toggle: the global flag and write, applied to the child's transcript", () => {
     const h = harness();
+    // An assistant entry, so pi's apply arm has a component to reach inside the child container.
+    h.record.session.sessionManager.buildContextEntries = () => [message("assistant", "CHILD REPLY")];
     h.openChild();
     expect(h.im.hideThinkingBlock).toBe(false);
     h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
-    // The host's own field and the global setting are the host's: a child gesture changes neither.
-    expect(h.im.hideThinkingBlock).toBe(false);
-    expect(h.hostSession.settingsManager.setHideThinkingBlock).not.toHaveBeenCalled();
+    // pi's handler, unmodified: the flag and the setting it writes are GLOBAL — back on main,
+    // main's blocks hide too — and `this.chatContainer` was the child's transcript for the apply.
+    expect(h.im.hideThinkingBlock).toBe(true);
+    expect(h.hostSession.settingsManager.setHideThinkingBlock).toHaveBeenCalledWith(true);
     expect(render(h)).toContain("Thinking blocks: hidden");
-    h.view.repaint();
-    expect(h.seenRuntime.at(-1)!.hideThinkingBlock).toBe(true);
+    const assistants = h.documentContainer.children
+      .flatMap((child: any) => child.children ?? [])
+      .filter((child: any) => child instanceof AssistantMessageComponent);
+    expect(assistants.length).toBeGreaterThan(0);
+    for (const component of assistants) expect((component as any).hideThinkingBlock).toBe(true);
     h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
-    h.view.repaint();
-    expect(h.seenRuntime.at(-1)!.hideThinkingBlock).toBe(false);
+    expect(h.im.hideThinkingBlock).toBe(false);
+    for (const component of assistants) expect((component as any).hideThinkingBlock).toBe(false);
     expect(render(h)).toContain("Thinking blocks: visible");
   });
 

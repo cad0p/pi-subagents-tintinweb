@@ -62,12 +62,14 @@ describe("pi internals", () => {
 		expect(/return this\.session\.settingsManager/.test(source), "the settingsManager getter must keep delegating to session.settingsManager (interactive-mode.js)").toBe(true);
 	});
 
-	it("hideThinkingBlock is a declared field the child view swaps", () => {
-		// src/ui/native-view.ts seeds the child's flag from it and assigns it inside the render swap
-		// (withChildRuntime). A rename leaves tsc, every double and the ctrl+t test green while the
-		// toggle silently no-ops, so this peek is the only red signal.
+	it("toggleThinkingBlockVisibility flips the global setting and applies it to chatContainer", () => {
+		// src/ui/native-view.ts calls pi's own handler under a chatContainer swap
+		// (toggleThinkingVisibility): the reach is the method, its global write and its apply to
+		// `this.chatContainer`. A rename or a dropped arm leaves tsc and every double green while
+		// ctrl+t throws or silently stops hiding, so this peek is the only red signal.
 		const source = InteractiveMode.toString();
-		expect(/^\s*hideThinkingBlock =/m.test(source), "hideThinkingBlock must stay a field of InteractiveMode (interactive-mode.js)").toBe(true);
-		expect(/this\.hideThinkingBlock/.test(source), "hideThinkingBlock must keep being read or written on InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/toggleThinkingBlockVisibility\(\)/.test(source), "toggleThinkingBlockVisibility must stay a method of InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/this\.settingsManager\.setHideThinkingBlock\(/.test(source), "toggleThinkingBlockVisibility must keep writing the global hideThinkingBlock setting (interactive-mode.js)").toBe(true);
+		expect(/this\.updateThinkingBlockVisibility\(\)/.test(source), "toggleThinkingBlockVisibility must keep applying the flag to this.chatContainer (interactive-mode.js)").toBe(true);
 	});
 });

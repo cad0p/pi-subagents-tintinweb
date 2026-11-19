@@ -900,9 +900,9 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
       ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
       ...(invocation?.thinking !== undefined ? { thinking: invocation.thinking } : {}),
-      // The level the caller — or a model/thinking switch made in the child's view —
-      // last asked for, so a ledger can show `low (asked minimal)` when pi clamped it,
-      // and a reload-recovered resume re-derives its level from it.
+      // The level the spawn asked for, or what a view switch ended at — a ledger
+      // shows `low (asked minimal)` only when pi clamped a spawn request, and a
+      // reload-recovered resume re-derives its level from it.
       ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
       depth: record.depth ?? 1,
       ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),

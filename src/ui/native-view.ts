@@ -18,7 +18,6 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type AppKeybinding,
-  AssistantMessageComponent,
   CustomEditor,
   copyToClipboard,
   ExtensionEditorComponent,
@@ -217,7 +216,6 @@ export interface InteractiveModeView {
   readonly sessionManager: SessionManager;
   pendingTools: Map<string, ToolExecutionComponent>;
   toolOutputExpanded: boolean;
-  hideThinkingBlock: boolean;
   outputPad: number;
   hiddenThinkingLabel?: string;
   editor: EditorLike;
@@ -239,6 +237,12 @@ export interface InteractiveModeView {
    * and on close. No import can name it, so the compat row in test/compat pins it.
    */
   showSelector(create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void }): void;
+  /**
+   * pi's own ctrl+t handler (private: `interactive-mode.d.ts:393`): flips the global
+   * `hideThinkingBlock`, writes the global setting and applies it to `this.chatContainer` —
+   * which the view swaps to the child's transcript first (toggleThinkingVisibility).
+   */
+  toggleThinkingBlockVisibility(): void;
   isShuttingDown: boolean;
   resetExtensionUI(): void;
   setupAutocompleteProvider(): void;
@@ -387,8 +391,6 @@ interface ViewState {
   footerSession?: AgentSession;
   childPendingTools: Map<string, ToolExecutionComponent>;
   childToolOutputExpanded: boolean;
-  /** The child transcript's own hide-thinking flag, seeded from the host's at open (decision 9). */
-  childHideThinkingBlock: boolean;
   /** One anthropic-subscription warning per open, where pi's flag is per InteractiveMode lifetime. */
   anthropicWarningShown: boolean;
   dialogRequest?: ChildDialogRequest;
@@ -625,7 +627,6 @@ export class NativeTranscriptView {
       rebuildDeferred: false,
       childPendingTools: new Map(),
       childToolOutputExpanded: im.toolOutputExpanded,
-      childHideThinkingBlock: im.hideThinkingBlock,
       anthropicWarningShown: false,
     };
     this.state = state;
@@ -943,7 +944,6 @@ export class NativeTranscriptView {
       chatContainer: im.chatContainer,
       pendingTools: im.pendingTools,
       toolOutputExpanded: im.toolOutputExpanded,
-      hideThinkingBlock: im.hideThinkingBlock,
     };
     // Every mutation is inside the try, and each one records that it was applied: a throw in the
     // middle of this sequence must put back exactly the swaps that landed, never less. A throw
@@ -951,7 +951,6 @@ export class NativeTranscriptView {
     let swappedContainer = false;
     let swappedPendingTools = false;
     let swappedToolOutputExpanded = false;
-    let swappedHideThinkingBlock = false;
     let shadowedManager = false;
     let shadowedSession = false;
     try {
@@ -961,10 +960,6 @@ export class NativeTranscriptView {
       swappedPendingTools = true;
       im.toolOutputExpanded = state.childToolOutputExpanded;
       swappedToolOutputExpanded = true;
-      // pi's AssistantMessageComponent reads this field at construction (IM:3271): a child entry must
-      // render with the child's own flag, and ctrl+t must flip only the transcript it is showing.
-      im.hideThinkingBlock = state.childHideThinkingBlock;
-      swappedHideThinkingBlock = true;
       shadowAccessor(im, "sessionManager", sessionManager);
       shadowedManager = true;
       // Before the first child read: pi derives agent and settingsManager from session.
@@ -976,7 +971,6 @@ export class NativeTranscriptView {
       // Carry back what a component set through pi's own field, before the restore: the next paint
       // must start from what the child showed last, not from the host's value.
       state.childToolOutputExpanded = im.toolOutputExpanded;
-      state.childHideThinkingBlock = im.hideThinkingBlock;
     } finally {
       // Delete the own properties before anything reads again: the getters must see the host
       // session, and a partial swap must not leave one behind either.
@@ -985,7 +979,6 @@ export class NativeTranscriptView {
       if (swappedContainer) im.chatContainer = saved.chatContainer;
       if (swappedPendingTools) im.pendingTools = saved.pendingTools;
       if (swappedToolOutputExpanded) im.toolOutputExpanded = saved.toolOutputExpanded;
-      if (swappedHideThinkingBlock) im.hideThinkingBlock = saved.hideThinkingBlock;
     }
   }
 
@@ -1275,23 +1268,24 @@ export class NativeTranscriptView {
   }
 
   /**
-   * §8's write-back, the one write site for every view-initiated switch. `childSettings` (when the
-   * record has it) takes the REQUESTED level — `"off"` included — so a resume runs the user's pick
-   * even where pi clamped it; `invocation` always takes the effective pair. `requestedThinking` is
-   * unconditional because a reload-recovered record re-derives its resume level from it alone
-   * (index.ts `recoveredSettings`); an equal pair prints no "(asked X)" tag (agent-display.ts:221).
+   * The write-back, the one write site for every view-initiated switch. `level` is what pi's
+   * session ended at for a live call (`session.thinkingLevel` after pi's own clamp), or the pick a
+   * settled resume will run — the record stores pi's outcome, as on main, and keeps no separate
+   * requested value for a view write (owner ruling 2026-11-19). `requestedThinking` takes the same
+   * level because a reload-recovered record re-derives its resume level from it alone (index.ts
+   * `recoveredSettings`); an equal pair prints no "(asked X)" tag (agent-display.ts:221).
    */
-  private writeChildModel(record: AgentRecord, model: Model<any> | undefined, requested: EffectiveThinkingLevel): void {
+  private writeChildModel(record: AgentRecord, model: Model<any> | undefined, level: EffectiveThinkingLevel): void {
     if (!model) return;
     if (record.childSettings) {
       record.childSettings.model = model;
-      record.childSettings.thinkingLevel = requested;
+      record.childSettings.thinkingLevel = level;
     }
     record.invocation = {
       ...record.invocation,
       ...describeModel(model),
-      thinking: clampThinkingLevel(model, requested),
-      requestedThinking: requested,
+      thinking: level,
+      requestedThinking: level,
     };
   }
 
@@ -1333,21 +1327,20 @@ export class NativeTranscriptView {
   }
 
   /**
-   * ctrl+t: flip the CHILD transcript's flag and re-apply it in place. No
-   * `settingsManager.setHideThinkingBlock` — pi's write is global because the main view is the
-   * global display; a child-scoped gesture must not change main's rendering (decision 9).
+   * ctrl+t: pi's own toggle (interactive-mode.js:3830-3835), unmodified — it flips the global
+   * `hideThinkingBlock`, writes the global setting through the host manager (the getter sees the
+   * unshadowed session), applies it to `this.chatContainer` and shows its own status. The swap
+   * points that container at the child's transcript, so the gesture does exactly what it does on
+   * main — global write included (owner ruling 2026-11-19, decision 9b).
    */
   private toggleThinkingVisibility(im: InteractiveModeView, state: ViewState): void {
-    const record = this.options.manager.getRecord(state.id);
-    const sessionManager = record?.session?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
-    if (!record || !sessionManager) return;
-    this.withChildRuntime(im, state, record.session, sessionManager, () => {
-      im.hideThinkingBlock = !im.hideThinkingBlock;
-      for (const child of state.childContainer.children) {
-        if (child instanceof AssistantMessageComponent) child.setHideThinkingBlock(im.hideThinkingBlock);
-      }
-    });
-    this.notice(im, state, `Thinking blocks: ${state.childHideThinkingBlock ? "hidden" : "visible"}`);
+    const chatContainer = im.chatContainer;
+    im.chatContainer = state.childContainer;
+    try {
+      im.toggleThinkingBlockVisibility();
+    } finally {
+      im.chatContainer = chatContainer;
+    }
   }
 
   /** IM:4350-4364 — /thinking: the selector with no argument, pi's validation with one. */
@@ -1383,7 +1376,8 @@ export class NativeTranscriptView {
         if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
         return;
       }
-      this.writeChildModel(record, session.model, level);
+      // The record stores what pi's session ended at, not the requested arg — pi clamps.
+      this.writeChildModel(record, session.model, session.thinkingLevel);
       state.footer?.invalidate();
     } else {
       // `writeChildModel` returns on no model, so a level applied here would be reported and
