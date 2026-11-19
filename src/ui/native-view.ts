@@ -105,6 +105,8 @@ function mainSessionNotice(what: string, plural: boolean, backLabel: string): st
   return `${what} ${plural ? "act" : "acts"} on the main session; press ${backLabel} to go back to main`;
 }
 
+/** The settled refusal when the record's model no longer resolves: `writeChildModel` writes nothing. */
+const NO_CHILD_MODEL = "This child has no model; resume it to set a thinking level";
 /** pi's anthropic subscription warning text (IM:161), unexported there. */
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING = "Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage. Disable this warning in /settings.";
 
@@ -1310,10 +1312,16 @@ export class NativeTranscriptView {
       return;
     }
     const surface = this.childSurface(im, record);
+    // No model is a different refusal from a model without thinking: /thinking and the selector
+    // say the same thing on the same record, and none of the three claims a write it cannot make.
+    if (!surface.model) {
+      this.notice(im, state, NO_CHILD_MODEL);
+      return;
+    }
     // pi guards the cycle on `supportsThinking()` (agent-session.js:2156-2158) and IM prints this
     // on a non-reasoning model (IM:3771-3780); without the guard a settled "off"-only surface
-    // walks off->off and reports a change pi refuses. No model means no thinking either.
-    if (!surface.model?.reasoning) {
+    // walks off->off and reports a change pi refuses.
+    if (!surface.model.reasoning) {
       this.notice(im, state, "Current model does not support thinking");
       return;
     }
@@ -1378,7 +1386,14 @@ export class NativeTranscriptView {
       this.writeChildModel(record, session.model, level);
       state.footer?.invalidate();
     } else {
-      this.writeChildModel(record, this.childSurface(im, record).model, level);
+      // `writeChildModel` returns on no model, so a level applied here would be reported and
+      // never written: refuse once, before the write and before "(applies on resume)".
+      const surface = this.childSurface(im, record);
+      if (!surface.model) {
+        this.notice(im, state, NO_CHILD_MODEL);
+        return;
+      }
+      this.writeChildModel(record, surface.model, level);
     }
     // pi's persist arm writes the REQUESTED level to the global default on the HOST manager: the
     // child's own SettingsManager writes the file but leaves the host's in-memory merge stale.
@@ -1416,7 +1431,7 @@ export class NativeTranscriptView {
       this.showModelSelector(im, state);
       return;
     }
-    const match = await this.findExactModelMatch(im, this.childSurface(im, record), term);
+    const match = await this.findExactModelMatch(im, state, this.childSurface(im, record), term);
     if (match) {
       await this.applyModel(im, state, match, false);
       return;
@@ -1429,12 +1444,12 @@ export class NativeTranscriptView {
    * never refreshes (an unmatched term goes straight to the selector); without one, the catalogs
    * are refreshed under a 15 s deadline and the term is matched once more on the new snapshot.
    */
-  private async findExactModelMatch(im: InteractiveModeView, surface: ChildModelSurface, term: string): Promise<Model<any> | undefined> {
+  private async findExactModelMatch(im: InteractiveModeView, state: ViewState, surface: ChildModelSurface, term: string): Promise<Model<any> | undefined> {
     const scoped = surface.scopedModels;
     const cached = scoped.length > 0 ? scoped.map((entry) => entry.model) : [...surface.modelRuntime.getAvailableSnapshot()];
     const cachedMatch = findExactModelEntry(term, cached);
     if (cachedMatch || scoped.length > 0) return cachedMatch;
-    im.showStatus("Refreshing model catalogs…");
+    if (this.canPaint(im, state)) im.showStatus("Refreshing model catalogs…");
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -1443,14 +1458,17 @@ export class NativeTranscriptView {
     }, 15_000);
     try {
       const result = await surface.modelRuntime.refresh({ signal: controller.signal });
-      if (result.aborted && timedOut) im.showWarning("Model refresh timed out; searching cached models.");
-      else if (result.errors.size > 0) {
-        im.showWarning(`Could not refresh ${[...result.errors.keys()].join(", ")}; searching cached models.`);
+      if (result.aborted && timedOut) {
+        if (this.canPaint(im, state)) im.showWarning("Model refresh timed out; searching cached models.");
+      } else if (result.errors.size > 0) {
+        if (this.canPaint(im, state)) im.showWarning(`Could not refresh ${[...result.errors.keys()].join(", ")}; searching cached models.`);
       }
     } catch (error) {
-      im.showWarning(timedOut
-        ? "Model refresh timed out; searching cached models."
-        : `Could not refresh model catalogs: ${error instanceof Error ? error.message : String(error)}`);
+      if (this.canPaint(im, state)) {
+        im.showWarning(timedOut
+          ? "Model refresh timed out; searching cached models."
+          : `Could not refresh model catalogs: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       clearTimeout(timeout);
     }
@@ -1623,16 +1641,17 @@ export class NativeTranscriptView {
   ): Promise<void> {
     try {
       if (im.settingsManager.getWarnings().anthropicExtraUsage === false) return;
-      if (state.anthropicWarningShown || model.provider !== "anthropic") return;
+      if (!this.canPaint(im, state) || state.anthropicWarningShown || model.provider !== "anthropic") return;
       if ((await modelRuntime.checkAuth("anthropic"))?.type === "oauth") {
         state.anthropicWarningShown = true;
-        im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+        // The auth lookup can outlive the view; a warning for it would land on main's transcript.
+        if (this.canPaint(im, state)) im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
         return;
       }
       const apiKey = (await modelRuntime.getAuth(model.provider))?.auth.apiKey;
       if (typeof apiKey !== "string" || !apiKey.startsWith("sk-ant-oat")) return;
       state.anthropicWarningShown = true;
-      im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+      if (this.canPaint(im, state)) im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
     } catch {
       // Auth lookups are warning-only: a failure here must never break a model switch.
     }

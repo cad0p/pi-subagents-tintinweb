@@ -2508,6 +2508,161 @@ describe("child view model and thinking (#249 part 2)", () => {
     const selector = h.im.selector as any;
     expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("low");
   });
+
+  // writeChildModel returns on no model, so a level applied there is never written. All three entry
+  // points must refuse on one record: shift+tab, /thinking <level>, the thinking selector.
+  it("T24 a settled record with no resolvable model refuses all three entry points", () => {
+    const h = settledHarness({
+      childSettings: settledSettings({ model: undefined, parentModelRuntime: modelRuntimeDouble([]) }),
+      invocation: { modelId: "gone/model", requestedThinking: "low" },
+    });
+    h.openChild();
+    const refusal = "This child has no model; resume it to set a thinking level";
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(render(h)).toContain(refusal);
+    expect(render(h)).not.toContain("does not support thinking");
+    h.im.editor.onSubmit?.("/thinking high");
+    expect(render(h)).toContain(refusal);
+    h.im.editor.onSubmit?.("/thinking");
+    (h.im.selector as any).onSelect("high");
+    expect(render(h)).toContain(refusal);
+    h.im.editor.onSubmit?.("/thinking");
+    (h.im.selector as any).onSelectAsDefault("low");
+    expect(render(h)).toContain(refusal);
+    // Nothing claimed, nothing written: not the request, not the resume level, not the default.
+    expect(render(h)).not.toContain("(applies on resume)");
+    expect(h.record.invocation).toEqual({ modelId: "gone/model", requestedThinking: "low" });
+    expect(h.record.childSettings?.thinkingLevel).toBe("medium");
+    expect(h.hostSession.settingsManager.setDefaultThinkingLevel).not.toHaveBeenCalled();
+  });
+
+  it("T25 a model refresh that lands after the close paints nothing", async () => {
+    const child = liveChild();
+    const runtime = modelRuntimeDouble([child.model]);
+    let release: (value: unknown) => void = () => {};
+    runtime.refresh.mockImplementation(() => new Promise((resolve) => {
+      release = resolve;
+    }));
+    child.modelRuntime = runtime;
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    const showStatus = h.im.showStatus as ReturnType<typeof vi.fn>;
+    const showWarning = h.im.showWarning as ReturnType<typeof vi.fn>;
+    h.openChild();
+    h.im.editor.onSubmit?.("/model nosuch/model");
+    expect(showStatus).toHaveBeenCalledWith("Refreshing model catalogs…");
+    h.view.close("restore");
+    release({ aborted: false, errors: new Map([["anthropic", new Error("boom")]]) });
+    await tick();
+    await tick();
+    expect(showWarning).not.toHaveBeenCalled();
+    expect(render(h)).not.toContain("Could not refresh");
+  });
+
+  it("T26 the oauth subscription warning is not painted into main after a close", async () => {
+    const target = fakeModel("anthropic", "other-model");
+    const child = liveChild({ modelRuntime: modelRuntimeDouble([fakeModel("anthropic", "child-model"), target]) });
+    let release: () => void = () => {};
+    child.modelRuntime.checkAuth.mockImplementation(() => new Promise((resolve) => {
+      release = () => resolve({ type: "oauth" });
+    }));
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    const showWarning = h.im.showWarning as ReturnType<typeof vi.fn>;
+    h.openChild();
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    (h.im.selector as any).onSelectCallback(target);
+    await tick();
+    h.view.close("restore");
+    release();
+    await tick();
+    expect(showWarning).not.toHaveBeenCalled();
+    expect(render(h)).not.toContain("Anthropic subscription auth");
+  });
+
+  it("T26b the api-key subscription warning is not painted into main after a close", async () => {
+    const target = fakeModel("anthropic", "other-model");
+    const child = liveChild({ modelRuntime: modelRuntimeDouble([fakeModel("anthropic", "child-model"), target]) });
+    let release: () => void = () => {};
+    child.modelRuntime.getAuth.mockImplementation(() => new Promise((resolve) => {
+      release = () => resolve({ auth: { apiKey: "sk-ant-oat-1" } });
+    }));
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    const showWarning = h.im.showWarning as ReturnType<typeof vi.fn>;
+    h.openChild();
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    (h.im.selector as any).onSelectCallback(target);
+    await tick();
+    h.view.close("restore");
+    release();
+    await tick();
+    expect(showWarning).not.toHaveBeenCalled();
+    expect(render(h)).not.toContain("Anthropic subscription auth");
+  });
+
+  // The error surface is pi's showError, never the notice band alone: reverting any arm to
+  // this.notice would keep the text on screen and only the showError call would tell.
+  it("T27 every error arm goes through pi's showError and its band", async () => {
+    const h1 = harness({ child: liveChild(), record: { childSettings: settledSettings() } });
+    const showError1 = h1.im.showError as ReturnType<typeof vi.fn>;
+    h1.openChild();
+    h1.im.editor.onSubmit?.("/thinking bogus");
+    expect(showError1).toHaveBeenCalledWith('Unknown thinking level "bogus". Available levels: off, minimal, low, medium, high.');
+    expect(render(h1)).toContain('Error: Unknown thinking level "bogus"');
+
+    const child2 = liveChild();
+    child2.setThinkingLevel = vi.fn(() => {
+      throw new Error("level boom");
+    });
+    const h2 = harness({ child: child2, record: { childSettings: settledSettings() } });
+    const showError2 = h2.im.showError as ReturnType<typeof vi.fn>;
+    h2.openChild();
+    h2.im.editor.onSubmit?.("/thinking high");
+    expect(showError2).toHaveBeenCalledWith("level boom");
+    expect(render(h2)).toContain("Error: level boom");
+
+    const child3 = liveChild();
+    const target3 = fakeModel("openai", "other-model");
+    child3.modelRuntime = modelRuntimeDouble([child3.model, target3]);
+    child3.setModel = vi.fn(async () => {
+      throw new Error("switch boom");
+    });
+    const h3 = harness({ child: child3, record: { childSettings: settledSettings() } });
+    const showError3 = h3.im.showError as ReturnType<typeof vi.fn>;
+    h3.openChild();
+    h3.im.editor.onSubmit?.("/model");
+    await tick();
+    (h3.im.selector as any).onSelectCallback(target3);
+    await tick();
+    expect(showError3).toHaveBeenCalledWith("switch boom");
+    expect(render(h3)).toContain("Error: switch boom");
+
+    const model4 = fakeModel("anthropic", "child-model");
+    const runtime4 = modelRuntimeDouble([model4, fakeModel("openai", "other-model")]);
+    runtime4.checkAuth.mockImplementation(async () => false);
+    const h4 = settledHarness({
+      childSettings: settledSettings({ model: model4, parentModelRuntime: runtime4 }),
+      invocation: { modelId: "anthropic/child-model" },
+    });
+    const showError4 = h4.im.showError as ReturnType<typeof vi.fn>;
+    h4.openChild();
+    h4.im.editor.onSubmit?.("/model openai/other-model");
+    await tick();
+    expect(showError4).toHaveBeenCalledWith("No API key for openai/other-model");
+    expect(render(h4)).toContain("Error: No API key for openai/other-model");
+
+    const child5 = liveChild();
+    child5.cycleModel = vi.fn(async () => {
+      throw new Error("cycle boom");
+    });
+    const h5 = harness({ child: child5, record: { childSettings: settledSettings() } });
+    const showError5 = h5.im.showError as ReturnType<typeof vi.fn>;
+    h5.openChild();
+    h5.im.editor.actionHandlers.get("app.model.cycleForward")?.();
+    await tick();
+    expect(showError5).toHaveBeenCalledWith("cycle boom");
+    expect(render(h5)).toContain("Error: cycle boom");
+  });
 });
 
 
