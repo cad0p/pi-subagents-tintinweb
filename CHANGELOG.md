@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file.
 - *(agent-id)* Accept a unique short prefix on every caller surface (closes #205) ([#206](https://github.com/cad0p/pi-subagents-tintinweb/pull/206))
 - *(view)* Dispatch slash commands to the shown child, read-only built-ins first (closes #252) ([#253](https://github.com/cad0p/pi-subagents-tintinweb/pull/253))
 - *(fleet)* Shift+arrows navigate FleetView with a draft, configurable fleetKeys, one draft per child (closes #254) ([#256](https://github.com/cad0p/pi-subagents-tintinweb/pull/256))
+- *(view)* Model and thinking act on the shown child (closes #258) ([#259](https://github.com/cad0p/pi-subagents-tintinweb/pull/259))
 
 ### 🐛 Bug Fixes
 
