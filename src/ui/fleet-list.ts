@@ -23,8 +23,8 @@
 
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
-import { DEFAULT_FLEET_KEYS, type FleetDirection, type FleetKeys, fleetDirectionLabel, fleetDirectionOf, fleetPairLabel } from "../fleet-keys.js";
 import { deliveryText } from "../delivery-text.js";
+import { DEFAULT_FLEET_KEYS, type FleetDirection, type FleetKeys, fleetDirectionLabel, fleetDirectionOf, fleetPairLabel } from "../fleet-keys.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
