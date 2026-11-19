@@ -96,9 +96,7 @@ export const SESSION_REPLACING_COMMANDS: ReadonlySet<string> = new Set([
 
 /** Built-ins a later part of #249 lands, with the part that owns them. */
 export const LATER_COMMANDS: ReadonlyMap<string, string> = new Map([
-  ["thinking", "part 2"],
-  ["model", "part 2"],
-  ["settings", "part 2"],
+  ["settings", "part 5"],
   ["export", "part 5"],
   ["share", "part 5"],
   ["bug", "part 5"],
@@ -595,22 +593,27 @@ function fuzzyItems<T>(items: readonly T[], prefix: string, searchText: (item: T
   return filtered.map(toItem);
 }
 
-/** The session surface the command list is built from: only what the child's own activation exposes. */
+/**
+ * The session surface the command list is built from: only what the child's own activation exposes.
+ * The last three are live-only — a settled record has no runner, settings manager or resource
+ * loader, so the view hands it the built-in set plus the model and thinking completions.
+ */
 export interface ChildCommandSource {
   scopedModels: ReadonlyArray<{ model: ModelLike }>;
   modelRuntime: { getAvailableSnapshot(): readonly ModelLike[] };
   getAvailableThinkingLevels(): string[];
   promptTemplates: ReadonlyArray<PromptTemplate>;
-  extensionRunner: { getRegisteredCommands(): ResolvedCommand[] };
-  settingsManager: { getEnableSkillCommands(): boolean };
-  resourceLoader: { getSkills(): { skills: Skill[] } };
+  extensionRunner?: { getRegisteredCommands(): ResolvedCommand[] };
+  settingsManager?: { getEnableSkillCommands(): boolean };
+  resourceLoader?: { getSkills(): { skills: Skill[] } };
 }
 
 /**
  * IM:468-546 — the autocomplete command list, built from the CHILD's session: its own prompt
- * templates, extension commands and skills, never the host's. A settled record has no live session
- * and offers the built-in set only; a typed extension command still works there, because
- * `deliver` reopens the session and pi runs it on that session's runner. /login's argument
+ * templates, extension commands and skills, never the host's. A settled record has no live session:
+ * the view hands it the built-in set plus the /model and /thinking completions from the record's
+ * own scope and model; a typed extension command still works there, because `deliver` reopens the
+ * session and pi runs it on that session's runner. /login's argument
  * completions need IM-private provider options, so that refused command lists without them.
  */
 export function childSlashCommands(session: ChildCommandSource | undefined): SlashCommand[] {
@@ -650,7 +653,7 @@ export function childSlashCommands(session: ChildCommandSource | undefined): Sla
       ...(template.argumentHint ? { argumentHint: template.argumentHint } : {}),
     });
   }
-  for (const command of session?.extensionRunner.getRegisteredCommands() ?? []) {
+  for (const command of session?.extensionRunner?.getRegisteredCommands() ?? []) {
     if (builtinNames.has(command.name)) continue;
     const completions = command.getArgumentCompletions;
     commands.push({
@@ -659,8 +662,8 @@ export function childSlashCommands(session: ChildCommandSource | undefined): Sla
       ...(completions ? { getArgumentCompletions: (prefix: string) => completions(prefix) } : {}),
     });
   }
-  if (session?.settingsManager.getEnableSkillCommands()) {
-    for (const skill of session.resourceLoader.getSkills().skills) {
+  if (session?.settingsManager?.getEnableSkillCommands()) {
+    for (const skill of session?.resourceLoader?.getSkills().skills ?? []) {
       commands.push({
         name: `skill:${skill.name}`,
         description: prefixDescription(skill.description, skill.sourceInfo),
