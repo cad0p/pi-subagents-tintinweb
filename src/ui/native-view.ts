@@ -32,6 +32,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type MarkdownTheme, Spacer, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { type AgentManager, adoptSessionModel } from "../agent-manager.js";
+import { DEFAULT_FLEET_KEYS, type FleetKeys, fleetDirectionLabel } from "../fleet-keys.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import {
@@ -96,16 +97,9 @@ const LATER_ACTIONS: ReadonlyMap<AppKeybinding, string> = new Map([
   ["app.model.select", "part 2"],
 ]);
 
-/**
- * The key that leaves a child view: ← goes back one level in FleetView, and repeated it reaches
- * `main` from any depth. FleetView's hint and the view's notices both read this, so the two cannot
- * name different keys.
- */
-export const TO_MAIN_KEYS = "←";
-
 /** The notice for something the child view refuses because only the main session can do it. */
-function mainSessionNotice(what: string, plural: boolean): string {
-  return `${what} ${plural ? "act" : "acts"} on the main session; press ${TO_MAIN_KEYS} to go back to main`;
+function mainSessionNotice(what: string, plural: boolean, backLabel: string): string {
+  return `${what} ${plural ? "act" : "acts"} on the main session; press ${backLabel} to go back to main`;
 }
 
 export interface EditorLike {
@@ -332,6 +326,11 @@ export interface NativeViewOptions {
    * learns that the row it points at is no longer the transcript on screen (a failed open, or pi's reload).
    */
   onClosed?: () => void;
+  /**
+   * The same fleet-key getter FleetList takes: the notices name the configured "back" key, so a
+   * rebind cannot leave them pointing at a key that does nothing. Read live, per notice.
+   */
+  fleetKeys?: () => FleetKeys;
 }
 
 /** The parts of `ExtensionContext` the view reads. */
@@ -459,6 +458,11 @@ export class NativeTranscriptView {
   /** The record the open view shows, so landing on the row it already shows is not a rebuild. */
   shownId(): string | undefined {
     return this.isOpen() ? this.state?.id : undefined;
+  }
+
+  /** The configured "back to main" key's label, read live like FleetView's hint does. */
+  private backLabel(): string {
+    return fleetDirectionLabel(this.options.fleetKeys?.() ?? DEFAULT_FLEET_KEYS, "left");
   }
 
   /** The bus event handler: repaint only when the event names the shown record. */
@@ -887,7 +891,7 @@ export class NativeTranscriptView {
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
     ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
     for (const action of BLOCKED_ACTIONS) {
-      ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false)));
+      ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false, this.backLabel())));
     }
     for (const [action, part] of LATER_ACTIONS) {
       ed.onAction(action, () => this.notice(im, state, `${action} is not wired into the child view yet — it lands in ${part} of #249`));
@@ -944,7 +948,8 @@ export class NativeTranscriptView {
 
   /**
    * Esc in a child view: interrupt the run it shows, and nothing else — the view stays open, so the
-   * user can read how the run ended. Leaving is navigation only (`TO_MAIN_KEYS`).
+   * user can read how the run ended. Leaving is navigation only — FleetView's `left` key,
+   * `shift+←` by default.
    *
    * Nothing is announced here: pi renders the abort in the transcript this view shows, as it does in
    * the main session — an aborted assistant message reads "Operation aborted" and an aborted tool
@@ -1051,7 +1056,7 @@ export class NativeTranscriptView {
       im.ui.requestRender();
       return true;
     }
-    const refusal = childCommandRefusal(name, exact, TO_MAIN_KEYS);
+    const refusal = childCommandRefusal(name, exact, this.backLabel());
     if (refusal) {
       this.notice(im, state, refusal);
       return true;

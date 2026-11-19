@@ -29,9 +29,10 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { setQuietMs } from "../src/agent-manager.js";
 import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
+import { DEFAULT_FLEET_KEYS, fleetDirectionLabel } from "../src/fleet-keys.js";
 import subagentsExtension from "../src/index.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
-import { captureInteractiveMode, TO_MAIN_KEYS } from "../src/ui/native-view.js";
+import { captureInteractiveMode } from "../src/ui/native-view.js";
 import { agentIdOf, makePi, textOf, withStubProjection } from "./helpers/subagents-harness.js";
 
 // Settles wait a quiet window; a few ms keeps the suite fast (production keeps 1000 ms).
@@ -484,7 +485,7 @@ describe("FleetView arrows and Esc through the real extension (#178)", () => {
       expect(h.transcript()).toContain("hang: CHILD hang");
       expect(h.transcript()).not.toContain("HOST TEXT");
       expect(row(h, "nav one")).toContain("⏺");
-      expect(h.painted()[0]).toContain(`${TO_MAIN_KEYS} back to main · esc interrupts`);
+      expect(h.painted()[0]).toContain(`${fleetDirectionLabel(DEFAULT_FLEET_KEYS, "left")} back to main · esc interrupts`);
 
       h.press(UP); // back onto `main`
       expect(h.transcript()).toContain("HOST TEXT");

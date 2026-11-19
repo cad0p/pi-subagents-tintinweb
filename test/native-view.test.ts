@@ -690,7 +690,7 @@ describe("native transcript view", () => {
     expect(h.im.editor.history).toContain("CHILD TEXT");
 
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press ← to go back to main");
+    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press shift+← to go back to main");
     h.im.editor.onSubmit?.("/model");
     // A built-in a later part owns names that part, never "main": /model acts on the child in part 2.
     expect(h.documentContainer.render(120).join("\n")).toContain("/model is not wired into the child view yet — it lands in part 2 of #249");
@@ -1618,13 +1618,13 @@ describe("child view slash commands (#252)", () => {
       ["/login anthropic", "/login is not wired into the child view yet — it lands in part 5 of #249"],
       ["/logout", "/logout is not wired into the child view yet — it lands in part 5 of #249"],
       ["/reload", "/reload is not wired into the child view yet — it lands in part 5 of #249"],
-      ["/new", "/new replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/resume", "/resume replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/fork", "/fork replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/clone", "/clone replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/tree", "/tree replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/quit", "/quit replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/import file.jsonl", "/import replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/new", "/new replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/resume", "/resume replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/fork", "/fork replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/clone", "/clone replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/tree", "/tree replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/quit", "/quit replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/import file.jsonl", "/import replaces a session — it acts on the main session; press shift+← to go back to main"],
       ["!pwd", "bash mode is not wired into the child view yet — it lands in part 4 of #249"],
     ];
     for (const [input, notice] of cases) {
@@ -1664,7 +1664,7 @@ describe("child view slash commands (#252)", () => {
     const h = harness();
     h.openChild();
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(render(h)).toContain("app.session.new acts on the main session; press ← to go back to main");
+    expect(render(h)).toContain("app.session.new acts on the main session; press shift+← to go back to main");
     h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
     expect(render(h)).toContain("app.thinking.cycle is not wired into the child view yet — it lands in part 2 of #249");
     h.im.editor.actionHandlers.get("app.message.dequeue")?.();
