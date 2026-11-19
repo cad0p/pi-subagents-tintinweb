@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isFallbackResolvableIn } from "../src/agent-types.js";
+import { resolveFleetKeys } from "../src/fleet-keys.js";
 import {
   applyAndEmitLoaded,
   applySettings,
@@ -169,6 +170,38 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ fallbackSubagent: "my-router" });
     writeProject({ fallbackSubagent: "   " });
     expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("round-trips fleetKeys, keeping the string-or-list shape the author wrote", () => {
+    saveSettings({ fleetKeys: { down: "ctrl+alt+down", up: ["shift+up", "ctrl+alt+up"] } }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ fleetKeys: { down: "ctrl+alt+down", up: ["shift+up", "ctrl+alt+up"] } });
+  });
+
+  it("drops invalid fleetKeys entries with one warning each; the surviving directions stay", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      writeProject({ fleetKeys: { up: "shift+up", down: "q", left: [], right: "ctrl+alt+right" } });
+      expect(loadSettings(projectDir)).toEqual({ fleetKeys: { up: "shift+up", right: "ctrl+alt+right" } });
+      expect(spy).toHaveBeenCalledTimes(2); // "q" and [] — one warning each
+      writeProject({ fleetKeys: { up: "plain" } });
+      expect(loadSettings(projectDir)).toEqual({}); // no direction survives: the field is absent
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a project fleetKeys replaces the global one wholesale; omitted directions take shipped defaults", () => {
+    writeGlobal({ fleetKeys: { up: "ctrl+alt+up", left: "ctrl+alt+left" } });
+    writeProject({ fleetKeys: { down: "ctrl+alt+down" } });
+    const loaded = loadSettings(projectDir);
+    // Shallow merge like every other field: the project's object is the whole value — the
+    // global's up/left do NOT carry over; resolve fills them with shipped defaults.
+    expect(loaded.fleetKeys).toEqual({ down: "ctrl+alt+down" });
+    expect(resolveFleetKeys(loaded.fleetKeys)).toEqual({
+      up: ["shift+up"], down: ["ctrl+alt+down"], left: ["shift+left"], right: ["shift+right"],
+    });
+    writeProject({ maxConcurrent: 2 }); // no project fleetKeys: the global one applies
+    expect(loadSettings(projectDir).fleetKeys).toEqual({ up: "ctrl+alt+up", left: "ctrl+alt+left" });
   });
 
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
@@ -455,6 +488,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setFleetKeys: vi.fn(),
       };
     });
 
@@ -468,6 +502,7 @@ describe("settings persistence", () => {
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
       expect(appliers.setFailurePreviewMaxChars).not.toHaveBeenCalled();
+      expect(appliers.setFleetKeys).not.toHaveBeenCalled();
     });
 
     it("applies only the fields that are present", () => {
@@ -515,6 +550,11 @@ describe("settings persistence", () => {
     it("applies toolDescriptionMode", () => {
       applySettings({ toolDescriptionMode: "full" }, appliers);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("full");
+    });
+
+    it("applies fleetKeys with the sanitized object, and only when present", () => {
+      applySettings({ fleetKeys: { down: "ctrl+alt+down" } }, appliers);
+      expect(appliers.setFleetKeys).toHaveBeenCalledWith({ down: "ctrl+alt+down" });
     });
 
     it("applies outputTranscript (both true and false)", () => {
@@ -619,6 +659,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setFleetKeys: vi.fn(),
       };
     });
 
