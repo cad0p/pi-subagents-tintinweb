@@ -1242,6 +1242,9 @@ export class NativeTranscriptView {
     const current = !model
       ? "off"
       : clampThinkingLevel(model, record.invocation?.thinking
+        // A record rebuilt from the ledger by a crash carries no effective level and no settings:
+        // its only level is the request `recoveredSettings` will resume at.
+        ?? record.invocation?.requestedThinking
         ?? childSettings?.thinkingLevel
         ?? settingsManager.getModelThinkingLevel(model.provider, model.id)
         ?? settingsManager.getDefaultThinkingLevel()
@@ -1307,6 +1310,13 @@ export class NativeTranscriptView {
       return;
     }
     const surface = this.childSurface(im, record);
+    // pi guards the cycle on `supportsThinking()` (agent-session.js:2156-2158) and IM prints this
+    // on a non-reasoning model (IM:3771-3780); without the guard a settled "off"-only surface
+    // walks off->off and reports a change pi refuses. No model means no thinking either.
+    if (!surface.model?.reasoning) {
+      this.notice(im, state, "Current model does not support thinking");
+      return;
+    }
     const levels = surface.getAvailableThinkingLevels();
     const index = levels.indexOf(surface.thinkingLevel);
     const next = levels[(index + 1) % levels.length] ?? "off";
@@ -1361,7 +1371,8 @@ export class NativeTranscriptView {
       try {
         session.setThinkingLevel(level, { persist: false });
       } catch (error) {
-        this.notice(im, state, error instanceof Error ? error.message : String(error));
+        // pi's showError, like its own selectThinkingLevel: an error is an error in every view.
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
         return;
       }
       this.writeChildModel(record, session.model, level);
@@ -1492,14 +1503,14 @@ export class NativeTranscriptView {
       try {
         await childSession.setModel(model, { persist: false });
       } catch (error) {
-        if (this.canPaint(im, state)) this.notice(im, state, error instanceof Error ? error.message : String(error));
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
         return;
       }
       level = childSession.thinkingLevel;
     } else {
       const surface = this.childSurface(im, record);
       if (!(await surface.modelRuntime.checkAuth(model.provider))) {
-        if (this.canPaint(im, state)) this.notice(im, state, `No API key for ${model.provider}/${model.id}`);
+        if (this.canPaint(im, state)) im.showError(`No API key for ${model.provider}/${model.id}`);
         return;
       }
       level = this.levelForModelSwitch(surface, model);
@@ -1550,7 +1561,7 @@ export class NativeTranscriptView {
       try {
         result = await childSession.cycleModel(direction);
       } catch (error) {
-        if (this.canPaint(im, state)) this.notice(im, state, error instanceof Error ? error.message : String(error));
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
         return;
       }
       if (!result) {

@@ -2417,7 +2417,100 @@ describe("child view model and thinking (#249 part 2)", () => {
     (h.im.selector as any).onCancelCallback();
     expect(h.im.selectorClosed).toBe(true);
   });
+
+  it("T17 ctrl+l opens the model selector through the binding", async () => {
+    const child = liveChild();
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.model.select")?.();
+    await tick();
+    expect(h.im.showSelector).toHaveBeenCalledTimes(1);
+    expect(h.im.selector).toBeInstanceOf(ModelSelectorComponent);
+  });
+
+  it("T18 the anthropic subscription warning is shown once per open", async () => {
+    const target = fakeModel("anthropic", "other-model");
+    const child = liveChild({ modelRuntime: modelRuntimeDouble([fakeModel("anthropic", "child-model"), target]) });
+    child.modelRuntime.checkAuth.mockImplementation(async () => ({ type: "oauth" }));
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    // The view wraps showWarning on the instance, so the original spy is what the wrapper calls.
+    const showWarning = h.im.showWarning as ReturnType<typeof vi.fn>;
+    h.openChild();
+    for (const expected of [1, 1]) {
+      h.im.editor.onSubmit?.("/model");
+      await tick();
+      (h.im.selector as any).onSelectCallback(target);
+      await tick();
+      expect(showWarning).toHaveBeenCalledTimes(expected);
+    }
+  });
+
+  it("T19 a settled model switch falls through to the level the child is at", async () => {
+    const model = fakeModel("anthropic", "child-model");
+    const target = fakeModel("openai", "other-model");
+    const h = settledHarness({
+      childSettings: settledSettings({ model, thinkingLevel: undefined, parentModelRuntime: modelRuntimeDouble([model, target]) }),
+      invocation: { modelId: "anthropic/child-model", thinking: "high" },
+    });
+    // Nothing per-model, no global default: pi's chain ends at the level the child is at.
+    h.hostSession.settingsManager.getDefaultThinkingLevel = () => undefined;
+    h.openChild();
+    h.im.editor.onSubmit?.("/model openai/other-model");
+    await tick();
+    expect(h.record.childSettings?.model).toBe(target);
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+  });
+
+  it("T20 a settled ctrl+s arm applies the level and writes the global default", () => {
+    const h = settledHarness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    (h.im.selector as any).onSelectAsDefault("high");
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+    expect(h.record.invocation?.requestedThinking).toBe("high");
+    expect(h.hostSession.settingsManager.setDefaultThinkingLevel).toHaveBeenCalledWith("high");
+  });
+
+  it("T21 the settled level prefers what the child ran at over its resume request", () => {
+    const model = fakeModel("anthropic", "child-model");
+    const h = settledHarness({
+      childSettings: settledSettings({ model, thinkingLevel: "minimal" }),
+      invocation: { modelId: "anthropic/child-model", thinking: "high" },
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    const selector = h.im.selector as any;
+    expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("high");
+  });
+
+  it("T22 a settled non-thinking model refuses the cycle instead of claiming a change", () => {
+    const plain = fakeModel("anthropic", "plain-model", { reasoning: false });
+    const h = settledHarness({
+      childSettings: settledSettings({ model: plain, thinkingLevel: undefined, parentModelRuntime: modelRuntimeDouble([plain]) }),
+      invocation: { modelId: "anthropic/plain-model", thinking: "off" },
+    });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(render(h)).toContain("Current model does not support thinking");
+    expect(h.record.invocation?.requestedThinking).toBeUndefined();
+    expect(h.record.childSettings?.thinkingLevel).toBeUndefined();
+  });
+
+  it("T23 a crash-recovered record ticks the level it will resume at", () => {
+    const model = fakeModel("anthropic", "child-model");
+    const h = settledHarness({
+      childSettings: undefined,
+      invocation: { modelId: "anthropic/child-model", requestedThinking: "low" },
+    });
+    h.hostSession.modelRuntime = modelRuntimeDouble([model]);
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    const selector = h.im.selector as any;
+    expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("low");
+  });
 });
+
+
 
 
 
