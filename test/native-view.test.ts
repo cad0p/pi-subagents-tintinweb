@@ -7,6 +7,8 @@ import {
   copyToClipboard,
   getMarkdownTheme,
   initTheme,
+  ModelSelectorComponent,
+  ThinkingSelectorComponent,
   UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
@@ -18,8 +20,10 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
 });
 
 import type { AgentManager } from "../src/agent-manager.js";
+import type { ChildSessionSettings } from "../src/agent-runner.js";
 import { type FleetKeys, resolveFleetKeys } from "../src/fleet-keys.js";
 import type { AgentRecord } from "../src/types.js";
+import { LATER_COMMANDS } from "../src/ui/child-commands.js";
 import { childUIState, clearChildUI, createChildUIProxy, dropChildDialogs, onChildDialogFlag, pendingChildDialogs } from "../src/ui/child-ui.js";
 import {
   ChildFooter,
@@ -84,12 +88,31 @@ class FakeEditor {
   onAction(action: string, handler: () => void): void { this.actionHandlers.set(action, handler); }
 }
 
+/** A model the doubles hand out: the fields the exact matcher and the selectors read. */
+function fakeModel(provider: string, id: string, over: Record<string, unknown> = {}): any {
+  return { id, provider, name: `${provider}/${id}`, reasoning: true, contextWindow: 1000, ...over };
+}
+
+/** pi's ModelRuntime surface the view reads: the snapshot, exact lookup, refresh and auth. */
+function modelRuntimeDouble(models: any[] = []) {
+  return {
+    getAvailableSnapshot: () => models,
+    getModel: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+    getError: () => undefined,
+    refresh: vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() })),
+    checkAuth: vi.fn(async () => ({ type: "apiKey" })),
+    getAuth: vi.fn(async () => undefined),
+    // pi's footer asks the runtime whether the provider is on a subscription.
+    isUsingSubscription: () => false,
+  };
+}
+
 function childSession(over: Record<string, unknown> = {}): any {
   const listeners = new Set<(event: any) => void>();
   const registeredCommands: any[] = [];
   const shortcuts = new Map<string, any>();
   let childSessionName: string | undefined = "child";
-  return {
+  const session: any = {
     sessionId: "child-sid",
     // pi's AgentSession.subscribe: the child's own bus, which the view watches for a model switch.
     subscribe: (listener: (event: any) => void) => {
@@ -142,9 +165,37 @@ function childSession(over: Record<string, unknown> = {}): any {
     getContextUsage: () => ({ tokens: 0, contextWindow: 1000, percent: 0 }),
     state: { model: { id: "child-model", provider: "anthropic", contextWindow: 1000, reasoning: false }, thinkingLevel: "off" },
     model: { id: "child-model", provider: "anthropic", contextWindow: 1000, reasoning: false },
-    modelRuntime: { isUsingSubscription: () => false },
+    // The live model/thinking mutators the view calls: each records what it was asked and reports
+    // the change on the session bus, the way pi's own setters do.
+    scopedModels: [] as any[],
+    setThinkingLevel: vi.fn((level: string) => {
+      session.thinkingLevel = level;
+      session.state.thinkingLevel = level;
+      session.emit({ type: "thinking_level_changed" });
+    }),
+    cycleThinkingLevel: vi.fn(() => {
+      if (!session.model?.reasoning) return undefined;
+      const levels = session.getAvailableThinkingLevels();
+      const next = levels[(levels.indexOf(session.thinkingLevel) + 1) % levels.length];
+      session.setThinkingLevel(next);
+      return next;
+    }),
+    getAvailableThinkingLevels: () => session.model?.reasoning
+      ? ["off", "minimal", "low", "medium", "high"]
+      : ["off"],
+    setModel: vi.fn(async (model: any) => {
+      session.model = model;
+      session.state.model = model;
+      session.emit({ type: "entry_appended", entry: { type: "model_change" } });
+    }),
+    setScopedModels: vi.fn((next: any[]) => {
+      session.scopedModels = next;
+    }),
+    cycleModel: vi.fn(async () => undefined),
+    modelRuntime: modelRuntimeDouble([{ id: "child-model", provider: "anthropic", contextWindow: 1000, reasoning: false }]),
     ...over,
   };
+  return session;
 }
 
 /**
@@ -222,11 +273,24 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
       getEntries: () => [],
       getCwd: () => "/host",
     },
+    // The HOST manager: every global read and write the child view makes goes through it, never
+    // through the child's own stale-cached instance.
     settingsManager: {
       getExternalEditorCommand: () => undefined,
       getShowCacheMissNotices: () => false,
       getCacheWarmingMode: () => "auto",
+      getDefaultThinkingLevel: () => "medium",
+      setDefaultThinkingLevel: vi.fn(),
+      getModelThinkingLevel: () => undefined,
+      setDefaultModelAndProvider: vi.fn(),
+      getDefaultProvider: () => "anthropic",
+      getDefaultModel: () => "host-model",
+      getEnabledModels: () => undefined,
+      setEnabledModels: vi.fn(),
+      getWarnings: () => ({}),
+      setHideThinkingBlock: vi.fn(),
     },
+    modelRuntime: modelRuntimeDouble([{ id: "child-model", provider: "anthropic", contextWindow: 1000, reasoning: false }]),
     retryAttempt: 0,
   };
   const seenRuntime: SeenRuntime[] = [];
@@ -309,6 +373,20 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
     pushExtensionDialog: vi.fn((component: any, blocked?: any) => { im.dialogs.push(component); im.dialogBlocks.push(blocked); }),
     removeExtensionDialog: vi.fn(),
     updateEditorBorderColor: vi.fn(),
+    // pi's selector slot: run the factory, keep the component, and mark a done() the view called.
+    selectorClosed: false,
+    selector: undefined,
+    showSelector: vi.fn((create: (done: () => void) => { component: unknown; focus: unknown; dispose?: () => void }) => {
+      let dispose: (() => void) | undefined;
+      const done = () => {
+        dispose?.();
+        im.selectorClosed = true;
+        im.selector = undefined;
+      };
+      const created = create(done);
+      dispose = created.dispose;
+      im.selector = created.component;
+    }),
     extensionDialogs: [],
     dialogs: [],
     dialogBlocks: [],
@@ -445,12 +523,14 @@ describe("native transcript view", () => {
   it("shadows pi's session accessors for the render and gives the getters back afterwards", () => {
     const h = harness();
     const child = h.record.session;
-    // pi reads hideThinkingBlock off the instance, not off the session: flip it to prove the fake
-    // reads the field rather than a constant. It stays the host's on the child path, by design.
-    h.im.hideThinkingBlock = true;
     h.openChild();
     // A prototype method in pi, so the instance carries no own property for it either.
     expect(Object.getOwnPropertyDescriptor(h.im, "renderSessionEntries")).toBeUndefined();
+    // pi reads hideThinkingBlock off the instance, not off the session: the child path swaps in the
+    // child's own flag, seeded at open (false here). Flipping the HOST's afterwards and repainting
+    // proves the swap — without it the new entries would render with the host's value.
+    h.im.hideThinkingBlock = true;
+    h.view.repaint();
     // Inside the render every field pi's renderSessionItems reads resolved to the child's, which
     // is what pi's own code sees; a render that only echoed the entries it was handed would pass
     // whether or not the view swapped anything.
@@ -460,7 +540,7 @@ describe("native transcript view", () => {
     expect(seen.settingsManager).toBe(child.settingsManager);
     expect(seen.extensionRunner).toBe(child.extensionRunner);
     expect(seen.retryAttempt).toBe(2);
-    expect(seen.hideThinkingBlock).toBe(true);
+    expect(seen.hideThinkingBlock).toBe(false);
     // Afterwards no own property is left: the prototype getter is the restore, nothing to save.
     for (const name of ["session", "sessionManager"]) {
       expect(Object.getOwnPropertyDescriptor(h.im, name)).toBeUndefined();
@@ -692,9 +772,9 @@ describe("native transcript view", () => {
 
     h.im.editor.actionHandlers.get("app.session.new")?.();
     expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press shift+← to go back to main");
-    h.im.editor.onSubmit?.("/model");
-    // A built-in a later part owns names that part, never "main": /model acts on the child in part 2.
-    expect(h.documentContainer.render(120).join("\n")).toContain("/model is not wired into the child view yet — it lands in part 2 of #249");
+    h.im.editor.onSubmit?.("/settings");
+    // A built-in a later part owns names that part, never "main": /settings lands in part 5.
+    expect(h.documentContainer.render(120).join("\n")).toContain("/settings is not wired into the child view yet — it lands in part 5 of #249");
     expect(h.documentContainer.render(120).join("\n")).not.toContain("Slash commands act on the main session");
     expect((h.im.defaultEditor as any).actionHandlers.get("app.session.new")).not.toHaveBeenCalled();
     // An action pi may add later is not inherited either: the map starts empty.
@@ -1609,10 +1689,7 @@ describe("child view slash commands (#252)", () => {
       ["/trust", "/trust stays refused in a child view: its selector and option builder are not exported by pi"],
       ["/compact", "/compact stays refused in a child view: compact() aborts the run it would compact"],
       ["/compact the noisy part", "/compact stays refused in a child view: compact() aborts the run it would compact"],
-      ["/model", "/model is not wired into the child view yet — it lands in part 2 of #249"],
-      ["/model anthropic/claude", "/model is not wired into the child view yet — it lands in part 2 of #249"],
-      ["/thinking high", "/thinking is not wired into the child view yet — it lands in part 2 of #249"],
-      ["/settings", "/settings is not wired into the child view yet — it lands in part 2 of #249"],
+      ["/settings", "/settings is not wired into the child view yet — it lands in part 5 of #249"],
       ["/export out.html", "/export is not wired into the child view yet — it lands in part 5 of #249"],
       ["/share", "/share is not wired into the child view yet — it lands in part 5 of #249"],
       ["/bug it broke", "/bug is not wired into the child view yet — it lands in part 5 of #249"],
@@ -1667,7 +1744,9 @@ describe("child view slash commands (#252)", () => {
     h.im.editor.actionHandlers.get("app.session.new")?.();
     expect(render(h)).toContain("app.session.new acts on the main session; press shift+← to go back to main");
     h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
-    expect(render(h)).toContain("app.thinking.cycle is not wired into the child view yet — it lands in part 2 of #249");
+    // Part 2 wires this one to the child: pi's own no-thinking reply, never the part-2 notice.
+    expect(render(h)).toContain("Current model does not support thinking");
+    expect(render(h)).not.toContain("app.thinking.cycle");
     h.im.editor.actionHandlers.get("app.message.dequeue")?.();
     expect(render(h)).toContain("app.message.dequeue is not wired into the child view yet — it lands in part 3 of #249");
   });
@@ -1815,3 +1894,533 @@ describe("per-child drafts, fleet keys and fdPath (#254)", () => {
     expect(render(h)).toContain("/new replaces a session — it acts on the main session; press ctrl+alt+← to go back to main");
   });
 });
+
+describe("child view model and thinking (#249 part 2)", () => {
+  const render = (h: Harness): string => h.documentContainer.render(160).join("\n");
+  const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  beforeEach(() => {
+    initTheme("dark");
+    vi.mocked(copyToClipboard).mockClear();
+    dropChildDialogs("child-1");
+    clearChildUI("child-1");
+  });
+
+  /** A live child on a reasoning model: the surface §1 reads, with pi's level list. */
+  function liveChild(over: Record<string, unknown> = {}): any {
+    const model = fakeModel("anthropic", "child-model");
+    return childSession({
+      model,
+      state: { model, thinkingLevel: "off" },
+      thinkingLevel: "off",
+      modelRuntime: modelRuntimeDouble([model]),
+      ...over,
+    });
+  }
+
+  /** A settled record's resolved settings: the resume source the view writes and reads. */
+  function settledSettings(over: Record<string, unknown> = {}): ChildSessionSettings {
+    const model = fakeModel("anthropic", "child-model");
+    return {
+      type: "general-purpose",
+      agentConfig: undefined,
+      effectiveCwd: "/settled",
+      configCwd: "/settled",
+      projectTrusted: true,
+      extensions: true,
+      excludeExtensions: undefined,
+      extSelectors: [],
+      noSkills: true,
+      systemPrompt: "",
+      toolNames: [],
+      parentActiveTools: new Set<string>(),
+      nestedTools: [],
+      model,
+      thinkingLevel: "medium",
+      scopedModels: [],
+      parentModelRuntime: modelRuntimeDouble([model]),
+      ...over,
+    } as unknown as ChildSessionSettings;
+  }
+
+  function settledHarness(record: Partial<AgentRecord> = {}): Harness {
+    const h = harness({
+      child: null,
+      record: {
+        session: undefined,
+        status: "completed",
+        childSettings: settledSettings(),
+        invocation: { modelId: "anthropic/child-model", thinking: "medium" },
+        ...record,
+      },
+    });
+    h.manager.settledSessionManager.mockReturnValue({
+      buildContextEntries: () => [],
+      buildSessionContext: () => ({ messages: [] }),
+      getEntries: () => [],
+      getCwd: () => "/settled",
+      getSessionFile: () => "/settled/session.jsonl",
+      getSessionId: () => "settled-sid",
+      getSessionName: () => undefined,
+    });
+    return h;
+  }
+
+  it("T1 shift+tab cycles the child's level and records the request", () => {
+    const child = liveChild();
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(child.cycleThinkingLevel).toHaveBeenCalledTimes(1);
+    expect(h.record.childSettings?.thinkingLevel).toBe("minimal");
+    expect(h.record.invocation?.requestedThinking).toBe("minimal");
+    expect(render(h)).toContain("Thinking level: minimal");
+  });
+
+  it("T2 shift+tab on a non-thinking model prints pi's reply and writes nothing", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(render(h)).toContain("Current model does not support thinking");
+    expect(h.record.childSettings).toBeUndefined();
+    expect(h.record.invocation).toEqual({ modelId: "child-model" });
+  });
+
+  it("T3 /thinking applies a level, stores the request (off included), and refuses unknowns", () => {
+    const child = liveChild();
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking HIGH");
+    expect(child.setThinkingLevel).toHaveBeenCalledWith("high", { persist: false });
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+    expect(render(h)).toContain("Thinking level: high");
+
+    h.im.editor.onSubmit?.("/thinking off");
+    expect(child.setThinkingLevel).toHaveBeenLastCalledWith("off", { persist: false });
+    expect(h.record.childSettings?.thinkingLevel).toBe("off");
+    expect(h.record.invocation?.thinking).toBe("off");
+    expect(h.record.invocation?.requestedThinking).toBe("off");
+
+    const calls = child.setThinkingLevel.mock.calls.length;
+    h.im.editor.onSubmit?.("/thinking bogus");
+    expect(render(h)).toContain('Unknown thinking level "bogus". Available levels: off, minimal, low, medium, high.');
+    expect(child.setThinkingLevel).toHaveBeenCalledTimes(calls);
+    expect(h.record.childSettings?.thinkingLevel).toBe("off");
+  });
+
+  // The watch's adoptSessionModel writes the OLD request when the level changes; the view's write
+  // is what the record finally holds, so a replaced request never reads "(asked max)".
+  it("T3b a live switch replaces the request the event watch preserved", () => {
+    const child = liveChild();
+    const h = harness({
+      child,
+      record: {
+        childSettings: settledSettings({ thinkingLevel: "max" }),
+        invocation: { modelId: "anthropic/child-model", thinking: "high", requestedThinking: "max" },
+      },
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking low");
+    expect(h.record.invocation?.requestedThinking).toBe("low");
+    expect(h.record.invocation?.thinking).toBe("low");
+    expect(h.record.childSettings?.thinkingLevel).toBe("low");
+  });
+
+  it("T4 /thinking opens pi's selector on the child and the persist arm writes the host default", () => {
+    const child = liveChild();
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    expect(h.im.showSelector).toHaveBeenCalledTimes(1);
+    const selector = h.im.selector as any;
+    expect(selector).toBeInstanceOf(ThinkingSelectorComponent);
+    // The child's own level ticks; the host session has none to read.
+    expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("off");
+    selector.onSelect("high");
+    expect(child.setThinkingLevel).toHaveBeenCalledWith("high", { persist: false });
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+    expect(h.im.selectorClosed).toBe(true);
+
+    h.im.editor.onSubmit?.("/thinking");
+    (h.im.selector as any).onSelectAsDefault("low");
+    expect(child.setThinkingLevel).toHaveBeenLastCalledWith("low", { persist: false });
+    expect(h.hostSession.settingsManager.setDefaultThinkingLevel).toHaveBeenCalledWith("low");
+    expect(render(h)).toContain("Default thinking level: low");
+  });
+
+  it("T5 ctrl+p cycles the child's models and stores the post-switch level", async () => {
+    const child = liveChild();
+    const target = fakeModel("openai", "other-model");
+    child.cycleModel = vi.fn(async () => {
+      child.thinkingLevel = "medium";
+      return { model: target, thinkingLevel: "medium", isScoped: false };
+    });
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.model.cycleForward")?.();
+    await tick();
+    expect(child.cycleModel).toHaveBeenCalledWith("forward");
+    expect(h.record.childSettings?.model).toBe(target);
+    expect(h.record.childSettings?.thinkingLevel).toBe("medium");
+    expect(render(h)).toContain("Switched to openai/other-model (thinking: medium)");
+    h.im.editor.actionHandlers.get("app.model.cycleBackward")?.();
+    await tick();
+    expect(child.cycleModel).toHaveBeenLastCalledWith("backward");
+
+    // pi's two "nothing to cycle" texts, split on whether the child has a scope.
+    child.scopedModels = [{ model: target }];
+    child.cycleModel = vi.fn(async () => undefined);
+    h.im.editor.actionHandlers.get("app.model.cycleForward")?.();
+    await tick();
+    expect(render(h)).toContain("Only one model in scope");
+    // A rejected cycle lands on the band; without the catch it would be an unhandled rejection.
+    child.cycleModel = vi.fn(async () => {
+      throw new Error("switch failed");
+    });
+    h.im.editor.actionHandlers.get("app.model.cycleForward")?.();
+    await tick();
+    expect(render(h)).toContain("switch failed");
+  });
+
+  it("T6 /model opens pi's selector on the child's model, runtime and scope", async () => {
+    const child = liveChild();
+    const target = fakeModel("openai", "other-model");
+    child.modelRuntime = modelRuntimeDouble([child.model, target]);
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    expect(h.im.showSelector).toHaveBeenCalledTimes(1);
+    const selector = h.im.selector as any;
+    expect(selector).toBeInstanceOf(ModelSelectorComponent);
+    expect(selector.currentModel).toBe(child.model);
+    expect(selector.modelRuntime).toBe(child.modelRuntime);
+    expect(selector.scopedModels).toEqual(child.scopedModels);
+    selector.onSelectCallback(target);
+    await tick();
+    expect(child.setModel).toHaveBeenCalledWith(target, { persist: false });
+    expect(h.im.selectorClosed).toBe(true);
+    expect(render(h)).toContain("Model: other-model");
+  });
+
+  it("T7 /model <ref> matches exactly, honours the scope gate, and never fuzzes", async () => {
+    const child = liveChild();
+    const target = fakeModel("openai", "other-model");
+    const models = [fakeModel("anthropic", "child-model")];
+    const runtime = modelRuntimeDouble(models);
+    // The first snapshot does not serve the reference: the refresh is what makes the match.
+    runtime.refresh.mockImplementation(async () => {
+      if (!models.includes(target)) models.push(target);
+      return { aborted: false, errors: new Map<string, Error>() };
+    });
+    child.modelRuntime = runtime;
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.onSubmit?.("/model openai/other-model");
+    await tick();
+    expect(runtime.refresh).toHaveBeenCalledTimes(1);
+    expect(child.setModel).toHaveBeenCalledWith(target, { persist: false });
+    expect(h.im.showSelector).not.toHaveBeenCalled();
+
+    // No fuzzy fallback: a term pi would refuse seeds the selector instead.
+    h.im.editor.onSubmit?.("/model other");
+    await tick();
+    expect(child.setModel).toHaveBeenCalledTimes(1);
+    expect(h.im.showSelector).toHaveBeenCalledTimes(1);
+    expect((h.im.selector as any).searchInput.getValue()).toBe("other");
+
+    // A bare id two providers serve is ambiguous without a provider prefix.
+    const dup = liveChild({ modelRuntime: modelRuntimeDouble([fakeModel("openai", "dup"), fakeModel("google", "dup")]) });
+    const ambiguous = harness({ child: dup, record: { childSettings: settledSettings() } });
+    ambiguous.openChild();
+    ambiguous.im.editor.onSubmit?.("/model dup");
+    await tick();
+    expect(dup.setModel).not.toHaveBeenCalled();
+    expect(ambiguous.im.showSelector).toHaveBeenCalledTimes(1);
+
+    // With a scope set, pi never refreshes the catalogs: the unmatched term goes straight to the
+    // selector (the selector's own background refresh is its business, so the band is the tell).
+    const scopedModel = fakeModel("anthropic", "child-model");
+    const scopedChild = liveChild({ scopedModels: [{ model: scopedModel }] });
+    const scopedRuntime = modelRuntimeDouble([scopedModel]);
+    scopedChild.modelRuntime = scopedRuntime;
+    const scoped = harness({ child: scopedChild, record: { childSettings: settledSettings() } });
+    scoped.openChild();
+    scoped.im.editor.onSubmit?.("/model nope");
+    await tick();
+    expect(render(scoped)).not.toContain("Refreshing model catalogs");
+    expect(scoped.im.showSelector).toHaveBeenCalledTimes(1);
+  });
+
+  it("T8 the persist arm writes the default and both halves of pi's scope rule", async () => {
+    const child = liveChild();
+    const scoped = fakeModel("anthropic", "child-model");
+    const target = fakeModel("openai", "other-model");
+    child.scopedModels = [{ model: scoped }];
+    child.modelRuntime = modelRuntimeDouble([scoped, target]);
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.hostSession.settingsManager.getEnabledModels = () => ["anthropic/child-model"];
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    (h.im.selector as any).onSelectAsDefaultCallback(target);
+    await tick();
+    expect(h.hostSession.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("openai", "other-model");
+    expect(child.setScopedModels).toHaveBeenCalledWith([{ model: scoped }, { model: target }]);
+    expect(h.hostSession.settingsManager.setEnabledModels).toHaveBeenCalledWith(["anthropic/child-model", "openai/other-model"]);
+
+    // Already covered by both lists: pi appends nothing, so neither list gains a duplicate.
+    vi.mocked(child.setScopedModels).mockClear();
+    vi.mocked(h.hostSession.settingsManager.setEnabledModels).mockClear();
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    (h.im.selector as any).onSelectAsDefaultCallback(scoped);
+    await tick();
+    expect(child.setScopedModels).not.toHaveBeenCalled();
+    expect(h.hostSession.settingsManager.setEnabledModels).not.toHaveBeenCalled();
+    expect(h.hostSession.settingsManager.setDefaultModelAndProvider).toHaveBeenCalledWith("anthropic", "child-model");
+
+    // No scope: pi's rule skips both halves, the default alone is written.
+    const unscoped = liveChild();
+    unscoped.modelRuntime = modelRuntimeDouble([unscoped.model, target]);
+    const h2 = harness({ child: unscoped, record: { childSettings: settledSettings() } });
+    h2.openChild();
+    h2.im.editor.onSubmit?.("/model");
+    await tick();
+    (h2.im.selector as any).onSelectAsDefaultCallback(target);
+    await tick();
+    expect(unscoped.setScopedModels).not.toHaveBeenCalled();
+    expect(h2.hostSession.settingsManager.setEnabledModels).not.toHaveBeenCalled();
+
+    // Settled: no session to scope, so the resume source takes the append.
+    const h3 = settledHarness({ childSettings: settledSettings({ scopedModels: [{ model: scoped }] }) });
+    h3.record.childSettings!.parentModelRuntime = modelRuntimeDouble([scoped, target]);
+    h3.openChild();
+    h3.im.editor.onSubmit?.("/model");
+    await tick();
+    (h3.im.selector as any).onSelectAsDefaultCallback(target);
+    await tick();
+    expect(h3.record.childSettings?.scopedModels).toEqual([{ model: scoped }, { model: target }]);
+  });
+
+  it("T8b a scoped entry's explicit level wins over the per-model override", async () => {
+    const a = fakeModel("anthropic", "a-model");
+    const b = fakeModel("openai", "b-model");
+    const h = settledHarness({
+      childSettings: settledSettings({
+        scopedModels: [{ model: a }, { model: b, thinkingLevel: "low" }],
+        parentModelRuntime: modelRuntimeDouble([a, b]),
+      }),
+      invocation: { modelId: "anthropic/a-model", thinking: "medium" },
+    });
+    h.hostSession.settingsManager.getModelThinkingLevel = () => "high";
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.model.cycleForward")?.();
+    await tick();
+    expect(h.record.childSettings?.model).toBe(b);
+    expect(h.record.childSettings?.thinkingLevel).toBe("low");
+  });
+
+  it("T8c the settled surface exposes the CLAMPED level, so the selector ticks it", () => {
+    const capped = fakeModel("anthropic", "capped-model", { thinkingLevelMap: { xhigh: null, max: null } });
+    const h = settledHarness({
+      childSettings: settledSettings({ model: capped, thinkingLevel: "max", parentModelRuntime: modelRuntimeDouble([capped]) }),
+      invocation: { modelId: "anthropic/capped-model" },
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    const selector = h.im.selector as any;
+    expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("high");
+  });
+
+  it("T8e the switch chain floors at medium when nothing is configured", () => {
+    const model = fakeModel("anthropic", "child-model");
+    const h = settledHarness({
+      childSettings: settledSettings({ model, thinkingLevel: undefined, parentModelRuntime: modelRuntimeDouble([model]) }),
+      invocation: { modelId: "anthropic/child-model" },
+    });
+    h.hostSession.settingsManager.getDefaultThinkingLevel = () => undefined;
+    h.hostSession.settingsManager.getModelThinkingLevel = () => undefined;
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    const selector = h.im.selector as any;
+    expect(selector.allItems.find((item: any) => item.label.startsWith("✓"))?.value).toBe("medium");
+  });
+
+  it("T8f a settled default spawn ticks and cycles from the level it ran at, not off", () => {
+    const model = fakeModel("anthropic", "child-model");
+    const h = settledHarness({
+      childSettings: settledSettings({ model, thinkingLevel: undefined, parentModelRuntime: modelRuntimeDouble([model]) }),
+      invocation: { modelId: "anthropic/child-model", thinking: "medium" },
+    });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+  });
+
+  it("T8d a settled record still offers /model and /thinking argument completions", async () => {
+    const h = settledHarness();
+    h.openChild();
+    const provider = (h.im.editor as any).autocompleteProvider as {
+      getSuggestions(lines: string[], line: number, col: number, options: { signal: AbortSignal }): Promise<{ items: { value: string }[] } | null>;
+    };
+    const options = { signal: new AbortController().signal };
+    const thinking = await provider.getSuggestions(["/thinking h"], 0, 11, options);
+    expect((thinking?.items ?? []).map((item) => item.value)).toContain("high");
+    const model = await provider.getSuggestions(["/model anthropic/"], 0, 17, options);
+    expect((model?.items ?? []).map((item) => item.value)).toContain("anthropic/child-model");
+  });
+
+  it("T9 a settled record takes /thinking and /model on both targets", async () => {
+    const model = fakeModel("anthropic", "child-model");
+    const target = fakeModel("openai", "other-model");
+    const h = settledHarness({
+      childSettings: settledSettings({ model, parentModelRuntime: modelRuntimeDouble([model, target]) }),
+      invocation: { modelId: "anthropic/child-model", thinking: "medium" },
+    });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking high");
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+    expect(h.record.invocation?.thinking).toBe("high");
+    expect(h.record.invocation?.requestedThinking).toBe("high");
+    h.im.editor.onSubmit?.("/model openai/other-model");
+    await tick();
+    expect(h.record.childSettings?.model).toBe(target);
+    expect(h.record.invocation?.modelId).toBe("openai/other-model");
+    expect(h.record.invocation?.thinking).toBe("medium");
+    // Settled: there was no session to touch.
+    expect(h.record.session).toBeUndefined();
+  });
+
+  it("T10 a record with no childSettings takes the invocation write-back, off included", () => {
+    const model = fakeModel("anthropic", "child-model");
+    const h = settledHarness({ childSettings: undefined, invocation: { modelId: "anthropic/child-model" } });
+    h.hostSession.modelRuntime = modelRuntimeDouble([model]);
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking off");
+    expect(h.record.childSettings).toBeUndefined();
+    expect(h.record.invocation?.requestedThinking).toBe("off");
+    expect(h.record.invocation?.thinking).toBe("off");
+    expect(h.record.invocation?.modelId).toBe("anthropic/child-model");
+  });
+
+  // The record keeps the REQUEST it was spawned at; a bind's adoptSessionModel refresh must not
+  // rewrite it with the effective level, or every reopen loses the spawn's "max".
+  it("T10b a bind's adoptSessionModel leaves the stored request alone", () => {
+    const capped = fakeModel("anthropic", "capped-model", { thinkingLevelMap: { xhigh: null, max: null } });
+    const child = liveChild({
+      model: capped,
+      state: { model: capped, thinkingLevel: "high" },
+      thinkingLevel: "high",
+      modelRuntime: modelRuntimeDouble([capped]),
+    });
+    const h = harness({
+      child,
+      record: {
+        childSettings: settledSettings({ model: capped, thinkingLevel: "max" }),
+        invocation: { modelId: "anthropic/capped-model", thinking: "high", requestedThinking: "max" },
+      },
+    });
+    h.openChild();
+    h.record.session?.emit({ type: "thinking_level_changed" });
+    expect(h.record.childSettings?.thinkingLevel).toBe("max");
+    expect(h.record.invocation?.thinking).toBe("high");
+    expect(h.record.invocation?.requestedThinking).toBe("max");
+  });
+
+  it("T10c a settled /thinking bogus writes nothing", () => {
+    const h = settledHarness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking bogus");
+    expect(render(h)).toContain('Unknown thinking level "bogus". Available levels: off, minimal, low, medium, high.');
+    expect(h.record.childSettings?.thinkingLevel).toBe("medium");
+    expect(h.record.invocation?.thinking).toBe("medium");
+  });
+
+  it("T11 ctrl+t flips the child's hide-thinking flag and never the global setting", () => {
+    const h = harness();
+    h.openChild();
+    expect(h.im.hideThinkingBlock).toBe(false);
+    h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
+    // The host's own field and the global setting are the host's: a child gesture changes neither.
+    expect(h.im.hideThinkingBlock).toBe(false);
+    expect(h.hostSession.settingsManager.setHideThinkingBlock).not.toHaveBeenCalled();
+    expect(render(h)).toContain("Thinking blocks: hidden");
+    h.view.repaint();
+    expect(h.seenRuntime.at(-1)!.hideThinkingBlock).toBe(true);
+    h.im.editor.actionHandlers.get("app.thinking.toggle")?.();
+    h.view.repaint();
+    expect(h.seenRuntime.at(-1)!.hideThinkingBlock).toBe(false);
+    expect(render(h)).toContain("Thinking blocks: visible");
+  });
+
+  it("T12 /settings is refused for part 5 and its argument form forwards as text", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.onSubmit?.("/settings");
+    expect(render(h)).toContain("/settings is not wired into the child view yet — it lands in part 5 of #249");
+    expect(h.manager.steer).not.toHaveBeenCalled();
+    h.im.editor.onSubmit?.("/settings x");
+    expect(h.manager.steer).toHaveBeenCalledWith("child-1", "/settings x");
+    // The two names this slice wires leave the refusal table entirely.
+    expect(LATER_COMMANDS.has("thinking")).toBe(false);
+    expect(LATER_COMMANDS.has("model")).toBe(false);
+  });
+
+  it("T13 /scoped-models, /trust and /compact keep their refusals", () => {
+    const h = harness();
+    h.openChild();
+    for (const [input, notice] of [
+      ["/scoped-models", "/scoped-models stays refused in a child view: its selector component is not exported by pi"],
+      ["/trust", "/trust stays refused in a child view: its selector and option builder are not exported by pi"],
+      ["/compact", "/compact stays refused in a child view: compact() aborts the run it would compact"],
+    ] as const) {
+      h.im.editor.onSubmit?.(input);
+      expect(render(h), input).toContain(notice);
+    }
+  });
+
+  it("T14 a settle during setModel writes the pair from the awaited local", async () => {
+    const child = liveChild();
+    const target = fakeModel("openai", "other-model");
+    child.modelRuntime = modelRuntimeDouble([child.model, target]);
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    child.setModel = vi.fn(async (model: any) => {
+      child.model = model;
+      child.thinkingLevel = "high";
+      // The record settles while the switch is in flight: the view must not read record.session.
+      h.record.session = undefined;
+    });
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    (h.im.selector as any).onSelectCallback(target);
+    await tick();
+    expect(h.record.childSettings?.model).toBe(target);
+    expect(h.record.childSettings?.thinkingLevel).toBe("high");
+    expect(h.record.invocation?.modelId).toBe("openai/other-model");
+  });
+
+  it("T15 both selectors go through pi's showSelector and done() on pick and cancel", async () => {
+    const child = liveChild();
+    const h = harness({ child, record: { childSettings: settledSettings() } });
+    h.openChild();
+    h.im.editor.onSubmit?.("/thinking");
+    expect(h.im.showSelector).toHaveBeenCalledTimes(1);
+    (h.im.selector as any).onCancel();
+    expect(h.im.selectorClosed).toBe(true);
+
+    h.im.selectorClosed = false;
+    h.im.editor.onSubmit?.("/model");
+    await tick();
+    expect(h.im.showSelector).toHaveBeenCalledTimes(2);
+    (h.im.selector as any).onCancelCallback();
+    expect(h.im.selectorClosed).toBe(true);
+  });
+});
+
+
+
+
+
+

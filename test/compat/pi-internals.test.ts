@@ -1,7 +1,8 @@
 /**
  * Pi internals the compiler cannot see.
  *
- * One row, for one reach: `tui.terminal.programStatusSupported` is TypeScript-private in pi-tui
+ * One row per reach this extension makes into pi that the compiler cannot see. The first:
+ * `tui.terminal.programStatusSupported` is TypeScript-private in pi-tui
  * (`dist/terminal.d.ts:80`), so no import can name it and nothing reddens when a release drops it.
  * The extension attaches the terminal at `src/index.ts:897` and reads the flag at
  * `src/program-status.ts:216`; a dropped field reads as `undefined` and OSC 7501 reporting never
@@ -40,5 +41,33 @@ describe("pi internals", () => {
 		const source = InteractiveMode.toString();
 		expect(/^\s*fdPath;/m.test(source), "fdPath must stay a declared field of InteractiveMode (interactive-mode.js)").toBe(true);
 		expect(/this\.fdPath\s*=/.test(source), "fdPath must keep being assigned on InteractiveMode (interactive-mode.js)").toBe(true);
+	});
+
+	it("showSelector is declared and called on the real InteractiveMode", () => {
+		// The child view shows both of its selectors through this slot (src/ui/native-view.ts
+		// showThinkingSelector/showModelSelector): pi declares it private (interactive-mode.d.ts:422),
+		// no import can name it, and the instance is narrowed by a runtime probe — so a rename leaves
+		// tsc green, every double green, and the first ctrl+l throws "im.showSelector is not a function".
+		const source = InteractiveMode.toString();
+		expect(/^\s*showSelector\(/m.test(source), "showSelector must stay a method of InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/this\.showSelector\(/.test(source), "showSelector must keep being called on InteractiveMode (interactive-mode.js)").toBe(true);
+	});
+
+	it("get settingsManager delegates to the session's manager", () => {
+		// The view reads every global setting through this getter outside withChildRuntime, which
+		// shadows the session for the child render: a getter that stopped delegating would silently
+		// read the wrong manager on every persist arm (src/ui/native-view.ts childSurface).
+		const source = InteractiveMode.toString();
+		expect(/get settingsManager\(\)/.test(source), "the settingsManager getter must stay on InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/return this\.session\.settingsManager/.test(source), "the settingsManager getter must keep delegating to session.settingsManager (interactive-mode.js)").toBe(true);
+	});
+
+	it("hideThinkingBlock is a declared field the child view swaps", () => {
+		// src/ui/native-view.ts seeds the child's flag from it and assigns it inside the render swap
+		// (withChildRuntime). A rename leaves tsc, every double and the ctrl+t test green while the
+		// toggle silently no-ops, so this peek is the only red signal.
+		const source = InteractiveMode.toString();
+		expect(/^\s*hideThinkingBlock =/m.test(source), "hideThinkingBlock must stay a field of InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/this\.hideThinkingBlock/.test(source), "hideThinkingBlock must keep being read or written on InteractiveMode (interactive-mode.js)").toBe(true);
 	});
 });

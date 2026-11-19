@@ -23,7 +23,7 @@ vi.mock("../src/agent-runner.js", async (importOriginal) => ({
 }));
 
 import { setQuietMs } from "../src/agent-manager.js";
-import { attachSessionLifecycle, type ChildSessionSettings, resumeAgent, runAgent } from "../src/agent-runner.js";
+import { attachSessionLifecycle, type ChildSessionSettings, createChildSession, resumeAgent, runAgent } from "../src/agent-runner.js";
 import { runInChildSessionContext } from "../src/child-context.js";
 import subagentsExtension from "../src/index.js";
 import { spawnedEntry } from "../src/ledger.js";
@@ -669,6 +669,26 @@ describe("crash recovery — resume", () => {
     expect(prompt).toContain("continue");
     expect(findModel).toHaveBeenCalledWith("faux", "model");
     expect(entriesOf(file).some((e) => e.customType === "subagent-resumed" && e.data?.id === "res")).toBe(true);
+  });
+
+  // The view stores the REQUESTED level, and pi's spawn option cannot carry "off": recoveredSettings
+  // post-assigns it, so a crash between a view-set "off" and the resume brings the run back at "off"
+  // instead of the global default (the #249 part 2 must-fix).
+  it("resumes a recovered run at the thinking level a view wrote, off included", async () => {
+    const file = join(tmpDir, "parent.jsonl");
+    writeSession(file, [spawned("off1", DEAD_PID, { thinking: "off" })]);
+    writeChildFiles("off1");
+    const made = boot(file);
+    await startup(made, file);
+    await vi.waitFor(() => expect(made.pi.sendMessage).toHaveBeenCalledTimes(1));
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "done" });
+    vi.mocked(createChildSession).mockClear();
+
+    await made.tools.get("SendMessage").execute("tc-off", { to: "off1", message: "continue" }, undefined, undefined, spawnCtx(tmpDir));
+
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalled());
+    const settings = vi.mocked(createChildSession).mock.calls.at(-1)?.[0] as ChildSessionSettings;
+    expect(settings.thinkingLevel).toBe("off");
   });
 
   it("reports a nested interrupted run at its parent's resume, not at startup", async () => {
