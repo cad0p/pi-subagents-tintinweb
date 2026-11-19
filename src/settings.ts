@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { IMPLICIT_FALLBACK, NO_FALLBACK } from "./agent-types.js";
+import { type FleetKeyConfig, sanitizeFleetKeys } from "./fleet-keys.js";
 
 /**
  * What the `fallbackSubagent` row shows and offers.
@@ -222,6 +223,14 @@ export interface SubagentsSettings {
    */
   showModel?: boolean;
   /**
+   * FleetView's extra navigation keys — the ones that work even while the prompt holds a
+   * draft. Per direction (`up`, `down`, `left`, `right`) one key or a list of keys, each
+   * modifier+arrow (e.g. "shift+up", "ctrl+alt+down"); omitted directions keep the shipped
+   * shift+arrow defaults. The plain arrows stay the empty-prompt keys and are not
+   * configurable. Hand-edit only: there is no /agents → Settings row for it. Applied live.
+   */
+  fleetKeys?: FleetKeyConfig;
+  /**
    * Whether each subagent is reported to the terminal as an OSC 7501 child record
    * (`subagents/<id>`) — a Program Status Protocol terminal then lists the agents
    * beside pi's own session record. Defaults to `true`. Applied live: turning it
@@ -256,6 +265,7 @@ export interface SettingsAppliers {
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
   setProgramStatus: (b: boolean) => void;
+  setFleetKeys: (v: FleetKeyConfig) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -281,7 +291,12 @@ export const FAILURE_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
  */
 export const DEFAULT_SHOW_COST = true;
 
-/** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
+/**
+ * Drop fields that don't match the expected shape. Silent — garbage becomes absent, with one
+ * exception: `fleetKeys` entries that fail validation warn once per dropped value on stderr
+ * (see sanitizeFleetKeys), because a mistyped key binding silently falling back to shift+arrows
+ * is exactly the kind of surprise the malformed-file warning below exists to prevent.
+ */
 function sanitize(raw: unknown): SubagentsSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
@@ -357,6 +372,8 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.programStatus === "boolean") {
     out.programStatus = r.programStatus;
   }
+  const fleetKeys = sanitizeFleetKeys(r.fleetKeys);
+  if (fleetKeys) out.fleetKeys = fleetKeys;
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -435,6 +452,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
   if (typeof s.programStatus === "boolean") appliers.setProgramStatus(s.programStatus);
+  if (s.fleetKeys) appliers.setFleetKeys(s.fleetKeys);
 }
 
 /**

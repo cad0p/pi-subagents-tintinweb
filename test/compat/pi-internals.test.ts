@@ -12,6 +12,7 @@
  * real terminal can answer it. Deleting the field from the instance — the reviewer's mutation, not
  * shipped here — reddens the row.
  */
+import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { ProcessTerminal } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 
@@ -29,5 +30,15 @@ describe("pi internals", () => {
 		const value: unknown = Reflect.get(terminal, FIELD);
 		expect(present, `${FIELD} must stay an own property of ProcessTerminal; reached from ${REACH}`).toBe(true);
 		expect(typeof value, `${FIELD} must be a boolean; reached from ${REACH}`).toBe("boolean");
+	});
+
+	it("fdPath is declared and assigned on the real InteractiveMode", () => {
+		// The child view's autocomplete threads this field into CombinedAutocompleteProvider
+		// (src/ui/native-view.ts setChildAutocomplete). It is a class field with no exported type:
+		// a rename would leave both sides undefined and every unit double green, so this peek at the
+		// class source is what reddens — the same shape the programStatusSupported row takes.
+		const source = InteractiveMode.toString();
+		expect(/^\s*fdPath;/m.test(source), "fdPath must stay a declared field of InteractiveMode (interactive-mode.js)").toBe(true);
+		expect(/this\.fdPath\s*=/.test(source), "fdPath must keep being assigned on InteractiveMode (interactive-mode.js)").toBe(true);
 	});
 });

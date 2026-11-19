@@ -18,6 +18,7 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
 });
 
 import type { AgentManager } from "../src/agent-manager.js";
+import { type FleetKeys, resolveFleetKeys } from "../src/fleet-keys.js";
 import type { AgentRecord } from "../src/types.js";
 import { childUIState, clearChildUI, createChildUIProxy, dropChildDialogs, onChildDialogFlag, pendingChildDialogs } from "../src/ui/child-ui.js";
 import {
@@ -193,7 +194,7 @@ interface Harness {
   onClosed: ReturnType<typeof vi.fn>;
 }
 
-function harness(options: { record?: Partial<AgentRecord>; child?: any; abortResult?: boolean } = {}): Harness {
+function harness(options: { record?: Partial<AgentRecord>; child?: any; abortResult?: boolean; fleetKeys?: () => FleetKeys } = {}): Harness {
   const documentContainer = new Container();
   const hostContainer = new Container();
   hostContainer.addChild(new Text("HOST TEXT"));
@@ -363,7 +364,7 @@ function harness(options: { record?: Partial<AgentRecord>; child?: any; abortRes
       notify: vi.fn(),
     },
   };
-  const view = new NativeTranscriptView({ manager: manager as unknown as AgentManager, getContext: () => ctx, getMode: () => im as InteractiveModeView, onClosed });
+  const view = new NativeTranscriptView({ manager: manager as unknown as AgentManager, getContext: () => ctx, getMode: () => im as InteractiveModeView, onClosed, fleetKeys: options.fleetKeys });
   return {
     im,
     hostSession,
@@ -690,7 +691,7 @@ describe("native transcript view", () => {
     expect(h.im.editor.history).toContain("CHILD TEXT");
 
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press ← to go back to main");
+    expect(h.documentContainer.render(120).join("\n")).toContain("app.session.new acts on the main session; press shift+← to go back to main");
     h.im.editor.onSubmit?.("/model");
     // A built-in a later part owns names that part, never "main": /model acts on the child in part 2.
     expect(h.documentContainer.render(120).join("\n")).toContain("/model is not wired into the child view yet — it lands in part 2 of #249");
@@ -1618,13 +1619,13 @@ describe("child view slash commands (#252)", () => {
       ["/login anthropic", "/login is not wired into the child view yet — it lands in part 5 of #249"],
       ["/logout", "/logout is not wired into the child view yet — it lands in part 5 of #249"],
       ["/reload", "/reload is not wired into the child view yet — it lands in part 5 of #249"],
-      ["/new", "/new replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/resume", "/resume replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/fork", "/fork replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/clone", "/clone replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/tree", "/tree replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/quit", "/quit replaces a session — it acts on the main session; press ← to go back to main"],
-      ["/import file.jsonl", "/import replaces a session — it acts on the main session; press ← to go back to main"],
+      ["/new", "/new replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/resume", "/resume replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/fork", "/fork replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/clone", "/clone replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/tree", "/tree replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/quit", "/quit replaces a session — it acts on the main session; press shift+← to go back to main"],
+      ["/import file.jsonl", "/import replaces a session — it acts on the main session; press shift+← to go back to main"],
       ["!pwd", "bash mode is not wired into the child view yet — it lands in part 4 of #249"],
     ];
     for (const [input, notice] of cases) {
@@ -1664,7 +1665,7 @@ describe("child view slash commands (#252)", () => {
     const h = harness();
     h.openChild();
     h.im.editor.actionHandlers.get("app.session.new")?.();
-    expect(render(h)).toContain("app.session.new acts on the main session; press ← to go back to main");
+    expect(render(h)).toContain("app.session.new acts on the main session; press shift+← to go back to main");
     h.im.editor.actionHandlers.get("app.thinking.cycle")?.();
     expect(render(h)).toContain("app.thinking.cycle is not wired into the child view yet — it lands in part 2 of #249");
     h.im.editor.actionHandlers.get("app.message.dequeue")?.();
@@ -1722,5 +1723,95 @@ describe("child view slash commands (#252)", () => {
     h.im.editor.onSubmit?.("/copy");
     await new Promise((r) => setImmediate(r));
     expect(copyToClipboard).toHaveBeenCalledWith("SETTLED REPLY");
+  });
+});
+
+describe("per-child drafts, fleet keys and fdPath (#254)", () => {
+  const render = (h: Harness): string => h.documentContainer.render(120).join("\n");
+
+  beforeEach(() => {
+    initTheme("dark");
+    vi.mocked(copyToClipboard).mockClear();
+    dropChildDialogs("child-1");
+    dropChildDialogs("child-2");
+    clearChildUI("child-1");
+    clearChildUI("child-2");
+  });
+
+  /** A second record under the same manager, with its own live session. */
+  function secondRecord(h: Harness): AgentRecord {
+    const recordB = { ...h.record, id: "child-2", description: "two", session: childSession() } as AgentRecord;
+    h.manager.getRecord.mockImplementation((id: string) => id === "child-1" ? h.record : id === "child-2" ? recordB : undefined);
+    return recordB;
+  }
+
+  it("keeps each child's draft under its record id; the host draft is never crossed", () => {
+    const h = harness();
+    secondRecord(h);
+    h.openChild(); // child-1
+    h.im.editor.setText("draft-for-A");
+    expect(h.view.open("child-2")).toBe("opened"); // the switch saves A's draft first
+    expect(h.hostDraft.getText()).toBe("half typed"); // the host editor got its own draft back
+    expect(h.im.editor.getText()).toBe(""); // child-2 starts empty, never with A's text
+    h.im.editor.setText("draft-for-B");
+    expect(h.view.open("child-1")).toBe("opened");
+    expect(h.im.editor.getText()).toBe("draft-for-A");
+    h.view.close("switch");
+    expect(h.hostDraft.getText()).toBe("half typed"); // leaving a child restores only hostDraft
+  });
+
+  it("drops the draft of a record that is gone, so a re-added id starts empty", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.setText("draft-for-A");
+    h.manager.getRecord.mockReturnValue(undefined); // evicted before the close completes
+    h.view.close("session");
+    h.manager.getRecord.mockImplementation((id: string) => id === "child-1" ? h.record : undefined);
+    expect(h.view.open("child-1")).toBe("opened");
+    expect(h.im.editor.getText()).toBe("");
+  });
+
+  it("close('reload') files nothing under the child id — the reset wrapper already wrote hostDraft", () => {
+    const h = harness();
+    h.openChild();
+    h.im.editor.setText("draft-for-A");
+    h.im.resetExtensionUI(); // the wrapper pi runs before session_shutdown: the editor <- hostDraft
+    h.view.close("reload");
+    expect(h.view.open("child-1")).toBe("opened");
+    expect(h.im.editor.getText()).toBe(""); // not "half typed"
+  });
+
+  it("a mid-restore throw leaves the earlier draft filed; the finishing close saves nothing over it", () => {
+    const h = harness();
+    secondRecord(h);
+    h.openChild();
+    h.im.editor.setText("draft-for-A");
+    // The restore aborts after restoreEditor already wrote hostDraft into the child editor: the
+    // stale state stays installed, and the next open()'s finishing close must not file "half typed"
+    // under child-1.
+    h.im.footer.invalidate.mockImplementation(() => { throw new Error("invalidate boom"); });
+    expect(() => h.view.open("child-2")).toThrow("invalidate boom"); // close("switch") aborts mid-restore
+    expect(() => h.view.open("child-2")).toThrow("invalidate boom"); // the stale close finishes, same throw
+    h.im.footer.invalidate.mockImplementation(() => {});
+    expect(h.view.open("child-2")).toBe("opened");
+    expect(h.view.open("child-1")).toBe("opened");
+    expect(h.im.editor.getText()).toBe("draft-for-A"); // the first close's save is the one that stood
+  });
+
+  it("hands pi's fdPath to the child's autocomplete provider", () => {
+    const h = harness();
+    h.im.fdPath = "/fake/fd";
+    h.openChild();
+    const provider = (h.im.editor as unknown as { autocompleteProvider?: { fdPath?: string | null } }).autocompleteProvider;
+    expect(provider?.fdPath).toBe("/fake/fd");
+  });
+
+  it("names the configured back key in the blocked-action and command-refusal notices", () => {
+    const h = harness({ fleetKeys: () => resolveFleetKeys({ left: "ctrl+alt+left" }) });
+    h.openChild();
+    h.im.editor.actionHandlers.get("app.session.new")?.();
+    expect(render(h)).toContain("app.session.new acts on the main session; press ctrl+alt+← to go back to main");
+    h.im.editor.onSubmit?.("/new");
+    expect(render(h)).toContain("/new replaces a session — it acts on the main session; press ctrl+alt+← to go back to main");
   });
 });

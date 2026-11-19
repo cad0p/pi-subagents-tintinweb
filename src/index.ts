@@ -29,6 +29,7 @@ import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { isStrictAgentFilesEnabled, loadCustomAgents, setStrictAgentFiles } from "./custom-agents.js";
 import { capDebugEnabled } from "./debug.js";
 import { deliveryText } from "./delivery-text.js";
+import { type FleetKeyConfig, type FleetKeys, resolveFleetKeys } from "./fleet-keys.js";
 import { publishImpl, routedToolActivity } from "./impl-route.js";
 import { guardInitAsync, guardInitVoid, recordInitFailure, takeInitFailures } from "./init-guard.js";
 import { isolatedParamError, isolationParam, resolveAgentInvocationConfig } from "./invocation-config.js";
@@ -414,6 +415,14 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; fleet.update(); }
+  /**
+   * FleetView's extra navigation keys (subagents.json `fleetKeys`). Read live: the list and the
+   * view ask for the resolved map on every keystroke and render, so an applied value needs no
+   * re-registration. The file itself is read at load, like every other setting.
+   */
+  let fleetKeysConfig: FleetKeyConfig | undefined;
+  function fleetKeys(): FleetKeys { return resolveFleetKeys(fleetKeysConfig); }
+  function setFleetKeys(v: FleetKeyConfig | undefined): void { fleetKeysConfig = v; }
 
   // ---- Program Status Protocol (OSC 7501) ----
   /** Widget key for the zero-line capture point that hands us pi's terminal. */
@@ -934,6 +943,8 @@ export default function (pi: ExtensionAPI) {
         // The list points its cursor at the transcript on screen: a failed open (and pi's own
         // teardown on reload) closes the view behind its back, so put the cursor back on `main`.
         onClosed: () => fleet.returnToMain(),
+        // The same getter the list takes, so the notices name the configured keys live.
+        fleetKeys,
       })
     : undefined;
   if (nativeView) {
@@ -1616,7 +1627,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled);
+  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, isShowModelEnabled, fleetKeys);
   fleet.setNativeView(nativeView);
 
   // Project/global default for writing the subagent .output transcript lives in
@@ -1742,6 +1753,7 @@ export default function (pi: ExtensionAPI) {
       setShowCost,
       setShowModel,
       setProgramStatus,
+      setFleetKeys,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -3130,6 +3142,9 @@ ${systemPrompt}
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
       programStatus: isProgramStatusEnabled(),
+      // Same implicit-default rule as fallbackSubagent: absent means shipped defaults, and a menu
+      // save must not materialize them — or a hand-edited value must not be rewritten away.
+      ...(fleetKeysConfig ? { fleetKeys: fleetKeysConfig } : {}),
     };
   }
 

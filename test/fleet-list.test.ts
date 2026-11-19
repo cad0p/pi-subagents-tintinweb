@@ -6,10 +6,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { DEFAULT_FLEET_KEYS, type FleetKeys, fleetDirectionLabel, resolveFleetKeys } from "../src/fleet-keys.js";
 import type { AgentRecord } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-display.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed } from "../src/ui/fleet-list.js";
-import { TO_MAIN_KEYS } from "../src/ui/native-view.js";
 import { paintedScreen } from "./helpers/painted-screen.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
@@ -21,6 +21,13 @@ const ESC = "\x1b";
 const ENTER = "\r";
 // Kitty-protocol key-RELEASE for ↓ (event type 3) — listeners receive these too.
 const DOWN_RELEASE = "\x1b[1;1:3B";
+// shift+arrows (xterm modified-cursor shape) and a kitty RELEASE of shift+↓.
+const SHIFT_DOWN = "\x1b[1;2B";
+const SHIFT_UP = "\x1b[1;2A";
+const SHIFT_LEFT = "\x1b[1;2D";
+const SHIFT_RIGHT = "\x1b[1;2C";
+const SHIFT_DOWN_RELEASE = "\x1b[1;2:3B";
+const CTRL_ALT_DOWN = "\x1b[1;7B";
 
 /** Plain text: markup tags would count toward visibleWidth and skew the fit rules. */
 const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
@@ -82,6 +89,7 @@ interface HarnessOptions {
   activity?: Map<string, AgentActivity>;
   showCost?: () => boolean;
   showModel?: () => boolean;
+  fleetKeys?: () => FleetKeys;
 }
 
 function harness(agents: AgentRecord[], draining: string[] = [], options: HarnessOptions = {}): Harness {
@@ -113,7 +121,7 @@ function harness(agents: AgentRecord[], draining: string[] = [], options: Harnes
   };
 
   const manager = fakeManager(agents, draining);
-  const fleet = new FleetList(manager, options.activity ?? new Map(), options.showCost, options.showModel);
+  const fleet = new FleetList(manager, options.activity ?? new Map(), options.showCost, options.showModel, options.fleetKeys);
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -156,7 +164,7 @@ describe("FleetList navigation", () => {
     const res = h.press(DOWN);
     expect(res).toEqual({ consume: true });
     // main selected, list active → nav hint shown
-    expect(h.render()[0]).toContain("↑↓ select · → nested · enter view · esc back");
+    expect(h.render()[0]).toContain("shift+↑↓ select · shift+→ nested · enter view · esc back");
   });
 
   it("also activates on ← (matches the '← for agents' hint)", () => {
@@ -1236,7 +1244,7 @@ describe("FleetList owns navigation (#178)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true }); // onto the agent row
     expect(view.opened).toEqual(["a1"]);
     expect(h.render().find(l => l.includes("one"))).toContain("⏺");
-    expect(h.render()[0]).toContain(`${TO_MAIN_KEYS} back to main · esc interrupts`);
+    expect(h.render()[0]).toContain(`${fleetDirectionLabel(DEFAULT_FLEET_KEYS, "left")} back to main · esc interrupts`);
 
     expect(h.press(UP)).toEqual({ consume: true }); // back onto `main`
     expect(view.closes).toEqual(["switch"]);
@@ -1567,5 +1575,90 @@ describe("FleetView keeps its marker and its transcript in step (#178 review)", 
     h.fleet.update();
     expect(view.isOpen()).toBe(false);
     expect(h.render()).toEqual([]); // no rows, so the widget clears itself
+  });
+});
+
+describe("FleetView fleet keys (#254)", () => {
+  const mk = (over: Partial<AgentRecord>) => makeRecord(over);
+
+  it("shift+↓ activates the list with a draft in the host prompt; plain ↓ does not", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    h.setEditorText("draft in main");
+    expect(h.press(DOWN)).toBeUndefined(); // the plain arrow stays the editor's
+    expect(h.press(SHIFT_DOWN)).toEqual({ consume: true });
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+    // The draft itself is untouched: the list moves the cursor, never the text.
+    expect(h.render()[0]).toContain("shift+↑↓ select");
+  });
+
+  it("a kitty release of a fleet key moves nothing and opens nothing", () => {
+    const h = harness([mk({ id: "a1", description: "one" })]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.setEditorText("draft in main");
+    h.press(SHIFT_DOWN); // activate on the press half
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+    h.press(SHIFT_DOWN_RELEASE);
+    h.press(SHIFT_DOWN_RELEASE); // a release is not a second tap: it must not reach a1
+    expect(view.opened).toEqual([]);
+    expect(h.render().find(l => l.includes("main"))).toContain("⏺");
+  });
+
+  it("shift+↑↓←→ mirror the plain arrows: activate, move, expand, back", () => {
+    const parent = mk({ id: "p", description: "parent", startedAt: 1000 });
+    const child = mk({ id: "c", description: "kid", startedAt: 2000, parentAgentId: "p" });
+    const h = harness([parent, child]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    expect(h.press(SHIFT_DOWN)).toEqual({ consume: true }); // activate → cursor on main
+    expect(h.press(SHIFT_DOWN)).toEqual({ consume: true }); // → parent row
+    expect(view.opened).toEqual(["p"]);
+    expect(h.press(SHIFT_RIGHT)).toEqual({ consume: true }); // expand → first child
+    expect(view.opened).toEqual(["p", "c"]);
+    expect(h.press(SHIFT_LEFT)).toEqual({ consume: true }); // collapse → parent
+    expect(view.opened).toEqual(["p", "c", "p"]);
+    expect(h.press(SHIFT_LEFT)).toEqual({ consume: true }); // top level → main
+    expect(view.isOpen()).toBe(false);
+    expect(h.press(SHIFT_UP)).toEqual({ consume: true }); // above main: deactivate
+    expect(h.render().some(l => l.includes("shift+← for agents"))).toBe(true);
+  });
+
+  it("a child draft keeps plain arrows/Enter/Esc for the child editor; fleet keys still navigate", () => {
+    const h = harness([
+      mk({ id: "a1", description: "one", startedAt: 1000 }),
+      mk({ id: "a2", description: "two", startedAt: 2000 }),
+    ]);
+    const view = fakeNativeView();
+    h.fleet.setNativeView(view);
+    h.press(DOWN); h.press(DOWN); // open a1
+    h.setEditorText("draft-for-A");
+    expect(h.press(UP)).toBeUndefined(); // its history
+    expect(h.press(DOWN)).toBeUndefined();
+    expect(h.press(LEFT)).toBeUndefined(); // its cursor
+    expect(h.press(ENTER)).toBeUndefined(); // its submit — steers the shown child
+    expect(h.press(ESC)).toBeUndefined(); // its interrupt
+    expect(view.opened).toEqual(["a1"]); // nothing moved, nothing opened
+    expect(h.render().find(l => l.includes("one"))).toContain("⏺");
+    // The configured keys are the way to the next child without losing the draft.
+    expect(h.press(SHIFT_DOWN)).toEqual({ consume: true });
+    expect(view.opened).toEqual(["a1", "a2"]);
+  });
+
+  it("a configured ctrl+alt+↓ navigates and the default shift+↓ does not", () => {
+    const h = harness([mk({ id: "a1", description: "one" })], [], {
+      fleetKeys: () => resolveFleetKeys({ up: "ctrl+alt+up", down: "ctrl+alt+down", left: "ctrl+alt+left", right: "ctrl+alt+right" }),
+    });
+    expect(h.render()[0]).toContain("ctrl+alt+← for agents · ctrl+alt+↓ to manage");
+    expect(h.press(SHIFT_DOWN)).toBeUndefined(); // rebound: the old key is the editor's now
+    expect(h.press(CTRL_ALT_DOWN)).toEqual({ consume: true });
+    expect(h.render()[0]).toContain("ctrl+alt+↑↓ select · ctrl+alt+→ nested · enter view · esc back");
+  });
+
+  it("the hint collapses a shared modifier prefix and splits when the keys differ", () => {
+    const h = harness([mk({ id: "a1", description: "one" })], [], {
+      fleetKeys: () => resolveFleetKeys({ up: "ctrl+up", down: "shift+down" }),
+    });
+    h.press(SHIFT_DOWN); // down is the one rebound key that still activates
+    expect(h.render()[0]).toContain("ctrl+↑/shift+↓ select");
   });
 });

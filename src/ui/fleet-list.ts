@@ -16,12 +16,15 @@
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
- * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
+ * can `consume` keys. The plain arrows are gated on `getEditorText() === ""` so normal
+ * typing is untouched; the configured fleet keys (shift+arrows by default, see
+ * fleet-keys.ts) navigate with a draft in the prompt too.
  */
 
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { deliveryText } from "../delivery-text.js";
+import { DEFAULT_FLEET_KEYS, type FleetDirection, type FleetKeys, fleetDirectionLabel, fleetDirectionOf, fleetPairLabel } from "../fleet-keys.js";
 import { toSingleLine } from "../text-safety.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -41,7 +44,7 @@ import {
   type Theme,
 } from "./agent-display.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
-import { noTranscriptMessage, TO_MAIN_KEYS } from "./native-view.js";
+import { noTranscriptMessage } from "./native-view.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -212,6 +215,12 @@ export class FleetList {
     private showCost: () => boolean = () => false,
     /** Read live at render time. Whether each running row shows its model and thinking level. */
     private showModel: () => boolean = () => false,
+    /**
+     * Read live on every keystroke and every render: the extra navigation keys
+     * (subagents.json `fleetKeys`), so a rebind needs no re-registration. The
+     * plain arrows are not configurable.
+     */
+    private fleetKeys: () => FleetKeys = () => DEFAULT_FLEET_KEYS,
   ) {}
 
   // ---- Lifecycle ----
@@ -372,7 +381,8 @@ export class FleetList {
    * The list owns navigation (#178): the cursor is the view, so a key that moves it moves the
    * transcript with it. Only the keys the list does not use reach the editor — and while a child
    * view is open, the child's editor is the focused one, so a draft there keeps all of its keys
-   * (↑/↓ walk its history, Esc cancels its autocomplete).
+   * (↑/↓ walk its history, Esc cancels its autocomplete). The configured fleet keys are the one
+   * exception: they navigate with a draft in either prompt (#254).
    */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
     if (!this.ui) return undefined;
@@ -392,13 +402,19 @@ export class FleetList {
     }
 
     const viewing = this.nativeView?.isOpen() === true;
-    // A child view's editor is the focused one: its draft keeps its own keys.
-    if (viewing && this.ui.getEditorText() !== "") return undefined;
+    const text = this.ui.getEditorText();
+    const dir = this.navDirection(data, text);
+    // A non-fleet key on a non-empty prompt belongs to the focused editor: a child draft keeps its
+    // arrows, Enter, Esc and history; the host prompt gives the list up for the keystroke (so Enter
+    // still submits a draft there).
+    if (dir === undefined && text !== "") {
+      if (this.active && !viewing) this.deactivate();
+      return undefined;
+    }
 
     if (!this.active) {
-      // Activate: ↓ or ← at an empty prompt moves focus into the list.
-      const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
-      if (isActivator && this.agentRows().length > 0 && this.ui.getEditorText() === "") {
+      // Activate: a configured ↓ or ←, or a plain one at an empty prompt, moves focus into the list.
+      if ((dir === "down" || dir === "left") && this.agentRows().length > 0) {
         this.active = true;
         // An open view already put the cursor on the agent it shows: activation never resets it.
         if (!viewing) this.moveSelection(this.roster(), 0); // `main`
@@ -408,16 +424,16 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows move the cursor (and the view follows it), → expands nested rows, ← goes back
-    // one level, Enter re-affirms the view, Esc leaves the list unless a child view is open.
-    if (matchesKey(data, "down")) {
+    // Active — a fleet key moves the cursor (and the view follows it), → expands nested rows, ← goes
+    // back one level, Enter re-affirms the view, Esc leaves the list unless a child view is open.
+    if (dir === "down") {
       const roster = this.roster();
       this.moveSelection(roster, this.resolveIndex(roster) + 1);
       this.followSelection();
       this.update();
       return { consume: true };
     }
-    if (matchesKey(data, "up")) {
+    if (dir === "up") {
       const roster = this.roster();
       const idx = this.resolveIndex(roster);
       if (idx === 0) { this.deactivate(); return { consume: true }; }
@@ -426,7 +442,7 @@ export class FleetList {
       this.update();
       return { consume: true };
     }
-    if (matchesKey(data, "right")) {
+    if (dir === "right") {
       // Only a collapsed parent expands (→ on an open one is a no-op, not a ↓).
       const roster = this.roster();
       const entry = roster[this.resolveIndex(roster)];
@@ -439,7 +455,7 @@ export class FleetList {
       this.update();
       return { consume: true };
     }
-    if (matchesKey(data, "left")) {
+    if (dir === "left") {
       // ← goes back one level, with `main` at the top: on `main` there is nowhere further to go.
       const roster = this.roster();
       const entry = roster[this.resolveIndex(roster)];
@@ -468,6 +484,22 @@ export class FleetList {
     // stays on the agent it shows (a keystroke cannot leave the view behind), so only the host
     // prompt gives the list up.
     if (!viewing) this.deactivate();
+    return undefined;
+  }
+
+  /**
+   * The direction a key steers the list, or undefined. A configured fleet key wins and ignores
+   * the prompt text — that is the point of the setting (#254); the plain arrows keep their
+   * empty-prompt gate.
+   */
+  private navDirection(data: string, text: string): FleetDirection | undefined {
+    const configured = fleetDirectionOf(data, this.fleetKeys());
+    if (configured !== undefined) return configured;
+    if (text !== "") return undefined;
+    if (matchesKey(data, "down")) return "down";
+    if (matchesKey(data, "up")) return "up";
+    if (matchesKey(data, "right")) return "right";
+    if (matchesKey(data, "left")) return "left";
     return undefined;
   }
 
@@ -630,12 +662,17 @@ export class FleetList {
     const sel = this.resolveIndex([{ kind: "main" }, ...agents]);
 
     // A child view's Esc interrupts its run and stays (the list no longer swallows it); leaving is
-    // the cursor on `main`, with the same keys the view's notices name.
+    // the cursor on `main`, with the same keys the view's notices name. The hint names the
+    // configured keys — the ones that work even while the prompt holds a draft.
+    const keys = this.fleetKeys();
+    const pair = fleetPairLabel(keys, "up", "down");
+    const right = fleetDirectionLabel(keys, "right");
+    const left = fleetDirectionLabel(keys, "left");
     const hint = this.nativeView?.isOpen() === true
-      ? `↑↓ select · → nested · ${TO_MAIN_KEYS} back to main · esc interrupts`
+      ? `${pair} select · ${right} nested · ${left} back to main · esc interrupts`
       : this.active
-        ? "↑↓ select · → nested · enter view · esc back"
-        : "esc to interrupt · ← for agents · ↓ to manage";
+        ? `${pair} select · ${right} nested · enter view · esc back`
+        : `esc to interrupt · ${left} for agents · ${fleetDirectionLabel(keys, "down")} to manage`;
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");

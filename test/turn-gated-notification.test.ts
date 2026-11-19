@@ -22,7 +22,7 @@
  * the nudge arms at t=0 and fires at t=200 (the hold window) unless parked.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentSession, initTheme } from "@earendil-works/pi-coding-agent";
@@ -1454,6 +1454,46 @@ describe("agents command terminal surfaces", () => {
 
       expect(settingsScreen).toContain("Max concurrency");
       expect(settingsScreen).not.toMatch(/Widget|Fleet ?View/);
+    } finally {
+      process.chdir(previousCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a menu save keeps a hand-edited fleetKeys in the project file; no Fleet keys row exists", async () => {
+    initTheme("dark");
+    const dir = mkdtempSync(join(tmpdir(), "pi-fleetkeys-menu-"));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(dir);
+      mkdirSync(join(dir, ".pi"), { recursive: true });
+      writeFileSync(join(dir, ".pi", "subagents.json"), JSON.stringify({ fleetKeys: { down: "ctrl+alt+down" } }), "utf-8");
+      const { pi, commands } = makePi();
+      delete (globalThis as Record<symbol, unknown>)[MANAGER_KEY];
+      subagentsExtension(pi);
+
+      const { c, selects } = commandCtx((title) => {
+        if (title !== "Agents") return undefined;
+        return selects.filter(s => s.title === "Agents").length <= 1 ? "Settings" : undefined;
+      });
+      c.ui.input.mockResolvedValueOnce("8"); // the Max concurrency prompt after Enter
+
+      let settingsScreen = "";
+      c.ui.custom.mockImplementation((factory: any) =>
+        new Promise<undefined>(resolve => {
+          const view = factory({ terminal: { rows: 40, columns: 100 } }, mockTheme, undefined, resolve);
+          settingsScreen = view.render(100).join("\n");
+          view.handleInput("\r"); // Enter on the first row (Max concurrency, a numeric field)
+        }),
+      );
+
+      await commands.get("agents").handler("", c);
+
+      expect(settingsScreen).toContain("Max concurrency");
+      expect(settingsScreen).not.toMatch(/[Ff]leet/); // hand-edit only: no menu row for it
+      const saved = JSON.parse(readFileSync(join(dir, ".pi", "subagents.json"), "utf-8"));
+      expect(saved.maxConcurrent).toBe(8);
+      expect(saved.fleetKeys).toEqual({ down: "ctrl+alt+down" });
     } finally {
       process.chdir(previousCwd);
       rmSync(dir, { recursive: true, force: true });
