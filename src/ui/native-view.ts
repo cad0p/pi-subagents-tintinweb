@@ -912,7 +912,7 @@ export class NativeTranscriptView {
     const editor = im.editor;
     if (editor === im.defaultEditor) throw new Error("native view: pi did not install the custom editor");
     const ed = editor as CustomEditor;
-    // pi copied the host draft into the new editor (IM:2219); the host draft is kept in
+    // pi copied the host draft into the new editor (IM:2310); the host draft is kept in
     // hostDraft, and this child's own draft — saved on its last close — comes back instead.
     ed.setText(this.drafts.get(state.id) ?? "");
     // That setText pushed an undo snapshot of the host text pi seeded (IM:2310), so one ctrl+-
@@ -934,7 +934,7 @@ export class NativeTranscriptView {
       return true;
     };
     this.setChildAutocomplete(im, state);
-    // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
+    // Start from an empty map: pi copied the host's handlers in (IM:2342-2344), including ones that
     // replace or clear the main session. Only three act on something the view can honour; every other
     // action says whether main owns it or a later part of #249 wires it here.
     ed.actionHandlers.clear();
@@ -968,7 +968,7 @@ export class NativeTranscriptView {
     if (!ed) return;
     if (im.editor === ed) {
       ed.setText(state.hostDraft);
-      // IM restores defaultEditor from our text (IM:2259), so the host draft comes back, never the child's.
+      // IM restores defaultEditor from our text (IM:2350), so the host draft comes back, never the child's.
       this.options.getContext()?.ui.setEditorComponent(undefined);
     }
     if (im.editor !== im.defaultEditor) {
