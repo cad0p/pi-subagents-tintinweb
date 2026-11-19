@@ -47,7 +47,7 @@ import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, DEFAULT_SHOW_COST, FAILURE_PREVIEW_MAX_CHARS_CEILING, fallbackRow, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
 import { safeTruncate, stripControlChars, toSingleLine } from "./text-safety.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type DeliverOutcome, type SubagentType, THINKING_LEVELS } from "./types.js";
 import { type AgentActivity, type AgentDetails, buildInvocationTags, fgPreservingNestedStyles, formatCost, formatDuration, formatMs, formatTokens, formatTurns, getDisplayName, getPromptModeLabel, type Theme } from "./ui/agent-display.js";
 import { FleetList, type FleetUICtx, nestIndent, treeOrder } from "./ui/fleet-list.js";
 import { capturedInteractiveMode, captureInteractiveMode, NativeTranscriptView, type NativeViewContext } from "./ui/native-view.js";
@@ -121,15 +121,6 @@ function createActivityTracker(agentId: () => string | undefined, maxTurns?: num
 
   return { state, callbacks };
 }
-
-/**
- * Advertised thinking levels, ordered to mirror pi-ai's EXTENDED_THINKING_LEVELS
- * (`off` + every `ThinkingLevel`). Single source for the generated-agent template
- * and the `/agents` wizard so these lists can't drift behind pi again (#147).
- * Availability of any level still depends on the host pi version and the
- * selected model — pi clamps unsupported levels down.
- */
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Human-readable status word for the completion report header. */
 function getStatusWord(status: string, limitReason?: "time", timeLimit?: "wrapped" | "stopped"): string {
@@ -909,9 +900,9 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
       ...(invocation?.modelId !== undefined ? { model: invocation.modelId } : {}),
       ...(invocation?.thinking !== undefined ? { thinking: invocation.thinking } : {}),
-      // Set only when the caller did not get the level it asked for (pi clamped
-      // it to the model), so a ledger can show `low (asked minimal)` instead of
-      // silently relabelling.
+      // The level the spawn asked for, or what a view switch ended at — a ledger
+      // shows `low (asked minimal)` only when pi clamped a spawn request, and a
+      // reload-recovered resume re-derives its level from it.
       ...(invocation?.requestedThinking !== undefined ? { requestedThinking: invocation.requestedThinking } : {}),
       depth: record.depth ?? 1,
       ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
@@ -1492,7 +1483,7 @@ export default function (pi: ExtensionAPI) {
     // is depth 1; a nested entry that recorded no depth predates the field and is treated as at the cap — the
     // tool-less state it has today, so no old ledger entry gains a capability it never had.
     const depth = record.depth ?? (record.parentAgentId === undefined ? 1 : Number.POSITIVE_INFINITY);
-    return resolveChildSettings(ctx, record.type, {
+    const settings = await resolveChildSettings(ctx, record.type, {
       pi,
       agentId: record.id,
       parentAgentId: record.parentAgentId,
@@ -1504,11 +1495,16 @@ export default function (pi: ExtensionAPI) {
         rootCwd: record.rootCwd,
       },
       model,
+      // The spawn option can only carry a ThinkingLevel: "off" is a level a session reports and a
+      // child view can request, so it is added to the resolved settings below instead of passing
+      // through the narrow option.
       thinkingLevel: requested === "off" ? undefined : requested,
       cwd,
       configCwd: record.configCwd && existsSync(record.configCwd) ? record.configCwd : cwd,
       worktree: record.worktree && existsSync(record.worktree.path) ? { path: record.worktree.path, parentCwd } : undefined,
     });
+    if (requested === "off") settings.thinkingLevel = "off";
+    return settings;
   }
 
   /**

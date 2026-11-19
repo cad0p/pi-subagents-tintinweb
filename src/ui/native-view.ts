@@ -13,6 +13,7 @@
  * There is no per-token tap: a message is shown once it is complete.
  */
 
+import { clampThinkingLevel, getSupportedThinkingLevels, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -24,23 +25,29 @@ import {
   ExtensionSelectorComponent,
   FooterComponent,
   type KeybindingsManager,
+  type ModelCycleResult,
+  ModelSelectorComponent,
   type ReadonlyFooterDataProvider,
   type SessionEntry,
   type SessionManager,
+  type SettingsManager,
   type Theme,
+  ThinkingSelectorComponent,
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, type Component, Container, type EditorTheme, type MarkdownTheme, Spacer, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { type AgentManager, adoptSessionModel } from "../agent-manager.js";
 import { DEFAULT_FLEET_KEYS, type FleetKeys, fleetDirectionLabel } from "../fleet-keys.js";
+import { describeModel } from "../model-resolver.js";
 import { toSingleLine } from "../text-safety.js";
-import type { AgentRecord } from "../types.js";
+import { type AgentRecord, DEFAULT_THINKING_LEVEL, type EffectiveThinkingLevel, THINKING_LEVELS } from "../types.js";
 import {
   addArminEgg,
   addChangelog,
   addEarendilEgg,
   addHotkeys,
   addSessionInfo,
+  type ChildCommandSource,
   type ChildShortcuts,
   childCommandRefusal,
   childSlashCommands,
@@ -90,16 +97,70 @@ const LATER_ACTIONS: ReadonlyMap<AppKeybinding, string> = new Map([
   ["app.suspend", "part 3"],
   ["app.message.followUp", "part 3"],
   ["app.message.dequeue", "part 3"],
-  ["app.thinking.cycle", "part 2"],
-  ["app.thinking.toggle", "part 2"],
-  ["app.model.cycleForward", "part 2"],
-  ["app.model.cycleBackward", "part 2"],
-  ["app.model.select", "part 2"],
 ]);
 
 /** The notice for something the child view refuses because only the main session can do it. */
 function mainSessionNotice(what: string, plural: boolean, backLabel: string): string {
   return `${what} ${plural ? "act" : "acts"} on the main session; press ${backLabel} to go back to main`;
+}
+
+/** The settled refusal when the record's model no longer resolves: `writeChildModel` writes nothing. */
+const NO_CHILD_MODEL = "This child has no model; resume it to set a thinking level";
+/** pi's anthropic subscription warning text (IM:161), unexported there. */
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING = "Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage. Disable this warning in /settings.";
+
+/**
+ * A child's model and thinking surface (§1): the live session when the record has one, the
+ * record's own resolved settings when it does not. Every read and every level goes through it, so
+ * a handler has one shape for both paths and only the apply step branches.
+ */
+interface ChildModelSurface {
+  model: Model<any> | undefined;
+  /** The level in effect for `model`, clamped — a raw request may be unsupported (`max` on `high`). */
+  thinkingLevel: EffectiveThinkingLevel;
+  scopedModels: AgentSession["scopedModels"];
+  modelRuntime: AgentSession["modelRuntime"];
+  settingsManager: SettingsManager;
+  getAvailableThinkingLevels(): EffectiveThinkingLevel[];
+}
+
+/** pi's `splitProviderPrefix` (`core/model-resolver.js:60-76`), unexported. */
+function splitProviderPrefix(text: string, models: readonly Model<any>[]): { provider: string; modelText: string } | undefined {
+  const lowerText = text.toLowerCase();
+  let best: { provider: string; modelText: string } | undefined;
+  for (const { provider } of models) {
+    const prefix = provider.trim().toLowerCase();
+    if (!prefix || (best && best.provider.length >= provider.length)) continue;
+    const slashIndex = lowerText.indexOf("/", prefix.length);
+    if (slashIndex === -1 || lowerText.substring(0, slashIndex).trim() !== prefix) continue;
+    const modelText = text.substring(slashIndex + 1).trim();
+    if (modelText) best = { provider, modelText };
+  }
+  return best;
+}
+
+/**
+ * pi's `findExactModelReferenceMatch` (`core/model-resolver.js:108-111`, over `selectReference`
+ * :154-181) in the one shape a /model argument uses: exact `provider/id` or a bare id, no fuzzy
+ * fallback and every candidate usable. Ambiguous across providers without a named match resolves
+ * to nothing, which is what sends the term to the selector — as on main.
+ */
+function findExactModelEntry(text: string, pool: readonly Model<any>[]): Model<any> | undefined {
+  const lowerText = text.toLowerCase();
+  const raw = pool.filter((model) => model.id.toLowerCase() === lowerText);
+  const split = splitProviderPrefix(text, pool);
+  let named: Model<any> | undefined;
+  if (split) {
+    const providerModels = pool.filter((model) => model.provider === split.provider);
+    const modelText = split.modelText.toLowerCase();
+    named = providerModels.find((model) => model.id.toLowerCase() === modelText) ?? raw.find((model) => model.provider === split.provider);
+  }
+  const others = raw.filter((model) => model !== named);
+  const candidates = named ? [named, ...others] : others;
+  if (candidates.length === 0) return undefined;
+  if (new Set(candidates.map((model) => model.provider)).size === 1) return candidates[0];
+  if (named) return named;
+  return others.length === 1 ? others[0] : undefined;
 }
 
 export interface EditorLike {
@@ -155,7 +216,6 @@ export interface InteractiveModeView {
   readonly sessionManager: SessionManager;
   pendingTools: Map<string, ToolExecutionComponent>;
   toolOutputExpanded: boolean;
-  hideThinkingBlock: boolean;
   outputPad: number;
   hiddenThinkingLabel?: string;
   editor: EditorLike;
@@ -165,10 +225,26 @@ export interface InteractiveModeView {
   footer: { invalidate(): void };
   ui: ViewTUI;
   keybindings: KeybindingsManager;
-  settingsManager: {
-    getExternalEditorCommand(): string | undefined;
-    getCacheWarmingMode(): string;
-  };
+  /**
+   * pi's own manager for the HOST session (`get settingsManager()` delegating to
+   * `this.session.settingsManager`, interactive-mode.js:360-361). Read only outside
+   * `withChildRuntime`: inside the swap the getter resolves the child's stale cache.
+   */
+  settingsManager: SettingsManager;
+  /**
+   * pi's selector slot (private: `interactive-mode.d.ts:422`): swap the editor for a component,
+   * `done()` restores and focuses the editor, and the returned `dispose` is called on `done()`
+   * and on close. No import can name it, so the compat row in test/compat pins it.
+   */
+  showSelector(create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void }): void;
+  /**
+   * pi's own ctrl+t handler (private: `interactive-mode.d.ts:393`): flips the global
+   * `hideThinkingBlock`, writes the global setting and applies it to `this.chatContainer` —
+   * which the view swaps to the child's transcript first (toggleThinkingVisibility).
+   */
+  toggleThinkingBlockVisibility(): void;
+  /** Private (`interactive-mode.js:3887`): re-applies the global flag to `this.chatContainer`, then requests a render. */
+  updateThinkingBlockVisibility(): void;
   isShuttingDown: boolean;
   resetExtensionUI(): void;
   setupAutocompleteProvider(): void;
@@ -317,6 +393,8 @@ interface ViewState {
   footerSession?: AgentSession;
   childPendingTools: Map<string, ToolExecutionComponent>;
   childToolOutputExpanded: boolean;
+  /** One anthropic-subscription warning per open, where pi's flag is per InteractiveMode lifetime. */
+  anthropicWarningShown: boolean;
   dialogRequest?: ChildDialogRequest;
   dialogComponent?: Component;
   footer?: ChildFooter | RecordFooter;
@@ -551,6 +629,7 @@ export class NativeTranscriptView {
       rebuildDeferred: false,
       childPendingTools: new Map(),
       childToolOutputExpanded: im.toolOutputExpanded,
+      anthropicWarningShown: false,
     };
     this.state = state;
     this.installNoticeWrappers(im, state);
@@ -941,6 +1020,11 @@ export class NativeTranscriptView {
     ed.onAction("app.tools.expand", () => this.toggleExpansion(im, state));
     ed.onAction("app.message.copy", () => { void this.copyChild(im, state); });
     ed.onAction("app.editor.external", () => { void im.handleOpenExternalEditor(); });
+    ed.onAction("app.thinking.cycle", () => this.cycleThinking(im, state));
+    ed.onAction("app.thinking.toggle", () => this.toggleThinkingVisibility(im, state));
+    ed.onAction("app.model.cycleForward", () => { void this.cycleModel(im, state, "forward"); });
+    ed.onAction("app.model.cycleBackward", () => { void this.cycleModel(im, state, "backward"); });
+    ed.onAction("app.model.select", () => this.showModelSelector(im, state));
     for (const action of BLOCKED_ACTIONS) {
       ed.onAction(action, () => this.notice(im, state, mainSessionNotice(action, false, this.backLabel())));
     }
@@ -1060,6 +1144,14 @@ export class NativeTranscriptView {
   private runChildCommand(im: InteractiveModeView, state: ViewState, trimmed: string): boolean {
     const name = commandName(trimmed);
     const exact = trimmed === `/${name}`;
+    if (name === "thinking") {
+      this.handleThinkingCommand(im, state, trimmed);
+      return true;
+    }
+    if (name === "model") {
+      void this.handleModelCommand(im, state, trimmed);
+      return true;
+    }
     if (name === "session" && exact) {
       this.showSessionInfo(im, state);
       return true;
@@ -1113,6 +1205,455 @@ export class NativeTranscriptView {
       return true;
     }
     return false;
+  }
+
+  // ---- model and thinking, on the shown child (#249 part 2) ----
+
+  /**
+   * The shown child's model and thinking surface (§1). Live: the session itself. Settled: the
+   * record — `childSettings` is the next resume's request, `invocation` the last reported truth.
+   * The settled current is the level it RAN at (`invocation.thinking`), falling back to pi's
+   * switch chain and clamped: a raw `max` request on a `high` model must not seed a cycle at `off`.
+   */
+  private childSurface(im: InteractiveModeView, record: AgentRecord): ChildModelSurface {
+    const session = record.session;
+    const childSettings = record.childSettings;
+    const settingsManager = im.settingsManager;
+    const modelRuntime = session?.modelRuntime ?? childSettings?.parentModelRuntime ?? im.session.modelRuntime;
+    const levels = (model: Model<any> | undefined): EffectiveThinkingLevel[] =>
+      model ? getSupportedThinkingLevels(model) : [...THINKING_LEVELS];
+    if (session) {
+      return {
+        model: session.model,
+        thinkingLevel: session.thinkingLevel,
+        scopedModels: session.scopedModels,
+        modelRuntime,
+        settingsManager,
+        getAvailableThinkingLevels: () => levels(session.model),
+      };
+    }
+    const modelId = record.invocation?.modelId;
+    const slash = modelId?.indexOf("/") ?? -1;
+    const model = childSettings?.model
+      ?? (modelId && slash > 0 ? modelRuntime.getModel(modelId.slice(0, slash), modelId.slice(slash + 1)) : undefined);
+    const current = !model
+      ? "off"
+      : clampThinkingLevel(model, record.invocation?.thinking
+        // A record rebuilt from the ledger by a crash carries no effective level and no settings:
+        // its only level is the request `recoveredSettings` will resume at.
+        ?? record.invocation?.requestedThinking
+        ?? childSettings?.thinkingLevel
+        ?? settingsManager.getModelThinkingLevel(model.provider, model.id)
+        ?? settingsManager.getDefaultThinkingLevel()
+        ?? DEFAULT_THINKING_LEVEL);
+    return {
+      model,
+      thinkingLevel: current,
+      scopedModels: childSettings?.scopedModels ?? [],
+      modelRuntime,
+      settingsManager,
+      getAvailableThinkingLevels: () => levels(model),
+    };
+  }
+
+  /**
+   * pi's `_getThinkingLevelForModelSwitch` (agent-session.js:2181-2194) on a surface: the scoped
+   * entry's explicit level, then the per-model override, then the global default, then the level
+   * the child is at — clamped to the model being switched to, as `setThinkingLevel` would.
+   */
+  private levelForModelSwitch(surface: ChildModelSurface, model: Model<any>, explicit?: EffectiveThinkingLevel): EffectiveThinkingLevel {
+    const level = explicit
+      ?? surface.settingsManager.getModelThinkingLevel(model.provider, model.id)
+      ?? surface.settingsManager.getDefaultThinkingLevel()
+      ?? surface.thinkingLevel;
+    return clampThinkingLevel(model, level);
+  }
+
+  /**
+   * The write-back, the one write site for every view-initiated switch. `level` is what pi's
+   * session ended at for a live call (`session.thinkingLevel` after pi's own clamp), or the pick a
+   * settled resume will run — the record stores pi's outcome, as on main, and keeps no separate
+   * requested value for a view write (owner ruling 2026-11-19). `requestedThinking` takes the same
+   * level because a reload-recovered record re-derives its resume level from it alone (index.ts
+   * `recoveredSettings`); an equal pair prints no "(asked X)" tag (agent-display.ts:221).
+   */
+  private writeChildModel(record: AgentRecord, model: Model<any> | undefined, level: EffectiveThinkingLevel): void {
+    if (!model) return;
+    if (record.childSettings) {
+      record.childSettings.model = model;
+      record.childSettings.thinkingLevel = level;
+    }
+    record.invocation = {
+      ...record.invocation,
+      ...describeModel(model),
+      thinking: level,
+      requestedThinking: level,
+    };
+  }
+
+  /** The shift+tab handler: pi's `cycleThinkingLevel` live, the same walk over the record when settled. */
+  private cycleThinking(im: InteractiveModeView, state: ViewState): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const session = record.session;
+    if (session) {
+      const level = session.cycleThinkingLevel();
+      if (level === undefined) {
+        this.notice(im, state, "Current model does not support thinking");
+        return;
+      }
+      this.writeChildModel(record, session.model, level);
+      state.footer?.invalidate();
+      this.notice(im, state, `Thinking level: ${level}`);
+      return;
+    }
+    const surface = this.childSurface(im, record);
+    // No model is a different refusal from a model without thinking: /thinking and the selector
+    // say the same thing on the same record, and none of the three claims a write it cannot make.
+    if (!surface.model) {
+      this.notice(im, state, NO_CHILD_MODEL);
+      return;
+    }
+    // pi guards the cycle on `supportsThinking()` (agent-session.js:2156-2158) and IM prints this
+    // on a non-reasoning model (IM:3771-3780); without the guard a settled "off"-only surface
+    // walks off->off and reports a change pi refuses.
+    if (!surface.model.reasoning) {
+      this.notice(im, state, "Current model does not support thinking");
+      return;
+    }
+    const levels = surface.getAvailableThinkingLevels();
+    const index = levels.indexOf(surface.thinkingLevel);
+    const next = levels[(index + 1) % levels.length] ?? "off";
+    this.writeChildModel(record, surface.model, next);
+    this.notice(im, state, `Thinking level: ${next} (applies on resume)`);
+  }
+
+  /**
+   * ctrl+t: pi's own toggle (interactive-mode.js:3830-3835), unmodified — it flips the global
+   * `hideThinkingBlock`, writes the global setting through the host manager (the getter sees the
+   * unshadowed session), applies it to `this.chatContainer` and shows its own status. The swap
+   * points that container at the child's transcript, so the gesture does exactly what it does on
+   * main — global write included (owner ruling 2026-11-19, decision 9b). The setting is global, so
+   * once the host container is back the apply runs again to flip main's existing blocks too; pi's
+   * apply only walks `this.chatContainer` and requests a render, both safe with the host detached.
+   */
+  private toggleThinkingVisibility(im: InteractiveModeView, state: ViewState): void {
+    const chatContainer = im.chatContainer;
+    im.chatContainer = state.childContainer;
+    try {
+      im.toggleThinkingBlockVisibility();
+    } finally {
+      im.chatContainer = chatContainer;
+    }
+    im.updateThinkingBlockVisibility();
+  }
+
+  /** IM:4350-4364 — /thinking: the selector with no argument, pi's validation with one. */
+  private handleThinkingCommand(im: InteractiveModeView, state: ViewState, trimmed: string): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const surface = this.childSurface(im, record);
+    const term = trimmed.slice("/thinking".length).trim();
+    if (!term) {
+      this.showThinkingSelector(im, state, surface);
+      return;
+    }
+    const normalized = term.toLowerCase();
+    const levels = surface.getAvailableThinkingLevels();
+    const level = levels.find((candidate) => candidate.toLowerCase() === normalized);
+    if (!level) {
+      im.showError(`Unknown thinking level "${term}". Available levels: ${levels.join(", ")}.`);
+      return;
+    }
+    this.applyThinkingLevel(im, state, level, false);
+  }
+
+  /** Apply a picked or typed level: the child's session when live, the record's settings when settled. */
+  private applyThinkingLevel(im: InteractiveModeView, state: ViewState, level: EffectiveThinkingLevel, persist: boolean): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const session = record.session;
+    if (session) {
+      try {
+        session.setThinkingLevel(level, { persist: false });
+      } catch (error) {
+        // pi's showError, like its own selectThinkingLevel: an error is an error in every view.
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      // The record stores what pi's session ended at, not the requested arg — pi clamps.
+      this.writeChildModel(record, session.model, session.thinkingLevel);
+      state.footer?.invalidate();
+    } else {
+      // `writeChildModel` returns on no model, so a level applied here would be reported and
+      // never written: refuse once, before the write and before "(applies on resume)".
+      const surface = this.childSurface(im, record);
+      if (!surface.model) {
+        this.notice(im, state, NO_CHILD_MODEL);
+        return;
+      }
+      this.writeChildModel(record, surface.model, level);
+    }
+    // pi's persist arm writes the REQUESTED level to the global default on the HOST manager: the
+    // child's own SettingsManager writes the file but leaves the host's in-memory merge stale.
+    if (persist) im.settingsManager.setDefaultThinkingLevel(level);
+    this.notice(im, state, persist
+      ? `Default thinking level: ${level}`
+      : `Thinking level: ${level}${session ? "" : " (applies on resume)"}`);
+  }
+
+  /** IM:4376-4387 — pi's thinking selector, bound to the shown child's surface. */
+  private showThinkingSelector(im: InteractiveModeView, state: ViewState, surface: ChildModelSurface): void {
+    im.showSelector((done) => {
+      const pick = (level: EffectiveThinkingLevel, persist: boolean): void => {
+        this.applyThinkingLevel(im, state, level, persist);
+        done();
+      };
+      const selector = new ThinkingSelectorComponent(
+        surface.thinkingLevel,
+        surface.getAvailableThinkingLevels(),
+        (level) => pick(level, false),
+        () => { done(); im.ui.requestRender(); },
+        (level) => pick(level, true),
+        im.settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL,
+      );
+      return { component: selector, focus: selector };
+    });
+  }
+
+  /** IM:4388-4408 — /model: the selector with no argument, an exact match with one. */
+  private async handleModelCommand(im: InteractiveModeView, state: ViewState, trimmed: string): Promise<void> {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const term = trimmed.slice("/model".length).trim();
+    if (!term) {
+      this.showModelSelector(im, state);
+      return;
+    }
+    const match = await this.findExactModelMatch(im, state, this.childSurface(im, record), term);
+    if (match) {
+      await this.applyModel(im, state, match, false);
+      return;
+    }
+    if (this.canPaint(im, state)) this.showModelSelector(im, state, term);
+  }
+
+  /**
+   * IM:4409-4434 — the exact match behind /model <ref>, with pi's scope gate: a child with a scope
+   * never refreshes (an unmatched term goes straight to the selector); without one, the catalogs
+   * are refreshed under a 15 s deadline and the term is matched once more on the new snapshot.
+   */
+  private async findExactModelMatch(im: InteractiveModeView, state: ViewState, surface: ChildModelSurface, term: string): Promise<Model<any> | undefined> {
+    const scoped = surface.scopedModels;
+    const cached = scoped.length > 0 ? scoped.map((entry) => entry.model) : [...surface.modelRuntime.getAvailableSnapshot()];
+    const cachedMatch = findExactModelEntry(term, cached);
+    if (cachedMatch || scoped.length > 0) return cachedMatch;
+    if (this.canPaint(im, state)) im.showStatus("Refreshing model catalogs…");
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 15_000);
+    try {
+      const result = await surface.modelRuntime.refresh({ signal: controller.signal });
+      if (result.aborted && timedOut) {
+        if (this.canPaint(im, state)) im.showWarning("Model refresh timed out; searching cached models.");
+      } else if (result.errors.size > 0) {
+        if (this.canPaint(im, state)) im.showWarning(`Could not refresh ${[...result.errors.keys()].join(", ")}; searching cached models.`);
+      }
+    } catch (error) {
+      if (this.canPaint(im, state)) {
+        im.showWarning(timedOut
+          ? "Model refresh timed out; searching cached models."
+          : `Could not refresh model catalogs: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+    return findExactModelEntry(term, [...surface.modelRuntime.getAvailableSnapshot()]);
+  }
+
+  /** IM:4522-4546 — pi's model selector on the child's model, runtime and scope, through showSelector. */
+  private showModelSelector(im: InteractiveModeView, state: ViewState, initialSearchInput?: string): void {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const surface = this.childSurface(im, record);
+    im.showSelector((done) => {
+      const pick = (model: Model<any>, persist: boolean): void => {
+        void this.applyModel(im, state, model, persist).finally(() => {
+          done();
+          im.ui.requestRender();
+        });
+      };
+      const defaultProvider = im.settingsManager.getDefaultProvider();
+      const defaultModel = im.settingsManager.getDefaultModel();
+      const selector = new ModelSelectorComponent(
+        im.ui as unknown as TUI,
+        surface.model,
+        surface.modelRuntime,
+        surface.scopedModels,
+        (model) => pick(model, false),
+        () => { done(); im.ui.requestRender(); },
+        initialSearchInput,
+        (model) => pick(model, true),
+        defaultProvider && defaultModel ? { provider: defaultProvider, id: defaultModel } : undefined,
+      );
+      // pi's own factory returns the dispose (IM:4545): showSelector calls it on done and on close,
+      // and the component's refresh timer and in-flight refresh are what leak without it.
+      return { component: selector, focus: selector, dispose: () => selector.dispose() };
+    });
+  }
+
+  /**
+   * Apply a picked model. Live: pi's `setModel`, then §8's write with the session's post-switch
+   * level. Settled: `setModel`'s auth guard, then §8's write with the level pi's switch chain
+   * resolves. A settle during the await must not read the torn-down session, so the level comes
+   * from the awaited local, and only the live chrome branches on identity.
+   */
+  private async applyModel(im: InteractiveModeView, state: ViewState, model: Model<any>, persist: boolean): Promise<void> {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const childSession = record.session;
+    let level: EffectiveThinkingLevel;
+    if (childSession) {
+      try {
+        await childSession.setModel(model, { persist: false });
+      } catch (error) {
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      level = childSession.thinkingLevel;
+    } else {
+      const surface = this.childSurface(im, record);
+      if (!(await surface.modelRuntime.checkAuth(model.provider))) {
+        if (this.canPaint(im, state)) im.showError(`No API key for ${model.provider}/${model.id}`);
+        return;
+      }
+      level = this.levelForModelSwitch(surface, model);
+    }
+    const current = this.options.manager.getRecord(state.id) ?? record;
+    this.writeChildModel(current, model, level);
+    if (persist) this.persistModelChoice(im, current, childSession, model);
+    if (current.session === childSession) state.footer?.invalidate();
+    if (!this.canPaint(im, state)) return;
+    const settled = current.session === undefined;
+    this.notice(im, state, persist
+      ? `Default model: ${model.provider}/${model.id}`
+      : `Model: ${model.id}${settled ? " (applies on resume)" : ""}`);
+    void this.warnAboutAnthropicSubscription(im, state, model, this.childSurface(im, current).modelRuntime);
+  }
+
+  /**
+   * pi's `_addPersistedDefaultToNonEmptyScope` (agent-session.js:2044-2057), on the HOST manager:
+   * the global default, then — only when the child HAS a scope that does not cover the model — the
+   * scope append (so ctrl+p reaches the saved model) and the enabledModels append.
+   */
+  private persistModelChoice(im: InteractiveModeView, record: AgentRecord, session: AgentSession | undefined, model: Model<any>): void {
+    im.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+    const scope = session ? session.scopedModels : record.childSettings?.scopedModels;
+    if (!scope?.length) return;
+    if (scope.some((entry) => modelsAreEqual(entry.model, model))) return;
+    const next = [...scope, { model }];
+    if (session) session.setScopedModels(next);
+    else if (record.childSettings) record.childSettings.scopedModels = next;
+    const enabled = im.settingsManager.getEnabledModels();
+    if (!enabled?.length) return;
+    const reference = `${model.provider}/${model.id}`;
+    if (enabled.some((pattern) => pattern.toLowerCase() === reference.toLowerCase())) return;
+    im.settingsManager.setEnabledModels([...enabled, reference]);
+  }
+
+  /**
+   * ctrl+p / shift+ctrl+p: pi's `cycleModel` when the child is live; a settled record walks its own
+   * scope (filtered to what the runtime still serves) or the snapshot, the same modulo pi uses,
+   * with `modelsAreEqual` locating the current model, and re-resolves the level per §4.
+   */
+  private async cycleModel(im: InteractiveModeView, state: ViewState, direction: "forward" | "backward"): Promise<void> {
+    const record = this.options.manager.getRecord(state.id);
+    if (!record) return;
+    const childSession = record.session;
+    if (childSession) {
+      let result: ModelCycleResult | undefined;
+      try {
+        result = await childSession.cycleModel(direction);
+      } catch (error) {
+        if (this.canPaint(im, state)) im.showError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+      if (!result) {
+        if (this.canPaint(im, state)) {
+          this.notice(im, state, childSession.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available");
+        }
+        return;
+      }
+      const current = this.options.manager.getRecord(state.id) ?? record;
+      this.writeChildModel(current, result.model, result.thinkingLevel);
+      if (current.session === childSession) state.footer?.invalidate();
+      if (!this.canPaint(im, state)) return;
+      const thinking = result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
+      this.notice(im, state, `Switched to ${result.model.name || result.model.id}${thinking}`);
+      void this.warnAboutAnthropicSubscription(im, state, result.model, childSession.modelRuntime);
+      return;
+    }
+    const surface = this.childSurface(im, record);
+    const snapshot = surface.modelRuntime.getAvailableSnapshot();
+    let next: Model<any> | undefined;
+    let explicit: EffectiveThinkingLevel | undefined;
+    if (surface.scopedModels.length > 0) {
+      const available = new Set(snapshot.map((model) => `${model.provider}\0${model.id}`));
+      const scoped = surface.scopedModels.filter((entry) => available.has(`${entry.model.provider}\0${entry.model.id}`));
+      if (scoped.length <= 1) {
+        this.notice(im, state, "Only one model in scope");
+        return;
+      }
+      let index = scoped.findIndex((entry) => modelsAreEqual(entry.model, surface.model));
+      if (index === -1) index = 0;
+      const picked = scoped[direction === "forward" ? (index + 1) % scoped.length : (index - 1 + scoped.length) % scoped.length];
+      next = picked.model;
+      explicit = picked.thinkingLevel;
+    } else {
+      if (snapshot.length <= 1) {
+        this.notice(im, state, "Only one model available");
+        return;
+      }
+      let index = snapshot.findIndex((model) => modelsAreEqual(model, surface.model));
+      if (index === -1) index = 0;
+      next = snapshot[direction === "forward" ? (index + 1) % snapshot.length : (index - 1 + snapshot.length) % snapshot.length];
+    }
+    const level = this.levelForModelSwitch(surface, next, explicit);
+    this.writeChildModel(record, next, level);
+    const thinking = next.reasoning && level !== "off" ? ` (thinking: ${level})` : "";
+    this.notice(im, state, `Switched to ${next.name || next.id}${thinking} (applies on resume)`);
+    void this.warnAboutAnthropicSubscription(im, state, next, surface.modelRuntime);
+  }
+
+  /**
+   * IM:4450-4475 — pi's warn-once anthropic subscription check, on the child's runtime. The flag
+   * lives on this open's state, where pi's is per InteractiveMode: a reopen may warn once more.
+   */
+  private async warnAboutAnthropicSubscription(
+    im: InteractiveModeView,
+    state: ViewState,
+    model: Model<any>,
+    modelRuntime: AgentSession["modelRuntime"],
+  ): Promise<void> {
+    try {
+      if (im.settingsManager.getWarnings().anthropicExtraUsage === false) return;
+      if (!this.canPaint(im, state) || state.anthropicWarningShown || model.provider !== "anthropic") return;
+      if ((await modelRuntime.checkAuth("anthropic"))?.type === "oauth") {
+        state.anthropicWarningShown = true;
+        // The auth lookup can outlive the view; a warning for it would land on main's transcript.
+        if (this.canPaint(im, state)) im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+        return;
+      }
+      const apiKey = (await modelRuntime.getAuth(model.provider))?.auth.apiKey;
+      if (typeof apiKey !== "string" || !apiKey.startsWith("sk-ant-oat")) return;
+      state.anthropicWarningShown = true;
+      if (this.canPaint(im, state)) im.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+    } catch {
+      // Auth lookups are warning-only: a failure here must never break a model switch.
+    }
   }
 
   /**
@@ -1221,13 +1762,26 @@ export class NativeTranscriptView {
   private setChildAutocomplete(im: InteractiveModeView, state: ViewState): void {
     const ed = state.editor;
     if (!ed) return;
-    const child = this.options.manager.getRecord(state.id)?.session;
+    const record = this.options.manager.getRecord(state.id);
+    const child = record?.session;
     const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
-    if (!sessionManager) return;
+    if (!record || !sessionManager) return;
+    // A settled record has no live session: hand the list the record's own surface, so /model and
+    // /thinking argument completions work exactly where this slice makes the commands work.
+    let source: ChildCommandSource | undefined = child;
+    if (!source) {
+      const surface = this.childSurface(im, record);
+      source = {
+        scopedModels: surface.scopedModels,
+        modelRuntime: surface.modelRuntime,
+        getAvailableThinkingLevels: () => surface.getAvailableThinkingLevels(),
+        promptTemplates: [],
+      };
+    }
     // pi's third argument is its fd helper path (IM:546): omitting it left @-path completion dead
     // in a child view. fdPath is a class field with no public type, so it is optional here and the
     // compat test pins the real field — a rename reddens there, not silently here.
-    const provider = new CombinedAutocompleteProvider(childSlashCommands(child), sessionManager.getCwd(), im.fdPath);
+    const provider = new CombinedAutocompleteProvider(childSlashCommands(source), sessionManager.getCwd(), im.fdPath);
     state.childProvider = provider;
     ed.setAutocompleteProvider(provider);
   }

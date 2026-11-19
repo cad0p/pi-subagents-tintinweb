@@ -223,6 +223,8 @@ async function harness(): Promise<Harness> {
       buildContextEntries: () => [],
     },
     settingsManager: { getExternalEditorCommand: () => undefined, getShowCacheMissNotices: () => false },
+    // The settled model surface resolves an `invocation.modelId` through this runtime.
+    modelRuntime: { getAvailableSnapshot: () => [], getModel: () => undefined },
     retryAttempt: 0,
   };
 
