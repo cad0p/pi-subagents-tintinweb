@@ -44,6 +44,12 @@ const UP = "\x1b[A";
 const RIGHT = "\x1b[C";
 const LEFT = "\x1b[D";
 const ESC = "\x1b";
+// shift+arrows (xterm modified-cursor shape) — the default fleetKeys.
+const SHIFT_DOWN = "\x1b[1;2B";
+const SHIFT_UP = "\x1b[1;2A";
+const SHIFT_LEFT = "\x1b[1;2D";
+// ctrl+- (tui.editor.undo) and a bracketed-paste wrapper, both handled inside the focused editor.
+const CTRL_MINUS = "\x1f";
 
 const flush = async () => {
   await new Promise((r) => setImmediate(r));
@@ -59,7 +65,7 @@ const theme = {
 } as unknown as EditorTheme;
 
 /** pi's own bindings: Esc is app.interrupt, everything else is unbound here. */
-const keybindings = { matches: (data: string, action: string) => action === "app.interrupt" && data === ESC };
+const keybindings = { matches: (data: string, action: string) => (action === "app.interrupt" && data === ESC) || (action === "tui.editor.undo" && data === CTRL_MINUS) };
 
 /** What a child session has to answer for the manager, the view's footer and its autocomplete. */
 function childSession(sessionId: string): AgentSession {
@@ -105,6 +111,8 @@ function childSession(sessionId: string): AgentSession {
       getShortcuts: () => new Map(),
     },
     abort: vi.fn(async () => {}),
+    // Where a running child's prompt lands; a steer in its view should reach exactly this.
+    prompt: vi.fn(async () => ({})),
     dispose: vi.fn(),
     subscribe: () => () => {},
     getSessionStats: () => ({}),
@@ -716,6 +724,93 @@ describe("the child-bus tap through the real extension (#245)", () => {
 
       expect(h.renders()).toBe(paints + 2);
       expect(h.transcript()).toContain("resumed: RESUMED TURN LANDS");
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("a bracketed paste in the host prompt survives opening and leaving a child", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("paste host", "hang");
+      await flush();
+      const pasted = Array.from({ length: 12 }, (_, i) => `pasted line ${i}`).join("\n");
+      h.type("\x1b[200~" + pasted + "\x1b[201~");
+      expect(h.im.editor.getText()).toContain("[paste #1 +12 lines]");
+      // The prompt holds the marker: plain ↓ is the editor's, shift+↓ is the fleet key.
+      expect(h.press(DOWN)).toBeUndefined();
+      h.press(SHIFT_DOWN); h.press(SHIFT_DOWN);
+      expect(h.transcript()).toContain("hang: CHILD hang");
+      h.press(SHIFT_LEFT); // back to main
+      expect(h.transcript()).toContain("HOST TEXT");
+      // What Enter would send is the pasted text: the marker literal never leaves the editor.
+      expect(h.im.editor.getText()).toBe(pasted);
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("a bracketed paste in a child comes back as its text, not a marker", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("paste one", "one");
+      await h.spawn("paste two", "two");
+      await flush();
+      h.press(SHIFT_DOWN); h.press(SHIFT_DOWN); // child one
+      const pasted = Array.from({ length: 12 }, (_, i) => `child line ${i}`).join("\n");
+      h.type("\x1b[200~" + pasted + "\x1b[201~");
+      expect(h.im.editor.getText()).toContain("[paste #1 +12 lines]");
+      h.press(SHIFT_DOWN); // child two — the switch saves one's draft expanded
+      expect(h.im.editor.getText()).toBe("");
+      h.press(SHIFT_UP); // back to one
+      expect(h.im.editor.getText()).toBe(pasted);
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("ctrl+- in a child cannot undo back into the host's draft", async () => {
+    mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("undo kid", "hang");
+      await flush();
+      h.type("host draft");
+      h.press(SHIFT_DOWN); h.press(SHIFT_DOWN); // the child opens seeded with its own draft: ""
+      expect(h.im.editor.getText()).toBe("");
+      // pi seeded the new editor with the host text, which pushed an undo snapshot: undoing it
+      // would put main's draft into the child prompt, and Enter would steer it there.
+      h.type(CTRL_MINUS);
+      expect(h.im.editor.getText()).toBe("");
+    } finally {
+      await h.shutdown();
+    }
+  });
+
+  it("a host draft is not lost to navigation, and a child draft steers the child it was typed for", async () => {
+    const runs = mockRuns();
+    const h = await harness();
+    try {
+      await h.spawn("draft one", "one");
+      await h.spawn("draft two", "two");
+      await flush();
+      h.type("draft in main");
+      expect(h.press(DOWN)).toBeUndefined(); // a plain arrow is the editor's with a draft
+      h.press(SHIFT_DOWN); h.press(SHIFT_DOWN); // onto draft one
+      expect(h.im.editor.getText()).toBe("");
+      h.type("draft-for-A");
+      h.press(SHIFT_DOWN); // the draft does not lock the view: fleet keys move to two
+      expect(h.im.editor.getText()).toBe("");
+      h.press(SHIFT_UP); // back to one — its draft is still there
+      expect(h.im.editor.getText()).toBe("draft-for-A");
+      h.type("\r"); // Enter steers the shown child, nobody else
+      await flush();
+      expect(vi.mocked(runs.sessions.get("one") as any).prompt).toHaveBeenCalledWith("draft-for-A", expect.anything());
+      expect(vi.mocked((runs.sessions.get("two") as any).prompt)).not.toHaveBeenCalled();
+      h.press(SHIFT_LEFT); // to main — main's own draft is back, never A's
+      expect(h.im.editor.getText()).toBe("draft in main");
     } finally {
       await h.shutdown();
     }

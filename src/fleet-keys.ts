@@ -15,7 +15,7 @@
  * focused editor sees it, so a printable key would make the prompt untypeable.
  */
 
-import { matchesKey } from "@earendil-works/pi-tui";
+import { type KeyId, matchesKey } from "@earendil-works/pi-tui";
 
 /** The four directions the extra keys steer. */
 export type FleetDirection = "up" | "down" | "left" | "right";
@@ -109,10 +109,12 @@ export function resolveFleetKeys(config: FleetKeyConfig | undefined): FleetKeys 
  * (one `isKeyRelease` guard in FleetList.handleKey covers these and the plain arrows).
  */
 export function fleetDirectionOf(data: string, keys: FleetKeys): FleetDirection | undefined {
-  if (keys.down.some(key => matchesKey(data, key))) return "down";
-  if (keys.up.some(key => matchesKey(data, key))) return "up";
-  if (keys.right.some(key => matchesKey(data, key))) return "right";
-  if (keys.left.some(key => matchesKey(data, key))) return "left";
+  // The KeyId cast is safe at the boundary: sanitizeFleetKeys admits only the modifier+arrow
+  // grammar KeyId expresses, and an unparseable value makes matchesKey answer false anyway.
+  if (keys.down.some(key => matchesKey(data, key as KeyId))) return "down";
+  if (keys.up.some(key => matchesKey(data, key as KeyId))) return "up";
+  if (keys.right.some(key => matchesKey(data, key as KeyId))) return "right";
+  if (keys.left.some(key => matchesKey(data, key as KeyId))) return "left";
   return undefined;
 }
 

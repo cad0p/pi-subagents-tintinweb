@@ -104,6 +104,12 @@ function mainSessionNotice(what: string, plural: boolean, backLabel: string): st
 
 export interface EditorLike {
   getText(): string;
+  /**
+   * The text with [paste #N] markers expanded — what submit actually sends. Draft
+   * saves and restores must read this: setText clears the paste map, so a saved
+   * marker would come back as its short literal and be steered as that string.
+   */
+  getExpandedText?(): string;
   setText(text: string): void;
   addToHistory?(text: string): void;
   setAutocompleteProvider?(provider: unknown): void;
@@ -154,6 +160,8 @@ export interface InteractiveModeView {
   hiddenThinkingLabel?: string;
   editor: EditorLike;
   defaultEditor: EditorLike;
+  /** pi's fd path for @-completion (IM:254); the child's autocomplete provider reads it too. */
+  fdPath?: string;
   footer: { invalidate(): void };
   ui: ViewTUI;
   keybindings: KeybindingsManager;
@@ -444,6 +452,13 @@ export class RecordFooter implements Component {
 
 export class NativeTranscriptView {
   private state: ViewState | undefined;
+  /**
+   * Each child's saved prompt, keyed by record id — a resume reuses the record, so the
+   * same agent gets its draft back. View state, not record state: the map dies with the
+   * activation, so a draft never survives a /reload (the same baseline main has — an
+   * editor holding text cannot type /reload at all).
+   */
+  private drafts = new Map<string, string>();
 
   constructor(private options: NativeViewOptions) {}
 
@@ -490,6 +505,10 @@ export class NativeTranscriptView {
       return "refused";
     }
     if (this.state) this.close("switch");
+    // A record that left the manager takes its draft with it: re-adding the id starts empty.
+    for (const draftId of this.drafts.keys()) {
+      if (this.options.manager.getRecord(draftId) === undefined) this.drafts.delete(draftId);
+    }
 
     // Read after the close: while a view is open the host container is detached, so its index is
     // only meaningful once the close put it back.
@@ -506,7 +525,10 @@ export class NativeTranscriptView {
       hostContainer,
       hostIndex,
       childContainer: new Container(),
-      hostDraft: im.editor.getText(),
+      // getExpandedText, never getText: restoreEditor seeds this back and pi's
+      // defaultEditor.setText clears the paste map, so a saved [paste #N] marker would
+      // submit as its short literal after any child visit.
+      hostDraft: im.editor.getExpandedText?.() ?? im.editor.getText(),
       saved: {
         showError: im.showError,
         showWarning: im.showWarning,
@@ -665,6 +687,12 @@ export class NativeTranscriptView {
     const im = this.options.getMode();
     const state = this.state;
     if (!im || !state) return;
+    // The draft save runs first, on a state's first close only: a mid-restore throw below leaves
+    // this.state set, and a later open() finishing the same close must not file the hostDraft that
+    // restoreEditor already wrote back under the child's id. The reload and quit reasons skip it —
+    // on reload the reset wrapper has already put hostDraft into this editor, so saving would file
+    // the host's text under the child's id.
+    if (state.active && reason !== "reload" && reason !== "quit") this.saveDraft(state);
     // Step 1, for every reason and before anything can paint: deactivate, unsubscribe, restore the
     // six instance wrappers. Assignment only; it never renders. The state stays until the restore
     // finishes, so a throw below leaves a view that isOpen() still reports as closed and a later
@@ -700,6 +728,22 @@ export class NativeTranscriptView {
     im.updateEditorBorderColor();
     im.ui.requestRender(true);
     this.state = undefined;
+  }
+
+  /**
+   * File the child editor's draft under the record's id — read as getExpandedText, never
+   * getText (see EditorLike). An empty draft or a record already gone deletes instead of
+   * storing: nothing may come back under an id that no longer names an agent.
+   */
+  private saveDraft(state: ViewState): void {
+    const ed = state.editor;
+    if (!ed) return;
+    const draft = ed.getExpandedText?.() ?? ed.getText();
+    if (draft === "" || this.options.manager.getRecord(state.id) === undefined) {
+      this.drafts.delete(state.id);
+    } else {
+      this.drafts.set(state.id, draft);
+    }
   }
 
   /** Whether a paint is allowed: an active view on a live (not shutting-down) instance. */
@@ -868,9 +912,16 @@ export class NativeTranscriptView {
     const editor = im.editor;
     if (editor === im.defaultEditor) throw new Error("native view: pi did not install the custom editor");
     const ed = editor as CustomEditor;
+    // pi copied the host draft into the new editor (IM:2219); the host draft is kept in
+    // hostDraft, and this child's own draft — saved on its last close — comes back instead.
+    ed.setText(this.drafts.get(state.id) ?? "");
+    // That setText pushed an undo snapshot of the host text pi seeded (IM:2310), so one ctrl+-
+    // would restore main's draft into the child prompt and Enter would steer it there.
+    // `undoStack` is a private field, hence the peek: a rename turns the ?. into a silent no-op,
+    // and the real-editor ctrl+- test row is what reddens.
+    (ed as unknown as { undoStack?: { clear(): void } }).undoStack?.clear();
+    // Assigned last: a setText throw above leaves nothing saveable under the new id.
     state.editor = ed;
-    // pi copied the host draft into the new editor (IM:2219); the draft is kept in hostDraft.
-    ed.setText("");
     // pi's copied onChange writes im.isBashMode from the text; a child ! must not flip host state.
     ed.onChange = () => {};
     ed.onSubmit = (text: string) => this.submit(im, state, text);
@@ -882,7 +933,7 @@ export class NativeTranscriptView {
       this.repaint();
       return true;
     };
-    this.setChildAutocomplete(state);
+    this.setChildAutocomplete(im, state);
     // Start from an empty map: pi copied the host's handlers in (IM:2250-2253), including ones that
     // replace or clear the main session. Only three act on something the view can honour; every other
     // action says whether main owns it or a later part of #249 wires it here.
@@ -906,7 +957,7 @@ export class NativeTranscriptView {
       state.saved.setupAutocompleteProvider.call(im);
       // pi rebuilt its own provider for the host session: rebuild the child's from the child's own
       // runner and templates, so a reload cannot leak the host's commands into this editor.
-      this.setChildAutocomplete(state);
+      this.setChildAutocomplete(im, state);
     };
     im.resetExtensionUI = state.wrappers.resetExtensionUI;
     im.setupAutocompleteProvider = state.wrappers.setupAutocompleteProvider;
@@ -1014,7 +1065,7 @@ export class NativeTranscriptView {
       return true;
     }
     if (name === "name") {
-      this.commandName(im, state, trimmed);
+      this.handleNameCommand(im, state, trimmed);
       return true;
     }
     if (name === "copy" && exact) {
@@ -1097,7 +1148,7 @@ export class NativeTranscriptView {
    * `/name [name]` (IM:5645). Reading the current name works on a settled record; setting one is a
    * write into the child's own session file, so a settled record gets the resume-first notice.
    */
-  private commandName(im: InteractiveModeView, state: ViewState, trimmed: string): void {
+  private handleNameCommand(im: InteractiveModeView, state: ViewState, trimmed: string): void {
     const ctx = this.options.getContext();
     if (!ctx) return;
     const theme = ctx.ui.theme;
@@ -1167,13 +1218,16 @@ export class NativeTranscriptView {
    * a typed extension command still runs through `deliver`. The host's set is never offered, so
    * `/agents` — registered only on the root activation — cannot appear.
    */
-  private setChildAutocomplete(state: ViewState): void {
+  private setChildAutocomplete(im: InteractiveModeView, state: ViewState): void {
     const ed = state.editor;
     if (!ed) return;
     const child = this.options.manager.getRecord(state.id)?.session;
     const sessionManager = child?.sessionManager ?? this.options.manager.settledSessionManager(state.id);
     if (!sessionManager) return;
-    const provider = new CombinedAutocompleteProvider(childSlashCommands(child), sessionManager.getCwd());
+    // pi's third argument is its fd helper path (IM:546): omitting it left @-path completion dead
+    // in a child view. fdPath is a class field with no public type, so it is optional here and the
+    // compat test pins the real field — a rename reddens there, not silently here.
+    const provider = new CombinedAutocompleteProvider(childSlashCommands(child), sessionManager.getCwd(), im.fdPath);
     state.childProvider = provider;
     ed.setAutocompleteProvider(provider);
   }
